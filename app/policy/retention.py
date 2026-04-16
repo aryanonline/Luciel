@@ -28,6 +28,7 @@ DATA_CATEGORY_MAP = {
         "date_col": "created_at",
         "anon_cols": {"user_id": "anon"},
         "has_tenant": True,
+        "tenant_via_session": True,
     },
     "messages": {
         "table": "messages",
@@ -177,8 +178,8 @@ class RetentionService:
         params: dict = {"cutoff": cutoff}
 
         effective_tenant = scope_tenant_id or policy.tenant_id
-        if effective_tenant and has_tenant:
-            conditions.append("tenant_id = :tenant_id")
+        if effective_tenant and config.get("tenant_via_session"):
+            conditions.append("session_id IN (SELECT id FROM sessions WHERE tenant_id = :tenant_id)")
             params["tenant_id"] = effective_tenant
 
         where = " AND ".join(conditions)

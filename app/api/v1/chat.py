@@ -34,7 +34,14 @@ def chat(
             session_id=payload.session_id,
             message=payload.message,
             provider=payload.provider,
+            caller_tenant_id=getattr(request.state, "tenant_id", None),
         )
+    except PermissionError as exc:           # ADD this handler
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -56,7 +63,13 @@ def chat_stream(
             session_id=payload.session_id,
             message=payload.message,
             provider=payload.provider,
+            caller_tenant_id=getattr(request.state, "tenant_id", None),
         )
+    except PermissionError as exc:           # ADD this handler
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

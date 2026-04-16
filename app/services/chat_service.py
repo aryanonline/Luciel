@@ -32,6 +32,7 @@ from app.services.session_service import SessionService
 from app.services.trace_service import TraceService
 from app.tools.broker import ToolBroker
 from app.tools.registry import ToolRegistry
+from app.policy.consent import ConsentPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class ChatService:
         trace_service: TraceService,
         knowledge_retriever: KnowledgeRetriever,
         config_repository: ConfigRepository,
+        consent_policy: ConsentPolicy | None = None,
     ) -> None:
         self.session_service = session_service
         self.memory_service = memory_service
@@ -57,6 +59,7 @@ class ChatService:
         self.trace_service = trace_service
         self.knowledge_retriever = knowledge_retriever
         self.config_repository = config_repository
+        self.consent_policy = consent_policy
         self.policy_engine = PolicyEngine()
         self.escalation_service = EscalationService()
 
@@ -77,13 +80,16 @@ class ChatService:
         session_id: str,
         message: str,
         provider: str | None = None,
+        caller_tenant_id: str | None = None,
     ) -> str:
 
         # 1. Verify session
         session = self.session_service.get_session(session_id)
         if session is None:
             raise ValueError("Session not found")
-
+        # 1b. Enforce tenant ownership  ← ADD THIS BLOCK
+        if caller_tenant_id and session.tenant_id != caller_tenant_id:
+            raise PermissionError("Session does not belong to this tenant")
         user_id = session.user_id
         tenant_id = session.tenant_id
         domain_id = session.domain_id
@@ -131,7 +137,12 @@ class ChatService:
 
         # 6. Retrieve long-term memories (now agent-scoped)
         memories = []
-        if user_id:
+        can_use_memory = True
+        if self.consent_policy and user_id:
+            can_use_memory = self.consent_policy.can_persist_memory(
+                user_id=user_id, tenant_id=tenant_id,
+            )
+        if user_id and can_use_memory:
             memories = self.memory_service.retrieve_memories(
                 user_id=user_id,
                 tenant_id=tenant_id,
@@ -258,7 +269,7 @@ class ChatService:
 
         # 15. Extract and save new memories (now agent-scoped)
         memories_extracted = 0
-        if user_id:
+        if user_id and can_use_memory:
             recent_messages = [
                 {"role": "user", "content": message},
                 {"role": "assistant", "content": final_reply},
@@ -271,6 +282,7 @@ class ChatService:
                     agent_id=agent_id,
                     messages=recent_messages,
                 )
+
             except Exception as exc:
                 logger.warning("Memory extraction failed: %s", exc)
 
@@ -309,6 +321,7 @@ class ChatService:
         session_id: str,
         message: str,
         provider: str | None = None,
+        caller_tenant_id: str | None = None,
     ):
         """
         Stream a response token by token.
@@ -324,6 +337,10 @@ class ChatService:
         session = self.session_service.get_session(session_id)
         if session is None:
             raise ValueError("Session not found")
+        
+        # Enforce tenant ownership  ← ADD THIS
+        if caller_tenant_id and session.tenant_id != caller_tenant_id:
+            raise PermissionError("Session does not belong to this tenant")
 
         user_id = session.user_id
         tenant_id = session.tenant_id
@@ -365,7 +382,12 @@ class ChatService:
 
         # Retrieve memories (now agent-scoped)
         memories = []
-        if user_id:
+        can_use_memory = True
+        if self.consent_policy and user_id:
+            can_use_memory = self.consent_policy.can_persist_memory(
+                user_id=user_id, tenant_id=tenant_id,
+            )
+        if user_id and can_use_memory:
             memories = self.memory_service.retrieve_memories(
                 user_id=user_id,
                 tenant_id=tenant_id,
@@ -441,7 +463,7 @@ class ChatService:
             )
 
             # Extract and save memories (now agent-scoped)
-            if user_id:
+            if user_id and can_use_memory:
                 recent_messages = [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": final_reply},
@@ -455,6 +477,6 @@ class ChatService:
                         messages=recent_messages,
                     )
                 except Exception as exc:
-                    logger.warning("Memory extraction failed (stream): %s", exc)
+                    logger.warning("Memory extraction failed: %s", exc)
 
         return token_generator()

@@ -2,6 +2,9 @@
 FastAPI dependency injection wiring.
 """
 
+# Add import at top
+from app.repositories.consent_repository import ConsentRepository
+from app.policy.consent import ConsentPolicy
 from typing import Annotated
 
 from fastapi import Depends
@@ -79,6 +82,15 @@ def get_ingestion_service(
 ) -> IngestionService:
     return IngestionService(repository=repository)
 
+# Add these two functions
+def get_consent_repository(db: DbSession) -> ConsentRepository:
+    return ConsentRepository(db)
+
+def get_consent_policy(
+    repo: Annotated[ConsentRepository, Depends(get_consent_repository)],
+) -> ConsentPolicy:
+    return ConsentPolicy(consent_repository=repo)
+
 
 def get_chat_service(
     session_service: Annotated[SessionService, Depends(get_session_service)],
@@ -86,6 +98,7 @@ def get_chat_service(
     trace_service: Annotated[TraceService, Depends(get_trace_service)],
     knowledge_retriever: Annotated[KnowledgeRetriever, Depends(get_knowledge_retriever)],
     config_repository: Annotated[ConfigRepository, Depends(get_config_repository)],
+    consent_policy: Annotated[ConsentPolicy, Depends(get_consent_policy)],  # ADD
 ) -> ChatService:
     return ChatService(
         session_service=session_service,
@@ -96,4 +109,5 @@ def get_chat_service(
         trace_service=trace_service,
         knowledge_retriever=knowledge_retriever,
         config_repository=config_repository,
+        consent_policy=consent_policy,  # ADD
     )
