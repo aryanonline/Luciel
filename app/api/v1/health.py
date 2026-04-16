@@ -1,14 +1,14 @@
-from fastapi import APIRouter
-from app.core.config import settings
+from fastapi import APIRouter, Request
+from app.middleware.rate_limit import limiter
 
 router = APIRouter()
 
+
 @router.get("/version")
-def version() -> dict:
+@limiter.limit("60/minute")
+def version(request: Request) -> dict:
     return {
-        "app": settings.app_name,
-        "environment": settings.environment,
+        "app": "Luciel Backend",
         "version": "0.1.0",
-        "default_tenant_id": settings.default_tenant_id,
-        "default_domain_id": settings.default_domain_id,
+        "status": "ok",
     }

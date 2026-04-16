@@ -17,6 +17,7 @@ class SessionModel(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     domain_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
     user_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
     channel: Mapped[str] = mapped_column(String(50), default="web", nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)

@@ -1,0 +1,26 @@
+{
+  "cluster": "luciel-cluster",
+  "serviceName": "luciel-backend-service",
+  "taskDefinition": "luciel-backend:3",
+  "desiredCount": 1,
+  "launchType": "FARGATE",
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": [
+        "subnet-0e95d953fd553cbd1",
+        "subnet-0e54df62d1a4463bc"
+      ],
+      "securityGroups": [
+        "sg-0f2e317f987925601"
+      ],
+      "assignPublicIp": "ENABLED"
+    }
+  },
+  "loadBalancers": [
+    {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba",
+      "containerName": "luciel-backend",
+      "containerPort": 8000
+    }
+  ]
+}

@@ -1,32 +1,32 @@
-from __future__ import annotations
-
+from app.api.deps import get_chat_service
+import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_chat_service
+from app.middleware.rate_limit import limiter, get_api_key_or_ip, CHAT_RATE_LIMIT
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import ChatService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-@router.post("", response_model=ChatResponse, status_code=status.HTTP_200_OK)
+@router.post(
+    "",
+    response_model=ChatResponse,
+    status_code=status.HTTP_200_OK,
+)
+@limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
 def chat(
+    request: Request,
     payload: ChatRequest,
     service: Annotated[ChatService, Depends(get_chat_service)],
 ) -> ChatResponse:
-    """
-    Handle one chat turn for an existing session.
-
-    The route stays thin:
-    - validate HTTP input
-    - delegate to ChatService
-    - translate errors into HTTP responses
-    """
     try:
         reply = service.respond(
-            session_id=payload.session_id,
+            sessionid=payload.sessionid,
             message=payload.message,
             provider=payload.provider,
         )
@@ -36,7 +36,45 @@ def chat(
             detail=str(exc),
         ) from exc
 
-    return ChatResponse(
-        session_id=payload.session_id,
-        reply=reply,
+    return ChatResponse(sessionid=payload.sessionid, reply=reply)
+
+
+@router.post("/stream")
+@limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
+def chatstream(
+    request: Request,
+    payload: ChatRequest,
+    service: Annotated[ChatService, Depends(get_chat_service)],
+):
+    try:
+        generator = service.respondstream(
+            sessionid=payload.sessionid,
+            message=payload.message,
+            provider=payload.provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    def eventstream():
+        full_reply = ""
+        try:
+            for token in generator:
+                full_reply += token
+                yield f"data: {json.dumps({'token': token})}\n\n"
+
+            yield f"data: {json.dumps({'done': True, 'sessionid': payload.sessionid, 'fullreply': full_reply})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        eventstream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

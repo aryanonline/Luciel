@@ -7,6 +7,8 @@ Uses the official openai Python SDK.
 
 from __future__ import annotations
 
+from typing import Generator
+
 from openai import OpenAI
 
 from app.core.config import settings
@@ -21,7 +23,6 @@ class OpenAIClient(LLMBase):
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         model = request.model or self.default_model
-
         messages = [
             {"role": msg.role, "content": msg.content}
             for msg in request.messages
@@ -47,3 +48,23 @@ class OpenAIClient(LLMBase):
             },
             finish_reason=choice.finish_reason or "",
         )
+
+    def generate_stream(self, request: LLMRequest) -> Generator[str, None, None]:
+        """Stream tokens one at a time from OpenAI."""
+        model = request.model or self.default_model
+        messages = [
+            {"role": msg.role, "content": msg.content}
+            for msg in request.messages
+        ]
+
+        stream = self.client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            stream=True,
+        )
+
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content

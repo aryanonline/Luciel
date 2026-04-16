@@ -8,6 +8,7 @@ from app.models.session import SessionModel
 
 
 class SessionRepository:
+
     def __init__(self, db: Session) -> None:
         self.db = db
 
@@ -17,7 +18,8 @@ class SessionRepository:
         session_id: str,
         tenant_id: str,
         domain_id: str,
-        user_id: str | None,
+        agent_id: str | None = None,
+        user_id: str | None = None,
         channel: str = "web",
         status: str = "active",
     ) -> SessionModel:
@@ -25,6 +27,7 @@ class SessionRepository:
             id=session_id,
             tenant_id=tenant_id,
             domain_id=domain_id,
+            agent_id=agent_id,
             user_id=user_id,
             channel=channel,
             status=status,
@@ -44,14 +47,15 @@ class SessionRepository:
         user_id: str | None = None,
         limit: int = 50,
     ) -> list[SessionModel]:
-        stmt = select(SessionModel).order_by(SessionModel.created_at.desc()).limit(limit)
-
+        stmt = (
+            select(SessionModel)
+            .order_by(SessionModel.created_at.desc())
+            .limit(limit)
+        )
         if tenant_id:
             stmt = stmt.where(SessionModel.tenant_id == tenant_id)
-
         if user_id:
             stmt = stmt.where(SessionModel.user_id == user_id)
-
         return list(self.db.scalars(stmt).all())
 
     def add_message(

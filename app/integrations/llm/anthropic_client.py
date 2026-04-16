@@ -10,6 +10,8 @@ so this client extracts the system message before calling the API.
 
 from __future__ import annotations
 
+from typing import Generator
+
 import anthropic
 
 from app.core.config import settings
@@ -25,11 +27,8 @@ class AnthropicClient(LLMBase):
     def generate(self, request: LLMRequest) -> LLMResponse:
         model = request.model or self.default_model
 
-        # Anthropic requires system prompt to be passed separately,
-        # not inside the messages array.
         system_prompt = ""
         messages = []
-
         for msg in request.messages:
             if msg.role == "system":
                 system_prompt = msg.content
@@ -56,3 +55,25 @@ class AnthropicClient(LLMBase):
             },
             finish_reason=response.stop_reason or "",
         )
+
+    def generate_stream(self, request: LLMRequest) -> Generator[str, None, None]:
+        """Stream tokens one at a time from Anthropic."""
+        model = request.model or self.default_model
+
+        system_prompt = ""
+        messages = []
+        for msg in request.messages:
+            if msg.role == "system":
+                system_prompt = msg.content
+            else:
+                messages.append({"role": msg.role, "content": msg.content})
+
+        with self.client.messages.stream(
+            model=model,
+            system=system_prompt,
+            messages=messages,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
