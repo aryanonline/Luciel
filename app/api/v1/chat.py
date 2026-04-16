@@ -1,4 +1,9 @@
-from app.api.deps import get_chat_service
+"""
+Chat API routes.
+
+Handles synchronous and streaming chat endpoints.
+"""
+
 import json
 from typing import Annotated
 
@@ -26,7 +31,7 @@ def chat(
 ) -> ChatResponse:
     try:
         reply = service.respond(
-            sessionid=payload.sessionid,
+            session_id=payload.session_id,
             message=payload.message,
             provider=payload.provider,
         )
@@ -36,19 +41,19 @@ def chat(
             detail=str(exc),
         ) from exc
 
-    return ChatResponse(sessionid=payload.sessionid, reply=reply)
+    return ChatResponse(session_id=payload.session_id, reply=reply)
 
 
 @router.post("/stream")
 @limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
-def chatstream(
+def chat_stream(
     request: Request,
     payload: ChatRequest,
     service: Annotated[ChatService, Depends(get_chat_service)],
 ):
     try:
-        generator = service.respondstream(
-            sessionid=payload.sessionid,
+        generator = service.respond_stream(
+            session_id=payload.session_id,
             message=payload.message,
             provider=payload.provider,
         )
@@ -58,19 +63,19 @@ def chatstream(
             detail=str(exc),
         ) from exc
 
-    def eventstream():
+    def event_stream():
         full_reply = ""
         try:
             for token in generator:
                 full_reply += token
                 yield f"data: {json.dumps({'token': token})}\n\n"
 
-            yield f"data: {json.dumps({'done': True, 'sessionid': payload.sessionid, 'fullreply': full_reply})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'session_id': payload.session_id, 'full_reply': full_reply})}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 
     return StreamingResponse(
-        eventstream(),
+        event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

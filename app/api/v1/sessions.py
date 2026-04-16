@@ -1,3 +1,10 @@
+"""
+Session API routes.
+
+PATCHED: get_session() and list_messages() now verify the
+session belongs to the caller's tenant via request.state.tenant_id.
+"""
+
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -26,12 +33,10 @@ def create_session(
     The client can optionally provide them, but they must match
     what the API key allows.
     """
-    # Get tenant/domain/agent from API key (injected by middleware).
     key_tenant_id = getattr(request.state, "tenant_id", None)
     key_domain_id = getattr(request.state, "domain_id", None)
     key_agent_id = getattr(request.state, "agent_id", None)
 
-    # Use API key values, allow body override only if key does not lock them.
     tenant_id = key_tenant_id or payload.tenant_id
     domain_id = key_domain_id or payload.domain_id
     agent_id = key_agent_id or payload.agent_id
@@ -47,14 +52,12 @@ def create_session(
             detail="domain_id is required (from API key or request body)",
         )
 
-    # If the API key locks to a specific domain, enforce it.
     if key_domain_id and payload.domain_id and payload.domain_id != key_domain_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"API key is locked to domain '{key_domain_id}'",
         )
 
-    # If the API key locks to a specific agent, enforce it.
     if key_agent_id and payload.agent_id and payload.agent_id != key_agent_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -79,7 +82,6 @@ def list_sessions(
     user_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[SessionRead]:
-    # Scope to the API key's tenant.
     key_tenant_id = getattr(request.state, "tenant_id", None)
     effective_tenant_id = key_tenant_id or tenant_id
     sessions = service.list_sessions(
@@ -91,10 +93,18 @@ def list_sessions(
 @router.get("/{session_id}", response_model=SessionRead)
 def get_session(
     session_id: str,
+    request: Request,
     service: Annotated[SessionService, Depends(get_session_service)],
 ) -> SessionRead:
+    # Enforce tenant ownership — API key tenant must match session tenant
+    key_tenant_id = getattr(request.state, "tenant_id", None)
     session = service.get_session(session_id)
     if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+    if key_tenant_id and session.tenant_id != key_tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found",
@@ -105,10 +115,18 @@ def get_session(
 @router.get("/{session_id}/messages", response_model=list[MessageRead])
 def list_messages(
     session_id: str,
+    request: Request,
     service: Annotated[SessionService, Depends(get_session_service)],
 ) -> list[MessageRead]:
+    # Enforce tenant ownership — same check as get_session
+    key_tenant_id = getattr(request.state, "tenant_id", None)
     session = service.get_session(session_id)
     if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+    if key_tenant_id and session.tenant_id != key_tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found",

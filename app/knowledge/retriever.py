@@ -2,7 +2,10 @@
 Knowledge retriever.
 
 Retrieves relevant knowledge from the vector database
-for a given user query in a specific tenant/domain context.
+for a given user query in a specific tenant/domain/agent context.
+
+PATCHED: Added agent_id parameter to retrieve() so agent-scoped
+knowledge stays isolated between agents under the same tenant.
 """
 
 from __future__ import annotations
@@ -26,10 +29,17 @@ class KnowledgeRetriever:
         query: str,
         tenant_id: str | None = None,
         domain_id: str | None = None,
+        agent_id: str | None = None,
         limit: int = 5,
     ) -> list[str]:
         """
         Retrieve relevant knowledge for a query.
+
+        Scoping:
+          - tenant_id filters to tenant-private knowledge (+ shared).
+          - domain_id filters to domain-specific knowledge (+ shared).
+          - agent_id filters to agent-private knowledge (+ shared).
+
         Returns empty list on any failure so chat is never blocked.
         """
         if not query or not query.strip():
@@ -42,6 +52,7 @@ class KnowledgeRetriever:
                 query_embedding=query_embedding,
                 tenant_id=tenant_id,
                 domain_id=domain_id,
+                agent_id=agent_id,
                 limit=limit,
             )
 
@@ -57,8 +68,8 @@ class KnowledgeRetriever:
                     knowledge_strings.append(f"[{k_type}] {content}")
 
             logger.info(
-                "Retrieved %d knowledge chunks for tenant=%s domain=%s",
-                len(knowledge_strings), tenant_id, domain_id,
+                "Retrieved %d knowledge chunks for tenant=%s domain=%s agent=%s",
+                len(knowledge_strings), tenant_id, domain_id, agent_id,
             )
 
             return knowledge_strings

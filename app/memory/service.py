@@ -3,18 +3,8 @@ Memory service.
 
 Coordinates memory extraction and retrieval for Luciel.
 
-This service sits between the chat flow and the memory repository.
-It decides when to extract, what to store, and what to retrieve.
-
-Responsibilities:
-- After a chat turn: extract and persist new memories.
-- Before a chat turn: retrieve relevant memories for context.
-
-Future improvements:
-- Deduplication: check if a memory already exists before saving.
-- Relevance scoring: rank memories by relevance to current query.
-- Memory limits: cap total memories per user to control context size.
-- Vector search: use embeddings for semantic memory retrieval.
+PATCHED: Added agent_id parameter to retrieve_memories() and
+extract_and_save() so memories stay isolated per agent.
 """
 
 from __future__ import annotations
@@ -43,6 +33,7 @@ class MemoryService:
         *,
         user_id: str,
         tenant_id: str,
+        agent_id: str | None = None,
         limit: int = 20,
     ) -> list[str]:
         """
@@ -54,10 +45,17 @@ class MemoryService:
 
         These strings are designed to be injected directly into
         the LLM context so Luciel can reference them during generation.
+
+        Scoping:
+          - Always filtered by user_id + tenant_id.
+          - If agent_id is provided, returns agent-scoped memories
+            PLUS shared memories (agent_id IS NULL).
+          - If agent_id is None, returns only tenant-level memories.
         """
         items = self.repository.get_user_memories(
             user_id=user_id,
             tenant_id=tenant_id,
+            agent_id=agent_id,
             limit=limit,
         )
         return [f"[{item.category}] {item.content}" for item in items]
@@ -68,6 +66,7 @@ class MemoryService:
         user_id: str,
         tenant_id: str,
         session_id: str,
+        agent_id: str | None = None,
         messages: list[dict],
     ) -> int:
         """
@@ -77,6 +76,7 @@ class MemoryService:
             user_id:    The user these memories belong to.
             tenant_id:  The tenant context.
             session_id: Which session these memories came from.
+            agent_id:   Which agent extracted these memories (optional).
             messages:   Recent conversation messages as dicts.
 
         Returns:
@@ -90,6 +90,7 @@ class MemoryService:
                 self.repository.save_memory(
                     user_id=user_id,
                     tenant_id=tenant_id,
+                    agent_id=agent_id,
                     category=item["category"],
                     content=item["content"],
                     source_session_id=session_id,
@@ -100,8 +101,8 @@ class MemoryService:
 
         if saved_count:
             logger.info(
-                "Extracted %d memories for user %s in session %s",
-                saved_count, user_id, session_id,
+                "Extracted %d memories for user %s (agent=%s) in session %s",
+                saved_count, user_id, agent_id, session_id,
             )
 
         return saved_count

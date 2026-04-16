@@ -1,3 +1,11 @@
+"""
+Session repository.
+
+PATCHED:
+  S1 — get_session() now accepts optional tenant_id for ownership check.
+  S2 — list_sessions() now accepts agent_id filter.
+"""
+
 from __future__ import annotations
 
 from sqlalchemy import select
@@ -37,14 +45,32 @@ class SessionRepository:
         self.db.refresh(session)
         return session
 
-    def get_session(self, session_id: str) -> SessionModel | None:
-        return self.db.get(SessionModel, session_id)
+    def get_session(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> SessionModel | None:
+        """
+        Get a session by ID.
+
+        If tenant_id is provided, also verifies the session belongs
+        to that tenant. Returns None if the session exists but belongs
+        to a different tenant — preventing cross-tenant reads.
+        """
+        session = self.db.get(SessionModel, session_id)
+        if session is None:
+            return None
+        if tenant_id and session.tenant_id != tenant_id:
+            return None
+        return session
 
     def list_sessions(
         self,
         *,
         tenant_id: str | None = None,
         user_id: str | None = None,
+        agent_id: str | None = None,
         limit: int = 50,
     ) -> list[SessionModel]:
         stmt = (
@@ -56,6 +82,8 @@ class SessionRepository:
             stmt = stmt.where(SessionModel.tenant_id == tenant_id)
         if user_id:
             stmt = stmt.where(SessionModel.user_id == user_id)
+        if agent_id:
+            stmt = stmt.where(SessionModel.agent_id == agent_id)
         return list(self.db.scalars(stmt).all())
 
     def add_message(

@@ -1,7 +1,7 @@
 """
 ChatService coordinates one full chat turn.
 
-Now assembles the full child Luciel context:
+Assembles the full child Luciel context:
   1. Luciel Core persona (fixed, with custom name)
   2. Tenant config (tenant-wide rules)
   3. Domain config (role-specific instructions)
@@ -11,7 +11,9 @@ Now assembles the full child Luciel context:
   7. Tool descriptions (filtered by domain config)
   8. Conversation history
 
-This is where Luciel Core becomes a child Luciel instance.
+PATCHED: agent_id now piped through to knowledge retriever,
+memory service, and trace recording in both respond() and
+respond_stream().
 """
 
 from __future__ import annotations
@@ -101,11 +103,13 @@ class ChatService:
 
         # 5. Load agent config
         agent_prompt = None
+        agent_config_id = None
         assistant_name = "Luciel"
         if agent_id:
             agent_config = self.config_repository.get_agent_config(tenant_id, agent_id)
             if agent_config:
                 agent_prompt = agent_config.system_prompt_additions
+                agent_config_id = agent_config.id
                 assistant_name = agent_config.display_name or "Luciel"
                 if agent_config.preferred_provider:
                     preferred_provider = agent_config.preferred_provider
@@ -114,16 +118,21 @@ class ChatService:
         if not provider and preferred_provider:
             provider = preferred_provider
 
-        # 6. Retrieve long-term memories
+        # 6. Retrieve long-term memories (now agent-scoped)
         memories = []
         if user_id:
             memories = self.memory_service.retrieve_memories(
-                user_id=user_id, tenant_id=tenant_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
             )
 
-        # 7. Retrieve relevant knowledge from vector DB
+        # 7. Retrieve relevant knowledge from vector DB (now agent-scoped)
         knowledge = self.knowledge_retriever.retrieve(
-            query=message, tenant_id=tenant_id, domain_id=domain_id,
+            query=message,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            agent_id=agent_id,
         )
 
         # 8. Load conversation history
@@ -178,7 +187,7 @@ class ChatService:
             elif "get_session_summary" in raw_reply:
                 tool_name = "get_session_summary"
 
-        # Handle save_memory
+        # Handle save_memory (now agent-scoped)
         if tool_name == "save_memory" and tool_result.success:
             category = tool_result.metadata.get("category", "")
             content = tool_result.metadata.get("content", "")
@@ -189,6 +198,7 @@ class ChatService:
                     self.memory_service.repository.save_memory(
                         user_id=user_id,
                         tenant_id=tenant_id,
+                        agent_id=agent_id,
                         category=category,
                         content=content,
                         source_session_id=session_id,
@@ -232,7 +242,7 @@ class ChatService:
             session_id=session_id, role="assistant", content=final_reply,
         )
 
-        # 15. Extract and save new memories
+        # 15. Extract and save new memories (now agent-scoped)
         memories_extracted = 0
         if user_id:
             recent_messages = [
@@ -244,18 +254,20 @@ class ChatService:
                     user_id=user_id,
                     tenant_id=tenant_id,
                     session_id=session_id,
+                    agent_id=agent_id,
                     messages=recent_messages,
                 )
             except Exception as exc:
                 logger.warning("Memory extraction failed: %s", exc)
 
-        # 16. Record trace with full metadata
+        # 16. Record trace with full metadata (now includes agent_config_id)
         try:
             self.trace_service.record_trace(
                 session_id=session_id,
                 user_id=user_id,
                 tenant_id=tenant_id,
                 domain_id=domain_id,
+                agent_id=agent_id,
                 user_message=message,
                 assistant_reply=final_reply,
                 llm_provider=llm_provider_used,
@@ -269,6 +281,7 @@ class ChatService:
                 memories_extracted=memories_extracted,
                 tenant_config_id=tenant_config_id,
                 domain_config_id=domain_config_id,
+                agent_config_id=agent_config_id,
             )
         except Exception as exc:
             logger.warning("Trace recording failed: %s", exc)
@@ -336,16 +349,21 @@ class ChatService:
         if not provider and preferred_provider:
             provider = preferred_provider
 
-        # Retrieve memories
+        # Retrieve memories (now agent-scoped)
         memories = []
         if user_id:
             memories = self.memory_service.retrieve_memories(
-                user_id=user_id, tenant_id=tenant_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
             )
 
-        # Retrieve knowledge
+        # Retrieve knowledge (now agent-scoped)
         knowledge = self.knowledge_retriever.retrieve(
-            query=message, tenant_id=tenant_id, domain_id=domain_id,
+            query=message,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            agent_id=agent_id,
         )
 
         # Load history
@@ -405,7 +423,7 @@ class ChatService:
                 session_id=session_id, role="assistant", content=final_reply,
             )
 
-            # Extract and save memories
+            # Extract and save memories (now agent-scoped)
             if user_id:
                 recent_messages = [
                     {"role": "user", "content": message},
@@ -416,9 +434,10 @@ class ChatService:
                         user_id=user_id,
                         tenant_id=tenant_id,
                         session_id=session_id,
+                        agent_id=agent_id,
                         messages=recent_messages,
                     )
                 except Exception as exc:
-                    logger.warning("Memory extraction failed: %s", exc)
+                    logger.warning("Memory extraction failed (stream): %s", exc)
 
         return token_generator()
