@@ -11,9 +11,9 @@ Assembles the full child Luciel context:
   7. Tool descriptions (filtered by domain config)
   8. Conversation history
 
-PATCHED: agent_id now piped through to knowledge retriever,
-memory service, and trace recording in both respond() and
-respond_stream().
+PATCHED: agent_id piped through to knowledge retriever,
+memory service, and trace recording. Tool descriptions now
+filtered by domain_config.allowed_tools.
 """
 
 from __future__ import annotations
@@ -59,6 +59,17 @@ class ChatService:
         self.config_repository = config_repository
         self.policy_engine = PolicyEngine()
         self.escalation_service = EscalationService()
+
+    def _resolve_allowed_tools(self, domain_config) -> list[str] | None:
+        """
+        Determine which tools are allowed for this request.
+
+        Returns None if no restrictions (all tools available).
+        Returns a list of tool names if domain config restricts tools.
+        """
+        if domain_config and domain_config.allowed_tools:
+            return domain_config.allowed_tools
+        return None
 
     def respond(
         self,
@@ -138,11 +149,14 @@ class ChatService:
         # 8. Load conversation history
         history = self.session_service.list_messages(session_id)
 
-        # 9. Build the full child Luciel prompt
-        tool_descriptions = self.tool_registry.get_tool_descriptions()
+        # 9. Build the full child Luciel prompt (tools filtered by domain config)
+        allowed_tools = self._resolve_allowed_tools(domain_config)
+        tool_descriptions = self.tool_registry.get_tool_descriptions(
+            allowed=allowed_tools,
+        )
         system_prompt = build_system_prompt(
             memories=memories if memories else None,
-            tool_descriptions=tool_descriptions,
+            tool_descriptions=tool_descriptions if tool_descriptions else None,
             tenant_prompt=tenant_prompt,
             domain_prompt=domain_prompt,
             agent_prompt=agent_prompt,
@@ -369,11 +383,14 @@ class ChatService:
         # Load history
         history = self.session_service.list_messages(session_id)
 
-        # Build prompt
-        tool_descriptions = self.tool_registry.get_tool_descriptions()
+        # Build prompt (tools filtered by domain config)
+        allowed_tools = self._resolve_allowed_tools(domain_config)
+        tool_descriptions = self.tool_registry.get_tool_descriptions(
+            allowed=allowed_tools,
+        )
         system_prompt = build_system_prompt(
             memories=memories if memories else None,
-            tool_descriptions=tool_descriptions,
+            tool_descriptions=tool_descriptions if tool_descriptions else None,
             tenant_prompt=tenant_prompt,
             domain_prompt=domain_prompt,
             agent_prompt=agent_prompt,

@@ -9,8 +9,8 @@ To add a new tool:
 1. Create the tool class in app/tools/implementations/
 2. Import and register it here.
 
-Later this can become dynamic (load tools from config or DB),
-but for MVP a simple code-level registry is clear and debuggable.
+PATCHED: get_tool_descriptions() now accepts an optional allowed
+list so domain configs can restrict which tools the LLM sees.
 """
 
 from __future__ import annotations
@@ -48,13 +48,26 @@ class ToolRegistry:
         """Return all registered tools."""
         return list(self._tools.values())
 
-    def get_tool_descriptions(self) -> str:
+    def get_tool_descriptions(
+        self,
+        allowed: list[str] | None = None,
+    ) -> str:
         """
-        Format all tools as a text block for injection into the LLM prompt.
-        This is what the model reads to decide which tool to call.
+        Format tools as a text block for injection into the LLM prompt.
+
+        If allowed is None, all tools are included (no restriction).
+        If allowed is a list, only tools whose name is in the list
+        are included. This is how domain configs restrict tool access.
         """
+        tools = self._tools.values()
+        if allowed is not None:
+            tools = [t for t in tools if t.name in allowed]
+
+        if not tools:
+            return ""
+
         descriptions = []
-        for tool in self._tools.values():
+        for tool in tools:
             params = ", ".join(
                 f"{k} ({v.get('type', 'string')}): {v.get('description', '')}"
                 for k, v in tool.parameter_schema.items()
