@@ -1,3 +1,14 @@
+
+# --- Add to imports at top of admin.py ---
+from app.schemas.onboarding import (
+    TenantOnboardRequest,
+    TenantOnboardResponse,
+    OnboardedTenantSummary,
+    OnboardedDomainSummary,
+    OnboardedApiKeySummary,
+    OnboardedRetentionSummary,
+)
+from app.services.onboarding_service import OnboardingService
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Annotated
 
@@ -30,6 +41,91 @@ from app.services.api_key_service import ApiKeyService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+# --- Add this endpoint BEFORE the individual /tenants POST route ---
+# (FastAPI matches routes top-down, so /tenants/onboard must come
+#  before /tenants/{tenant_id} to avoid treating "onboard" as a tenant_id)
+
+@router.post(
+    "/tenants/onboard",
+    response_model=TenantOnboardResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def onboard_tenant(
+    request: Request,
+    payload: TenantOnboardRequest,
+    db: DbSession,
+) -> TenantOnboardResponse:
+    """
+    One-call tenant onboarding.
+
+    Creates TenantConfig, default DomainConfig, PIPEDA retention policies,
+    and the tenant's first API key atomically. If anything fails,
+    nothing is created.
+
+    The raw API key is returned once. Store it securely.
+    """
+    service = OnboardingService(db)
+
+    try:
+        result = service.onboard_tenant(
+            tenant_id=payload.tenant_id,
+            display_name=payload.display_name,
+            description=payload.description,
+            escalation_contact=payload.escalation_contact,
+            system_prompt_additions=payload.system_prompt_additions,
+            default_domain_id=payload.default_domain_id,
+            default_domain_display_name=payload.default_domain_display_name,
+            default_domain_description=payload.default_domain_description,
+            api_key_display_name=payload.api_key_display_name,
+            api_key_permissions=payload.api_key_permissions,
+            api_key_rate_limit=payload.api_key_rate_limit,
+            retention_days_sessions=payload.retention_days_sessions,
+            retention_days_messages=payload.retention_days_messages,
+            retention_days_memory_items=payload.retention_days_memory_items,
+            retention_days_traces=payload.retention_days_traces,
+            retention_days_knowledge=payload.retention_days_knowledge,
+            created_by=payload.created_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    tenant = result["tenant"]
+    domain = result["default_domain"]
+    # api_key = result["api_key"]
+    # raw_key = result["raw_api_key"]
+    # policies = result["retention_policies"]
+
+    return TenantOnboardResponse(
+        tenant=OnboardedTenantSummary.model_validate(tenant),
+        default_domain=OnboardedDomainSummary.model_validate(domain),
+        chat_api_key=OnboardedApiKeySummary(
+            key_prefix=result["chat_api_key"].key_prefix,
+            display_name=result["chat_api_key"].display_name,
+            permissions=result["chat_api_key"].permissions,
+            rate_limit=result["chat_api_key"].rate_limit,
+            raw_key=result["chat_raw_key"],
+        ),
+        admin_api_key=OnboardedApiKeySummary(
+            key_prefix=result["admin_api_key"].key_prefix,
+            display_name=result["admin_api_key"].display_name,
+            permissions=result["admin_api_key"].permissions,
+            rate_limit=result["admin_api_key"].rate_limit,
+            raw_key=result["admin_raw_key"],
+        ),
+        retention_policies=[
+            OnboardedRetentionSummary(
+                data_category=p.data_category,
+                retention_days=p.retention_days,
+                action=p.action,
+            )
+            for p in result["retention_policies"]
+        ],
+        message=f"Tenant '{payload.tenant_id}' onboarded successfully",
+    )
 
 @router.post("/tenants", response_model=TenantConfigRead, status_code=status.HTTP_201_CREATED)
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)

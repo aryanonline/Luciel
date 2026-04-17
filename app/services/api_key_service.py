@@ -50,41 +50,32 @@ class ApiKeyService:
         permissions: list[str] | None = None,
         rate_limit: int = 1000,
         created_by: str | None = None,
+        auto_commit: bool = True,          # ADD THIS
     ) -> tuple[ApiKey, str]:
-        """
-        Create a new API key.
-
-        Returns a tuple of (ApiKey model, raw_key_string).
-        The raw key is only available at creation time.
-        """
-        if permissions is None:
-            permissions = ["chat", "sessions"]
-
+        """Create a new API key. Returns (ApiKey model, raw_key)."""
         raw_key = generate_raw_key()
-        key_hash = hash_key(raw_key)
-        key_prefix = raw_key[:16]
+        hashed = hash_key(raw_key)
 
         api_key = ApiKey(
-            key_hash=key_hash,
-            key_prefix=key_prefix,
+            key_hash=hashed,
+            key_prefix=raw_key[:12],
             tenant_id=tenant_id,
             domain_id=domain_id,
             agent_id=agent_id,
             display_name=display_name,
-            permissions=permissions,
+            permissions=permissions or ["chat", "sessions"],
             rate_limit=rate_limit,
             active=True,
             created_by=created_by,
         )
-
         self.db.add(api_key)
-        self.db.commit()
-        self.db.refresh(api_key)
+        if auto_commit:                    # ADD THIS
+            self.db.commit()
+            self.db.refresh(api_key)
+        else:                              # ADD THIS
+            self.db.flush()                # ADD THIS
 
-        logger.info(
-            "Created API key for tenant=%s domain=%s agent=%s name=%s",
-            tenant_id, domain_id, agent_id, display_name,
-        )
+        logger.info("Created API key for tenant %s (prefix: %s)", tenant_id, api_key.key_prefix)
         return api_key, raw_key
 
     def validate_key(self, raw_key: str) -> ApiKey | None:
