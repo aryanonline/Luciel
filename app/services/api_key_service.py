@@ -106,3 +106,6 @@ class ApiKeyService:
         self.db.commit()
         logger.info("Deactivated API key id=%d", key_id)
         return True
+
+    def get_key_by_id(self, key_id: int) -> ApiKey | None:
+        return self.db.query(ApiKey).filter(ApiKey.id == key_id).first()

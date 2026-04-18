@@ -1,7 +1,17 @@
 """
-API Key schemas.
-"""
+API key schemas.
 
+Permission vocabulary (Step 24):
+- "chat"            : may call /api/v1/chat and /chat/stream
+- "sessions"        : may manage sessions under its scope
+- "admin"           : may manage domains/agents/knowledge/keys WITHIN its scope
+                       (tenant-, domain-, or agent-scoped based on key fields)
+- "platform_admin"  : may act across all tenants (VantageMind operators only)
+
+Scope is determined by the key's tenant_id / domain_id / agent_id columns,
+not by the permissions list. Permissions gate WHICH actions; scope gates
+WHICH rows those actions may touch.
+"""
 from __future__ import annotations
 
 from datetime import datetime

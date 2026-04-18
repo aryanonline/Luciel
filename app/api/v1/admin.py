@@ -38,6 +38,7 @@ from app.schemas.admin import (
 from app.schemas.api_key import ApiKeyCreate, ApiKeyCreateResponse, ApiKeyRead
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService
+from app.policy.scope import ScopePolicy
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -56,6 +57,14 @@ def onboard_tenant(
     payload: TenantOnboardRequest,
     db: DbSession,
 ) -> TenantOnboardResponse:
+
+    # Only platform_admin may onboard new tenants.
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may onboard tenants",
+        )
+
     """
     One-call tenant onboarding.
 
@@ -134,6 +143,10 @@ def create_tenant(
     payload: TenantConfigCreate,
     db: DbSession,
 ) -> TenantConfigRead:
+
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(status_code=403, detail="Only platform_admin may create tenants")
+
     service = AdminService(db)
     existing = service.get_tenant_config(payload.tenant_id)
     if existing:
@@ -153,7 +166,12 @@ def list_tenants(
     db: DbSession,
 ) -> list[TenantConfigRead]:
     service = AdminService(db)
-    configs = service.list_tenant_configs()
+    if ScopePolicy.is_platform_admin(request):
+        configs = service.list_tenant_configs()
+    else:
+        caller_tenant = getattr(request.state, "tenant_id", None)
+        cfg = service.get_tenant_config(caller_tenant) if caller_tenant else None
+        configs = [cfg] if cfg else []
     return [TenantConfigRead.model_validate(c) for c in configs]
 
 
@@ -164,6 +182,7 @@ def get_tenant(
     tenant_id: str,
     db: DbSession,
 ) -> TenantConfigRead:
+    ScopePolicy.enforce_tenant_scope(request, tenant_id)
     service = AdminService(db)
     config = service.get_tenant_config(tenant_id)
     if not config:
@@ -182,6 +201,7 @@ def update_tenant(
     payload: TenantConfigUpdate,
     db: DbSession,
 ) -> TenantConfigRead:
+    ScopePolicy.enforce_tenant_scope(request, tenant_id)
     service = AdminService(db)
     config = service.update_tenant_config(
         tenant_id,
@@ -202,6 +222,11 @@ def create_domain(
     payload: DomainConfigCreate,
     db: DbSession,
 ) -> DomainConfigRead:
+    ScopePolicy.enforce_tenant_scope(request, payload.tenant_id)
+    # domain-scoped keys cannot create a different domain
+    caller_domain = getattr(request.state, "domain_id", None)
+    if caller_domain and caller_domain != payload.domain_id and not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(status_code=403, detail="This key is scoped to a different domain")
     service = AdminService(db)
     existing = service.get_domain_config(payload.tenant_id, payload.domain_id)
     if existing:
@@ -222,7 +247,15 @@ def list_domains(
     tenant_id: str | None = Query(default=None),
 ) -> list[DomainConfigRead]:
     service = AdminService(db)
+    if not ScopePolicy.is_platform_admin(request):
+        caller_tenant = getattr(request.state, "tenant_id", None)
+        # Force scope: non-platform callers can only see their own tenant.
+        tenant_id = caller_tenant
     configs = service.list_domain_configs(tenant_id=tenant_id)
+    # If caller is domain-scoped, filter further.
+    caller_domain = getattr(request.state, "domain_id", None)
+    if caller_domain and not ScopePolicy.is_platform_admin(request):
+        configs = [c for c in configs if c.domain_id == caller_domain]
     return [DomainConfigRead.model_validate(c) for c in configs]
 
 
@@ -234,6 +267,7 @@ def get_domain(
     domain_id: str,
     db: DbSession,
 ) -> DomainConfigRead:
+    ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
     service = AdminService(db)
     config = service.get_domain_config(tenant_id, domain_id)
     if not config:
@@ -253,11 +287,10 @@ def update_domain(
     payload: DomainConfigUpdate,
     db: DbSession,
 ) -> DomainConfigRead:
+    ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
     service = AdminService(db)
     config = service.update_domain_config(
-        tenant_id,
-        domain_id,
-        **payload.model_dump(exclude_unset=True),
+        tenant_id, domain_id, **payload.model_dump(exclude_unset=True),
     )
     if not config:
         raise HTTPException(
@@ -266,6 +299,22 @@ def update_domain(
         )
     return DomainConfigRead.model_validate(config)
 
+@router.delete("/domains/{tenant_id}/{domain_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def deactivate_domain(
+    request: Request,
+    tenant_id: str,
+    domain_id: str,
+    db: DbSession,
+) -> None:
+    ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
+    service = AdminService(db)
+    success = service.deactivate_domain(tenant_id, domain_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Domain config not found",
+        )
 
 @router.post("/agents", response_model=AgentConfigRead, status_code=status.HTTP_201_CREATED)
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
@@ -274,14 +323,29 @@ def create_agent(
     payload: AgentConfigCreate,
     db: DbSession,
 ) -> AgentConfigRead:
+    # Scope: caller must match tenant (and domain if scoped).
+    target_domain_id = getattr(payload, "domain_id", None)
+    ScopePolicy.enforce_domain_scope(request, payload.tenant_id, target_domain_id)
+
     service = AdminService(db)
+
+    # Hierarchy validation: parent domain must exist and be active.
+    if target_domain_id:
+        if not service.validate_domain_active(payload.tenant_id, target_domain_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Domain '{target_domain_id}' does not exist or is inactive "
+                    f"for tenant '{payload.tenant_id}'"
+                ),
+            )
+
     existing = service.get_agent_config(payload.tenant_id, payload.agent_id)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Agent {payload.agent_id} for tenant {payload.tenant_id} already exists",
         )
-
     config = service.create_agent_config(**payload.model_dump())
     return AgentConfigRead.model_validate(config)
 
@@ -294,7 +358,30 @@ def list_agents(
     tenant_id: str | None = Query(default=None),
 ) -> list[AgentConfigRead]:
     service = AdminService(db)
+    if not ScopePolicy.is_platform_admin(request):
+        tenant_id = getattr(request.state, "tenant_id", None)
     configs = service.list_agent_configs(tenant_id=tenant_id)
+
+    caller_domain = getattr(request.state, "domain_id", None)
+    caller_agent = getattr(request.state, "agent_id", None)
+    if caller_agent and not ScopePolicy.is_platform_admin(request):
+        configs = [c for c in configs if c.agent_id == caller_agent]
+    elif caller_domain and not ScopePolicy.is_platform_admin(request):
+        configs = [c for c in configs if getattr(c, "domain_id", None) == caller_domain]
+
+    return [AgentConfigRead.model_validate(c) for c in configs]
+
+@router.get("/agents/{tenant_id}/by-domain/{domain_id}", response_model=list[AgentConfigRead])
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def list_agents_by_domain(
+    request: Request,
+    tenant_id: str,
+    domain_id: str,
+    db: DbSession,
+) -> list[AgentConfigRead]:
+    ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
+    service = AdminService(db)
+    configs = service.list_agent_configs_by_domain(tenant_id, domain_id)
     return [AgentConfigRead.model_validate(c) for c in configs]
 
 
@@ -306,6 +393,7 @@ def get_agent(
     agent_id: str,
     db: DbSession,
 ) -> AgentConfigRead:
+    ScopePolicy.enforce_tenant_scope(request, tenant_id)
     service = AdminService(db)
     config = service.get_agent_config(tenant_id, agent_id)
     if not config:
@@ -313,6 +401,15 @@ def get_agent(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent config not found",
         )
+    # If caller is agent-scoped, it can only read itself.
+    caller_agent = getattr(request.state, "agent_id", None)
+    if caller_agent and caller_agent != agent_id and not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(status_code=403, detail="This key is scoped to a different agent")
+    # If caller is domain-scoped, the agent must belong to that domain.
+    caller_domain = getattr(request.state, "domain_id", None)
+    if (caller_domain and getattr(config, "domain_id", None) != caller_domain
+            and not ScopePolicy.is_platform_admin(request)):
+        raise HTTPException(status_code=403, detail="Agent belongs to a different domain")
     return AgentConfigRead.model_validate(config)
 
 
@@ -325,18 +422,46 @@ def update_agent(
     payload: AgentConfigUpdate,
     db: DbSession,
 ) -> AgentConfigRead:
+    ScopePolicy.enforce_tenant_scope(request, tenant_id)
     service = AdminService(db)
+    existing = service.get_agent_config(tenant_id, agent_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Agent config not found")
+
+    caller_domain = getattr(request.state, "domain_id", None)
+    caller_agent = getattr(request.state, "agent_id", None)
+    if (caller_domain and getattr(existing, "domain_id", None) != caller_domain
+            and not ScopePolicy.is_platform_admin(request)):
+        raise HTTPException(status_code=403, detail="Agent belongs to a different domain")
+    if caller_agent and caller_agent != agent_id and not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(status_code=403, detail="This key is scoped to a different agent")
+
     config = service.update_agent_config(
-        tenant_id,
-        agent_id,
-        **payload.model_dump(exclude_unset=True),
+        tenant_id, agent_id, **payload.model_dump(exclude_unset=True),
     )
-    if not config:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Agent config not found",
-        )
     return AgentConfigRead.model_validate(config)
+
+@router.delete("/agents/{tenant_id}/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def deactivate_agent(
+    request: Request,
+    tenant_id: str,
+    agent_id: str,
+    db: DbSession,
+) -> None:
+    ScopePolicy.enforce_tenant_scope(request, tenant_id)
+    service = AdminService(db)
+    existing = service.get_agent_config(tenant_id, agent_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Agent config not found")
+
+    caller_domain = getattr(request.state, "domain_id", None)
+    if (caller_domain and getattr(existing, "domain_id", None) != caller_domain
+            and not ScopePolicy.is_platform_admin(request)):
+        raise HTTPException(status_code=403, detail="Agent belongs to a different domain")
+
+    service.deactivate_agent(tenant_id, agent_id)
+
 
 
 @router.post("/knowledge/ingest", response_model=KnowledgeIngestResponse)
@@ -346,6 +471,35 @@ def ingest_knowledge(
     payload: KnowledgeIngestRequest,
     ingestion: Annotated[IngestionService, Depends(get_ingestion_service)],
 ) -> KnowledgeIngestResponse:
+    # Scope enforcement: caller must match tenant, domain (if scoped),
+    # and agent (if scoped) of the target knowledge record.
+    ScopePolicy.enforce_agent_scope(
+        request,
+        payload.tenant_id,
+        payload.domain_id,
+        payload.agent_id,
+    )
+
+    # Additional rule: a domain-scoped caller (no agent_id) cannot ingest
+    # agent-level knowledge for an agent outside their domain.
+    # enforce_agent_scope already covers (caller_domain vs payload.domain_id),
+    # so this is belt-and-suspenders in case payload.domain_id is None but
+    # payload.agent_id is set.
+    caller_domain = getattr(request.state, "domain_id", None)
+    caller_agent = getattr(request.state, "agent_id", None)
+    if (caller_agent and payload.agent_id != caller_agent
+            and not ScopePolicy.is_platform_admin(request)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Agent-scoped key may only ingest its own knowledge",
+        )
+    if (caller_domain and payload.domain_id and payload.domain_id != caller_domain
+            and not ScopePolicy.is_platform_admin(request)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Domain-scoped key may only ingest knowledge within its domain",
+        )
+
     try:
         chunks_stored = ingestion.ingest(
             content=payload.content,
@@ -382,6 +536,33 @@ def create_api_key(
     payload: ApiKeyCreate,
     db: DbSession,
 ) -> ApiKeyCreateResponse:
+    # Scope: a caller can only mint keys at or below their own scope.
+    ScopePolicy.enforce_agent_scope(
+        request,
+        payload.tenant_id,
+        payload.domain_id,
+        payload.agent_id,
+    )
+    # Prevent privilege escalation (non-platform_admin cannot grant platform_admin).
+    ScopePolicy.enforce_no_privilege_escalation(request, payload.permissions or [])
+
+    # Extra rule: a domain-scoped caller cannot mint a tenant-wide key
+    # (i.e. target domain_id must be set and match caller_domain).
+    caller_domain = getattr(request.state, "domain_id", None)
+    caller_agent = getattr(request.state, "agent_id", None)
+    if caller_domain and not ScopePolicy.is_platform_admin(request):
+        if payload.domain_id is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Domain-scoped key may not mint tenant-wide keys",
+            )
+    if caller_agent and not ScopePolicy.is_platform_admin(request):
+        if payload.agent_id is None or payload.agent_id != caller_agent:
+            raise HTTPException(
+                status_code=403,
+                detail="Agent-scoped key may only mint keys for itself",
+            )
+
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
         tenant_id=payload.tenant_id,
@@ -406,7 +587,20 @@ def list_api_keys(
     tenant_id: str | None = Query(default=None),
 ) -> list[ApiKeyRead]:
     service = ApiKeyService(db)
+
+    if not ScopePolicy.is_platform_admin(request):
+        # Force tenant filter to caller's own tenant.
+        tenant_id = getattr(request.state, "tenant_id", None)
+
     keys = service.list_keys(tenant_id=tenant_id)
+
+    caller_domain = getattr(request.state, "domain_id", None)
+    caller_agent = getattr(request.state, "agent_id", None)
+    if caller_agent and not ScopePolicy.is_platform_admin(request):
+        keys = [k for k in keys if k.agent_id == caller_agent]
+    elif caller_domain and not ScopePolicy.is_platform_admin(request):
+        keys = [k for k in keys if k.domain_id == caller_domain]
+
     return [ApiKeyRead.model_validate(k) for k in keys]
 
 
@@ -418,6 +612,21 @@ def deactivate_api_key(
     db: DbSession,
 ) -> None:
     service = ApiKeyService(db)
+    # Fetch first so we can enforce scope on the target.
+    target = service.get_key_by_id(key_id) if hasattr(service, "get_key_by_id") else None
+    if target is None:
+        # Fall back: just try deactivate; 404 if not found.
+        success = service.deactivate_key(key_id)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="API key not found",
+            )
+        return
+
+    ScopePolicy.enforce_agent_scope(
+        request, target.tenant_id, target.domain_id, target.agent_id,
+    )
     success = service.deactivate_key(key_id)
     if not success:
         raise HTTPException(

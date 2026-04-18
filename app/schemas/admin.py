@@ -30,6 +30,7 @@ class TenantConfigUpdate(BaseModel):
     escalation_contact: str | None = None
     allowed_domains: list[str] | None = None
     system_prompt_additions: str | None = None
+    active: bool | None = None       # <-- ADD THIS
     updated_by: str | None = None
 
 
@@ -73,6 +74,7 @@ class DomainConfigUpdate(BaseModel):
     escalation_contact: str | None = None
     policy_overrides: dict | None = None
     preferred_provider: str | None = None
+    active: bool | None = None       # <-- ADD THIS
     updated_by: str | None = None
 
 
@@ -119,6 +121,7 @@ class AgentConfigUpdate(BaseModel):
     allowed_domains: list[str] | None = None
     policy_overrides: dict | None = None
     preferred_provider: str | None = None
+    active: bool | None = None       # <-- ADD THIS
     updated_by: str | None = None
 
 

@@ -131,3 +131,54 @@ class AdminService:
         if tenant_id:
             stmt = stmt.where(AgentConfig.tenant_id == tenant_id)
         return list(self.db.scalars(stmt).all())
+    
+    def validate_domain_active(self, tenant_id: str, domain_id: str) -> bool:
+        """
+        Hierarchy validation used before creating an agent.
+        Returns True only if a DomainConfig exists for (tenant_id, domain_id)
+        AND it is active.
+        """
+        domain = self.get_domain_config(tenant_id, domain_id)
+        return bool(domain and getattr(domain, "active", False))
+
+    def list_agent_configs_by_domain(
+        self, tenant_id: str, domain_id: str,
+    ) -> list:
+        """List agents filtered to a specific domain within a tenant."""
+        from app.models.agent_config import AgentConfig  # local import to avoid cycles
+        return (
+            self.db.query(AgentConfig)
+            .filter(
+                AgentConfig.tenant_id == tenant_id,
+                AgentConfig.domain_id == domain_id,
+            )
+            .order_by(AgentConfig.id.asc())
+            .all()
+        )
+
+    def deactivate_domain(self, tenant_id: str, domain_id: str) -> bool:
+        """
+        Soft-deactivate a domain and cascade-deactivate every agent under it.
+        Returns False if the domain does not exist.
+        """
+        from app.models.agent_config import AgentConfig
+        domain = self.get_domain_config(tenant_id, domain_id)
+        if not domain:
+            return False
+        domain.active = False
+        self.db.query(AgentConfig).filter(
+            AgentConfig.tenant_id == tenant_id,
+            AgentConfig.domain_id == domain_id,
+        ).update({"active": False})
+        self.db.commit()
+        self.db.refresh(domain)
+        return True
+
+    def deactivate_agent(self, tenant_id: str, agent_id: str) -> bool:
+        agent = self.get_agent_config(tenant_id, agent_id)
+        if not agent:
+            return False
+        agent.active = False
+        self.db.commit()
+        self.db.refresh(agent)
+        return True
