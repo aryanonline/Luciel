@@ -46,11 +46,12 @@ class ApiKeyService:
         tenant_id: str,
         domain_id: str | None = None,
         agent_id: str | None = None,
+        luciel_instance_id: int | None = None,   # Step 24.5
         display_name: str,
         permissions: list[str] | None = None,
         rate_limit: int = 1000,
         created_by: str | None = None,
-        auto_commit: bool = True,          # ADD THIS
+        auto_commit: bool = True,
     ) -> tuple[ApiKey, str]:
         """Create a new API key. Returns (ApiKey model, raw_key)."""
         raw_key = generate_raw_key()
@@ -62,6 +63,7 @@ class ApiKeyService:
             tenant_id=tenant_id,
             domain_id=domain_id,
             agent_id=agent_id,
+            luciel_instance_id=luciel_instance_id,   # Step 24.5
             display_name=display_name,
             permissions=permissions or ["chat", "sessions"],
             rate_limit=rate_limit,

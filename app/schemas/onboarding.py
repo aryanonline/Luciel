@@ -99,11 +99,21 @@ class OnboardedRetentionSummary(BaseModel):
 
 
 class TenantOnboardResponse(BaseModel):
-    """Full result of a successful onboarding."""
+    """Full result of a successful onboarding.
+
+    Step 24.5 (Option B — self-service): onboarding returns the
+    admin_api_key only. The tenant admin uses it to create their own
+    LucielInstance(s) via POST /admin/luciel-instances and to mint
+    chat key(s) bound to specific instances via POST /admin/api-keys.
+    No Luciel is auto-created during onboarding — every Luciel in the
+    system exists because a tenant deliberately created it.
+    """
 
     tenant: OnboardedTenantSummary
     default_domain: OnboardedDomainSummary
-    chat_api_key: OnboardedApiKeySummary
     admin_api_key: OnboardedApiKeySummary
     retention_policies: list[OnboardedRetentionSummary]
-    message: str = "Tenant onboarded successfully"
+    message: str = (
+        "Tenant onboarded. Use the admin key to create your first "
+        "LucielInstance and its chat key."
+    )

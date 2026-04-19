@@ -19,6 +19,7 @@ from sqlalchemy import JSON, Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
+from sqlalchemy import Integer, ForeignKey
 
 
 class ApiKey(Base, TimestampMixin):
@@ -44,6 +45,20 @@ class ApiKey(Base, TimestampMixin):
 
     agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     """If null, the key works at the tenant level (no agent scoping)."""
+
+    # Step 24.5 — optional pin to a specific LucielInstance.
+    # When set, this key can only talk to that one Luciel. When NULL,
+    # chat resolution falls back to the tenant/domain/agent config path.
+    luciel_instance_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "luciel_instances.id",
+            ondelete="SET NULL",
+            name="fk_api_keys_luciel_instance_id",
+        ),
+        nullable=True,
+        index=True,
+    )
 
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     """Human-readable label for this key."""

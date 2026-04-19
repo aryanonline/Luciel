@@ -25,6 +25,18 @@ from app.services.session_service import SessionService
 from app.services.trace_service import TraceService
 from app.tools.broker import ToolBroker
 from app.tools.registry import ToolRegistry
+from fastapi import Request  # noqa: E402
+
+from app.repositories.admin_audit_repository import (  # noqa: E402
+    AdminAuditRepository,
+    AuditContext,
+)
+from app.repositories.agent_repository import AgentRepository  # noqa: E402
+from app.repositories.luciel_instance_repository import (  # noqa: E402
+    LucielInstanceRepository,
+)
+from app.services.admin_service import AdminService  # noqa: E402
+from app.services.luciel_instance_service import LucielInstanceService  # noqa: E402
 
 DbSession = Annotated[Session, Depends(get_db)]
 
@@ -91,6 +103,8 @@ def get_consent_policy(
 ) -> ConsentPolicy:
     return ConsentPolicy(consent_repository=repo)
 
+def get_luciel_instance_repository(db: DbSession) -> LucielInstanceRepository:
+    return LucielInstanceRepository(db)
 
 def get_chat_service(
     session_service: Annotated[SessionService, Depends(get_session_service)],
@@ -98,7 +112,10 @@ def get_chat_service(
     trace_service: Annotated[TraceService, Depends(get_trace_service)],
     knowledge_retriever: Annotated[KnowledgeRetriever, Depends(get_knowledge_retriever)],
     config_repository: Annotated[ConfigRepository, Depends(get_config_repository)],
-    consent_policy: Annotated[ConsentPolicy, Depends(get_consent_policy)],  # ADD
+    luciel_instance_repository: Annotated[                                          # Step 24.5 File 15
+        LucielInstanceRepository, Depends(get_luciel_instance_repository)           # Step 24.5 File 15
+    ],                                                                              # Step 24.5 File 15
+    consent_policy: Annotated[ConsentPolicy, Depends(get_consent_policy)],
 ) -> ChatService:
     return ChatService(
         session_service=session_service,
@@ -109,5 +126,32 @@ def get_chat_service(
         trace_service=trace_service,
         knowledge_retriever=knowledge_retriever,
         config_repository=config_repository,
-        consent_policy=consent_policy,  # ADD
+        luciel_instance_repository=luciel_instance_repository,   # Step 24.5 File 15
+        consent_policy=consent_policy,
     )
+
+def get_agent_repository(db: DbSession) -> AgentRepository:
+    return AgentRepository(db)
+
+
+def get_admin_audit_repository(db: DbSession) -> AdminAuditRepository:
+    return AdminAuditRepository(db)
+
+
+def get_admin_service(db: DbSession) -> AdminService:
+    """Step 24 constructed AdminService inline inside each handler.
+    Step 24.5 needs it as a proper FastAPI dependency because
+    LucielInstanceService takes it as a constructor arg (File 7)."""
+    return AdminService(db)
+
+
+def get_luciel_instance_service(
+    db: DbSession,
+    admin_service: Annotated[AdminService, Depends(get_admin_service)],
+) -> LucielInstanceService:
+    return LucielInstanceService(db, admin_service=admin_service)
+
+
+def get_audit_context(request: Request) -> AuditContext:
+    """Capture WHO is performing an admin action, once per request."""
+    return AuditContext.from_request(request)

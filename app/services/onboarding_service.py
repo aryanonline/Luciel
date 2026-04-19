@@ -134,19 +134,6 @@ class OnboardingService:
             self.db.flush()
             logger.info("Onboard: created %d retention policies for %s", len(retention_policies), tenant_id)
 
-            # 4a. Create the tenant's chat API key (client-facing)
-            chat_key, chat_raw = self.api_key_service.create_key(
-                tenant_id=tenant_id,
-                domain_id=None,
-                agent_id=None,
-                display_name=f"{display_name} — Chat Key",
-                permissions=["chat", "sessions"],
-                rate_limit=api_key_rate_limit,
-                created_by=created_by,
-                auto_commit=False,
-            )
-            logger.info("Onboard: created chat API key for %s", tenant_id)
-
             # 4b. Create the tenant's admin API key (management)
             admin_key, admin_raw = self.api_key_service.create_key(
                 tenant_id=tenant_id,
@@ -171,8 +158,6 @@ class OnboardingService:
             return {
                 "tenant": tenant,
                 "default_domain": domain,
-                "chat_api_key": chat_key,
-                "chat_raw_key": chat_raw,
                 "admin_api_key": admin_key,
                 "admin_raw_key": admin_raw,
                 "retention_policies": retention_policies,

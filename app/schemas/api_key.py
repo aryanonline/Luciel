@@ -16,16 +16,24 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApiKeyCreate(BaseModel):
-    tenant_id: str
+    tenant_id: str = Field(..., min_length=2, max_length=100)
     domain_id: str | None = None
     agent_id: str | None = None
+    luciel_instance_id: int | None = Field(                 # Step 24.5
+        default=None,
+        description=(
+            "Pin this key to a specific LucielInstance. When set, the "
+            "key can only chat with that one Luciel. Admin keys leave "
+            "this null."
+        ),
+    )
     display_name: str
-    permissions: list[str] | None = None
-    rate_limit: int = 1000
+    permissions: list[str] = Field(default_factory=lambda: ["chat", "sessions"])
+    rate_limit: int = Field(default=1000, ge=0)
     created_by: str | None = None
 
 
@@ -43,6 +51,7 @@ class ApiKeyRead(BaseModel):
     active: bool
     created_by: str | None
     created_at: datetime
+    luciel_instance_id: int | None = None
 
 
 class ApiKeyCreateResponse(BaseModel):

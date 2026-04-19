@@ -18,6 +18,12 @@ from __future__ import annotations
 import logging
 from fastapi import HTTPException, Request, status
 
+# Step 24.5 — scope-level constants for LucielInstance authorization.
+# Imported via a late-bound local import in each method below to keep
+# app.policy.scope free of SQLAlchemy-model dependencies at module
+# load time. (Same discipline used in app.policy.consent /
+# app.policy.retention.)
+
 logger = logging.getLogger(__name__)
 
 PLATFORM_ADMIN = "platform_admin"
@@ -96,3 +102,187 @@ class ScopePolicy:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only platform_admin may grant platform_admin permission",
             )
+    # -----------------------------------------------------------------
+    # Step 24.5 — LucielInstance authorization
+    # -----------------------------------------------------------------
+
+    @classmethod
+    def _caller_creation_ceiling(
+        cls, request: Request
+    ) -> str:
+        """Return the highest scope level the caller is allowed to
+        create at. Used by enforce_luciel_creation_scope.
+
+        Returns one of: "platform" | "tenant" | "domain" | "agent".
+
+        Rules (matches the permission matrix in the Step 24.5 plan):
+          - platform_admin permission             -> 'platform'
+          - tenant-scoped admin (no domain/agent) -> 'tenant'
+          - domain-scoped admin (domain, no agent)-> 'domain'
+          - agent-scoped admin                    -> 'agent'
+          - any caller without admin at all       -> raises 403
+            (creation is an admin-only operation; this should
+            normally be caught upstream by permission checks, but
+            we reject here defensively)
+        """
+        if cls.is_platform_admin(request):
+            return "platform"
+
+        caller_tenant, caller_domain, caller_agent, perms = cls._caller(request)
+
+        if ADMIN not in perms:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This API key does not have admin permissions.",
+            )
+
+        if caller_agent is not None:
+            return "agent"
+        if caller_domain is not None:
+            return "domain"
+        if caller_tenant is not None:
+            return "tenant"
+
+        # Admin permission but no scope at all — shouldn't happen for
+        # a non-platform_admin key. Reject defensively.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This admin key has no tenant scope; cannot create resources.",
+        )
+
+    @classmethod
+    def enforce_luciel_creation_scope(
+        cls,
+        request: Request,
+        *,
+        target_scope_level: str,
+        target_tenant_id: str,
+        target_domain_id: str | None = None,
+        target_agent_id: str | None = None,
+    ) -> None:
+        """Enforce the 'create at or below your own scope' rule for
+        a new LucielInstance.
+
+        Authorization matrix:
+
+          caller scope          | may create at target_scope_level
+          --------------------- | -------------------------------------
+          platform_admin        | tenant / domain / agent (any tenant)
+          tenant-scoped admin   | tenant / domain / agent (own tenant)
+          domain-scoped admin   | domain / agent (own domain only)
+          agent-scoped admin    | agent (own agent only)
+
+        Additionally:
+          - target_tenant_id must match caller's tenant (enforced by
+            enforce_tenant_scope).
+          - For domain-scoped callers: target_domain_id must match
+            caller's domain_id.
+          - For agent-scoped callers: target_agent_id must match
+            caller's agent_id (and by transitivity, target_domain_id
+            must match caller's domain_id).
+
+        Raises HTTPException(403) on any violation.
+        """
+        # Late-bound import to avoid circularity — scope.py does not
+        # depend on SQLAlchemy models at module load.
+        from app.models.luciel_instance import (
+            SCOPE_LEVEL_AGENT,
+            SCOPE_LEVEL_DOMAIN,
+            SCOPE_LEVEL_TENANT,
+        )
+
+        _LEVEL_RANK = {
+            SCOPE_LEVEL_TENANT: 1,
+            SCOPE_LEVEL_DOMAIN: 2,
+            SCOPE_LEVEL_AGENT: 3,
+        }
+        _CEILING_RANK = {
+            "platform": 0,  # platform is "above tenant"; can create anything
+            "tenant": 1,
+            "domain": 2,
+            "agent": 3,
+        }
+
+        if target_scope_level not in _LEVEL_RANK:
+            # Defensive — schema validator already rejects this,
+            # but authorization should never rely solely on schema.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown target_scope_level: {target_scope_level!r}",
+            )
+
+        # Step 1 — cross-tenant guard (reuses Step 24's helper).
+        cls.enforce_tenant_scope(request, target_tenant_id)
+
+        # Step 2 — caller's ceiling must be at or above the target level.
+        ceiling = cls._caller_creation_ceiling(request)
+        if _CEILING_RANK[ceiling] > _LEVEL_RANK[target_scope_level]:
+            logger.warning(
+                "Luciel creation denied: caller ceiling=%s target_level=%s "
+                "tenant=%s",
+                ceiling,
+                target_scope_level,
+                target_tenant_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "This API key cannot create a Luciel at a higher scope "
+                    "than its own key scope."
+                ),
+            )
+
+        # Step 3 — if the caller is domain- or agent-scoped, the target
+        # owner identifiers must lie within the caller's own scope.
+        if cls.is_platform_admin(request):
+            return
+
+        _, caller_domain, caller_agent, _ = cls._caller(request)
+
+        # Domain-scoped callers: target domain must match caller domain.
+        if caller_domain is not None:
+            if target_domain_id != caller_domain:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="This key is scoped to a different domain.",
+                )
+
+        # Agent-scoped callers: target agent must match caller agent.
+        if caller_agent is not None:
+            if target_scope_level != SCOPE_LEVEL_AGENT:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        "Agent-scoped keys may only create agent-level Luciels."
+                    ),
+                )
+            if target_agent_id != caller_agent:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="This key is scoped to a different agent.",
+                )
+
+    @classmethod
+    def enforce_luciel_instance_scope(
+        cls,
+        request: Request,
+        instance,  # app.models.luciel_instance.LucielInstance
+    ) -> None:
+        """Enforce read / update / delete authorization against an
+        existing LucielInstance row.
+
+        An action on `instance` is allowed when the caller could have
+        CREATED `instance` in the first place. So we delegate to
+        enforce_luciel_creation_scope with the instance's owner
+        triple as the target.
+
+        This keeps the read/write rules identical to the create rules —
+        no divergence possible.
+        """
+        cls.enforce_luciel_creation_scope(
+            request,
+            target_scope_level=instance.scope_level,
+            target_tenant_id=instance.scope_owner_tenant_id,
+            target_domain_id=instance.scope_owner_domain_id,
+            target_agent_id=instance.scope_owner_agent_id,
+        )

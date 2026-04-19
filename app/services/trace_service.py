@@ -46,6 +46,7 @@ class TraceService:
         tenant_config_id: int | None = None,
         domain_config_id: int | None = None,
         agent_config_id: int | None = None,
+        luciel_instance_id: int | None = None,   # Step 24.5 File 15
     ) -> str:
         """
         Create and persist a trace record.
@@ -74,6 +75,7 @@ class TraceService:
             tenant_config_id=tenant_config_id,
             domain_config_id=domain_config_id,
             agent_config_id=agent_config_id,
+            luciel_instance_id=luciel_instance_id,   # Step 24.5 File 15
         )
 
         try:

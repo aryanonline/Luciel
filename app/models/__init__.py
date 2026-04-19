@@ -8,12 +8,17 @@ from app.models.session import SessionModel
 from app.models.tenant import TenantConfig
 from app.models.trace import Trace
 from app.models.retention import RetentionPolicy, DeletionLog
+from app.models.user_consent import UserConsent
+from app.models.agent import Agent   # noqa: F401  (Step 24.5)
+from app.models.luciel_instance import LucielInstance  # noqa: F401  (Step 24.5)
+from app.models.admin_audit_log import AdminAuditLog  # noqa: F401  (Step 24.5 — File 6.5a)
 
 __all__ = [
     "AgentConfig",
     "ApiKey",
     "DeletionLog",
     "SessionModel",
+    "UserConsent",
     "MessageModel",
     "MemoryItem",
     "RetentionPolicy",
@@ -21,4 +26,7 @@ __all__ = [
     "TenantConfig",
     "DomainConfig",
     "KnowledgeEmbedding",
+    "Agent",
+    "LucielInstance",
+    "AdminAuditLog",
 ]

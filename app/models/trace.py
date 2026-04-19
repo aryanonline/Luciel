@@ -11,7 +11,7 @@ child Luciel configuration was active for each request.
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, Integer, String, Text
+from sqlalchemy import ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -61,3 +61,16 @@ class Trace(Base, TimestampMixin):
     domain_config_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     agent_config_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     """Which agent config was active. Enables per-agent audit."""
+
+    # Step 24.5 File 15 — LucielInstance that served this chat turn.
+    # NULL = legacy/unbound (chat resolved via tenant/domain/agent config path).
+    luciel_instance_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "luciel_instances.id",
+            ondelete="SET NULL",
+            name="fk_traces_luciel_instance_id",
+        ),
+        nullable=True,
+        index=True,
+    )
