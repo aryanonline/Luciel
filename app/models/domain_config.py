@@ -11,7 +11,7 @@ for enterprise-grade auditability.
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, String, Text, UniqueConstraint, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -36,6 +36,22 @@ class DomainConfig(Base, TimestampMixin):
 
     # Role-specific system prompt additions.
     system_prompt_additions: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ---- Step 25b: optional chunking config overrides (NULL = inherit from tenant) ----
+    chunk_size: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    """Override of TenantConfig.chunk_size for this domain. NULL = inherit."""
+
+    chunk_overlap: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    """Override of TenantConfig.chunk_overlap for this domain. NULL = inherit."""
+
+    chunk_strategy: Mapped[str | None] = mapped_column(
+        String(length=20), nullable=True
+    )
+    """Override of TenantConfig.chunk_strategy for this domain. NULL = inherit."""
 
     # Which tools this role is allowed to use.
     allowed_tools: Mapped[list | None] = mapped_column(JSON, nullable=True)

@@ -53,6 +53,10 @@ ACTION_REACTIVATE = "reactivate"
 ACTION_CASCADE_DEACTIVATE = "cascade_deactivate"
 ACTION_REPLACE = "replace"       # Step 25 knowledge versioning
 ACTION_DELETE_HARD = "delete_hard"  # reserved — not used by Step 24.5
+RESOURCE_KNOWLEDGE = "knowledge"
+ACTION_KNOWLEDGE_INGEST = "knowledge_ingest"
+ACTION_KNOWLEDGE_REPLACE = "knowledge_replace"
+ACTION_KNOWLEDGE_DELETE = "knowledge_delete"
 
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
@@ -62,7 +66,11 @@ ALLOWED_ACTIONS = (
     ACTION_CASCADE_DEACTIVATE,
     ACTION_REPLACE,
     ACTION_DELETE_HARD,
+    ACTION_KNOWLEDGE_INGEST,
+    ACTION_KNOWLEDGE_REPLACE,
+    ACTION_KNOWLEDGE_DELETE,
 )
+
 
 
 # ---------------------------------------------------------------------
@@ -77,6 +85,12 @@ RESOURCE_LUCIEL_INSTANCE = "luciel_instance"
 RESOURCE_API_KEY = "api_key"
 RESOURCE_KNOWLEDGE = "knowledge_embedding"  # Step 25
 RESOURCE_RETENTION_POLICY = "retention_policy"
+# Step 25b — knowledge ingestion
+RESOURCE_KNOWLEDGE = "knowledge"
+
+ACTION_KNOWLEDGE_INGEST = "knowledge_ingest"
+ACTION_KNOWLEDGE_REPLACE = "knowledge_replace"
+ACTION_KNOWLEDGE_DELETE = "knowledge_delete"
 
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,

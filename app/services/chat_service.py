@@ -313,6 +313,7 @@ class ChatService:
             tenant_id=tenant_id,
             domain_id=domain_id,
             agent_id=agent_id,
+            luciel_instance_id=ctx.luciel_instance_id,
         )
 
         # 6. Load conversation history
@@ -532,6 +533,7 @@ class ChatService:
             tenant_id=tenant_id,
             domain_id=domain_id,
             agent_id=agent_id,
+            luciel_instance_id=ctx.luciel_instance_id,
         )
 
         history = self.session_service.list_messages(session_id)

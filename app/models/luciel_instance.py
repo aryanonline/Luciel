@@ -128,6 +128,24 @@ class LucielInstance(Base, TimestampMixin):
     # in the model itself.
     system_prompt_additions: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # ---- Step 25b (Option A): optional chunking overrides at instance level ----
+    # NULL = inherit from DomainConfig (which itself NULL = inherit from TenantConfig).
+    # Same "scope-owned, layered overrides" pattern as persona/provider/allowed_tools.
+    chunk_size: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    """Override of DomainConfig/TenantConfig chunk_size for this Luciel instance."""
+
+    chunk_overlap: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    """Override of DomainConfig/TenantConfig chunk_overlap for this Luciel instance."""
+
+    chunk_strategy: Mapped[str | None] = mapped_column(
+        String(length=20), nullable=True
+    )
+    """Override of DomainConfig/TenantConfig chunk_strategy for this Luciel instance."""
+
     # Optional LLM provider preference: "openai" / "anthropic" /
     # future providers. NULL => use ModelRouter default for the tenant.
     # String, not enum, so new providers don't need migrations.

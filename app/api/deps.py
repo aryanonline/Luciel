@@ -89,10 +89,8 @@ def get_knowledge_retriever(
     return KnowledgeRetriever(repository=repository)
 
 
-def get_ingestion_service(
-    repository: Annotated[KnowledgeRepository, Depends(get_knowledge_repository)],
-) -> IngestionService:
-    return IngestionService(repository=repository)
+def get_ingestion_service(db: DbSession) -> IngestionService:
+    return IngestionService(db=db)
 
 # Add these two functions
 def get_consent_repository(db: DbSession) -> ConsentRepository:

@@ -12,7 +12,7 @@ for enterprise-grade auditability.
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, String, Text
+from sqlalchemy import JSON, Boolean, String, Text, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -42,6 +42,23 @@ class TenantConfig(Base, TimestampMixin):
 
     # Tenant-wide system prompt additions.
     system_prompt_additions: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ---- Step 25b: knowledge ingestion chunking config (defaults) ----
+    chunk_size: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="500"
+    )
+    """Default chunk size in tokens for knowledge ingestion. Inherited by
+    domains/instances unless overridden."""
+
+    chunk_overlap: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="50"
+    )
+    """Default chunk overlap in tokens for knowledge ingestion."""
+
+    chunk_strategy: Mapped[str] = mapped_column(
+        String(length=20), nullable=False, server_default="paragraph"
+    )
+    """Default chunking strategy: 'paragraph' | 'sentence' | 'fixed' | 'semantic'."""
 
     # Whether this tenant is currently active.
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

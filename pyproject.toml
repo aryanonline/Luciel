@@ -19,6 +19,11 @@ dependencies = [
   "pgvector>=0.3.0",
   "slowapi>=0.1.9",
   "redis>=5.0.0",
+  "pypdf>=4.2.0",
+  "python-docx>=1.1.2",
+  "beautifulsoup4>=4.12.3",
+  "markdown>=3.6",
+  "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

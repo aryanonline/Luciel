@@ -65,6 +65,7 @@ def chat_stream(
             message=payload.message,
             provider=payload.provider,
             caller_tenant_id=getattr(request.state, "tenant_id", None),
+            luciel_instance_id=getattr(request.state, "luciel_instance_id", None),  # Step 24.5 File 15
         )
     except PermissionError as exc:           # ADD this handler
         raise HTTPException(
