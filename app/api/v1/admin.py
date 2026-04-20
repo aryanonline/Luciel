@@ -354,17 +354,50 @@ def update_domain(
     domain_id: str,
     payload: DomainConfigUpdate,
     db: DbSession,
+    instance_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> DomainConfigRead:
     ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
     service = AdminService(db)
-    config = service.update_domain_config(
-        tenant_id, domain_id, **payload.model_dump(exclude_unset=True),
-    )
-    if not config:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Domain config not found",
+
+    fields = payload.model_dump(exclude_unset=True)
+
+    # Step 26 P7: deactivation must cascade to Agents and LucielInstances.
+    # Route through deactivate_domain() instead of generic update when
+    # the caller is flipping active=False. Other field updates still go
+    # through the generic path (or both, if mixed).
+    if fields.get("active") is False:
+        ok = service.deactivate_domain(
+            tenant_id,
+            domain_id,
+            audit_ctx=audit_ctx,
+            luciel_instance_service=instance_service,
+            updated_by=getattr(request.state, "actor_label", None),
         )
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Domain config not found",
+            )
+        # Drop active from the field set; apply any remaining updates via
+        # the generic path (e.g. display_name change in same PATCH call).
+        fields.pop("active", None)
+
+    if fields:
+        config = service.update_domain_config(tenant_id, domain_id, **fields)
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Domain config not found",
+            )
+    else:
+        config = service.get_domain_config(tenant_id, domain_id)
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Domain config not found",
+            )
+
     return DomainConfigRead.model_validate(config)
 
 @router.delete("/domains/{tenant_id}/{domain_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1038,6 +1071,12 @@ async def upload_knowledge_file(
         source_type=source_type,
     )
 
+    # Step 26 P3: every knowledge source needs a stable identity for
+    # versioning/replace/delete. Auto-generate when client omits it.
+    if not meta.source_id:
+        from uuid import uuid4
+        meta = meta.model_copy(update={"source_id": f"src-{uuid4().hex[:12]}"})
+
     instance = _load_active_instance(
         request=request, instance_id=instance_id, instance_service=instance_service
     )
@@ -1090,7 +1129,7 @@ async def upload_knowledge_file(
 
     return kschemas.KnowledgeSourceRead(
         luciel_instance_id=instance.id,
-        source_id=result.source_id or "",
+        source_id=result.source_id or meta.source_id,
         source_version=result.source_version,
         source_filename=result.source_filename,
         source_type=result.source_type,
@@ -1124,6 +1163,12 @@ def ingest_knowledge_text(
     instance = _load_active_instance(
         request=request, instance_id=instance_id, instance_service=instance_service
     )
+
+    # Step 26 P3: ensure every text-ingest also has a stable source_id.
+    if not payload.source_id:
+        from uuid import uuid4
+        payload = payload.model_copy(update={"source_id": f"src-{uuid4().hex[:12]}"})
+
     try:
         result = ingestion_service.ingest_text(
             content=payload.content,
@@ -1167,7 +1212,7 @@ def ingest_knowledge_text(
 
     return kschemas.KnowledgeSourceRead(
         luciel_instance_id=instance.id,
-        source_id=result.source_id or "",
+        source_id=result.source_id or payload.source_id,
         source_version=result.source_version,
         source_filename=result.source_filename,
         source_type=result.source_type,
