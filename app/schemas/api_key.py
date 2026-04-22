@@ -20,7 +20,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApiKeyCreate(BaseModel):
-    tenant_id: str = Field(..., min_length=2, max_length=100)
+    tenant_id: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=100,
+        description="NULL for platform-admin keys (cross-tenant bypass via 'platformadmin' permission per Invariant 5).",
+    )
     domain_id: str | None = None
     agent_id: str | None = None
     luciel_instance_id: int | None = Field(                 # Step 24.5
@@ -42,7 +47,7 @@ class ApiKeyRead(BaseModel):
 
     id: int
     key_prefix: str
-    tenant_id: str
+    tenant_id: str | None
     domain_id: str | None
     agent_id: str | None
     display_name: str

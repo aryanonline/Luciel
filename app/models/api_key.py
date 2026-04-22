@@ -35,10 +35,10 @@ class ApiKey(Base, TimestampMixin):
     key_prefix: Mapped[str] = mapped_column(String(20), nullable=False)
     """First few characters of the raw key, safe to display."""
 
-    tenant_id: Mapped[str] = mapped_column(
-        String(100), index=True, nullable=False
+    tenant_id: Mapped[str | None] = mapped_column(
+        String(100), index=True, nullable=True
     )
-    """Which tenant this key belongs to."""
+    """Which tenant this key belongs to. NULL for platform-admin keys (cross-tenant bypass via 'platformadmin' permission per Invariant 5)."""
 
     domain_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     """If null, the key works for any domain in the tenant's allowed_domains."""
