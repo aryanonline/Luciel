@@ -25,14 +25,46 @@ from celery import Celery
 # ---------- broker URL resolution ----------
 # Precedence: explicit REDIS_URL env > default local dev URL.
 # Prod ECS task-def injects REDIS_URL from SSM /luciel/production/REDIS_URL.
-BROKER_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+# ---------- broker URL resolution ----------
+# Two supported broker modes:
+#   1. SQS (prod):  CELERY_BROKER_URL=sqs://  + AWS creds via task role
+#   2. Redis (dev): CELERY_BROKER_URL=redis://localhost:6379/0
+#                   (or omit entirely; local default below)
+#
+# We deliberately do NOT use ElastiCache Redis in cluster mode as a broker:
+# Celery's kombu Redis transport uses multi-key MULTI/EXEC pipelines that
+# violate the ClusterCrossSlot constraint. SQS is the right primitive for
+# our prod async-extraction workload anyway (already provisioned in Phase 1
+# of the Step 27b deploy runbook).
+BROKER_URL: str = os.environ.get(
+    "CELERY_BROKER_URL",
+    os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+)
 
-# ---------- TLS for prod ElastiCache (rediss://) ----------
-_IS_TLS = BROKER_URL.startswith("rediss://")
-_broker_transport_options: dict = {}
-if _IS_TLS:
-    # In-VPC traffic to ElastiCache; cert verification off (no public CA chain).
-    _broker_transport_options = {"ssl_cert_reqs": ssl.CERT_NONE}
+# ---------- broker_transport_options ----------
+# Per-broker config. SQS prod uses an explicit region + queue name prefix
+# so the worker only sees its own queues. Redis dev passes through any
+# rediss:// TLS hint. Visibility timeout matches the per-task budget.
+_broker_transport_options: dict = {
+    "visibility_timeout": 30,
+}
+
+if BROKER_URL.startswith("sqs://"):
+    _broker_transport_options.update({
+        "region": os.environ.get("AWS_REGION", "ca-central-1"),
+        "predefined_queues": {
+            "luciel-memory-tasks": {
+                "url": f"https://sqs.{os.environ.get('AWS_REGION', 'ca-central-1')}.amazonaws.com/729005488042/luciel-memory-tasks",
+            },
+            "luciel-memory-dlq": {
+                "url": f"https://sqs.{os.environ.get('AWS_REGION', 'ca-central-1')}.amazonaws.com/729005488042/luciel-memory-dlq",
+            },
+        },
+        "polling_interval": 1.0,  # seconds between SQS long-poll batches
+    })
+elif BROKER_URL.startswith("rediss://"):
+    _broker_transport_options["ssl_cert_reqs"] = ssl.CERT_NONE
+# plain redis:// needs no extra options
 
 # ---------- Celery app ----------
 celery_app = Celery(
@@ -63,11 +95,8 @@ celery_app.conf.update(
     task_max_retries=3,
 
     # ----- broker timeouts -----
-    broker_transport_options={
-        **_broker_transport_options,
-        "visibility_timeout": 30,
-    },
-
+    broker_transport_options=_broker_transport_options,
+    
     # ----- log hygiene: OMIT task_args / task_kwargs -----
     # Default Celery format includes %(args)s %(kwargs)s which leaks payload.
     worker_log_format=(
