@@ -1433,3 +1433,113 @@ def replace_knowledge_source_text(
         created_at=None,
         superseded_at=None,
     )
+
+# ============================================================================
+# Step 27b: Async worker queue-depth diagnostic
+# ============================================================================
+# Read-only operational endpoint. Platform-admin only. NOT audit-logged
+# (diagnostic poll, not a mutation - Invariant 4 applies to mutations).
+# Mirrors the Step 26b.2 pattern (verification/teardown-integrity):
+# server-side AWS call so caller never needs SQS credentials.
+#
+# Returns ApproximateNumberOfMessages for both queues:
+#   - luciel-memory-tasks (main)
+#   - luciel-memory-dlq (dead-letter)
+#
+# Used by Pillar 11 and ops dashboards.
+
+import logging as _logging_27b
+from app.core.config import settings as _settings_27b
+
+_logger_27b = _logging_27b.getLogger(__name__)
+
+
+@router.get("/worker/queue-depth")
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def get_worker_queue_depth(
+    request: Request,
+    main_queue_name: str = Query(
+        "luciel-memory-tasks",
+        min_length=1,
+        max_length=80,
+        description="SQS main queue name",
+    ),
+    dlq_name: str = Query(
+        "luciel-memory-dlq",
+        min_length=1,
+        max_length=80,
+        description="SQS dead-letter queue name",
+    ),
+) -> dict:
+    """Return ApproximateNumberOfMessages for the worker SQS queues.
+
+    Platform-admin only. Read-only. No audit log row written (diagnostic).
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may read worker queue depth",
+        )
+
+    # Lazy boto3 import - keeps cold-start light for non-worker deploys.
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="boto3 not installed",
+        )
+
+    try:
+        client = boto3.client("sqs", region_name=_settings_27b.aws_region)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"sqs client init failed: {type(exc).__name__}",
+        ) from exc
+
+    def _depth(queue_name: str) -> int | None:
+        """Return ApproximateNumberOfMessages or None if queue is unreachable."""
+        try:
+            url = client.get_queue_url(QueueName=queue_name)["QueueUrl"]
+            attrs = client.get_queue_attributes(
+                QueueUrl=url,
+                AttributeNames=["ApproximateNumberOfMessages"],
+            )["Attributes"]
+            return int(attrs.get("ApproximateNumberOfMessages", 0))
+        except (BotoCoreError, ClientError) as exc:
+            # Never echo raw AWS error strings - could leak account ids,
+            # queue ARNs, etc. Only the exception class name.
+            _logger_27b.warning(
+                "queue-depth fetch failed queue=%s type=%s",
+                queue_name, type(exc).__name__,
+            )
+            return None
+        except Exception as exc:
+            _logger_27b.warning(
+                "queue-depth unexpected error queue=%s type=%s",
+                queue_name, type(exc).__name__,
+            )
+            return None
+
+    main_depth = _depth(main_queue_name)
+    dlq_depth = _depth(dlq_name)
+
+    if main_depth is None and dlq_depth is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="worker queues unreachable",
+        )
+
+    return {
+        "region": _settings_27b.aws_region,
+        "main_queue": {
+            "name": main_queue_name,
+            "approximate_messages": main_depth,
+        },
+        "dlq": {
+            "name": dlq_name,
+            "approximate_messages": dlq_depth,
+        },
+    }

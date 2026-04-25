@@ -51,6 +51,7 @@ from app.services.session_service import SessionService
 from app.services.trace_service import TraceService
 from app.tools.broker import ToolBroker
 from app.tools.registry import ToolRegistry
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,7 @@ class ChatService:
         provider: str | None = None,
         caller_tenant_id: str | None = None,
         luciel_instance_id: int | None = None,  # Step 24.5 File 15
+        actor_key_prefix: str | None = None,
     ) -> str:
 
         # 1. Verify session
@@ -426,11 +428,12 @@ class ChatService:
             )
 
         # 12. Persist assistant reply
-        self.session_service.add_message(
+        # 12. Persist assistant reply — capture id for 27b idempotency key
+        assistant_msg = self.session_service.add_message(
             session_id=session_id, role="assistant", content=final_reply,
         )
 
-        # 13. Memory extraction (consent-gated)
+        # 13. Memory extraction (consent-gated) — async if flag enabled
         memories_extracted = 0
         if user_id and can_use_memory:
             recent_messages = [
@@ -438,15 +441,47 @@ class ChatService:
                 {"role": "assistant", "content": final_reply},
             ]
             try:
-                memories_extracted = self.memory_service.extract_and_save(
-                    user_id=user_id,
-                    tenant_id=tenant_id,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    messages=recent_messages,
-                )
+                if settings.memory_extraction_async and actor_key_prefix:
+                    # Step 27b: enqueue; worker re-reads turn window from DB.
+                    # Fail-open: a down worker must NOT break the chat turn.
+                    try:
+                        self.memory_service.enqueue_extraction(
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                            session_id=session_id,
+                            message_id=assistant_msg.id,
+                            actor_key_prefix=actor_key_prefix,
+                            agent_id=agent_id,
+                            luciel_instance_id=luciel_instance_id,
+                            trace_id=None,  # no trace_id yet at this point in flow
+                        )
+                        memories_extracted = 0  # real count lands in audit row
+                    except Exception as enq_exc:
+                        # Broker down, validation fail, etc. — log and move on.
+                        # Chat turn already succeeded; memory write pauses until
+                        # worker recovers. Queue-depth alarm surfaces the gap.
+                        logger.warning(
+                            "enqueue_extraction failed (fail-open): type=%s "
+                            "session=%s message_id=%s",
+                            type(enq_exc).__name__,
+                            session_id,
+                            assistant_msg.id,
+                        )
+                else:
+                    # Legacy sync path — still idempotent if message_id provided.
+                    memories_extracted = self.memory_service.extract_and_save(
+                        user_id=user_id,
+                        tenant_id=tenant_id,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        messages=recent_messages,
+                        message_id=assistant_msg.id,
+                        luciel_instance_id=luciel_instance_id,
+                    )
             except Exception as exc:
-                logger.warning("Memory extraction failed: %s", exc)
+                logger.warning(
+                    "Memory extraction failed: type=%s", type(exc).__name__,
+                )
 
         # 14. Trace (now carries luciel_instance_id)
         try:
@@ -486,6 +521,8 @@ class ChatService:
         provider: str | None = None,
         caller_tenant_id: str | None = None,
         luciel_instance_id: int | None = None,  # Step 24.5 File 15
+        actor_key_prefix: str | None = None,  # Step 27b
+        
     ):
         """Token-by-token streaming variant. Same setup as respond()."""
 
@@ -588,7 +625,8 @@ class ChatService:
                     reason=decision.escalation_reason,
                 )
 
-            self.session_service.add_message(
+            # Persist assistant reply — capture id for 27b idempotency key
+            assistant_msg = self.session_service.add_message(
                 session_id=session_id, role="assistant", content=final_reply,
             )
 
@@ -598,15 +636,41 @@ class ChatService:
                     {"role": "assistant", "content": final_reply},
                 ]
                 try:
-                    self.memory_service.extract_and_save(
-                        user_id=user_id,
-                        tenant_id=tenant_id,
-                        session_id=session_id,
-                        agent_id=agent_id,
-                        messages=recent_messages,
-                    )
+                    if settings.memory_extraction_async and actor_key_prefix:
+                        # Step 27b async path (fail-open)
+                        try:
+                            self.memory_service.enqueue_extraction(
+                                user_id=user_id,
+                                tenant_id=tenant_id,
+                                session_id=session_id,
+                                message_id=assistant_msg.id,
+                                actor_key_prefix=actor_key_prefix,
+                                agent_id=agent_id,
+                                luciel_instance_id=luciel_instance_id,
+                                trace_id=None,
+                            )
+                        except Exception as enq_exc:
+                            logger.warning(
+                                "enqueue_extraction failed (fail-open, stream): "
+                                "type=%s session=%s message_id=%s",
+                                type(enq_exc).__name__,
+                                session_id,
+                                assistant_msg.id,
+                            )
+                    else:
+                        self.memory_service.extract_and_save(
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            messages=recent_messages,
+                            message_id=assistant_msg.id,
+                            luciel_instance_id=luciel_instance_id,
+                        )
                 except Exception as exc:
-                    logger.warning("Memory extraction failed: %s", exc)
+                    logger.warning(
+                        "Memory extraction failed: type=%s", type(exc).__name__,
+                    )
 
             # Step 24.5 File 15: record trace for the streaming path too,
             # so bound LucielInstances appear in audit regardless of

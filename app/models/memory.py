@@ -11,6 +11,7 @@ from sqlalchemy import Boolean, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
+from sqlalchemy import ForeignKey
 
 
 class MemoryItem(Base, TimestampMixin):
@@ -34,3 +35,14 @@ class MemoryItem(Base, TimestampMixin):
 
     active: Mapped[bool] = mapped_column(default=True, nullable=False)
     """Memories can be soft-deleted or superseded without removing the row."""
+    
+    message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    luciel_instance_id: Mapped[int | None] = mapped_column(
+        ForeignKey("luciel_instances.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )

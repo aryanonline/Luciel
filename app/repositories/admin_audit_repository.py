@@ -92,6 +92,22 @@ class AuditContext:
             actor_label=label,
             actor_tenant_id=SYSTEM_ACTOR_TENANT,
         )
+    
+    @classmethod
+    def worker(cls, task_id: str, actor_key_prefix: str | None) -> "AuditContext":
+        """For async worker tasks (Step 27b+).
+
+        Preserves the enqueuing API key's prefix for audit linkage so
+        every worker-written row traces back to the HTTP caller that
+        triggered the enqueue. Distinguished from system() by the
+        ('worker',) permissions tuple.
+        """
+        return cls(
+            actor_key_prefix=actor_key_prefix,
+            actor_permissions=("worker",),
+            actor_label=f"worker:{task_id}",
+            actor_tenant_id=None,  # set by caller if known
+        )
 
     @property
     def permissions_str(self) -> str | None:

@@ -31,6 +31,21 @@ class Settings(BaseSettings):
     default_openai_model: str = "gpt-4o"
     default_anthropic_model: str = "claude-sonnet-4-20250514"
 
+    # --- Async Worker (Step 27b) ---
+    # Feature flag: when True, ChatService enqueues memory extraction to the
+    # luciel-worker Celery service instead of running it inline. Read at
+    # call-time (via settings.memory_extraction_async) so env flips take
+    # effect without process restart during worker rollout/rollback.
+    memory_extraction_async: bool = False
+
+    # Redis broker URL for Celery. Prod ECS task-def injects from SSM
+    # /luciel/production/REDIS_URL. Leave default for local dev.
+    redis_url: str = "redis://localhost:6379/0"
+
+    # AWS region for SQS queue-depth admin endpoint and any future
+    # worker-side AWS calls. PIPEDA data residency: stays ca-central-1.
+    aws_region: str = "ca-central-1"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

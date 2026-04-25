@@ -104,3 +104,66 @@ class MemoryRepository:
         if item:
             item.active = False
             self.db.commit()
+    def upsert_by_message_id(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        category: str,
+        content: str,
+        message_id: int,
+        agent_id: str | None = None,
+        source_session_id: str | None = None,
+        luciel_instance_id: int | None = None,
+    ) -> bool:
+        """Insert a memory row keyed by (tenant_id, message_id).
+
+        Idempotent: if a row already exists for the same (tenant_id, message_id),
+        this is a no-op and returns False. Relies on the composite partial
+        unique index added in migration <step-27b add_memory_items_message_id>.
+
+        Returns True if a new row was inserted, False if the row already existed.
+
+        Invariant 13: tenant_id is in the conflict key, not just message_id,
+        so two tenants cannot collision-block each other's message ids.
+
+        Invariant 4: caller commits (worker owns the transaction so the
+        memory row + admin_audit_logs row land together).
+        """
+        from sqlalchemy import select
+        from sqlalchemy.exc import IntegrityError
+
+        from app.models.memory import MemoryItem
+
+        # Fast-path existence check (avoids a wasted INSERT on replay/redrive).
+        existing = self.db.scalars(
+            select(MemoryItem.id)
+            .where(
+                MemoryItem.tenant_id == tenant_id,
+                MemoryItem.message_id == message_id,
+            )
+            .limit(1)
+        ).first()
+        if existing is not None:
+            return False
+
+        item = MemoryItem(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            category=category,
+            content=content,
+            source_session_id=source_session_id,
+            message_id=message_id,
+            luciel_instance_id=luciel_instance_id,
+            active=True,
+        )
+        self.db.add(item)
+        try:
+            self.db.flush()
+        except IntegrityError:
+            # Race: another worker inserted between our check and flush.
+            # Partial unique index caught it. Safe no-op.
+            self.db.rollback()
+            return False
+        return True

@@ -58,6 +58,13 @@ ACTION_KNOWLEDGE_INGEST = "knowledge_ingest"
 ACTION_KNOWLEDGE_REPLACE = "knowledge_replace"
 ACTION_KNOWLEDGE_DELETE = "knowledge_delete"
 
+# Step 27b: async memory extraction worker
+ACTION_MEMORY_EXTRACTED = "memory_extracted"
+ACTION_WORKER_MALFORMED_PAYLOAD = "worker_malformed_payload"
+ACTION_WORKER_KEY_REVOKED = "worker_key_revoked"
+ACTION_WORKER_CROSS_TENANT_REJECT = "worker_cross_tenant_reject"
+ACTION_WORKER_INSTANCE_DEACTIVATED = "worker_instance_deactivated"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -69,6 +76,13 @@ ALLOWED_ACTIONS = (
     ACTION_KNOWLEDGE_INGEST,
     ACTION_KNOWLEDGE_REPLACE,
     ACTION_KNOWLEDGE_DELETE,
+
+    # Step 27b
+    ACTION_MEMORY_EXTRACTED,
+    ACTION_WORKER_MALFORMED_PAYLOAD,
+    ACTION_WORKER_KEY_REVOKED,
+    ACTION_WORKER_CROSS_TENANT_REJECT,
+    ACTION_WORKER_INSTANCE_DEACTIVATED,
 )
 
 
@@ -85,6 +99,8 @@ RESOURCE_LUCIEL_INSTANCE = "luciel_instance"
 RESOURCE_API_KEY = "api_key"
 RESOURCE_KNOWLEDGE = "knowledge_embedding"  # Step 25
 RESOURCE_RETENTION_POLICY = "retention_policy"
+# Step 27b: async memory extraction worker writes to memory_items
+RESOURCE_MEMORY = "memory"
 # Step 25b — knowledge ingestion
 RESOURCE_KNOWLEDGE = "knowledge"
 
@@ -100,6 +116,8 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_API_KEY,
     RESOURCE_KNOWLEDGE,
     RESOURCE_RETENTION_POLICY,
+    # Step 27b: async memory extraction worker writes to memory_items
+    RESOURCE_MEMORY,
 )
 
 
