@@ -321,3 +321,90 @@ Remove-Item step27tagmsg.txt
 
 git push origin step-27-20260429
 git ls-remote --tags origin | Select-String "step-27-20260429"
+
+
+---
+
+## Step 27c rollout addendum (2026-04-25 EDT)
+
+### What landed in prod
+
+- `luciel-backend:14` registered, image digest `sha256:b93b3086`,
+  `MEMORY_EXTRACTION_ASYNC=true`. Rolled from `:13` (async OFF) to `:14` at ~21:44 EDT.
+- `luciel-worker:4` registered with cleaned command:
+  `celery -A app.worker.celery_app worker --loglevel=info -Q luciel-memory-tasks
+  --concurrency=2 --without-gossip --without-mingle --without-heartbeat`
+  Scaled `luciel-worker-service` from `desired=0` → `desired=1`. Reached `ready`
+  at 00:50:39 UTC. Logs clean: no ClusterCrossSlotError, no ListQueues, no CreateQueue.
+- IAM hotfix: `luciel-ecs-web-role` inline policy `luciel-web-sqs-readonly`
+  expanded to grant `sqs:SendMessage` on `luciel-memory-tasks` and
+  `ssmmessages:Create*/Open*` on `*`. Force-new-deployment applied so running
+  task picked up the new role.
+
+### Failure caught and corrected during rollout
+
+The web role was originally `sqs-readonly` only. After the `:14` flip, every
+chat turn's `enqueue_extraction` call hit `AccessDenied` on `sqs:SendMessage`.
+The fail-open contract in `chat_service.py` caught it correctly — chat turns
+returned 200 to clients, no errors surfaced — but **no memory rows were written
+during the ~1 hour gap.**
+
+Detection signal: 90-second queue watch loop showed flat `main=0 dlq=0` despite
+expected traffic. Root-caused via `aws iam get-role-policy`. Fixed by replacing
+the inline policy with the consolidated three-statement version.
+
+This is the first concrete production-validated argument for Pillar 11 as a
+mandatory gate: every component in the path was individually correct, and only
+end-to-end verification would have caught the IAM oversight pre-flip.
+
+### Verification status: PARTIAL
+
+What was empirically verified tonight:
+- Worker boot, queue binding, task registration
+- Backend env var flip, deployment health
+- IAM policy contents post-fix
+- SQS queue depth and DLQ depth post-fix
+- Code parity: deployed digest matches `main` HEAD `1c3b058`
+
+What was NOT verified tonight:
+- A real chat turn through the ALB producing a `memory_items` row via the worker
+- Pillar 11 (`async_memory`) in `MODE=full`
+
+### Why verification is incomplete
+
+ECS exec / SSM Session Manager not usable in current VPC topology:
+- Zero VPC interface endpoints in `ca-central-1`
+- Tasks have public IPs and reach SQS via IGW egress, but SSM Messages
+  WebSocket fails to establish (root cause unconfirmed; likely security group
+  egress rules or hostname resolution timing in Fargate networking)
+- Operator workstation cannot reach RDS (private subnet, no ingress rule)
+- No platform-admin key in SSM; no test API key in SSM
+
+End-to-end verification requires resolving at least one of those gaps.
+
+### Step 28 entry criteria (do these before declaring 27 complete)
+
+1. Provision VPC interface endpoints in `ca-central-1`:
+   - `com.amazonaws.ca-central-1.ssmmessages`
+   - `com.amazonaws.ca-central-1.ssm`
+   - `com.amazonaws.ca-central-1.ec2messages`
+   Attach to both private subnets used by ECS tasks. Approx cost: ~$22/month per endpoint.
+2. Mint a stable platform-admin API key via `scripts/mint_platform_admin_ssm.py` and
+   confirm it's stored at `/luciel/production/platform-admin-key` (SecureString).
+3. Run `python -m app.verification --mode=full` from inside an exec session against
+   `luciel-backend:14`. Require all 11 pillars GREEN, especially Pillar 11.
+4. After GREEN: tag `step-27-completed-<YYYYMMDD>` and update this runbook.
+
+### Open risk this leaves on prod
+
+The async memory path is producing rows correctly **as of the IAM fix at ~22:30 EDT**,
+inferable because the IAM denial is the only known failure mode and we removed it.
+Worst-case risk: a second silent failure mode we haven't identified is also active.
+Mitigation: queue-depth admin endpoint and CloudWatch alarms on
+`ApproximateAgeOfOldestMessage` will surface backlog within minutes; DLQ
+non-zero will surface task-level failures.
+
+### Tag
+
+`step-27c-deployed-20260425` — partial verification, async live, IAM corrected.
+**Not** `step-27-completed-*` — that comes after Pillar 11 GREEN.
