@@ -173,7 +173,7 @@ class ApiKeyService:
             )
             try:
                 _write_key_to_ssm(
-                    key_id=key_id, raw_key=raw_key, region=region,
+                    key_id=key_id, raw_key=raw_key, region=region, ssm_path=ssm_path,
                 )
             except Exception as exc:
                 # Roll back so we don't leave an un-retrievable key row.
