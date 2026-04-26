@@ -5,7 +5,7 @@
 set -euo pipefail
 
 AWS_REGION="ca-central-1"
-CLUSTER="luciel-prod"
+CLUSTER="luciel-cluster"
 WEB_SERVICE="luciel-backend-service"
 WORKER_SERVICE="luciel-worker-service"
 
