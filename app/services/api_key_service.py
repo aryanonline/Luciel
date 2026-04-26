@@ -54,18 +54,25 @@ def hash_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode()).hexdigest()
 
 
-def _write_key_to_ssm(*, key_id: int, raw_key: str, region: str) -> str:
+def _write_key_to_ssm(*, key_id: int, raw_key: str, region: str,  ssm_path: str | None = None,) -> str:
     """
     Step 27a: Write a freshly-minted raw key to AWS SSM Parameter Store
     as SecureString. Returns the parameter path on success. Raises on
     failure — caller decides whether to roll back the DB insert.
+
+    Step 27c-final: when ssm_path is provided, it is used verbatim (no
+    .format() substitution). This supports durable production paths like
+    /luciel/production/platform-admin-key that should NOT carry the
+    key_id in the URL (the production path is stable across re-mints).
+    When ssm_path is None (default), behavior is identical to 27a:
+    SSM_BOOTSTRAP_PATH.format(key_id=key_id) is used.
 
     boto3 is imported lazily so dev/test paths that never hit this branch
     do not need boto3 installed.
     """
     import boto3  # lazy import — keeps dev paths dependency-free
 
-    path = SSM_BOOTSTRAP_PATH.format(key_id=key_id)
+    path = ssm_path if ssm_path is not None else SSM_BOOTSTRAP_PATH.format(key_id=key_id)
     ssm = boto3.client("ssm", region_name=region)
     ssm.put_parameter(
         Name=path,
@@ -73,11 +80,13 @@ def _write_key_to_ssm(*, key_id: int, raw_key: str, region: str) -> str:
         Type="SecureString",
         Overwrite=False,  # refuse to clobber; caller deletes stale params first
         Description=(
-            f"Luciel bootstrap admin key id={key_id}. "
-            f"Read once by operator, then delete this parameter."
+            f"Luciel platform-admin key id={key_id} at {path}. "
+            f"Read by operator or task role; managed via SSM."
         ),
         Tags=[
-            {"Key": "luciel:purpose", "Value": "bootstrap-admin-key"},
+            {"Key": "luciel:purpose", "Value": (
+                "platform-admin-key" if ssm_path is not None else "bootstrap-admin-key"
+            )},
             {"Key": "luciel:key_id", "Value": str(key_id)},
         ],
     )
@@ -107,6 +116,7 @@ class ApiKeyService:
         auto_commit: bool = True,
         ssm_write: bool = False,                    # Step 27a
         ssm_region: str | None = None,              # Step 27a
+        ssm_path: str | None = None,
     ) -> tuple[ApiKey, str | None]:
         """
         Create a new API key.
