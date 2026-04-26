@@ -64,6 +64,12 @@ ACTION_WORKER_MALFORMED_PAYLOAD = "worker_malformed_payload"
 ACTION_WORKER_KEY_REVOKED = "worker_key_revoked"
 ACTION_WORKER_CROSS_TENANT_REJECT = "worker_cross_tenant_reject"
 ACTION_WORKER_INSTANCE_DEACTIVATED = "worker_instance_deactivated"
+# Step 24.5b: Q6 resolution -- mandatory key rotation cascade on role change.
+# Distinct from ACTION_DEACTIVATE because the key was active+valid; this
+# captures "key was good but the User's scope assignment ended, so we
+# rotated as a security cascade." Auditors filter on this to find all
+# role-change-induced revocations.
+ACTION_KEY_ROTATED_ON_ROLE_CHANGE = "key_rotated_on_role_change"
 
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
@@ -83,6 +89,8 @@ ALLOWED_ACTIONS = (
     ACTION_WORKER_KEY_REVOKED,
     ACTION_WORKER_CROSS_TENANT_REJECT,
     ACTION_WORKER_INSTANCE_DEACTIVATED,
+    # Step 24.5b
+    ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
 )
 
 
@@ -101,6 +109,9 @@ RESOURCE_KNOWLEDGE = "knowledge_embedding"  # Step 25
 RESOURCE_RETENTION_POLICY = "retention_policy"
 # Step 27b: async memory extraction worker writes to memory_items
 RESOURCE_MEMORY = "memory"
+# Step 24.5b: User identity layer (Q6 resolution)
+RESOURCE_USER = "user"
+RESOURCE_SCOPE_ASSIGNMENT = "scope_assignment"
 # Step 25b — knowledge ingestion
 RESOURCE_KNOWLEDGE = "knowledge"
 
@@ -118,6 +129,9 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_RETENTION_POLICY,
     # Step 27b: async memory extraction worker writes to memory_items
     RESOURCE_MEMORY,
+    # Step 24.5b
+    RESOURCE_USER,
+    RESOURCE_SCOPE_ASSIGNMENT,
 )
 
 
