@@ -1,4 +1,4 @@
-"""Pillar 12 - Identity stability under role change (Step 24.5b Q6).
+﻿"""Pillar 12 - Identity stability under role change (Step 24.5b Q6).
 
 Q6 resolution proof: when an Agent's role changes, the platform User
 identity persists and remains attributable across the change, while
@@ -160,7 +160,7 @@ class IdentityStabilityPillar(Pillar):
             session_id = session_body.get("session_id") or session_body.get("id")
 
             call(
-                "POST", "/api/v1/api/v1/consent/grant", k1_raw,
+                "POST", "/api/v1/consent/grant", k1_raw,
                 json={
                     "user_id": session_body.get("user_id"),
                     "tenant_id": tid,
@@ -298,7 +298,7 @@ class IdentityStabilityPillar(Pillar):
             session2_id = session2_body.get("session_id") or session2_body.get("id")
 
             call(
-                "POST", "/api/v1/api/v1/consent/grant", k2_raw,
+                "POST", "/api/v1/consent/grant", k2_raw,
                 json={
                     "user_id": session2_body.get("user_id"),
                     "tenant_id": tid,

@@ -1,4 +1,4 @@
-"""Pillar 14 - Departure semantics (Step 24.5b Q6).
+﻿"""Pillar 14 - Departure semantics (Step 24.5b Q6).
 
 The most reliability-sensitive operation in the identity layer: ending
 a User's assignment in one tenant must leave every other tenant
@@ -254,7 +254,7 @@ class DepartureSemanticsPillar(Pillar):
 
             call(
                 "POST",
-                "/api/v1/api/v1/consent/grant",
+                "/api/v1/consent/grant",
                 k1_raw,
                 json={
                     "user_id": t1_session.get("user_id"),
@@ -291,7 +291,7 @@ class DepartureSemanticsPillar(Pillar):
 
             call(
                 "POST",
-                "/api/v1/api/v1/consent/grant",
+                "/api/v1/consent/grant",
                 k1_raw,
                 json={
                     "user_id": t2_session.get("user_id"),

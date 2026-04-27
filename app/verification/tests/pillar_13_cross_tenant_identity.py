@@ -1,4 +1,4 @@
-"""Pillar 13 - Cross-tenant identity-spoof guard (Step 24.5b Q6).
+﻿"""Pillar 13 - Cross-tenant identity-spoof guard (Step 24.5b Q6).
 
 Worker-side defense-in-depth proof: a malicious enqueue-side payload
 that claims (user_id=U, tenant_id=T1, agent_id=A2_under_T2) MUST land
@@ -249,7 +249,7 @@ class CrossTenantIdentityPillar(Pillar):
 
             call(
                 "POST",
-                "/api/v1/api/v1/consent/grant",
+                "/api/v1/consent/grant",
                 k1_raw,
                 json={
                     "user_id": session_body.get("user_id"),

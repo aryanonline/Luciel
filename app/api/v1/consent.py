@@ -1,9 +1,9 @@
-"""
+﻿"""
 Consent API endpoints.
 
-POST /api/v1/consent/grant   — user grants consent
-POST /api/v1/consent/withdraw — user withdraws consent
-GET  /api/v1/consent/status   — check current consent state
+POST /api/v1/consent/grant   â€” user grants consent
+POST /api/v1/consent/withdraw â€” user withdraws consent
+GET  /api/v1/consent/status   â€” check current consent state
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from app.schemas.consent import (
     ConsentWithdrawRequest,
 )
 
-router = APIRouter(prefix="/api/v1/consent", tags=["consent"])
+router = APIRouter(prefix="/consent", tags=["consent"])
 
 
 @router.post("/grant", response_model=ConsentActionResponse)
