@@ -57,9 +57,10 @@ from app.verification.tests.pillar_12_identity_stability import PILLAR as P12
 from app.verification.tests.pillar_13_cross_tenant_identity import PILLAR as P13
 from app.verification.tests.pillar_14_departure_semantics import PILLAR as P14
 from app.verification.tests.pillar_15_consent_route_no_double_prefix import PILLAR as P15
+from app.verification.tests.pillar_16_memory_items_actor_user_id_not_null import PILLAR as P16
 
 
-PRE_TEARDOWN_PILLARS = [P1, P2, P3, P4, P5, P6, P7, P8, P11, P12, P13, P14, P15]
+PRE_TEARDOWN_PILLARS = [P1, P2, P3, P4, P5, P6, P7, P8, P11, P12, P13, P14, P15, P16]
 
 
 def _thorough_teardown(state: RunState) -> list[str]:
