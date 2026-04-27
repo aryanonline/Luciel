@@ -64,6 +64,22 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
     ("deletion_logs",        None,     "*",                            ["tenant_id"]),
     ("admin_audit_logs",     None,     "*",                            ["tenant_id"]),
     ("agent_configs",        None,     "*",                            ["tenant_id"]),
+
+    # Step 24.5b additions:
+    # - users: tenant-agnostic identity rows. No tenant_id column on the
+    #   table, so the probe will resolve "no_tenant_scope" -- intentional.
+    #   Real-User cleanup is verified by per-pillar self-teardown via
+    #   UserService.deactivate_user, not via per-tenant residue probe.
+    #   Listed here so the observations dict shows "users: no_tenant_scope"
+    #   for traceability rather than silently omitting the table.
+    ("users",                None,     "*",                            ["tenant_id"]),
+    # - scope_assignments: tenant-scoped active assignments. Per-tenant
+    #   teardown should leave 0 active rows for the audited tenant.
+    #   Q6 doctrine: end-and-recreate, never UPDATE in place; teardown
+    #   cascades end every active SA via end_assignment with reason=
+    #   DEACTIVATED. Probe enforces live=0 to catch a stuck-assignment
+    #   scenario after Pillar 14 / UserService.deactivate_user runs.
+    ("scope_assignments",    "active", 0,                              ["tenant_id"]),
 ]
 
 
