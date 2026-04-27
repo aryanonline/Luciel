@@ -51,6 +51,7 @@ from app.models.base import Base
 
 if TYPE_CHECKING:
     from app.models.agent import Agent
+    from app.models.memory import MemoryItem
     from app.models.scope_assignment import ScopeAssignment
 
 
@@ -128,6 +129,27 @@ class User(Base):
         "ScopeAssignment",
         back_populates="user",
         foreign_keys="ScopeAssignment.user_id",
+        lazy="select",
+    )
+
+    # Step 24.5b File 2.8 -- restored from Commit 1 deferral.
+    #
+    # Original deferral (D8): the back-populates target
+    # MemoryItem.actor_user_id column didn't land until Commit 2's
+    # File 2.6a, so declaring this relationship in Commit 1 would
+    # have crashed configure_mappers on first ORM use.
+    #
+    # Now safe: File 2.6a added MemoryItem.actor_user_id, File 2.7
+    # landed it in DB schema, File 2.8 (this edit + the matching
+    # MemoryItem.actor_user edit) closes the bidirectional pair.
+    #
+    # Used by Pillar 12 in Commit 3 to assert "all memory rows
+    # attributable to this User across role changes" reads
+    # correctly via user.memory_items.
+    memory_items: Mapped[list["MemoryItem"]] = relationship(
+        "MemoryItem",
+        back_populates="actor_user",
+        foreign_keys="MemoryItem.actor_user_id",
         lazy="select",
     )
 

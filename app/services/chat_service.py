@@ -52,6 +52,7 @@ from app.services.trace_service import TraceService
 from app.tools.broker import ToolBroker
 from app.tools.registry import ToolRegistry
 from app.core.config import settings
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +264,7 @@ class ChatService:
         caller_tenant_id: str | None = None,
         luciel_instance_id: int | None = None,  # Step 24.5 File 15
         actor_key_prefix: str | None = None,
+        actor_user_id: "uuid.UUID | None" = None,  # Step 24.5b File 2.5
     ) -> str:
 
         # 1. Verify session
@@ -453,6 +455,7 @@ class ChatService:
                             actor_key_prefix=actor_key_prefix,
                             agent_id=agent_id,
                             luciel_instance_id=luciel_instance_id,
+                            actor_user_id=actor_user_id,  # Step 24.5b File 2.5
                             trace_id=None,  # no trace_id yet at this point in flow
                         )
                         memories_extracted = 0  # real count lands in audit row
@@ -477,6 +480,7 @@ class ChatService:
                         messages=recent_messages,
                         message_id=assistant_msg.id,
                         luciel_instance_id=luciel_instance_id,
+                        actor_user_id=actor_user_id,  # Step 24.5b File 2.5
                     )
             except Exception as exc:
                 logger.warning(
@@ -522,7 +526,7 @@ class ChatService:
         caller_tenant_id: str | None = None,
         luciel_instance_id: int | None = None,  # Step 24.5 File 15
         actor_key_prefix: str | None = None,  # Step 27b
-        
+        actor_user_id: "uuid.UUID | None" = None,  # Step 24.5b File 2.5
     ):
         """Token-by-token streaming variant. Same setup as respond()."""
 
@@ -647,6 +651,7 @@ class ChatService:
                                 actor_key_prefix=actor_key_prefix,
                                 agent_id=agent_id,
                                 luciel_instance_id=luciel_instance_id,
+                                actor_user_id=actor_user_id,  # Step 24.5b File 2.5
                                 trace_id=None,
                             )
                         except Exception as enq_exc:
@@ -666,6 +671,7 @@ class ChatService:
                             messages=recent_messages,
                             message_id=assistant_msg.id,
                             luciel_instance_id=luciel_instance_id,
+                            actor_user_id=actor_user_id,  # Step 24.5b File 2.5
                         )
                 except Exception as exc:
                     logger.warning(

@@ -13,15 +13,30 @@ Payload (opaque ids only; NO user content):
     actor_key_prefix      str        # enqueuing api_key.key_prefix (audit linkage)
     agent_id              str | None
     luciel_instance_id    int | None
+    actor_user_id         str | None # Step 24.5b -- platform User UUID
+                                     # serialized as string for JSON
+                                     # transport. Worker parses to UUID
+                                     # at task entry. None for legacy /
+                                     # pre-backfill rows.
 
-Pre-flight gates (Invariant 8 — defense in depth):
+Pre-flight gates (Invariant 8 -- defense in depth):
     1. Payload shape validation               -> Reject to DLQ on fail
     2. API key still active                   -> Reject to DLQ on fail
     3. Session.tenant_id == payload.tenant_id -> Reject to DLQ on fail
-       (Invariant 13 — mandatory tenant predicate; also catches
+       (Invariant 13 -- mandatory tenant predicate; also catches
         cross-tenant enqueue attempts)
     4. LucielInstance.active is True (when luciel_instance_id present)
                                               -> Reject to DLQ on fail
+    5. User.active is True (when actor_user_id present, Step 24.5b)
+                                              -> Reject to DLQ on fail
+       Pillar 12 (Commit 3) asserts this gate fires when a User is
+       deactivated mid-flight after enqueue.
+    6. Agent.user_id == payload.actor_user_id (Step 24.5b -- Q6
+       cross-tenant identity-spoof guard)     -> Reject to DLQ on fail
+       Pillar 13 (Commit 3) asserts a malicious payload claiming
+       (user_id=U, tenant_id=T1, agent_id=A2_under_T2) lands in DLQ
+       because A2's row has tenant_id=T2 and user_id=U2, not the
+       payload's claimed values.
 
 Execution:
     - Re-read turn window from DB via join(MessageModel -> SessionModel)
@@ -41,6 +56,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 
 from celery import shared_task
 from celery.exceptions import Reject
@@ -49,10 +65,16 @@ from sqlalchemy import select
 from app.db.session import SessionLocal
 from app.integrations.llm.router import ModelRouter
 from app.memory.service import MemoryService
+from app.models.admin_audit_log import (
+    ACTION_WORKER_USER_INACTIVE,
+    ACTION_WORKER_IDENTITY_SPOOF_REJECT,
+)
+from app.models.agent import Agent
 from app.models.api_key import ApiKey
 from app.models.luciel_instance import LucielInstance
 from app.models.message import MessageModel
 from app.models.session import SessionModel
+from app.models.user import User
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
@@ -154,6 +176,7 @@ def extract_memory_from_turn(
     agent_id: str | None = None,
     luciel_instance_id: int | None = None,
     trace_id: str | None = None,
+    actor_user_id: str | None = None,  # Step 24.5b: platform User UUID as str
 ) -> None:
     """
     Extract durable memories from a just-completed chat turn and persist them.
@@ -249,6 +272,95 @@ def extract_memory_from_turn(
                     task_id=task_id,
                     trace_id=trace_id,
                 )
+        
+        # ---------- Gate 5: actor_user_id parse + User.active (Step 24.5b) ----------
+        actor_user_uuid: uuid.UUID | None = None
+        if actor_user_id is not None:
+            # Parse string -> UUID. Malformed actor_user_id is treated as
+            # gate 1 (malformed payload) -- the enqueue side serialized
+            # this from a real uuid.UUID, so a parse failure here means
+            # the payload was tampered with in transit.
+            try:
+                actor_user_uuid = uuid.UUID(actor_user_id)
+            except (ValueError, TypeError):
+                logger.error(
+                    "gate5 actor_user_id unparseable task=%s tenant=%s",
+                    task_id, tenant_id,
+                )
+                _reject_with_audit(
+                    db,
+                    action=ACTION_WORKER_MALFORMED_PAYLOAD,
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    message_id=message_id,
+                    actor_key_prefix=actor_key_prefix,
+                    note="actor_user_id failed UUID parse",
+                    task_id=task_id,
+                    trace_id=trace_id,
+                )
+
+            # User.active check. Deactivated users cannot have memory
+            # written for them mid-flight after enqueue.
+            user_row = db.get(User, actor_user_uuid)
+            if user_row is None or not user_row.active:
+                logger.warning(
+                    "gate5 user inactive/missing task=%s actor_user_id=%s",
+                    task_id, actor_user_uuid,
+                )
+                _reject_with_audit(
+                    db,
+                    action=ACTION_WORKER_USER_INACTIVE,
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    message_id=message_id,
+                    actor_key_prefix=actor_key_prefix,
+                    note=(
+                        f"actor_user inactive or missing: "
+                        f"{actor_user_uuid}"
+                    ),
+                    task_id=task_id,
+                    trace_id=trace_id,
+                )
+
+        # ---------- Gate 6: cross-tenant identity-spoof guard (Step 24.5b -- Q6) ----------
+        # When both agent_id and actor_user_id are present, the Agent row
+        # at (tenant_id, agent_id) MUST have user_id == actor_user_uuid.
+        # This catches a malicious payload that claims an actor identity
+        # whose Agent lives in a different tenant. Pillar 13 in Commit 3
+        # asserts this gate fires.
+        if actor_user_uuid is not None and agent_id is not None:
+            spoof_agent = db.scalars(
+                select(Agent).where(
+                    Agent.tenant_id == tenant_id,
+                    Agent.agent_id == agent_id,
+                ).limit(1)
+            ).first()
+            if spoof_agent is None or spoof_agent.user_id != actor_user_uuid:
+                logger.warning(
+                    "gate6 identity spoof task=%s payload_actor_user=%s "
+                    "agent_user=%s tenant=%s agent_id=%s",
+                    task_id,
+                    actor_user_uuid,
+                    spoof_agent.user_id if spoof_agent else None,
+                    tenant_id,
+                    agent_id,
+                )
+                _reject_with_audit(
+                    db,
+                    action=ACTION_WORKER_IDENTITY_SPOOF_REJECT,
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    message_id=message_id,
+                    actor_key_prefix=actor_key_prefix,
+                    note=(
+                        f"actor_user_id mismatch: payload claims "
+                        f"{actor_user_uuid}, agent ({tenant_id},"
+                        f"{agent_id}) has "
+                        f"{spoof_agent.user_id if spoof_agent else 'None'}"
+                    ),
+                    task_id=task_id,
+                    trace_id=trace_id,
+                )
 
         # ---------- Re-read turn window from DB (Invariant 13: tenant-scoped) ----------
         stmt = (
@@ -291,8 +403,9 @@ def extract_memory_from_turn(
             session_id=session_id,
             agent_id=agent_id,
             messages=messages_payload,
-            # message_id / luciel_instance_id passed through to repository
-            # once File 2.6 / 2.8 patches land.
+            message_id=message_id,
+            luciel_instance_id=luciel_instance_id,
+            actor_user_id=actor_user_uuid,  # Step 24.5b File 2.6d
         )
 
         # ---------- Audit row in same txn (Invariant 4) ----------
@@ -323,6 +436,9 @@ def extract_memory_from_turn(
                 "turn_window_size": len(messages_payload),
                 "saved_count": saved_count,
                 "content_sha256": content_digest,
+                "actor_user_id": (
+                    str(actor_user_uuid) if actor_user_uuid else None
+                ),  # Step 24.5b File 2.6d
             },
             note="async memory extraction",
             autocommit=False,

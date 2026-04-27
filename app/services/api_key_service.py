@@ -32,6 +32,17 @@ from sqlalchemy.orm import Session
 
 from app.models.api_key import ApiKey
 
+from app.models.admin_audit_log import (
+    ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
+    RESOURCE_API_KEY,
+)
+from app.models.luciel_instance import LucielInstance
+from app.repositories.admin_audit_repository import (
+    AdminAuditRepository,
+    AuditContext,
+    SYSTEM_ACTOR_TENANT,
+)
+
 logger = logging.getLogger(__name__)
 
 KEY_PREFIX = "luc_sk_"
@@ -229,3 +240,155 @@ class ApiKeyService:
 
     def get_key_by_id(self, key_id: int) -> ApiKey | None:
         return self.db.query(ApiKey).filter(ApiKey.id == key_id).first()
+    def rotate_keys_for_agent(
+        self,
+        *,
+        agent_id_pk: int,
+        reason: str,
+        audit_ctx: AuditContext | None = None,
+    ) -> int:
+        """Rotate (deactivate) every active ApiKey bound to an Agent.
+
+        Step 24.5b. Q6 mandatory key rotation cascade. Hard rotation,
+        no grace period (Step 24.5b decision A). Called by
+        ScopeAssignmentService.end_assignment when an assignment ends
+        for any reason (PROMOTED / DEMOTED / REASSIGNED / DEPARTED /
+        DEACTIVATED).
+
+        Walks two scopes of bound keys:
+        1. Direct: ApiKey.agent_id matches the Agent's natural slug
+           AND ApiKey.tenant_id matches the Agent's tenant.
+        2. Indirect: ApiKey.luciel_instance_id references any
+           LucielInstance whose owning agent is this one. A chat-key
+           pinned to a Luciel owned by an ending-role Agent must
+           stop working immediately -- otherwise the User's chat
+           experience continues working past the role change, which
+           is exactly the security gap Q6 closes.
+
+        Returns the count of keys rotated (sum of both scopes).
+
+        Emits per-key ACTION_KEY_ROTATED_ON_ROLE_CHANGE audit rows
+        in the same txn (Invariant 4). Each audit row includes:
+        - resource_type=RESOURCE_API_KEY
+        - resource_pk=<api_key.id>
+        - resource_natural_id=<api_key.key_prefix>
+        - tenant_id=<api_key.tenant_id or SYSTEM_ACTOR_TENANT>
+        - before={"active": True}, after={"active": False}
+        - note=reason (the cascade reason from ScopeAssignmentService)
+
+        Idempotent: keys already inactive are skipped (no-op + no
+        duplicate audit rows). This protects against re-entry during
+        cascade sequences (e.g. UserService.deactivate_user looping
+        end_assignment over many assignments where some Agent rows
+        share keys via shared LucielInstances).
+
+        Does NOT commit -- caller (ScopeAssignmentService.end_assignment)
+        owns the txn boundary. The cascade contract is: assignment
+        end + key rotation in same txn, single commit at end.
+
+        Drift D5 note: this method is the canonical audit-emitting
+        deactivation path for ApiKey. The legacy deactivate_key()
+        method does NOT emit audit rows -- Step 28 cleanup will
+        retrofit it. Until then, all role-change-induced rotations
+        MUST go through here, never through deactivate_key().
+        """
+        # Look up the Agent so we can resolve both scope dimensions:
+        # the Agent's natural agent_id slug (for direct ApiKey matches)
+        # and its primary key (for LucielInstance ownership traversal).
+        from app.models.agent import Agent
+
+        agent = self.db.get(Agent, agent_id_pk)
+        if agent is None:
+            logger.warning(
+                "rotate_keys_for_agent: agent_id_pk=%d not found, "
+                "no rotation performed",
+                agent_id_pk,
+            )
+            return 0
+
+        rotated_count = 0
+        audit_repo = AdminAuditRepository(self.db)
+
+        # ------ Scope 1: direct ApiKey bindings ------
+        # Match on (tenant_id, agent_id) natural-key tuple. Agent.agent_id
+        # is the slug; ApiKey.agent_id stores that same slug.
+        direct_stmt = select(ApiKey).where(
+            ApiKey.tenant_id == agent.tenant_id,
+            ApiKey.agent_id == agent.agent_id,
+            ApiKey.active.is_(True),
+        )
+        direct_keys = list(self.db.scalars(direct_stmt).all())
+
+        # ------ Scope 2: LucielInstance-pinned ApiKey bindings ------
+        # Find every LucielInstance owned by this Agent (one Agent can
+        # own multiple Luciels per Step 24.5 doctrine), then find every
+        # active ApiKey pinned to any of those LucielInstance rows.
+        owned_luciels_stmt = select(LucielInstance.id).where(
+            LucielInstance.scope_owner_agent_id == agent.agent_id,
+            LucielInstance.scope_owner_tenant_id == agent.tenant_id,
+        )
+        owned_luciel_ids = [row for row in self.db.scalars(owned_luciels_stmt).all()]
+
+        indirect_keys: list[ApiKey] = []
+        if owned_luciel_ids:
+            indirect_stmt = select(ApiKey).where(
+                ApiKey.luciel_instance_id.in_(owned_luciel_ids),
+                ApiKey.active.is_(True),
+            )
+            indirect_keys = list(self.db.scalars(indirect_stmt).all())
+
+        # ------ Rotate ------
+        # De-dupe across the two scopes (a key can technically be both
+        # agent-bound and luciel-bound depending on mint pattern).
+        seen_ids: set[int] = set()
+        all_keys = []
+        for key in direct_keys + indirect_keys:
+            if key.id in seen_ids:
+                continue
+            seen_ids.add(key.id)
+            all_keys.append(key)
+
+        for key in all_keys:
+            # Idempotency guard: already-inactive keys are a no-op.
+            # Defensive against re-entry during cascade sequences.
+            if not key.active:
+                continue
+
+            key.active = False
+            rotated_count += 1
+
+            audit_repo.record(
+                ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
+                    label="rotate_keys_for_agent"
+                ),
+                tenant_id=key.tenant_id or SYSTEM_ACTOR_TENANT,
+                action=ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
+                resource_type=RESOURCE_API_KEY,
+                resource_pk=key.id,
+                resource_natural_id=key.key_prefix,
+                domain_id=key.domain_id,
+                agent_id=key.agent_id,
+                luciel_instance_id=key.luciel_instance_id,
+                before={"active": True},
+                after={"active": False},
+                note=reason,
+                autocommit=False,
+            )
+
+        # Flush so the UPDATE + audit INSERTs hit the DB before the
+        # caller's commit boundary. Doesn't commit -- ScopeAssignmentService
+        # owns the txn.
+        self.db.flush()
+
+        logger.info(
+            "rotate_keys_for_agent agent_pk=%d agent_id=%s tenant=%s "
+            "direct_keys=%d indirect_keys=%d rotated=%d reason=%r",
+            agent_id_pk,
+            agent.agent_id,
+            agent.tenant_id,
+            len(direct_keys),
+            len(indirect_keys),
+            rotated_count,
+            reason[:80],
+        )
+        return rotated_count
