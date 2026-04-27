@@ -37,6 +37,7 @@ def chat(
             caller_tenant_id=getattr(request.state, "tenant_id", None),
             luciel_instance_id=getattr(request.state, "luciel_instance_id", None),  # Step 24.5 File 15
             actor_key_prefix=getattr(request.state, "key_prefix", None),  # Step 27b
+            actor_user_id=getattr(request.state, "actor_user_id", None),  # Step 24.5b File 2.5
         )
     except PermissionError as exc:           # ADD this handler
         raise HTTPException(
@@ -68,6 +69,7 @@ def chat_stream(
             caller_tenant_id=getattr(request.state, "tenant_id", None),
             luciel_instance_id=getattr(request.state, "luciel_instance_id", None),  # Step 24.5 File 15
             actor_key_prefix=getattr(request.state, "key_prefix", None),  # Step 27b
+            actor_user_id=getattr(request.state, "actor_user_id", None),  # Step 24.5b File 2.5
         )
     except PermissionError as exc:           # ADD this handler
         raise HTTPException(

@@ -29,6 +29,7 @@ from app.repositories.admin_audit_repository import (
     AuditContext,
     diff_updated_fields,
 )
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -301,3 +302,64 @@ class AgentRepository:
             agent_id,
         )
         return agent
+    # ---------------------------------------------------------------
+    # Step 24.5b -- User identity layer lookups
+    # ---------------------------------------------------------------
+
+    def get_by_user_and_tenant(
+        self,
+        *,
+        user_id: uuid.UUID,
+        tenant_id: str,
+        active_only: bool = False,
+    ) -> Agent | None:
+        """Find the Agent row for this User identity within this tenant.
+
+        Step 24.5b. Used by the promotion path: when ScopeAssignment is
+        ended for (user, tenant), the service walks here to find the
+        owning Agent so it can rotate ApiKeys bound to that Agent
+        (mandatory key rotation per Q6 resolution).
+
+        In steady state we expect exactly zero or one match per
+        (user_id, tenant_id) -- a User holds at most one active Agent
+        per tenant. Multiple matches across history are possible after
+        deactivate-and-recreate cycles, in which case active_only=True
+        returns the currently-active row.
+
+        Hits ix_agents_user_id (composite-friendly via tenant_id index).
+        """
+        query = self.db.query(Agent).filter(
+            Agent.user_id == user_id,
+            Agent.tenant_id == tenant_id,
+        )
+        if active_only:
+            query = query.filter(Agent.active.is_(True))
+        # If multiple historical rows exist (deactivate-and-recreate
+        # cycle), return the most recent. Active-only callers will
+        # only see at most one in steady state.
+        return query.order_by(Agent.id.desc()).first()
+
+    def list_for_user(
+        self,
+        user_id: uuid.UUID,
+        *,
+        active_only: bool = False,
+    ) -> list[Agent]:
+        """Cross-tenant: every Agent row this User identity holds.
+
+        Step 24.5b. Mirrors UserRepository.list_agents_for_user (which
+        delegates here). Both paths exist because some call sites have
+        a User in hand (UserRepository entry point) and others have
+        the user_id from a ScopeAssignment row (this entry point).
+
+        Service layer gates platform-admin authorization on the calling
+        key. Tenant-scoped admins use list_for_scope(tenant_id=...) for
+        tenant-bounded views; this cross-tenant lookup is platform-only.
+
+        Sorted by tenant first then id so the result groups Agents by
+        brokerage in display order.
+        """
+        query = self.db.query(Agent).filter(Agent.user_id == user_id)
+        if active_only:
+            query = query.filter(Agent.active.is_(True))
+        return query.order_by(Agent.tenant_id.asc(), Agent.id.asc()).all()

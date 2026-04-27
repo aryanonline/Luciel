@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.memory import MemoryItem
+import uuid  # noqa: F401  (referenced via string annotation in method signatures)
 
 
 class MemoryRepository:
@@ -33,8 +34,17 @@ class MemoryRepository:
         content: str,
         agent_id: str | None = None,
         source_session_id: str | None = None,
+        actor_user_id: "uuid.UUID | None" = None,  # Step 24.5b File 2.6b
     ) -> MemoryItem:
-        """Save a single memory item to the database."""
+        """Save a single memory item to the database.
+
+        Step 24.5b File 2.6b: actor_user_id captures the platform User
+        identity whose Agent wrote this row. Distinct from `user_id`
+        (the free-form end-user identifier string predating Step 24.5b).
+        Drift D7 resolution: both fields coexist with distinct semantics.
+        Nullable until Commit 3 backfill flips the column to NOT NULL
+        alongside agents.user_id (Invariant 12).
+        """
         item = MemoryItem(
             user_id=user_id,
             tenant_id=tenant_id,
@@ -42,6 +52,7 @@ class MemoryRepository:
             category=category,
             content=content,
             source_session_id=source_session_id,
+            actor_user_id=actor_user_id,  # Step 24.5b File 2.6b
             active=True,
         )
         self.db.add(item)
@@ -115,6 +126,7 @@ class MemoryRepository:
         agent_id: str | None = None,
         source_session_id: str | None = None,
         luciel_instance_id: int | None = None,
+        actor_user_id: "uuid.UUID | None" = None,  # Step 24.5b File 2.6b
     ) -> bool:
         """Insert a memory row keyed by (tenant_id, message_id).
 
@@ -156,6 +168,7 @@ class MemoryRepository:
             source_session_id=source_session_id,
             message_id=message_id,
             luciel_instance_id=luciel_instance_id,
+            actor_user_id=actor_user_id,  # Step 24.5b File 2.6b
             active=True,
         )
         self.db.add(item)
