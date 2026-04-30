@@ -625,13 +625,14 @@ def deactivate_api_key(
     request: Request,
     key_id: int,
     db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> None:
     service = ApiKeyService(db)
     # Fetch first so we can enforce scope on the target.
     target = service.get_key_by_id(key_id) if hasattr(service, "get_key_by_id") else None
     if target is None:
         # Fall back: just try deactivate; 404 if not found.
-        success = service.deactivate_key(key_id)
+        success = service.deactivate_key(key_id, audit_ctx=audit_ctx)
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -642,7 +643,7 @@ def deactivate_api_key(
     ScopePolicy.enforce_agent_scope(
         request, target.tenant_id, target.domain_id, target.agent_id,
     )
-    success = service.deactivate_key(key_id)
+    success = service.deactivate_key(key_id, audit_ctx=audit_ctx)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

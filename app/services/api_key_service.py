@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 from app.models.api_key import ApiKey
 
 from app.models.admin_audit_log import (
+    ACTION_DEACTIVATE,
     ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
     RESOURCE_API_KEY,
 )
@@ -228,12 +229,54 @@ class ApiKeyService:
             stmt = stmt.where(ApiKey.tenant_id == tenant_id)
         return list(self.db.scalars(stmt).all())
 
-    def deactivate_key(self, key_id: int) -> bool:
-        """Deactivate an API key."""
+    def deactivate_key(
+        self,
+        key_id: int,
+        *,
+        audit_ctx: AuditContext | None = None,
+    ) -> bool:
+        """Deactivate an API key.
+
+        Step 28 D5 (Phase 1, Commit 6): emits an ACTION_DEACTIVATE
+        audit row in the same transaction as the active=False UPDATE,
+        upholding Invariant 4 (audit-before-commit). This brings the
+        single-key admin DELETE path in line with the cascade path
+        in rotate_keys_for_agent, which has emitted audit rows since
+        Step 24.5b.
+
+        ``audit_ctx`` is keyword-only and optional for backward
+        compatibility. When omitted (legacy callers, system-internal
+        flows), an AuditContext.system(label="deactivate_key") actor
+        is used so the audit row is always attributable. New callers
+        (admin endpoints, scripts) MUST thread the request-scoped
+        AuditContext through.
+        """
         api_key = self.db.get(ApiKey, key_id)
         if not api_key:
             return False
+
+        was_active = api_key.active
         api_key.active = False
+
+        audit_repo = AdminAuditRepository(self.db)
+        audit_repo.record(
+            ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
+                label="deactivate_key"
+            ),
+            tenant_id=api_key.tenant_id or SYSTEM_ACTOR_TENANT,
+            action=ACTION_DEACTIVATE,
+            resource_type=RESOURCE_API_KEY,
+            resource_pk=api_key.id,
+            resource_natural_id=api_key.key_prefix,
+            domain_id=api_key.domain_id,
+            agent_id=api_key.agent_id,
+            luciel_instance_id=api_key.luciel_instance_id,
+            before={"active": was_active},
+            after={"active": False},
+            note=None,
+            autocommit=False,
+        )
+
         self.db.commit()
         logger.info("Deactivated API key id=%d", key_id)
         return True
@@ -286,11 +329,13 @@ class ApiKeyService:
         owns the txn boundary. The cascade contract is: assignment
         end + key rotation in same txn, single commit at end.
 
-        Drift D5 note: this method is the canonical audit-emitting
-        deactivation path for ApiKey. The legacy deactivate_key()
-        method does NOT emit audit rows -- Step 28 cleanup will
-        retrofit it. Until then, all role-change-induced rotations
-        MUST go through here, never through deactivate_key().
+        Step 28 D5 note (closed): deactivate_key() now also emits
+        ACTION_DEACTIVATE audit rows via AdminAuditRepository.record
+        in the same txn as the active=False UPDATE. This method
+        remains the cascade entry point for role-change rotations
+        because it walks both scope dimensions (direct ApiKey.agent_id
+        binding + indirect LucielInstance ownership); single-key
+        admin DELETEs go through deactivate_key().
         """
         # Look up the Agent so we can resolve both scope dimensions:
         # the Agent's natural agent_id slug (for direct ApiKey matches)
