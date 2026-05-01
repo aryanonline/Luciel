@@ -1,205 +1,223 @@
-feat(28): Commit 8b-prereq - fix luciel-migrate task-def + codify Pattern N
+feat(28): Commit 8b-prereq-data - codify Pattern O + discover prod tenant residue
 
 WHAT LANDED
 
-- New ECS task-def revision luciel-migrate:11 with proper Alembic command
-  override: ["alembic", "upgrade", "head"]. First working luciel-migrate
-  revision in the project's history (revs 1-10 all had command: null and
-  silently booted into uvicorn instead of running migrations).
+- New script `scripts/prod_readonly_query.py` (Pattern O recon utility,
+  psycopg v3, READ ONLY transaction, three-channel SQL provenance,
+  exit codes 0/2/3/4 for happy/no-DB-URL/connect-fail/query-fail).
+- New ECS task-def family `luciel-recon` with revision 1 registered
+  (image pinned by digest, command `["python", "scripts/prod_readonly_query.py"]`,
+  no SQL baked in - SQL supplied per-invocation via containerOverrides).
+- New audit-artifact JSON `recon-td-rev1.json` at repo root capturing
+  the canonical task-def shape (Approach 7a precedent from migrate-td-rev11).
+- New documentation `docs/runbooks/operator-patterns.md` Pattern O section
+  (~5 KB, ~135 lines, codifies the read-only-recon contract: rule, why,
+  security boundary, task-def shape, three-channel SQL provenance, output
+  format, exit codes, pre-launch checks, provenance).
+- New documentation `docs/runbooks/step-28-prereq-data-pattern-o.md`
+  (~5 KB runbook, codifies the operator procedure: prerequisites,
+  single-query procedure, CloudWatch log shape, worked examples from
+  this commit's 7 recon runs, cost note, resumption pointer).
+- Patch to `docs/runbooks/operator-patterns.md` Pattern N "First-run
+  note" - acknowledges that D-prod-3-migrations-behind-2026-05-01
+  resolution moved out of Commit 8b-prereq-data scope into a future
+  commit, replaced by D-prod-tenant-residue-2026-05-01 as the new
+  blocker.
 
-- New backend image pushed to ECR pinned by digest:
-  729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend
-  @sha256:ce8d94a0edbefaff2de349b0f768a18b467588c6f9e2e96ccc04b9fc0b80b5b2
-  Tagged step28-prereq-8028699. Built from step-28-hardening @ 8028699
-  (Commit 8a HEAD).
+WHY
 
-- New file docs/runbooks/operator-patterns.md codifying Pattern N: prod
-  database migrations apply via ECS one-shot task; operator never connects
-  to prod RDS directly. Patterns A-L will be backfilled in Commit 9 from
-  the canonical recap.
+The original Commit 8b-prereq-data scope was "fix the migrate path
+followed up immediately by applying pending migrations to prod RDS."
+Commit 8b-prereq (this morning) handled the migrate-path fix and
+codified Pattern N. The data-apply portion was the planned content
+of this commit.
 
-- New file migrate-td-rev11.json at repo root: the registered task-def
-  shape, committed to git as an audit artifact (per 8a precedent of
-  committing operational tooling).
+Pre-mutation recon via the newly-codified Pattern O surfaced a
+structural drift item that fundamentally reframed the work. Specifically:
 
-- Patch to docs/runbooks/step-28-commit-8-luciel-worker-sg.md:
-  * Phase C.1/C.2: pin to luciel-migrate:11, add JMESPath [0] indices
-  * Phase C.3: replaced laptop-psql verification with Option alpha (rely
-    on exit code + Phase D first-error path; consistent with Pattern N's
-    "operator never connects to prod RDS directly" rule)
-  * Phase A.4 rule 2: em-dash to ASCII hyphen in AWS resource description
-  * Phase A.5, B.x verify queries: JMESPath [0] index sweep
-  * New "Pre-execution: Register luciel-migrate:11" section pointing at
-    this commit's SHA
+- 7 recon queries against prod RDS via `luciel-recon:1`, totaling
+  ~$0.005 USD compute and ~7 minutes wall clock.
+- Discovered prod RDS contains 29 tenants in `tenant_configs`, of
+  which 100% match verification-tenant naming patterns
+  (`step24-5b-*`, `step26-verify-*`, `step27-prodgate-*`,
+  `step27-syncverify-*`).
+- Discovered the single NULL `actor_user_id` row in `memory_items`
+  belongs to `step27-syncverify-7064`, with all four parent-chain
+  rows (tenant_configs, luciel_instances, sessions, messages) still
+  present in prod.
+- Discovered prod `alembic_version` head is `4e989b9392c0` (matches
+  recap claim).
 
-SCOPE NOTE
+The first finding is the structurally significant one. The verification
+suite's Pillar 10 ("teardown integrity, zero residue") is suite-internal
+and runs against dev. Prior verification flows that ran during prod
+deploys (Step 24.5b prod gate, Step 26b/c verifies, Step 27c-final
+sync verify) had no equivalent teardown contract for prod, and their
+synthetic tenant residue has accumulated since 2026-04-22.
 
-This commit ships the *infrastructure* for prod migrations (working
-luciel-migrate:11 task-def, Pattern N codified, runbook updated). The
-actual application of pending migrations (Commit 7's f392a842f885 and
-others between prod head and Commit 7) is deferred to Commit
-8b-prereq-data, because the first invocation of luciel-migrate:11 today
-surfaced prod-state drift requiring a backfill decision (see RECON below).
+Applying the NOT NULL flip on top of 29 verification residue tenants
+would technically work but produce a brokerage-DD-indefensible audit
+state ("you applied a constraint to data you knew was test residue").
+The right sequencing is:
 
-WHY (Phase 1 D-luciel-migrate-task-def-hollow-since-rev1,
-     D-undocumented-laptop-migrate-path)
+  1. Codify Pattern O. (this commit)
+  2. Clean up the 29 verification residue tenants via the existing
+     admin DELETE /tenants/{id} code path (next commit).
+  3. Apply pending migrations against the now-clean prod RDS.
+  4. Resume Commit 8b's worker role swap.
 
-Recon during Commit 8b execution discovered that luciel-migrate task-def
-had command: null since revision 1. All prior production migrations were
-therefore applied via path (i): operator-laptop direct connection to
-prod RDS using `alembic upgrade head` with DATABASE_URL pointing at prod,
-sourced from SSM at runtime. This path was undocumented in the repo and
-contradicted Pattern E's discipline (raw secrets only ever in SSM
-SecureString, never in stdout/CloudWatch/git).
+Today's work scopes to (1) plus the discovery itself. Steps 2-4 are
+deliberate next-session work, not autopilot continuation today.
 
-Three structural drift items resolve in this commit:
-
-- D-luciel-migrate-task-def-hollow-since-rev1: register :11 with command
-  override, with image rebuilt from current branch state.
-- D-undocumented-laptop-migrate-path: codify Pattern N as the canonical
-  prod-migration path. Operator-to-prod-RDS connections are
-  architecturally bounded to ECS one-shot tasks running in the VPC.
-- D-runbook-c3-circular-dependency: Phase C.3 referenced a laptop-IP
-  allowlist that doesn't exist; replaced with Option alpha verification
-  chain.
-
-Plus three runbook authoring-quality fixes batched in:
-
-- D-runbook-jmespath-typo: 5+ instances of `Foo` to `Foo[0]` swept across
-  Phase A, Phase B, Phase C verify queries.
-- D-runbook-em-dash-in-aws-descriptions: A.4 rule 2 description fixed
-  (em-dash to ASCII hyphen). Generalized to D-runbook-ascii-only-for-
-  tooling: all runbook content destined for AWS descriptions, JMESPath,
-  JSON files, or any tooling pipeline must be authored in ASCII.
-- D-pattern-n-prod-migrations: new pattern codified.
-
-Brokerage tech-due-diligence posture: "How do you apply database
-migrations to production?" now has a single, defensible answer documented
-in source control at docs/runbooks/operator-patterns.md.
+The recon work itself worked exactly as Pattern O is designed to:
+zero prod state changes, full three-channel audit, all queries
+captured in CloudWatch and CloudTrail with deterministic SHA256
+correlation. Pattern O earned its codification by catching the
+issue at the cheapest possible gate.
 
 RECON
 
-- aws ecs describe-task-definition luciel-migrate:1 / :9 / :10: all three
-  confirmed `command: null, entryPoint: null`. Hollow since inception.
-- Repo grep for `alembic upgrade head` literal: 1 match (a migration
-  comment block). No runner script in the repo. No .github/ directory.
-- ECR image listing pre-this-commit: latest backend image was
-  step24.5b-adc5ba0 pushed 2026-04-27, predating Commit 7 (40d9fb8) by
-  3.5 days. Required a fresh build from current branch state.
-- alembic/env.py reads via `from app.core.config import settings;
-  settings.database_url`. app/core/config.py confirmed only DATABASE_URL
-  required; OPENAI/ANTHROPIC/REDIS have defaults. Strip-to-DB-only
-  viable for least-privilege task-def secrets list.
-
-FIRST-RUN FINDING (motivates Commit 8b-prereq-data)
-
-First invocation of luciel-migrate:11 against prod RDS exited with code 1
-on migration 4e4c2c0fb572 (D11 memory_items.actor_user_id NOT NULL flip),
-with psycopg.errors.NotNullViolation: column "actor_user_id" of relation
-"memory_items" contains null values. Surfaced two facts:
-
-- Prod RDS alembic_version is at 4e989b9392c0 (pre-D11). Local repo head
-  is at f392a842f885 (Commit 7). Prod is behind local main by 3 migrations.
-- Prior 10 production migrations applied via the operator-laptop path
-  stopped before D11. The recap section 5.2 line listing D11 (baf06f7),
-  D5 (67c65a5), and D-worker-role (40d9fb8) as "RESOLVED" referred to
-  *local verification suite passes*, not prod application.
-
-Alembic's transactional DDL discipline rolled the failed transaction back
-cleanly. Prod RDS state is unchanged from before this commit (still at
-4e989b9392c0). No data damage, no partial role creation, no manual cleanup.
-
-Resolution path: Commit 8b-prereq-data will codify Pattern O (read-only
-prod queries via ECS one-shot task), use it to count and sample the
-NULL-actor_user_id rows in prod, and ship a backfill migration to bring
-prod to current head. Phase 1 grows by one more commit; close shifts to
-late today / tomorrow.
+- 7 production read-only queries via `luciel-recon:1`, all successfully
+  audited via CloudWatch (`/ecs/luciel-backend` log group, stream
+  prefix `recon`).
+- Local script validation: 3 dry-run queries against dev Postgres
+  (happy path, UPDATE rejected, CREATE TABLE rejected) all returned
+  expected exit codes and JSON output shape.
+- In-image script validation: --help renders, psycopg version 3.3.3
+  matches venv, all module imports resolve, _query_input emits even
+  without DATABASE_URL set in container.
+- Image build: 39s, 897 MB local / 210 MB compressed in ECR.
+  Cached layers 1-7, rebuilt 8-9 (script COPY + pip install).
+- ECR: two tags pushed (`step28-prereq-data-recon-7560397` v1 and
+  `-v2`), v2 is the active digest. Both retained in ECR for audit
+  history.
+- Task-def: `luciel-recon:1` registered, ARN
+  `arn:aws:ecs:ca-central-1:729005488042:task-definition/luciel-recon:1`,
+  status ACTIVE.
 
 VERIFICATION
 
-- Local docker build from step-28-hardening @ 8028699: 37.5s, 4 layers
-  cached, 5 layers new (app/, alembic/, scripts/, pyproject install).
-- ECR push: 5 layers pushed, 4 reused. Final digest matches between
-  docker push and ECR describe-images:
-  sha256:ce8d94a0edbefaff2de349b0f768a18b467588c6f9e2e96ccc04b9fc0b80b5b2
-- migrate-td-rev11.json validated locally via PowerShell ConvertFrom-Json
-  round-trip; structure verified against rev 10 with the three intended
-  edits (image SHA, command override, secrets stripped to DATABASE_URL).
-- luciel-migrate:11 registered, command override confirmed via
-  describe-task-definition: command=["alembic","upgrade","head"],
-  secrets=["DATABASE_URL"], image SHA matches push.
-- First-run executed against prod (network config: subnets
-  subnet-0e54df62d1a4463bc + subnet-0e95d953fd553cbd1, sg
-  sg-0f2e317f987925601, assignPublicIp=ENABLED). Task transitioned
-  RUNNING -> STOPPED with exit 1 in 26 seconds. CloudWatch confirmed
-  Alembic ran (vs. rev 10's silent uvicorn boot), reached 4e4c2c0fb572,
-  errored on schema-vs-data mismatch, transaction rolled back. This
-  failure path is exactly what Pattern N is designed to surface cleanly:
-  fail fast, log loudly, prod RDS unchanged.
-- Pre-commit local verification suite: 16/17 pillars green (Pillar 13
-  still pre-existing, D-pillar13-actor-filter unchanged).
+- Local verification suite (`python -m app.verification`) re-run
+  pre-flight: 16/17 pillars green, Pillar 13 still pre-existing
+  red (D-pillar13-actor-filter, unchanged). No regression.
+- All 7 prod recon runs returned expected exit codes (5x exit 0,
+  1x exit 4 for the bad-table-name query that was caught and
+  corrected in the next run, 1x recovery query exit 0).
+- Markdown integrity: operator-patterns.md H2 count = 2
+  (Pattern N + Pattern O), step-28-prereq-data-pattern-o.md
+  H1 count = 1, H2 count = 7.
+- JSON integrity: recon-td-rev1.json parses cleanly via
+  ConvertFrom-Json, registers cleanly via aws ecs
+  register-task-definition.
+- No prod RDS mutations. `alembic_version` row unchanged at
+  `4e989b9392c0`.
 
-DRIFT REGISTER (live state post-this-commit)
+DRIFT REGISTER
 
-RESOLVED in this commit (8): D-luciel-migrate-task-def-hollow-since-rev1,
-D-undocumented-laptop-migrate-path, D-runbook-c3-circular-dependency,
-D-runbook-jmespath-typo, D-runbook-em-dash-in-aws-descriptions,
-D-runbook-ascii-only-for-tooling, D-runbook-bracket-tokens-fragile,
-D-pattern-n-prod-migrations (codified, not strictly drift).
+Resolved in this commit:
+- (Codification) Pattern O codified - read-only prod recon via ECS
+  one-shot task. Counterpart to Pattern N.
 
-NEW for Commit 9 (this morning's accumulated meta, 7 items):
-
-- D-recap-sha-mismatch: recap section 10.1 captured ca55b12, true HEAD
-  was 8028699 (likely an amend post-recap). Documentation reconcile.
-- D-shell-history-key-exposure-2026-05-01: process improvement from
-  morning Read-Host pattern misuse. Local key only, no rotation needed.
-- D-z2-precondition-already-met-2026-05-01: meta. Z2 collapsed to no-op
-  via recon.
-- D-recap-luciel-migrate-claim: recap section 10.1 line "luciel-migrate
-  ECS one-shot task matches existing 10-revision pattern" was factually
-  wrong.
-- D-no-cicd: log only, Phase 3. Repo has no .github/ directory.
-- D-ecr-describe-images-filter-quirk: AWS CLI filter on imageDigest
-  returns null without error when the digest is not in the queried
-  scope.
-- D-prod-3-migrations-behind-2026-05-01: prod RDS alembic_version is at
-  4e989b9392c0, local head is at f392a842f885. Resolution in Commit
-  8b-prereq-data.
-
-OPEN Phase 1: 2 - Commit 8b-prereq-data (data backfill + bring prod to
-head), then Commit 8b's Phases D-H (mint password, register
-luciel-worker:6, swap service, verify, commit). Commit 8b's Phase A and
-B are already complete (sg-0f0d450006350f153 + 3 ingress mods); Phase C
-will run cleanly once 8b-prereq-data lands.
+New for Commit 9 / next sprint:
+- D-prod-tenant-residue-2026-05-01
+  Prod RDS contains 29 verification residue tenants accounting for
+  100% of `tenant_configs`. Cleanup via existing admin DELETE
+  /tenants/{id} endpoint. Blocks NOT NULL flip on
+  memory_items.actor_user_id (D11 from prior recap).
+- D-pillar-10-suite-internal-only-2026-05-01
+  Pillar 10's "zero residue" check is suite-internal (dev-side
+  ephemeral tenants). Prior prod-deploy verification flows have
+  no equivalent teardown contract. Phase 3: codify a deploy-time
+  teardown contract.
+- D-recap-table-name-assumptions-2026-05-01
+  Recap and prior session referenced table names matching Python
+  class semantics (e.g., `tenants`); actual public schema uses
+  `_configs`-suffixed names (`tenant_configs`, etc.).
+- D-recap-memory-items-scope-shape-2026-05-01
+  Recap implied 4-level scope on memory_items (tenant/domain/agent/
+  instance); actual is 3-level (tenant/agent/luciel_instance) with
+  domain inferred via agent.
+- D-recap-task-def-naming-without-colon-2026-05-01
+  Recap shorthand "luciel-migrate11"; AWS-native form is
+  "luciel-migrate:11" with revision separator.
+- D-recap-requirements-txt-assumption-2026-05-01
+  Recap referenced `requirements.txt` as dep manifest; actual is
+  `pyproject.toml` (PEP 621 + setuptools).
+- D-readhost-prefix-check-typo-2026-05-01
+  Pre-flight Read-Host sanity check used `lucsk_` literal prefix;
+  actual lucsk_ key shape is `luc_sk_` with underscore.
+- D-double-8a-commits-2026-05-01
+  Both ca55b12 and 8028699 exist as separate 8a-shaped commits in
+  linear history (likely amend-without-rewrite). Reconcile in
+  Commit 9.
+- D-shell-history-key-exposure-2026-05-01
+  Process improvement: codify the corrected Read-Host pattern in
+  operator-patterns.md Pattern E.
+- D-cloudwatch-no-retention-policy-2026-05-01
+  /ecs/luciel-backend log group has retention=null (retain forever).
+  Phase 3: set 365-day retention to bound storage cost.
+- D-recon-task-role-reuses-migrate-role-2026-05-01
+  luciel-recon:1 task role mirrors migrate's role. Phase 3:
+  dedicated `luciel-ecs-recon-role` with no AWS permissions.
+- D-jmespath-dash-quoting-2026-05-01
+  JMESPath keys with dashes (e.g., `awslogs-stream-prefix`) need
+  backtick-quoting; PowerShell strips inner double-quotes.
+- D-jmespath-sizemb-mislabel-2026-05-01
+  JMESPath query labelled imageSizeInBytes as `sizeMB` in one ECR
+  describe-images call.
+- D-ecr-describe-images-filter-quirk-2026-05-01
+  Earlier session: AWS CLI filter on imageDigest can return null
+  silently rather than erroring; prefer unfiltered listing for
+  recon.
+- D-powershell-aws-cli-json-arg-quoting-2026-05-01
+  Inline JSON args to AWS CLI lose double quotes via PowerShell
+  parsing; use `file://` arg-passing instead.
+- D-powershell-selectstring-simplematch-anchors-2026-05-01
+  Select-String -SimpleMatch does not honor regex `^`/`$` anchors.
+  Use plain `-match` operator on Get-Content for line-anchored
+  patterns.
+- D-powershell-heredoc-angle-bracket-after-quote-2026-05-01
+  Single-quoted heredocs in PowerShell can drop `"<` digraphs in
+  some parser contexts. Workaround: avoid the literal sequence.
+- D-pattern-o-helper-script-2026-05-01
+  Future enhancement: extract the worked PowerShell template for
+  Pattern O recon into `scripts/run_prod_recon.ps1`.
+- D-gitignore-duplicate-stanzas-2026-05-01
+  .gitignore has overlapping patterns in the Step 27c-final and
+  Step 27 stanzas. Cosmetic deduplication for Phase 3.
 
 PLAN-VS-REALITY DIVERGENCE LOG (for Commit 9):
 
-#3 (NEW, this commit): Phase 1 grew from 9 to 11 commits mid-execution.
-First split: Commit 8b -> 8b-prereq + 8b after recon surfaced hollow
-luciel-migrate task-def. Second split: 8b-prereq -> 8b-prereq + 8b-prereq-data
-after first invocation of luciel-migrate:11 surfaced 3-migration prod-state
-drift (Commit 6's D11 hits a NotNullViolation on prod's existing data).
-Each commit retains a single explainable purpose: fix the migrate path /
-resolve the data drift / swap the worker role.
+The Phase 1 commit count is now 12 expected (originally 9, expanded
+to 10 mid-flight for Z2, expanded to 11 for 8b-prereq, expanded to
+12 for 8b-prereq-cleanup). All expansions caught by recon, not by
+retrospective regret. Each commit has a single purpose.
+
+This commit ships one valuable artifact (Pattern O codification) and
+one valuable discovery (D-prod-tenant-residue-2026-05-01). Scope is
+deliberately narrow.
 
 WHAT'S NEXT
 
-- Commit 8b-prereq-data: codify Pattern O (read-only prod queries via
-  ECS one-shot task with command override); register and run a
-  read-only recon task to count and sample NULL-actor_user_id rows in
-  prod memory_items; author and apply a backfill migration that resolves
-  the NULL rows and re-applies the chain through Commit 7's
-  f392a842f885.
+- Commit 8b-prereq-cleanup: tear down the 29 verification residue
+  tenants via existing admin DELETE /tenants/{id} endpoint. Verify
+  cascade behavior on first deletion, batch the remaining 28.
+  No new image needed.
+- Commit 8b-prereq-data-migrate (renamed/scoped): apply pending
+  Alembic migrations now that prod is clean of residue. Pattern N.
+- Commit 8b: worker role swap (Phases D-H). Pattern E mint, role
+  swap, service update, smoke test.
+- Commit 9: Phase 1 close. Canonical recap, drift register flush,
+  Patterns A-L backfill, tag step-28-phase-1-complete.
 
-- Commit 8b: resume at Phase D (mint password + write SSM via
-  scripts/mint_worker_db_password_ssm.py). Phases E-H follow per
-  runbook. Phase E will also bump the worker task-def's image SHA from
-  step24.5b-adc5ba0 to step28-prereq-8028699 so the worker runs the same
-  Commit-7-aware code as the migration.
-
-- Commit 9: Phase 1 close. Update drift register with all 16 entries
-  accumulated this session, write canonical recap to
-  docs/recaps/2026-05-01-step-28-phase-1-complete-canonical.md (or the
-  next-day date if Phase 1 closes Saturday), backfill Patterns A-L into
-  operator-patterns.md, tag step-28-phase-1-YYYY-MM-DD. Unblocks GTA
-  outreach to REMAX Crossroads.
+Resumption note for Monday morning:
+  Branch:   step-28-hardening
+  HEAD:     <NEW SHA after this push>
+  Working:  clean
+  Verify:   `python -m app.verification` should still report 16/17
+            green (Pillar 13 pre-existing red).
+  Next:     Commit 8b-prereq-cleanup. Read
+            docs/runbooks/operator-patterns.md Pattern O for the
+            recon contract; operator procedure for cleanup will
+            mirror Pattern O's procedure but using a write-allowed
+            task-def family or the existing admin API path.
