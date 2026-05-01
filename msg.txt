@@ -1,0 +1,185 @@
+﻿feat(28): Commit 8a — luciel-worker mint script + worker-sg runbook (artifacts only)
+
+WHAT LANDED
+
+- New script scripts/mint_worker_db_password_ssm.py (Pattern E, Step
+  27c-final convention -- committed to git as platform operational
+  tooling). Generates a strong password via secrets.token_urlsafe(32),
+  ALTER ROLE-s the luciel_worker Postgres role created in Commit 7,
+  and writes the worker DB connection string to SSM Parameter Store
+  as SecureString at /luciel/production/worker_database_url.
+
+- New runbook docs/runbooks/step-28-commit-8-luciel-worker-sg.md
+  documents the full Commit 8b prod execution sequence: SG creation,
+  three ingress modifications (RDS, ElastiCache, VPC endpoint SG),
+  migration apply via luciel-migrate ECS one-shot task, mint script
+  invocation, task-def rev 6 registration, atomic service update
+  (new task-def + new SG), and Phase 11 verification under prod load.
+  Includes per-phase rollback and full back-out playbooks.
+
+WHY (T2 split: Commit 8 -> 8a + 8b)
+
+Commit 8 was originally scoped as a single commit covering both
+artifact production and prod-side AWS execution. After tonight's
+recon surfaced four sequential naming/state surprises (cluster name
+luciel-cluster, service names luciel-backend-service /
+luciel-worker-service, Postgres role canonical form luciel_worker
+with underscore, VPC endpoint SG ingress requirement), the
+combined-commit scope grew to ~75 min of new AWS state changes at
+the end of a 22-hour day.
+
+Splitting into 8a (artifacts, this commit) + 8b (prod execution,
+tomorrow morning fresh) preserves tonight's recon momentum into
+reviewable code/docs while deferring all irreversible AWS calls
+(SG creation, RDS role password change, task-def revision, service
+update) to rested-judgment morning execution.
+
+Brokerage tech-due-diligence posture: the mint script + runbook
+together are the auditable artifact for "how does VantageMind
+provision worker DB credentials in production?" -- both are
+reviewable in source control before any AWS state changes happen.
+SOC 2 alignment: written policy enforced by tooling, no exceptions.
+
+RECON DISCIPLINE APPLIED (4 rounds, 2026-04-30 evening)
+
+Round 1: ECS cluster discovery -- "luciel-prod" (recap claim) was
+wrong, actual cluster is "luciel-cluster". Worker task-def secrets
+pulled cleanly: DATABASE_URL valueFrom = /luciel/database-url
+(shared with web), three other secrets unchanged.
+
+Round 2: ECS service + task-def family discovery -- "luciel-web" /
+"luciel-worker" (recap claims) were wrong, actual names are
+luciel-backend-service / luciel-worker-service (services) and
+luciel-backend / luciel-migrate / luciel-worker (task-def families).
+
+Round 3: Service network config -- worker and backend share
+sg-0f2e317f987925601 today; both run with assignPublicIp=ENABLED in
+the same two subnets. Logged D-public-ip-tasks for Phase 3 hardening.
+Managed prefix lists confirmed: SSM/ElastiCache/RDS use SG-to-SG
+references; SQS has no managed PL in ca-central-1, falls back to
+0.0.0.0/0:443 bounded by IAM. RDS SG allows 5432 from shared SG and
+also from 10.0.0.0/16 (broad, logged D-rds-cidr-broad for Phase 3).
+ElastiCache SG and VPC endpoint SG allow only the shared SG today --
+which means moving the worker to a new SG requires explicit
+ingress additions on all three (caught the VPC endpoint SG ingress
+requirement before it caused a silent SSM resolution failure in
+prod).
+
+Round 4: Source-of-truth confirmation -- read Commit 7's actual
+migration via git show 40d9fb8. Recap claimed
+"CREATE ROLE lucielworker WITH LOGIN PASSWORD 'pw'". Actual
+migration: CREATE ROLE luciel_worker WITH LOGIN (no PASSWORD
+clause), and the migration's own docstring documents
+/luciel/<env>/worker_database_url as the canonical SSM path.
+Result: Commit 7.5 (placeholder-password neutralization) was
+unnecessary; the migration was already password-clean.
+Phase 1 stays at 10 commits (added 8a vs original 8) instead of
+expanding to 11.
+
+VERIFICATION (local, this commit only)
+
+- Mint script imports cleanly (no circular deps): python -c
+  "import scripts.mint_worker_db_password_ssm" -> exit 0.
+- Argparse exercises all paths: --help renders, --dry-run runs
+  end-to-end with synthetic args and emits the expected metadata
+  block without touching Postgres or SSM.
+- Dangerous flag combination guard: --print-url-stdout without
+  --no-ssm exits 1 with the documented FATAL message.
+- Post-success failure recovery message present: if ALTER ROLE
+  succeeds but SSM write fails, the error message tells the
+  operator to re-run with --force-rotate.
+- Forensic fingerprint primitive verified: hashlib.sha256 of the
+  generated password's first 12 hex chars matches manual
+  Get-FileHash equivalent.
+- Runbook end-to-end read by operator (this commit's author):
+  every CLI command matches recon-locked constants, every
+  rollback step is reversible, no step depends on shell history
+  or scrollback.
+
+No AWS state changes in this commit. Prod execution happens in
+Commit 8b tomorrow morning per the runbook.
+
+DRIFT REGISTER (live state post-this-commit)
+
+RESOLVED: D1 (81c0088), D5 (67c65a5), D11 (baf06f7), D16 (679db3d),
+D-worker-role (40d9fb8), plus 3 meta items (D10 + 2 docs).
+
+OPEN Phase 1: 1 -- Commit 8b prod execution (worker SG + role mint
++ task-def + service update + verify), down from 1 worker SG item
+in Commit 7's drift register because the artifact split made 8b a
+distinct row. Net Phase 1 OPEN count unchanged.
+
+OPEN Phase 2: 5 + 1 NEW = 6 -- CloudWatch alarms, ECS auto-scaling,
+web healthCheck, worker healthCheck, batched retention deletes,
+plus D-sqs-vpc-endpoint (NEW: create an SQS interface VPC endpoint
+to tighten worker SG egress beyond 0.0.0.0/0:443; ~$25/mo across
+3 AZs).
+
+OPEN Phase 3: 11 + 3 NEW = 14 -- existing 11 plus D-no-terraform
+(NEW: codify all AWS infrastructure -- cluster, services, task-defs,
+SGs, SSM params, IAM roles, RDS, ElastiCache, VPC endpoints --
+into Terraform; currently all infra is console click-ops),
+D-public-ip-tasks (NEW: move worker + backend to private subnets
+with NAT, set assignPublicIp=DISABLED), and D-rds-cidr-broad
+(NEW: replace RDS SG ingress rule "5432 from 10.0.0.0/16" with
+explicit SG list).
+
+OPEN Phase 4 cosmetic: 2 -- D3, D4.
+
+PLAN-VS-REALITY DIVERGENCE LOG (for Commit 9)
+
+#1 (existing): D16 -> D11 -> D5 landing order vs planned
+D16 -> D5 -> D11. Independent items, harmless reordering.
+
+#2 (existing, from Commit 7): Phase 1 plan doc claimed
+app/worker/celery_app.py would read WORKER_DATABASE_URL if set.
+Commit 7 instead chose infrastructure-only role separation
+(web/worker share DATABASE_URL env var name; ECS task-defs inject
+different SSM param values). The WORKER_DATABASE_URL config slot
+remains available for future Step 33b/35 needs.
+
+#3 (NEW, this commit): Commit 8 originally scoped as a single
+commit covering both artifact production and prod-side AWS
+execution. After tonight's recon surfaced four naming/state
+surprises (cluster name, service names, role-name underscore form,
+VPC endpoint SG ingress requirement) at the end of a 22-hour day,
+split into 8a (artifacts, this commit) and 8b (prod execution,
+tomorrow morning). Phase 1 grows from 9 -> 10 commits. SSM path
+convention locked to /luciel/production/worker_database_url
+(env-prefixed, snake_case) per the migration's own docstring,
+overriding my earlier recommendation of the no-env-prefix kebab
+form -- the migration is the canonical source.
+
+#4 (NEW, this commit): Recap recorded Commit 7's role name as
+"lucielworker" (no underscore) and migration filename as
+f392a842f885_step28_create_lucielworker_role.py. Actual canonical
+form is luciel_worker (underscore, matching Postgres snake_case
+schema convention) and filename is
+f392a842f885_step28_create_luciel_worker_role.py. Recap also
+claimed the migration set PASSWORD 'pw' as a placeholder -- actual
+migration sets no password at all (operator-authorized via mint
+script, exactly the brokerage-compliance posture intended). Next
+canonical-recap snapshot (Commit 9 deliverable) needs scrubbing for
+both the underscore form and the placeholder-password claim
+correction.
+
+WHAT'S NEXT
+
+- Commit 8b (tomorrow morning, fresh): execute
+  docs/runbooks/step-28-commit-8-luciel-worker-sg.md end-to-end.
+  Phases A-G (SG creation, ingress mods, migration apply, mint,
+  task-def rev 6, service update, verify under prod load),
+  followed by Phase H (commit the as-deployed task-def snapshot).
+  Estimated 60-90 min including verification.
+
+- Commit 9 (after 8b): Phase 1 close -- write fresh canonical
+  recap docs/recaps/2026-04-30-step-28-phase-1-complete-canonical.md
+  superseding the 2026-04-27 versions; update drift register with
+  4 new Phase 2/3 items (D-no-terraform, D-sqs-vpc-endpoint,
+  D-public-ip-tasks, D-rds-cidr-broad) and the 4 plan-vs-reality
+  divergences logged above; scope D-pillar13-actor-filter
+  (15-min test fix vs 1-2 hr application fix decided after reading
+  pillar_13_cross_tenant_identity.py:440-470); write 6-phase prod
+  runbook covering Phase 1's complete deployment story; tag
+  step-28-phase-1-YYYYMMDD. Unblocks GTA outreach to REMAX
+  Crossroads.
