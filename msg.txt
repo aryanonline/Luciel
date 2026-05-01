@@ -1,185 +1,205 @@
-﻿feat(28): Commit 8a — luciel-worker mint script + worker-sg runbook (artifacts only)
+feat(28): Commit 8b-prereq - fix luciel-migrate task-def + codify Pattern N
 
 WHAT LANDED
 
-- New script scripts/mint_worker_db_password_ssm.py (Pattern E, Step
-  27c-final convention -- committed to git as platform operational
-  tooling). Generates a strong password via secrets.token_urlsafe(32),
-  ALTER ROLE-s the luciel_worker Postgres role created in Commit 7,
-  and writes the worker DB connection string to SSM Parameter Store
-  as SecureString at /luciel/production/worker_database_url.
+- New ECS task-def revision luciel-migrate:11 with proper Alembic command
+  override: ["alembic", "upgrade", "head"]. First working luciel-migrate
+  revision in the project's history (revs 1-10 all had command: null and
+  silently booted into uvicorn instead of running migrations).
 
-- New runbook docs/runbooks/step-28-commit-8-luciel-worker-sg.md
-  documents the full Commit 8b prod execution sequence: SG creation,
-  three ingress modifications (RDS, ElastiCache, VPC endpoint SG),
-  migration apply via luciel-migrate ECS one-shot task, mint script
-  invocation, task-def rev 6 registration, atomic service update
-  (new task-def + new SG), and Phase 11 verification under prod load.
-  Includes per-phase rollback and full back-out playbooks.
+- New backend image pushed to ECR pinned by digest:
+  729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend
+  @sha256:ce8d94a0edbefaff2de349b0f768a18b467588c6f9e2e96ccc04b9fc0b80b5b2
+  Tagged step28-prereq-8028699. Built from step-28-hardening @ 8028699
+  (Commit 8a HEAD).
 
-WHY (T2 split: Commit 8 -> 8a + 8b)
+- New file docs/runbooks/operator-patterns.md codifying Pattern N: prod
+  database migrations apply via ECS one-shot task; operator never connects
+  to prod RDS directly. Patterns A-L will be backfilled in Commit 9 from
+  the canonical recap.
 
-Commit 8 was originally scoped as a single commit covering both
-artifact production and prod-side AWS execution. After tonight's
-recon surfaced four sequential naming/state surprises (cluster name
-luciel-cluster, service names luciel-backend-service /
-luciel-worker-service, Postgres role canonical form luciel_worker
-with underscore, VPC endpoint SG ingress requirement), the
-combined-commit scope grew to ~75 min of new AWS state changes at
-the end of a 22-hour day.
+- New file migrate-td-rev11.json at repo root: the registered task-def
+  shape, committed to git as an audit artifact (per 8a precedent of
+  committing operational tooling).
 
-Splitting into 8a (artifacts, this commit) + 8b (prod execution,
-tomorrow morning fresh) preserves tonight's recon momentum into
-reviewable code/docs while deferring all irreversible AWS calls
-(SG creation, RDS role password change, task-def revision, service
-update) to rested-judgment morning execution.
+- Patch to docs/runbooks/step-28-commit-8-luciel-worker-sg.md:
+  * Phase C.1/C.2: pin to luciel-migrate:11, add JMESPath [0] indices
+  * Phase C.3: replaced laptop-psql verification with Option alpha (rely
+    on exit code + Phase D first-error path; consistent with Pattern N's
+    "operator never connects to prod RDS directly" rule)
+  * Phase A.4 rule 2: em-dash to ASCII hyphen in AWS resource description
+  * Phase A.5, B.x verify queries: JMESPath [0] index sweep
+  * New "Pre-execution: Register luciel-migrate:11" section pointing at
+    this commit's SHA
 
-Brokerage tech-due-diligence posture: the mint script + runbook
-together are the auditable artifact for "how does VantageMind
-provision worker DB credentials in production?" -- both are
-reviewable in source control before any AWS state changes happen.
-SOC 2 alignment: written policy enforced by tooling, no exceptions.
+SCOPE NOTE
 
-RECON DISCIPLINE APPLIED (4 rounds, 2026-04-30 evening)
+This commit ships the *infrastructure* for prod migrations (working
+luciel-migrate:11 task-def, Pattern N codified, runbook updated). The
+actual application of pending migrations (Commit 7's f392a842f885 and
+others between prod head and Commit 7) is deferred to Commit
+8b-prereq-data, because the first invocation of luciel-migrate:11 today
+surfaced prod-state drift requiring a backfill decision (see RECON below).
 
-Round 1: ECS cluster discovery -- "luciel-prod" (recap claim) was
-wrong, actual cluster is "luciel-cluster". Worker task-def secrets
-pulled cleanly: DATABASE_URL valueFrom = /luciel/database-url
-(shared with web), three other secrets unchanged.
+WHY (Phase 1 D-luciel-migrate-task-def-hollow-since-rev1,
+     D-undocumented-laptop-migrate-path)
 
-Round 2: ECS service + task-def family discovery -- "luciel-web" /
-"luciel-worker" (recap claims) were wrong, actual names are
-luciel-backend-service / luciel-worker-service (services) and
-luciel-backend / luciel-migrate / luciel-worker (task-def families).
+Recon during Commit 8b execution discovered that luciel-migrate task-def
+had command: null since revision 1. All prior production migrations were
+therefore applied via path (i): operator-laptop direct connection to
+prod RDS using `alembic upgrade head` with DATABASE_URL pointing at prod,
+sourced from SSM at runtime. This path was undocumented in the repo and
+contradicted Pattern E's discipline (raw secrets only ever in SSM
+SecureString, never in stdout/CloudWatch/git).
 
-Round 3: Service network config -- worker and backend share
-sg-0f2e317f987925601 today; both run with assignPublicIp=ENABLED in
-the same two subnets. Logged D-public-ip-tasks for Phase 3 hardening.
-Managed prefix lists confirmed: SSM/ElastiCache/RDS use SG-to-SG
-references; SQS has no managed PL in ca-central-1, falls back to
-0.0.0.0/0:443 bounded by IAM. RDS SG allows 5432 from shared SG and
-also from 10.0.0.0/16 (broad, logged D-rds-cidr-broad for Phase 3).
-ElastiCache SG and VPC endpoint SG allow only the shared SG today --
-which means moving the worker to a new SG requires explicit
-ingress additions on all three (caught the VPC endpoint SG ingress
-requirement before it caused a silent SSM resolution failure in
-prod).
+Three structural drift items resolve in this commit:
 
-Round 4: Source-of-truth confirmation -- read Commit 7's actual
-migration via git show 40d9fb8. Recap claimed
-"CREATE ROLE lucielworker WITH LOGIN PASSWORD 'pw'". Actual
-migration: CREATE ROLE luciel_worker WITH LOGIN (no PASSWORD
-clause), and the migration's own docstring documents
-/luciel/<env>/worker_database_url as the canonical SSM path.
-Result: Commit 7.5 (placeholder-password neutralization) was
-unnecessary; the migration was already password-clean.
-Phase 1 stays at 10 commits (added 8a vs original 8) instead of
-expanding to 11.
+- D-luciel-migrate-task-def-hollow-since-rev1: register :11 with command
+  override, with image rebuilt from current branch state.
+- D-undocumented-laptop-migrate-path: codify Pattern N as the canonical
+  prod-migration path. Operator-to-prod-RDS connections are
+  architecturally bounded to ECS one-shot tasks running in the VPC.
+- D-runbook-c3-circular-dependency: Phase C.3 referenced a laptop-IP
+  allowlist that doesn't exist; replaced with Option alpha verification
+  chain.
 
-VERIFICATION (local, this commit only)
+Plus three runbook authoring-quality fixes batched in:
 
-- Mint script imports cleanly (no circular deps): python -c
-  "import scripts.mint_worker_db_password_ssm" -> exit 0.
-- Argparse exercises all paths: --help renders, --dry-run runs
-  end-to-end with synthetic args and emits the expected metadata
-  block without touching Postgres or SSM.
-- Dangerous flag combination guard: --print-url-stdout without
-  --no-ssm exits 1 with the documented FATAL message.
-- Post-success failure recovery message present: if ALTER ROLE
-  succeeds but SSM write fails, the error message tells the
-  operator to re-run with --force-rotate.
-- Forensic fingerprint primitive verified: hashlib.sha256 of the
-  generated password's first 12 hex chars matches manual
-  Get-FileHash equivalent.
-- Runbook end-to-end read by operator (this commit's author):
-  every CLI command matches recon-locked constants, every
-  rollback step is reversible, no step depends on shell history
-  or scrollback.
+- D-runbook-jmespath-typo: 5+ instances of `Foo` to `Foo[0]` swept across
+  Phase A, Phase B, Phase C verify queries.
+- D-runbook-em-dash-in-aws-descriptions: A.4 rule 2 description fixed
+  (em-dash to ASCII hyphen). Generalized to D-runbook-ascii-only-for-
+  tooling: all runbook content destined for AWS descriptions, JMESPath,
+  JSON files, or any tooling pipeline must be authored in ASCII.
+- D-pattern-n-prod-migrations: new pattern codified.
 
-No AWS state changes in this commit. Prod execution happens in
-Commit 8b tomorrow morning per the runbook.
+Brokerage tech-due-diligence posture: "How do you apply database
+migrations to production?" now has a single, defensible answer documented
+in source control at docs/runbooks/operator-patterns.md.
+
+RECON
+
+- aws ecs describe-task-definition luciel-migrate:1 / :9 / :10: all three
+  confirmed `command: null, entryPoint: null`. Hollow since inception.
+- Repo grep for `alembic upgrade head` literal: 1 match (a migration
+  comment block). No runner script in the repo. No .github/ directory.
+- ECR image listing pre-this-commit: latest backend image was
+  step24.5b-adc5ba0 pushed 2026-04-27, predating Commit 7 (40d9fb8) by
+  3.5 days. Required a fresh build from current branch state.
+- alembic/env.py reads via `from app.core.config import settings;
+  settings.database_url`. app/core/config.py confirmed only DATABASE_URL
+  required; OPENAI/ANTHROPIC/REDIS have defaults. Strip-to-DB-only
+  viable for least-privilege task-def secrets list.
+
+FIRST-RUN FINDING (motivates Commit 8b-prereq-data)
+
+First invocation of luciel-migrate:11 against prod RDS exited with code 1
+on migration 4e4c2c0fb572 (D11 memory_items.actor_user_id NOT NULL flip),
+with psycopg.errors.NotNullViolation: column "actor_user_id" of relation
+"memory_items" contains null values. Surfaced two facts:
+
+- Prod RDS alembic_version is at 4e989b9392c0 (pre-D11). Local repo head
+  is at f392a842f885 (Commit 7). Prod is behind local main by 3 migrations.
+- Prior 10 production migrations applied via the operator-laptop path
+  stopped before D11. The recap section 5.2 line listing D11 (baf06f7),
+  D5 (67c65a5), and D-worker-role (40d9fb8) as "RESOLVED" referred to
+  *local verification suite passes*, not prod application.
+
+Alembic's transactional DDL discipline rolled the failed transaction back
+cleanly. Prod RDS state is unchanged from before this commit (still at
+4e989b9392c0). No data damage, no partial role creation, no manual cleanup.
+
+Resolution path: Commit 8b-prereq-data will codify Pattern O (read-only
+prod queries via ECS one-shot task), use it to count and sample the
+NULL-actor_user_id rows in prod, and ship a backfill migration to bring
+prod to current head. Phase 1 grows by one more commit; close shifts to
+late today / tomorrow.
+
+VERIFICATION
+
+- Local docker build from step-28-hardening @ 8028699: 37.5s, 4 layers
+  cached, 5 layers new (app/, alembic/, scripts/, pyproject install).
+- ECR push: 5 layers pushed, 4 reused. Final digest matches between
+  docker push and ECR describe-images:
+  sha256:ce8d94a0edbefaff2de349b0f768a18b467588c6f9e2e96ccc04b9fc0b80b5b2
+- migrate-td-rev11.json validated locally via PowerShell ConvertFrom-Json
+  round-trip; structure verified against rev 10 with the three intended
+  edits (image SHA, command override, secrets stripped to DATABASE_URL).
+- luciel-migrate:11 registered, command override confirmed via
+  describe-task-definition: command=["alembic","upgrade","head"],
+  secrets=["DATABASE_URL"], image SHA matches push.
+- First-run executed against prod (network config: subnets
+  subnet-0e54df62d1a4463bc + subnet-0e95d953fd553cbd1, sg
+  sg-0f2e317f987925601, assignPublicIp=ENABLED). Task transitioned
+  RUNNING -> STOPPED with exit 1 in 26 seconds. CloudWatch confirmed
+  Alembic ran (vs. rev 10's silent uvicorn boot), reached 4e4c2c0fb572,
+  errored on schema-vs-data mismatch, transaction rolled back. This
+  failure path is exactly what Pattern N is designed to surface cleanly:
+  fail fast, log loudly, prod RDS unchanged.
+- Pre-commit local verification suite: 16/17 pillars green (Pillar 13
+  still pre-existing, D-pillar13-actor-filter unchanged).
 
 DRIFT REGISTER (live state post-this-commit)
 
-RESOLVED: D1 (81c0088), D5 (67c65a5), D11 (baf06f7), D16 (679db3d),
-D-worker-role (40d9fb8), plus 3 meta items (D10 + 2 docs).
+RESOLVED in this commit (8): D-luciel-migrate-task-def-hollow-since-rev1,
+D-undocumented-laptop-migrate-path, D-runbook-c3-circular-dependency,
+D-runbook-jmespath-typo, D-runbook-em-dash-in-aws-descriptions,
+D-runbook-ascii-only-for-tooling, D-runbook-bracket-tokens-fragile,
+D-pattern-n-prod-migrations (codified, not strictly drift).
 
-OPEN Phase 1: 1 -- Commit 8b prod execution (worker SG + role mint
-+ task-def + service update + verify), down from 1 worker SG item
-in Commit 7's drift register because the artifact split made 8b a
-distinct row. Net Phase 1 OPEN count unchanged.
+NEW for Commit 9 (this morning's accumulated meta, 7 items):
 
-OPEN Phase 2: 5 + 1 NEW = 6 -- CloudWatch alarms, ECS auto-scaling,
-web healthCheck, worker healthCheck, batched retention deletes,
-plus D-sqs-vpc-endpoint (NEW: create an SQS interface VPC endpoint
-to tighten worker SG egress beyond 0.0.0.0/0:443; ~$25/mo across
-3 AZs).
+- D-recap-sha-mismatch: recap section 10.1 captured ca55b12, true HEAD
+  was 8028699 (likely an amend post-recap). Documentation reconcile.
+- D-shell-history-key-exposure-2026-05-01: process improvement from
+  morning Read-Host pattern misuse. Local key only, no rotation needed.
+- D-z2-precondition-already-met-2026-05-01: meta. Z2 collapsed to no-op
+  via recon.
+- D-recap-luciel-migrate-claim: recap section 10.1 line "luciel-migrate
+  ECS one-shot task matches existing 10-revision pattern" was factually
+  wrong.
+- D-no-cicd: log only, Phase 3. Repo has no .github/ directory.
+- D-ecr-describe-images-filter-quirk: AWS CLI filter on imageDigest
+  returns null without error when the digest is not in the queried
+  scope.
+- D-prod-3-migrations-behind-2026-05-01: prod RDS alembic_version is at
+  4e989b9392c0, local head is at f392a842f885. Resolution in Commit
+  8b-prereq-data.
 
-OPEN Phase 3: 11 + 3 NEW = 14 -- existing 11 plus D-no-terraform
-(NEW: codify all AWS infrastructure -- cluster, services, task-defs,
-SGs, SSM params, IAM roles, RDS, ElastiCache, VPC endpoints --
-into Terraform; currently all infra is console click-ops),
-D-public-ip-tasks (NEW: move worker + backend to private subnets
-with NAT, set assignPublicIp=DISABLED), and D-rds-cidr-broad
-(NEW: replace RDS SG ingress rule "5432 from 10.0.0.0/16" with
-explicit SG list).
+OPEN Phase 1: 2 - Commit 8b-prereq-data (data backfill + bring prod to
+head), then Commit 8b's Phases D-H (mint password, register
+luciel-worker:6, swap service, verify, commit). Commit 8b's Phase A and
+B are already complete (sg-0f0d450006350f153 + 3 ingress mods); Phase C
+will run cleanly once 8b-prereq-data lands.
 
-OPEN Phase 4 cosmetic: 2 -- D3, D4.
+PLAN-VS-REALITY DIVERGENCE LOG (for Commit 9):
 
-PLAN-VS-REALITY DIVERGENCE LOG (for Commit 9)
-
-#1 (existing): D16 -> D11 -> D5 landing order vs planned
-D16 -> D5 -> D11. Independent items, harmless reordering.
-
-#2 (existing, from Commit 7): Phase 1 plan doc claimed
-app/worker/celery_app.py would read WORKER_DATABASE_URL if set.
-Commit 7 instead chose infrastructure-only role separation
-(web/worker share DATABASE_URL env var name; ECS task-defs inject
-different SSM param values). The WORKER_DATABASE_URL config slot
-remains available for future Step 33b/35 needs.
-
-#3 (NEW, this commit): Commit 8 originally scoped as a single
-commit covering both artifact production and prod-side AWS
-execution. After tonight's recon surfaced four naming/state
-surprises (cluster name, service names, role-name underscore form,
-VPC endpoint SG ingress requirement) at the end of a 22-hour day,
-split into 8a (artifacts, this commit) and 8b (prod execution,
-tomorrow morning). Phase 1 grows from 9 -> 10 commits. SSM path
-convention locked to /luciel/production/worker_database_url
-(env-prefixed, snake_case) per the migration's own docstring,
-overriding my earlier recommendation of the no-env-prefix kebab
-form -- the migration is the canonical source.
-
-#4 (NEW, this commit): Recap recorded Commit 7's role name as
-"lucielworker" (no underscore) and migration filename as
-f392a842f885_step28_create_lucielworker_role.py. Actual canonical
-form is luciel_worker (underscore, matching Postgres snake_case
-schema convention) and filename is
-f392a842f885_step28_create_luciel_worker_role.py. Recap also
-claimed the migration set PASSWORD 'pw' as a placeholder -- actual
-migration sets no password at all (operator-authorized via mint
-script, exactly the brokerage-compliance posture intended). Next
-canonical-recap snapshot (Commit 9 deliverable) needs scrubbing for
-both the underscore form and the placeholder-password claim
-correction.
+#3 (NEW, this commit): Phase 1 grew from 9 to 11 commits mid-execution.
+First split: Commit 8b -> 8b-prereq + 8b after recon surfaced hollow
+luciel-migrate task-def. Second split: 8b-prereq -> 8b-prereq + 8b-prereq-data
+after first invocation of luciel-migrate:11 surfaced 3-migration prod-state
+drift (Commit 6's D11 hits a NotNullViolation on prod's existing data).
+Each commit retains a single explainable purpose: fix the migrate path /
+resolve the data drift / swap the worker role.
 
 WHAT'S NEXT
 
-- Commit 8b (tomorrow morning, fresh): execute
-  docs/runbooks/step-28-commit-8-luciel-worker-sg.md end-to-end.
-  Phases A-G (SG creation, ingress mods, migration apply, mint,
-  task-def rev 6, service update, verify under prod load),
-  followed by Phase H (commit the as-deployed task-def snapshot).
-  Estimated 60-90 min including verification.
+- Commit 8b-prereq-data: codify Pattern O (read-only prod queries via
+  ECS one-shot task with command override); register and run a
+  read-only recon task to count and sample NULL-actor_user_id rows in
+  prod memory_items; author and apply a backfill migration that resolves
+  the NULL rows and re-applies the chain through Commit 7's
+  f392a842f885.
 
-- Commit 9 (after 8b): Phase 1 close -- write fresh canonical
-  recap docs/recaps/2026-04-30-step-28-phase-1-complete-canonical.md
-  superseding the 2026-04-27 versions; update drift register with
-  4 new Phase 2/3 items (D-no-terraform, D-sqs-vpc-endpoint,
-  D-public-ip-tasks, D-rds-cidr-broad) and the 4 plan-vs-reality
-  divergences logged above; scope D-pillar13-actor-filter
-  (15-min test fix vs 1-2 hr application fix decided after reading
-  pillar_13_cross_tenant_identity.py:440-470); write 6-phase prod
-  runbook covering Phase 1's complete deployment story; tag
-  step-28-phase-1-YYYYMMDD. Unblocks GTA outreach to REMAX
-  Crossroads.
+- Commit 8b: resume at Phase D (mint password + write SSM via
+  scripts/mint_worker_db_password_ssm.py). Phases E-H follow per
+  runbook. Phase E will also bump the worker task-def's image SHA from
+  step24.5b-adc5ba0 to step28-prereq-8028699 so the worker runs the same
+  Commit-7-aware code as the migration.
+
+- Commit 9: Phase 1 close. Update drift register with all 16 entries
+  accumulated this session, write canonical recap to
+  docs/recaps/2026-05-01-step-28-phase-1-complete-canonical.md (or the
+  next-day date if Phase 1 closes Saturday), backfill Patterns A-L into
+  operator-patterns.md, tag step-28-phase-1-YYYY-MM-DD. Unblocks GTA
+  outreach to REMAX Crossroads.

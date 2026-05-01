@@ -47,6 +47,16 @@ landed via Commit 8a.
 | New SSM path | `/luciel/production/worker_database_url` (env-prefixed, snake_case) |
 | Web SSM path (UNTOUCHED) | `/luciel/database-url` |
 
+## Pre-execution: Register `luciel-migrate:11`
+
+This runbook assumes `luciel-migrate:11` is the active migrate task-def
+revision. If it is not yet registered, complete **Commit 8b-prereq** first
+(see `msg.txt` and `migrate-td-rev11.json` at the repo root). Pattern N
+(`docs/runbooks/operator-patterns.md`) explains the migrate task-def
+shape and the historical drift it resolved.
+
+After Commit 8b-prereq lands, proceed with Phase A below.
+
 ## Phase A — Create `luciel-worker-sg`
 
 ### A.1 Discover the VPC ID (we need it for SG creation)
@@ -55,7 +65,7 @@ landed via Commit 8a.
 $VPC_ID = aws ec2 describe-security-groups `
   --group-ids sg-0f2e317f987925601 `
   --region ca-central-1 `
-  --query "SecurityGroups.VpcId" `
+  --query "SecurityGroups[0].VpcId" `
   --output text
 echo $VPC_ID
 ```
@@ -97,7 +107,7 @@ aws ec2 authorize-security-group-egress `
 # 443 -> 0.0.0.0/0 (SQS, Secrets Manager, STS — IAM-bounded, no managed PL exists)
 aws ec2 authorize-security-group-egress `
   --group-id $WORKER_SG --region ca-central-1 `
-  --ip-permissions "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0,Description='SQS/SecretsManager/STS — IAM-bounded'}]"
+  --ip-permissions "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0,Description='SQS/SecretsManager/STS - IAM-bounded'}]"
 
 # 5432 -> RDS SG (SG-to-SG)
 aws ec2 authorize-security-group-egress `
@@ -114,7 +124,7 @@ aws ec2 authorize-security-group-egress `
 
 ```powershell
 aws ec2 describe-security-groups --group-ids $WORKER_SG --region ca-central-1 `
-  --query "SecurityGroups.{Name:GroupName,Egress:IpPermissionsEgress}" --output json
+  --query "SecurityGroups[0].{Name:GroupName,Egress:IpPermissionsEgress}" --output json
 ```
 
 **Expected**: 4 egress rules, no ingress rules. **Rollback**: revoke each rule, then `delete-security-group`.
@@ -147,21 +157,43 @@ aws ec2 authorize-security-group-ingress `
 
 **Rollback per rule**: `aws ec2 revoke-security-group-ingress` with same `--ip-permissions`.
 
-## Phase C — Apply Commit 7 migration to prod RDS
+## Phase C — Apply pending migrations to prod RDS
+
+> **Pre-execution requirement (Commit 8b-prereq):** `luciel-migrate:11` must
+> be the active task-def revision. Pre-2026-05-01, `luciel-migrate` had
+> `command: null` for 10 revisions and silently booted into uvicorn instead
+> of running Alembic. See `docs/runbooks/operator-patterns.md` Pattern N.
+> Verify before running C.1:
+>
+> ```powershell
+> aws ecs describe-task-definition `
+>   --task-definition luciel-migrate `
+>   --region ca-central-1 `
+>   --query "taskDefinition.containerDefinitions[0].command"
+> ```
+>
+> Expected: `["alembic", "upgrade", "head"]`. If `null`, abort.
+>
+> **Note:** This phase applies whatever migrations are pending in prod's
+> alembic_version chain. The first concrete invocation under Pattern N
+> happened in Commit 8b-prereq-data (resolution of
+> D-prod-3-migrations-behind-2026-05-01). For future migrations, this
+> phase runs cleanly as long as no schema-vs-data drift exists.
 
 ### C.1 Run the migrate task
 
 ```powershell
-aws ecs run-task `
+$TASK_ARN = aws ecs run-task `
   --cluster luciel-cluster `
-  --task-definition luciel-migrate `
+  --task-definition luciel-migrate:11 `
   --launch-type FARGATE `
   --network-configuration "awsvpcConfiguration={subnets=[subnet-0e54df62d1a4463bc,subnet-0e95d953fd553cbd1],securityGroups=[sg-0f2e317f987925601],assignPublicIp=ENABLED}" `
   --region ca-central-1 `
-  --query "tasks.taskArn" --output text
+  --query "tasks[0].taskArn" --output text
+echo "TASK_ARN=$TASK_ARN"
 ```
 
-Capture `$TASK_ARN`.
+Capture `TASK_ARN`.
 
 ### C.2 Wait and verify
 
@@ -169,21 +201,36 @@ Capture `$TASK_ARN`.
 aws ecs wait tasks-stopped --cluster luciel-cluster --tasks $TASK_ARN --region ca-central-1
 
 aws ecs describe-tasks --cluster luciel-cluster --tasks $TASK_ARN --region ca-central-1 `
-  --query "tasks.{exit:containers.exitCode,reason:stoppedReason}" --output json
+  --query "tasks[0].{exit:containers[0].exitCode,reason:stoppedReason,lastStatus:lastStatus}" --output json
 ```
 
-**Expected**: `exit: 0`. CloudWatch log group should show Alembic upgrade head completing through `f392a842f885`.
-
-### C.3 Confirm role exists with NULL password (via the migrate task itself OR a one-shot psql)
-
-Run this from your laptop with `$ADMIN_URL` set, **only after** Phase B.1 has allowed your laptop's egress (or use the bastion if your laptop isn't whitelisted on `10.0.0.0/16`):
+**Expected**: `exit: 0, lastStatus: STOPPED`. CloudWatch `/ecs/luciel-backend`
+stream prefix `migrate` should show Alembic upgrade completing through
+`f392a842f885`:
 
 ```powershell
-psql $ADMIN_URL -c "SELECT rolname, rolpassword IS NULL AS pw_null FROM pg_authid WHERE rolname='luciel_worker'"
+aws logs tail /ecs/luciel-backend `
+  --log-stream-name-prefix migrate `
+  --since 10m `
+  --region ca-central-1
 ```
 
-**Expected**: `(luciel_worker, t)`.
+### C.3 Verification (Option alpha - no laptop-direct connection)
 
+**Skipped: no operator-laptop psql connection to prod RDS.** Per Pattern N
+(`docs/runbooks/operator-patterns.md`), the verification chain is:
+
+1. **Layer 1**: migrate task `exit: 0` (Alembic transactional - if
+   `CREATE ROLE` failed, the transaction rolls back and exit is non-zero).
+2. **Layer 2**: Phase D mint script's `ALTER ROLE luciel_worker WITH PASSWORD
+   ...` errors immediately with "role does not exist" if the role is
+   missing, before any SSM write. This is the role-existence verification
+   for free.
+3. **Layer 3**: Phase G smoke test (single SQS message) confirms the role's
+   grants are correct end-to-end via Pillar 11.
+
+Three independent verification layers, zero laptop-to-prod-RDS connections.
+Resolves D-runbook-c3-circular-dependency from Commit 8b-prereq.
 ## Phase D — Mint password + write SSM
 
 ```powershell
