@@ -159,7 +159,7 @@ script."
 - **Network:** same subnets and security group as Pattern N's migrate task.
 - **Stream prefix:** `recon` (distinct from `migrate`, `web`, `worker`).
 
-### SQL provenance — three independent channels
+### SQL provenance â€” three independent channels
 
 Every Pattern O invocation captures the verbatim SQL in three places:
 
@@ -168,7 +168,7 @@ Every Pattern O invocation captures the verbatim SQL in three places:
 2. **CloudWatch Logs `_query_input` line** emitted by the script before any
    database interaction. Captured even when the database is unreachable or
    when the connection itself fails. Retention per log group.
-3. **SHA256 cross-correlation** — every result row, every error row, and the
+3. **SHA256 cross-correlation** â€” every result row, every error row, and the
    `_meta` summary line carry `query_sha256` so log entries from any of the
    above channels can be deterministically correlated.
 
@@ -190,12 +190,12 @@ about.
 
 ### Exit codes
 
-- `0` — query succeeded, results emitted.
-- `2` — `DATABASE_URL` env var not set. The `_query_input` line is still
+- `0` â€” query succeeded, results emitted.
+- `2` â€” `DATABASE_URL` env var not set. The `_query_input` line is still
   emitted before this exit, preserving SQL provenance even when the task-def
   is misconfigured.
-- `3` — connect failed (network, credentials, RDS unreachable).
-- `4` — query failed at the Postgres layer. Includes the read-only-rejection
+- `3` â€” connect failed (network, credentials, RDS unreachable).
+- `4` â€” query failed at the Postgres layer. Includes the read-only-rejection
   path (sqlstate `25006`) for any accidental mutation attempt.
 
 ### Pre-launch operator checks
@@ -232,3 +232,101 @@ own ephemeral path) had been creating tenants in prod RDS without an
 associated teardown contract. This is a separate finding from
 Pillar 10's per-suite teardown integrity, which is suite-internal and
 runs against dev, not prod.
+## Pattern S - Per-Resource Cleanup Walker for Residue Tenants
+
+**Rule:** Tenant cleanup is operator-driven via per-resource DELETE calls in
+leaf-first order, NOT a single tenant-level cascade. The PATCH on a tenant's
+`active=false` field deactivates only the tenant_configs row; it does NOT
+cascade to child resources (api_keys, luciel_instances, agents, domains).
+Operators MUST walk the resource tree per-tenant.
+
+**Why:**
+- The `PATCH /api/v1/admin/tenants/{tenant_id}` endpoint updates fields on
+  tenant_configs only. There is no `DELETE /api/v1/admin/tenants/{tenant_id}`
+  endpoint as of this commit. Sibling resources (agents, domains,
+  luciel-instances, api-keys) have their own DELETE endpoints which soft-delete
+  by flipping `active=false`.
+- Pillar 10 (`teardown integrity`) checks `live=0` for tenant_configs +
+  domain_configs + luciel_instances + api_keys + agents. All five must
+  be deactivated for the tenant to be considered cleanly torn down.
+- Verification suites (Pillars 12, 13, 14, 24.5b prod gate, 26b/c verifies,
+  27c-final sync verify) historically did not run teardown against prod, so
+  prod accumulated 18 active residue tenants between 2026-04-22 and
+  2026-04-27. This pattern is the operator procedure for cleaning that up,
+  and for keeping prod clean going forward.
+
+**Security boundary (Pattern E inherited):**
+Admin key sourced from `$env:LUCIEL_PROD_ADMIN_KEY` (SSM
+`/luciel/production/platform-admin-key`), never echoed, never written to
+disk, never to shell history. Authorization header
+`Authorization: Bearer $env:LUCIEL_PROD_ADMIN_KEY`.
+
+**Deletion order (leaf-first):**
+1. **api-keys** (leaf-most, FK from luciel-instances optional)
+2. **luciel-instances** (FK target of api-keys)
+3. **agents** (children of domains)
+4. **domains** (parents of agents, children of tenants)
+5. **tenant** PATCH `active=false` (root)
+
+This order avoids FK violations during deletion. Top-down ordering is
+unsafe.
+
+**Idempotency:**
+Every DELETE endpoint in this walker is soft-delete (flips `active=false`,
+row persists). Calling DELETE on an already-inactive resource may return
+404 or 200 depending on the endpoint; the walker's GET-then-skip pattern
+avoids relying on that ambiguity. Pre-fetch each list, filter to
+`active=true`, only act on those. Re-running the walker against a
+fully-cleaned tenant produces zero mutations.
+
+**Three-channel audit provenance:**
+1. CloudWatch / CloudTrail captures each API call's request/response
+   (auth header redacted, method + URL + body + status code preserved).
+2. `admin_audit_logs` table receives one row per state-changing endpoint
+   (Pillar 17 contract for api-keys; analogous rows for other resources).
+3. Local cleanup log JSON (`prod-cleanup-YYYY-MM-DD.json`) captures the
+   operator-side view: timestamp, tenant_id, resource_type, resource_id,
+   action, http_code. Committed to repo as audit artifact.
+
+**Pre-launch checks:**
+1. `aws sts get-caller-identity` returns expected account.
+2. `$env:LUCIEL_PROD_ADMIN_KEY` set, starts with `luc_sk_`, length ~50.
+3. `curl https://api.vantagemind.ai/health` returns 200.
+4. `curl -H "Authorization: Bearer $env:LUCIEL_PROD_ADMIN_KEY" https://api.vantagemind.ai/api/v1/admin/tenants` returns 200 with tenant list.
+5. `python -m app.verification` baseline: 16/17 pillars green
+   (Pillar 13 pre-existing red).
+6. Walker's `-DryRun` mode against the target tenant set produces the
+   expected `would-delete` / `would-patch` plan before any real run.
+
+**Tooling:**
+- `scripts/cleanup_residue_tenant.ps1` is the canonical walker. Takes
+  `-TenantId` (required), `-ApiBase` (default `https://api.vantagemind.ai`),
+  `-DryRun` (switch). Exits 0 on success, 2 on missing/malformed admin key,
+  4 on post-walk teardown still showing violations, 5 on caught exception.
+- `Invoke-RestMethod` for GETs (clean JSON parsing).
+- `curl.exe` for PATCH/DELETE (file-body via `--data @path` to avoid
+  PowerShell inline-JSON quote-eating, drift
+  `D-powershell-curl-inline-json-quoting-2026-05-01`).
+- `Write-Host` for log emission, captured via `Start-Transcript` for
+  disk persistence.
+
+**Worked example: Commit 8b-prereq-cleanup, 2026-05-01:**
+- Canary: `step27-syncverify-7064`, 4 children deleted manually, 1 tenant
+  PATCH, teardown passed.
+- Batch: 17 active residue tenants (12 step24-5b-*, 5 step27-prodgate-*).
+- Walker invoked once per tenant.
+- 70 prod mutations total: 53 DELETEs + 17 PATCHes.
+- All 17 walks returned `teardown_passed=true, violation_count=0`.
+- Wall-clock: 30.8 seconds. Cost: ~70 API calls, negligible.
+- Idempotency re-run produced 0 mutations on 18 tenants (canary + batch).
+
+**Resumption checklist for future cleanups:**
+1. Pre-flight: 5/6 checks above.
+2. List active residue tenants:
+   `GET /api/v1/admin/tenants` then filter
+   `WHERE tenant_id MATCHES residue-pattern AND active=true`.
+3. Dry-run all candidates first; review `would-*` action plan.
+4. Real run with transcript capture.
+5. Verify final state: residue active count = 0.
+6. Re-run `python -m app.verification`, expect 16/17 (no regression).
+7. Commit cleanup log as audit artifact.
