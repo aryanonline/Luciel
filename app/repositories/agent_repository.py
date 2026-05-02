@@ -18,6 +18,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import (
+    ACTION_CASCADE_DEACTIVATE,
     ACTION_CREATE,
     ACTION_DEACTIVATE,
     ACTION_UPDATE,
@@ -302,6 +303,85 @@ class AgentRepository:
             agent_id,
         )
         return agent
+    
+    
+    def deactivate_all_for_tenant(
+        self,
+        *,
+        tenant_id: str,
+        updated_by: str | None = None,
+        audit_ctx: AuditContext | None = None,
+        autocommit: bool = True,
+    ) -> int:
+        """Cascade: deactivate every active Agent for a tenant.
+
+        Used by AdminService.deactivate_tenant_with_cascade. Returns
+        the number of rows updated. Writes one cascade audit row
+        (only when updated > 0, matching the per-tenant cascade
+        pattern in LucielInstanceRepository).
+
+        Does NOT cascade to LucielInstance rows -- that cascade is
+        handled separately by the spine via
+        LucielInstanceRepository.deactivate_all_for_tenant.
+
+        autocommit=True by default for standalone callers. The tenant-
+        cascade spine passes autocommit=False so the whole cascade
+        commits in a single transaction.
+        """
+        # Snapshot affected ids + agent_id slugs for forensic audit.
+        affected = (
+            self.db.query(Agent.id, Agent.agent_id)
+            .filter(
+                Agent.tenant_id == tenant_id,
+                Agent.active.is_(True),
+            )
+            .all()
+        )
+        affected_pks = [pk for pk, _ in affected]
+        affected_ids = [nid for _, nid in affected]
+
+        updated = (
+            self.db.query(Agent)
+            .filter(
+                Agent.tenant_id == tenant_id,
+                Agent.active.is_(True),
+            )
+            .update(
+                {
+                    Agent.active: False,
+                    Agent.updated_by: updated_by,
+                },
+                synchronize_session=False,
+            )
+        )
+
+        if audit_ctx is not None and updated:
+            AdminAuditRepository(self.db).record(
+                ctx=audit_ctx,
+                tenant_id=tenant_id,
+                action=ACTION_CASCADE_DEACTIVATE,
+                resource_type=RESOURCE_AGENT,
+                resource_pk=None,
+                resource_natural_id=None,
+                after={
+                    "count": int(updated),
+                    "affected_pks": affected_pks,
+                    "affected_agent_ids": affected_ids,
+                    "trigger": "tenant_deactivate",
+                },
+                note=f"Cascade from tenant {tenant_id} deactivation",
+                autocommit=False,
+            )
+
+        if autocommit:
+            self.db.commit()
+        logger.info(
+            "Agent cascade-deactivated count=%d tenant=%s",
+            updated,
+            tenant_id,
+        )
+        return int(updated)
+    
     # ---------------------------------------------------------------
     # Step 24.5b -- User identity layer lookups
     # ---------------------------------------------------------------

@@ -268,18 +268,38 @@ def update_tenant(
     tenant_id: str,
     payload: TenantConfigUpdate,
     db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+    luciel_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    agent_repo: Annotated[AgentRepository, Depends(get_agent_repository)],
 ) -> TenantConfigRead:
     ScopePolicy.enforce_tenant_scope(request, tenant_id)
     service = AdminService(db)
-    config = service.update_tenant_config(
-        tenant_id,
-        **payload.model_dump(exclude_unset=True),
-    )
-    if not config:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Tenant not found",
+    payload_data = payload.model_dump(exclude_unset=True)
+
+    # Tenant deactivation routes through the cascade-aware spine.
+    # All other updates use the generic update_tenant_config path.
+    if payload_data.get("active") is False:
+        deactivated = service.deactivate_tenant_with_cascade(
+            tenant_id,
+            audit_ctx=audit_ctx,
+            luciel_instance_service=luciel_service,
+            agent_repo=agent_repo,
+            updated_by=getattr(request.state, "actor_label", None),
         )
+        if not deactivated:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tenant not found",
+            )
+        config = service.get_tenant_config(tenant_id)
+    else:
+        config = service.update_tenant_config(tenant_id, **payload_data)
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tenant not found",
+            )
+
     return TenantConfigRead.model_validate(config)
 
 
@@ -791,11 +811,25 @@ def deactivate_luciel_instance(
     pk: int,
     service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+    db: DbSession,
 ) -> LucielInstanceRead:
     instance = service.get_by_pk(pk)
     if instance is None:
         raise HTTPException(status_code=404, detail=f"LucielInstance pk={pk} not found.")
     ScopePolicy.enforce_luciel_instance_scope(request, instance)
+
+    # Memory cascade: soft-deactivate this instance's memory_items first.
+    # Wired at route level because LucielInstanceService doesn't depend on
+    # AdminService (would be a circular import).
+    # autocommit=True is fine here -- service.deactivate_instance below
+    # opens its own transaction for the instance row + audit row.
+    AdminService(db).bulk_soft_deactivate_memory_items_for_luciel_instance(
+        tenant_id=instance.tenant_id,
+        luciel_instance_id=pk,
+        audit_ctx=audit_ctx,
+        updated_by=getattr(request.state, "actor_label", None),
+    )
+
 
     try:
         deactivated = service.deactivate_instance(
@@ -962,6 +996,7 @@ def deactivate_agent(
     repo: Annotated[AgentRepository, Depends(get_agent_repository)],
     service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+    db: DbSession,
 ) -> AgentRead:
     """Soft-deactivate an Agent AND cascade-deactivate every agent-scoped
     LucielInstance owned by that agent. Both writes commit atomically
@@ -984,6 +1019,18 @@ def deactivate_agent(
         agent_id=existing.agent_id,
         updated_by=getattr(request.state, "actor_label", None),
     )
+
+    # 1.5 Memory cascade: soft-deactivate agent-scoped memory_items.
+    # Wired at route level because new-table Agent deactivation
+    # orchestrates at this layer (cascade is not embedded in repo).
+    AdminService(db).bulk_soft_deactivate_memory_items_for_agent(
+        tenant_id=existing.tenant_id,
+        agent_id=existing.agent_id,
+        audit_ctx=audit_ctx,
+        updated_by=getattr(request.state, "actor_label", None),
+        autocommit=False,
+    )
+
 
     # 2. Deactivate the agent row itself.
     deactivated = repo.deactivate(

@@ -162,13 +162,29 @@ class CascadePillar(Pillar):
                     row for row in rows
                     if (row.get("action") or "").lower() in ("cascade_deactivate", "cascade-deactivate", "cascadedeactivate")
                 ]
-                if len(cascade_rows) != 3:
+                if len(cascade_rows) != 4:
                     raise AssertionError(
-                        f"expected exactly 3 cascade_deactivate audit rows "
-                        f"(agent, domain-luciel, agent-luciel), got {len(cascade_rows)}. "
+                        f"expected exactly 4 cascade_deactivate audit rows "
+                        f"(agent, domain-luciel, agent-luciel, memory), "
+                        f"got {len(cascade_rows)}. "
                         f"rows={[{'action': r.get('action'), 'resource_type': r.get('resource_type')} for r in cascade_rows]}"
                     )
-                audit_note = f"{len(cascade_rows)} rows"
+                # New 2026-05-02: domain deactivation now cascades memory_items.
+                # Assert the memory cascade row exists explicitly so future
+                # regressions of Wiring B (deactivate_domain memory cascade)
+                # surface as a specific failure.
+                memory_cascade_rows = [
+                    row for row in cascade_rows
+                    if (row.get("resource_type") or "").lower() == "memory"
+                ]
+                if len(memory_cascade_rows) != 1:
+                    raise AssertionError(
+                        f"expected exactly 1 memory cascade row from domain "
+                        f"deactivation (Wiring B), got {len(memory_cascade_rows)}. "
+                        f"deactivate_domain may have stopped calling "
+                        f"bulk_soft_deactivate_memory_items_for_domain."
+                    )
+                audit_note = f"{len(cascade_rows)} rows (incl 1 memory)"
 
         return (
             f"domain+agent+domain-luciel+agent-luciel all inactive; "

@@ -57,7 +57,7 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
     ("sessions",             None,     "*",                            ["tenant_id"]),
     ("messages",             None,     "*",                            ["tenant_id"]),
     ("traces",               None,     "*",                            ["tenant_id"]),
-    ("memory_items",         None,     "*",                            ["tenant_id"]),
+    ("memory_items",         "active", 0,                              ["tenant_id"]),
     ("user_consents",        None,     "*",                            ["tenant_id"]),
     ("knowledge_embeddings", None,     "*",                            ["tenant_id"]),
     ("retention_policies",   None,     "*",                            ["tenant_id"]),

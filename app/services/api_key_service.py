@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 from app.models.api_key import ApiKey
 
 from app.models.admin_audit_log import (
+    ACTION_CASCADE_DEACTIVATE,
     ACTION_DEACTIVATE,
     ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
     RESOURCE_API_KEY,
@@ -437,3 +438,72 @@ class ApiKeyService:
             reason[:80],
         )
         return rotated_count
+
+
+    def deactivate_all_for_tenant(
+        self,
+        *,
+        tenant_id: str,
+        audit_ctx: AuditContext | None = None,
+        autocommit: bool = True,
+    ) -> int:
+        """Cascade: deactivate every active ApiKey for a tenant.
+
+        Used by AdminService.deactivate_tenant_with_cascade. Returns
+        the number of rows updated. Writes one cascade audit row
+        (only when updated > 0, matching LucielInstanceRepository's
+        per-tenant cascade pattern).
+
+        autocommit=True by default for standalone callers. The tenant-
+        cascade spine passes autocommit=False so the whole cascade
+        commits in a single transaction.
+        """
+        affected = (
+            self.db.query(ApiKey.id, ApiKey.key_prefix)
+            .filter(
+                ApiKey.tenant_id == tenant_id,
+                ApiKey.active.is_(True),
+            )
+            .all()
+        )
+        affected_pks = [pk for pk, _ in affected]
+        affected_prefixes = [prefix for _, prefix in affected]
+
+        updated = (
+            self.db.query(ApiKey)
+            .filter(
+                ApiKey.tenant_id == tenant_id,
+                ApiKey.active.is_(True),
+            )
+            .update(
+                {ApiKey.active: False},
+                synchronize_session=False,
+            )
+        )
+
+        if audit_ctx is not None and updated:
+            AdminAuditRepository(self.db).record(
+                ctx=audit_ctx,
+                tenant_id=tenant_id,
+                action=ACTION_CASCADE_DEACTIVATE,
+                resource_type=RESOURCE_API_KEY,
+                resource_pk=None,
+                resource_natural_id=None,
+                after={
+                    "count": int(updated),
+                    "affected_pks": affected_pks,
+                    "affected_key_prefixes": affected_prefixes,
+                    "trigger": "tenant_deactivate",
+                },
+                note=f"Cascade from tenant {tenant_id} deactivation",
+                autocommit=False,
+            )
+
+        if autocommit:
+            self.db.commit()
+        logger.info(
+            "ApiKey cascade-deactivated count=%d tenant=%s",
+            updated,
+            tenant_id,
+        )
+        return int(updated)

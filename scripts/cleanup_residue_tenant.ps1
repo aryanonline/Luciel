@@ -1,18 +1,32 @@
 <#
 .SYNOPSIS
-    Cleanup a single Luciel residue tenant via the prod admin API (Pattern S).
+    Trigger tenant cascade deactivation via the prod admin API.
 
 .DESCRIPTION
-    Walks a tenant's resource tree leaf-first and deactivates each child
-    resource, then PATCHes the tenant itself to active=false. Idempotent:
-    skips resources already inactive. Emits one JSON log line per action
-    taken (or skipped) via Write-Host so output is robust to [void] callers.
+    Step 28 commit `8b-prereq-data-tenant-cascade-in-code` (2026-05-02)
+    moved cascade logic from this PowerShell walker into the platform
+    itself: PATCH /api/v1/admin/tenants/{id} with active=false now
+    atomically deactivates every tenant-scoped resource (memory_items,
+    api_keys, luciel_instances, agents, agent_configs, domain_configs)
+    in a single transaction with full audit-row emission.
+
+    This script is now a thin operator trigger for that cascade. It:
+      1. PATCHes the tenant active=false (cascade fires server-side)
+      2. Runs teardown-integrity probe to verify zero live residue
+
+    Idempotent: re-running against an already-inactive tenant is a
+    no-op (memory cascade still emits a count=0 audit row by design).
 
     Security boundary (Pattern E): admin key sourced from
-    $env:LUCIEL_PROD_ADMIN_KEY, never echoed, never written to disk, never
-    to shell history.
+    $env:LUCIEL_PROD_ADMIN_KEY, never echoed, never disk, never history.
 
-    GETs use Invoke-RestMethod. PATCH/DELETE use curl.exe.
+    History: Pre-2026-05-02 this script implemented Pattern S walker
+    leaf-first cleanup (api-keys, luciel-instances, agents, domains,
+    tenant). That logic is now in
+    AdminService.deactivate_tenant_with_cascade and is tested by
+    Pillar 18 (tenant cascade end-to-end). The pre-rewrite version
+    is in git history under commits prior to 8b-prereq-data-tenant-
+    cascade-in-code.
 
 .PARAMETER TenantId
     The tenant_id of the residue tenant to clean up.
@@ -35,7 +49,6 @@ param(
     [switch]$DryRun
 )
 
-# Fail loudly on any unhandled error.
 $ErrorActionPreference = 'Stop'
 
 if (-not $env:LUCIEL_PROD_ADMIN_KEY) {
@@ -58,127 +71,49 @@ function Emit-Log {
     Write-Host ($entry | ConvertTo-Json -Compress)
 }
 
-function Invoke-AdminGet {
-    param([string]$path)
-    $url = "$ApiBase$path"
-    $headers = @{ "Authorization" = $authHeaderValue }
-    try {
-        return Invoke-RestMethod -Method Get -Uri $url -Headers $headers -ErrorAction Stop
-    } catch {
-        $code = $null
-        if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
-        Emit-Log @{ action="get-failed"; method="GET"; url=$url; http_code=$code; error=$_.Exception.Message }
-        throw "GET $url failed: $($_.Exception.Message)"
-    }
-}
-
-function Do-Delete {
-    param([string]$path, [string]$resourceType, $resourceId)
-    $url = "$ApiBase$path"
-    if ($DryRun) {
-        Emit-Log @{ action="would-delete"; method="DELETE"; url=$url; resource_type=$resourceType; resource_id=$resourceId }
-        return
-    }
-    $code = curl.exe -sS -X DELETE -o NUL -w "%{http_code}" -H $authHeaderArg $url
-    $codeInt = [int]$code
-    $ok = ($codeInt -eq 200) -or ($codeInt -eq 204)
-    Emit-Log @{
-        action        = if ($ok) { "deleted" } else { "delete-failed" }
-        method        = "DELETE"
-        url           = $url
-        http_code     = $codeInt
-        resource_type = $resourceType
-        resource_id   = $resourceId
-    }
-}
-
-function Do-PatchTenant {
-    param([string]$tenantId)
-    $url = "$ApiBase/api/v1/admin/tenants/$tenantId"
-    if ($DryRun) {
-        Emit-Log @{ action="would-patch"; method="PATCH"; url=$url; body="active=false" }
-        return
-    }
-    $bodyPath = Join-Path $env:TEMP "cleanup_patch_$tenantId.json"
-    '{"active": false}' | Set-Content -Path $bodyPath -Encoding ascii -NoNewline
-    try {
-        $code = curl.exe -sS -X PATCH -o NUL -w "%{http_code}" `
-            -H $authHeaderArg -H "Content-Type: application/json" `
-            --data "@$bodyPath" $url
-        $codeInt = [int]$code
-        $ok = ($codeInt -eq 200)
-        Emit-Log @{
-            action        = if ($ok) { "patched" } else { "patch-failed" }
-            method        = "PATCH"
-            url           = $url
-            http_code     = $codeInt
-            resource_type = "tenant"
-            resource_id   = $tenantId
-        }
-    } finally {
-        Remove-Item $bodyPath -ErrorAction SilentlyContinue
-    }
-}
-
-# ---- Walk ----
 try {
-    Emit-Log @{ action="walk-start"; tenant=$TenantId }
+    Emit-Log @{ action = "cascade-trigger-start"; tenant = $TenantId }
 
-    # 1. api-keys (leaf-most)
-    $apiKeys = Invoke-AdminGet "/api/v1/admin/api-keys?tenant_id=$TenantId"
-    foreach ($k in @($apiKeys)) {
-        if (-not $k.active) {
-            Emit-Log @{ action="skipped-already-inactive"; resource_type="api-key"; resource_id=$k.id; key_prefix=$k.key_prefix }
-            continue
-        }
-        Do-Delete -path "/api/v1/admin/api-keys/$($k.id)" -resourceType "api-key" -resourceId $k.id
-    }
-
-    # 2. luciel-instances
-    $instances = Invoke-AdminGet "/api/v1/admin/luciel-instances?tenant_id=$TenantId"
-    foreach ($i in @($instances)) {
-        if (-not $i.active) {
-            Emit-Log @{ action="skipped-already-inactive"; resource_type="luciel-instance"; resource_id=$i.id; instance_id=$i.instance_id }
-            continue
-        }
-        Do-Delete -path "/api/v1/admin/luciel-instances/$($i.id)" -resourceType "luciel-instance" -resourceId $i.id
-    }
-
-    # 3. agents
-    $agents = Invoke-AdminGet "/api/v1/admin/agents?tenant_id=$TenantId"
-    foreach ($a in @($agents)) {
-        if (-not $a.active) {
-            Emit-Log @{ action="skipped-already-inactive"; resource_type="agent"; resource_id=$a.agent_id }
-            continue
-        }
-        Do-Delete -path "/api/v1/admin/agents/$TenantId/$($a.agent_id)" -resourceType "agent" -resourceId $a.agent_id
-    }
-
-    # 4. domains
-    $domains = Invoke-AdminGet "/api/v1/admin/domains?tenant_id=$TenantId"
-    foreach ($d in @($domains)) {
-        if (-not $d.active) {
-            Emit-Log @{ action="skipped-already-inactive"; resource_type="domain"; resource_id=$d.domain_id }
-            continue
-        }
-        Do-Delete -path "/api/v1/admin/domains/$TenantId/$($d.domain_id)" -resourceType "domain" -resourceId $d.domain_id
-    }
-
-    # 5. tenant PATCH (only if currently active)
-    $tenants = Invoke-AdminGet "/api/v1/admin/tenants"
-    $thisTenant = $tenants | Where-Object { $_.tenant_id -eq $TenantId }
-    if (-not $thisTenant) {
-        Emit-Log @{ action="tenant-not-found"; tenant_id=$TenantId }
-        exit 4
-    }
-    if ($thisTenant.active) {
-        Do-PatchTenant -tenantId $TenantId
+    # 1. PATCH tenant active=false -- server-side cascade fires.
+    $url = "$ApiBase/api/v1/admin/tenants/$TenantId"
+    if ($DryRun) {
+        Emit-Log @{ action = "would-patch"; method = "PATCH"; url = $url; body = "active=false" }
     } else {
-        Emit-Log @{ action="skipped-already-inactive"; resource_type="tenant"; resource_id=$TenantId }
+        $bodyPath = Join-Path $env:TEMP "cleanup_patch_$TenantId.json"
+        '{"active": false}' | Set-Content -Path $bodyPath -Encoding ascii -NoNewline
+        try {
+            $code = curl.exe -sS -X PATCH -o NUL -w "%{http_code}" `
+                -H $authHeaderArg -H "Content-Type: application/json" `
+                --data "@$bodyPath" $url
+            $codeInt = [int]$code
+            $ok = ($codeInt -eq 200)
+            Emit-Log @{
+                action        = if ($ok) { "cascade-triggered" } else { "patch-failed" }
+                method        = "PATCH"
+                url           = $url
+                http_code     = $codeInt
+                resource_type = "tenant"
+                resource_id   = $TenantId
+            }
+            if (-not $ok) {
+                Emit-Log @{ action = "abort"; reason = "tenant PATCH returned $codeInt" }
+                exit 4
+            }
+        } finally {
+            Remove-Item $bodyPath -ErrorAction SilentlyContinue
+        }
     }
 
-    # 6. final teardown-integrity check
-    $ti = Invoke-AdminGet "/api/v1/admin/verification/teardown-integrity?tenant_id=$TenantId"
+    # 2. Teardown-integrity probe -- verify zero live residue.
+    $integrityUrl = "$ApiBase/api/v1/admin/verification/teardown-integrity?tenant_id=$TenantId"
+    if ($DryRun) {
+        Emit-Log @{ action = "would-check"; method = "GET"; url = $integrityUrl }
+        Emit-Log @{ action = "walk-complete"; teardown_passed = $null; note = "dry-run" }
+        exit 0
+    }
+
+    $headers = @{ "Authorization" = $authHeaderValue }
+    $ti = Invoke-RestMethod -Method Get -Uri $integrityUrl -Headers $headers -ErrorAction Stop
     $violationCount = if ($ti.violations) { @($ti.violations).Count } else { 0 }
     Emit-Log @{
         action          = "walk-complete"
@@ -187,10 +122,13 @@ try {
         violations      = $ti.violations
     }
 
-    if ($DryRun) { exit 0 }
     if ($ti.passed) { exit 0 } else { exit 4 }
 
 } catch {
-    Emit-Log @{ action="walk-failed"; error=$_.Exception.Message; line=$_.InvocationInfo.ScriptLineNumber }
+    Emit-Log @{
+        action = "walk-failed"
+        error  = $_.Exception.Message
+        line   = $_.InvocationInfo.ScriptLineNumber
+    }
     exit 5
 }
