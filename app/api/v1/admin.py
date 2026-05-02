@@ -89,6 +89,8 @@ from app.schemas.admin import (
 from app.schemas.api_key import ApiKeyCreate, ApiKeyCreateResponse, ApiKeyRead
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService
+from app.services.memory_admin_service import MemoryAdminService
+from app.schemas.memory import MemoryRead
 from app.policy.scope import ScopePolicy
 from app.models.luciel_instance import LucielInstance
 
@@ -658,16 +660,64 @@ def deactivate_api_key(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="API key not found",
             )
-        return
 
-    ScopePolicy.enforce_agent_scope(
-        request, target.tenant_id, target.domain_id, target.agent_id,
+
+# =====================================================================
+# Step 28 - Commit 8b-prereq-data-cascade-fix
+# Memory item admin endpoints (platform_admin only).
+# Powers the Pattern S walker's memory_items leaf step.
+# =====================================================================
+
+@router.get("/memory-items", response_model=list[MemoryRead])
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def list_memory_items(
+    request: Request,
+    db: DbSession,
+    tenant_id: str = Query(
+        ...,
+        min_length=2,
+        max_length=100,
+        description="Tenant whose memory_items to list. Required.",
+    ),
+    active_only: bool = Query(
+        default=False,
+        description="If true, return only rows with active=True.",
+    ),
+) -> list[MemoryRead]:
+    permissions = getattr(request.state, "permissions", []) or []
+    if "platform_admin" not in permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may list memory_items",
+        )
+    service = MemoryAdminService(db)
+    items = service.list_memories_for_tenant(
+        tenant_id=tenant_id,
+        active_only=active_only,
     )
-    success = service.deactivate_key(key_id, audit_ctx=audit_ctx)
+    return [MemoryRead.model_validate(i) for i in items]
+
+
+@router.delete("/memory-items/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def deactivate_memory_item(
+    request: Request,
+    memory_id: int,
+    db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> None:
+    permissions = getattr(request.state, "permissions", []) or []
+    if "platform_admin" not in permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may deactivate memory_items",
+        )
+    service = MemoryAdminService(db)
+    success = service.deactivate_memory(memory_id, audit_ctx=audit_ctx)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="API key not found",
+            detail="Memory item not found",
         )
 # =====================================================================
 # Step 24.5 — LucielInstance management routes

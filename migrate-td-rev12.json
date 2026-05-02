@@ -1,0 +1,36 @@
+{
+  "family": "luciel-migrate",
+  "taskRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-migrate-role",
+  "executionRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-execution-role",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "containerDefinitions": [
+    {
+      "name": "luciel-backend",
+      "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:e3e75dd2c82ceea5c26ca1e6213ca88ad7ad62eedeee405d0a86662a8d7c3d0e",
+      "command": ["alembic", "upgrade", "head"],
+      "essential": true,
+      "portMappings": [],
+      "environment": [],
+      "mountPoints": [],
+      "volumesFrom": [],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/luciel-backend",
+          "awslogs-region": "ca-central-1",
+          "awslogs-stream-prefix": "migrate"
+        }
+      },
+      "systemControls": []
+    }
+  ]
+}
