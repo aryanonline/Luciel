@@ -117,6 +117,20 @@ class CrossTenantIdentityPillar(Pillar):
         t2_id = _new_p13_tenant_id("t2")
         domain_id = "general"
 
+        # SENTINEL_LEGIT is woven into a user-fact-shaped statement
+        # below ("My account verification token is …") so the memory
+        # extractor recognizes it as a durable fact (`fact` category,
+        # per app/memory/extractor.py EXTRACTION_PROMPT). Older P13
+        # revisions wrapped the sentinel in instructional text
+        # ("Setup turn for Pillar 13...") which the extractor
+        # correctly rejects as trivial/temporary, leading to a
+        # vacuously-failing A3. The fix is on the test-setup side,
+        # not on extraction logic.
+        #
+        # SENTINEL_SPOOF stays as-is — A1 asserts ABSENCE of any row
+        # containing it, so its message text doesn't need to look
+        # like a user fact (and shouldn't, to keep the spoof payload
+        # clearly distinguishable from the legit baseline).
         SENTINEL_LEGIT = f"P13-LEGIT-{uuid.uuid4().hex[:6]}"
         SENTINEL_SPOOF = f"P13-SPOOF-{uuid.uuid4().hex[:6]}"
 
@@ -263,13 +277,20 @@ class CrossTenantIdentityPillar(Pillar):
             # for the spoof payload to reference. Gate 1 (payload shape)
             # rejects malformed message_id integers; we need a valid one
             # so the malicious payload reaches Gate 6.
+            # User-fact-shaped message so the extractor produces a
+            # MemoryItem row. The sentinel rides inside the fact text
+            # as a debug aid, but A3's primary lookup keys on
+            # MemoryItem.message_id (deterministic, paraphrase-proof)
+            # rather than content.contains(sentinel) — see A3 below.
             r = call(
                 "POST", "/api/v1/chat", k1_raw,
                 json={
                     "session_id": t1_session_id,
                     "message": (
-                        f"Setup turn for Pillar 13. Sentinel: {SENTINEL_LEGIT}. "
-                        f"This turn establishes a legitimate baseline."
+                        f"Please remember this for future sessions: my "
+                        f"account verification token is {SENTINEL_LEGIT}. "
+                        f"I will reference this token whenever I need to "
+                        f"confirm my identity."
                     ),
                 },
                 expect=200, client=c,
@@ -313,6 +334,7 @@ class CrossTenantIdentityPillar(Pillar):
                     t1_id=t1_id, t2_id=t2_id,
                     sentinel_legit=SENTINEL_LEGIT,
                     k1_id=k1_id,
+                    t1_message_id=t1_message_id,
                 )
                 self._teardown(c, pa, user_id, t1_id, t2_id)
                 return (
@@ -465,46 +487,88 @@ class CrossTenantIdentityPillar(Pillar):
         finally:
             db.close()
 
-        # ---------- 5. Legitimate chat turn through K1 (post-spoof) ----------
-        # Establishes a NEW message_id (different from t1_message_id)
-        # so we can isolate the legit row from the setup turn's row.
-        # We need K1's raw key again -- fetch a fresh chat-key mint
-        # from the API rather than threading the raw key through helpers.
-        # K1 is still active (we'll assert that as A6); reuse it for
-        # the legit turn.
-        # ... but k1_raw isn't in scope here. The setup turn's row IS
-        # legitimate (we created it before the spoof) so we use the
-        # setup row as the A3/A4/A5 evidence. The "spoof did not
-        # contaminate the legit row" assertion holds against it.
-        # ---------- ASSERTION A3: legit row has actor_user_id == U.id ----------
+        # ---------- 5. Locate the legit memory row from the setup turn ----------
+        # The setup turn (issued before the spoof) produced a chat
+        # response and enqueued a memory-extraction task. By now,
+        # ~60s after enqueue, that extraction should be complete.
+        #
+        # Earlier P13 revisions queried by content.contains(sentinel),
+        # which depended on the LLM preserving the sentinel verbatim
+        # in the extracted memory text. Even with low temperature,
+        # extractor paraphrasing made the assertion flaky and the
+        # FAIL message ("sentinel not found") was misleading — the
+        # real failure was usually "extractor produced no row at all
+        # because the message wasn't user-fact-shaped" (Phase 1 → 2
+        # carry-over). Switching the lookup to message_id (FK to the
+        # specific message that triggered the extraction) is
+        # deterministic and paraphrase-proof.
+        #
+        # We poll briefly because extraction is async; if the worker
+        # is slow under load, the row may still be in flight when A3
+        # first fires.
+        legit_row = None
+        legit_poll_attempts = 6   # 6 attempts × 5s = 30s budget
+        for _attempt in range(legit_poll_attempts):
+            db = SessionLocal()
+            try:
+                legit_row = db.scalars(
+                    select(MemoryItem)
+                    .where(
+                        MemoryItem.tenant_id == t1_id,
+                        MemoryItem.message_id == t1_message_id,
+                    )
+                    .order_by(MemoryItem.id.desc())
+                    .limit(1)
+                ).first()
+            finally:
+                db.close()
+            if legit_row is not None:
+                break
+            time.sleep(5)
+
+        # ---------- ASSERTION A3: legit row attributed to U.id ----------
+        if legit_row is None:
+            raise AssertionError(
+                f"A3 FAIL: setup turn produced no MemoryItem row for "
+                f"message_id={t1_message_id} in T1={t1_id} after "
+                f"{legit_poll_attempts * 5}s wait. Check (1) extractor "
+                f"is reachable and processed the queue, (2) the setup "
+                f"message text is user-fact-shaped enough that the "
+                f"extractor returns a non-empty memory list, and "
+                f"(3) MemoryRepository.upsert_by_message_id is wiring "
+                f"message_id through to the new row."
+            )
+        if legit_row.actor_user_id != user_id:
+            raise AssertionError(
+                f"A3 FAIL: legit row (id={legit_row.id}) "
+                f"actor_user_id={legit_row.actor_user_id} != "
+                f"U.id={user_id}"
+            )
+        legit_row_id = legit_row.id
+
+        # Soft check: log if sentinel is missing from the extracted
+        # content. Not a failure — extractor may paraphrase — but a
+        # signal that the user-fact framing in the setup turn could
+        # be tightened if it stops appearing.
+        if sentinel_legit not in (legit_row.content or ""):
+            print(
+                f"  pillar 13 note: sentinel {sentinel_legit!r} not "
+                f"present verbatim in extracted memory "
+                f"(content[:120]={legit_row.content[:120]!r}). "
+                f"Likely LLM paraphrase. A3 still passed via message_id "
+                f"key."
+            )
+
+        # ---------- ASSERTION A4: legit row tenant_id == T1 ----------
+        if legit_row.tenant_id != t1_id:
+            raise AssertionError(
+                f"A4 FAIL: legit row tenant_id={legit_row.tenant_id!r} "
+                f"!= T1={t1_id!r}"
+            )
+
+        # ---------- ASSERTION A5: T2 has no rows for U from this test ----------
         db = SessionLocal()
         try:
-            legit_row = db.scalars(
-                select(MemoryItem).where(
-                    MemoryItem.tenant_id == t1_id,
-                    MemoryItem.content.contains(sentinel_legit),
-                ).limit(1)
-            ).first()
-            if legit_row is None:
-                raise AssertionError(
-                    f"A3 FAIL: legit setup turn produced no memory row "
-                    f"with sentinel {sentinel_legit!r} in T1"
-                )
-            if legit_row.actor_user_id != user_id:
-                raise AssertionError(
-                    f"A3 FAIL: legit row actor_user_id="
-                    f"{legit_row.actor_user_id} != U.id={user_id}"
-                )
-            legit_row_id = legit_row.id
-
-            # ---------- ASSERTION A4: legit row tenant_id == T1 ----------
-            if legit_row.tenant_id != t1_id:
-                raise AssertionError(
-                    f"A4 FAIL: legit row tenant_id={legit_row.tenant_id!r} "
-                    f"!= T1={t1_id!r}"
-                )
-
-            # ---------- ASSERTION A5: T2 has no rows for U from this test ----------
             t2_leak_rows = list(db.scalars(
                 select(MemoryItem).where(
                     MemoryItem.tenant_id == t2_id,
@@ -552,19 +616,32 @@ class CrossTenantIdentityPillar(Pillar):
         t2_id: str,
         sentinel_legit: str,
         k1_id: int,
+        t1_message_id: int,
     ) -> str:
         """MODE=degraded sanity: assert the setup turn produced a legit
         memory row in T1 (sync path on the test machine wrote it because
-        no async worker was running). No spoof guard exercised."""
+        no async worker was running). No spoof guard exercised.
+
+        Mirrors the A3 fix in _run_full_assertions: keys on
+        MemoryItem.message_id rather than content.contains(sentinel) so
+        the assertion is robust to LLM paraphrase. sentinel_legit is
+        retained as a soft debug signal in the summary only.
+        """
         db = SessionLocal()
         try:
             legit_row = db.scalars(
                 select(MemoryItem).where(
                     MemoryItem.tenant_id == t1_id,
-                    MemoryItem.content.contains(sentinel_legit),
-                ).limit(1)
+                    MemoryItem.message_id == t1_message_id,
+                ).order_by(MemoryItem.id.desc()).limit(1)
             ).first()
-            legit_ok = legit_row is not None and legit_row.actor_user_id == user_id
+            legit_ok = (
+                legit_row is not None
+                and legit_row.actor_user_id == user_id
+            )
+            sentinel_in_content = bool(
+                legit_row and sentinel_legit in (legit_row.content or "")
+            )
 
             t2_leak_rows = list(db.scalars(
                 select(MemoryItem).where(
@@ -577,7 +654,9 @@ class CrossTenantIdentityPillar(Pillar):
             k1_active = k1_row is not None and k1_row.active
 
             return (
-                f"setup_legit_ok={legit_ok} T2_leak_rows={len(t2_leak_rows)} "
+                f"setup_legit_ok={legit_ok} "
+                f"sentinel_in_content={sentinel_in_content} "
+                f"T2_leak_rows={len(t2_leak_rows)} "
                 f"K1_active={k1_active}"
             )
         finally:
