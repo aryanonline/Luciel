@@ -262,19 +262,172 @@ but non-identical semantics.
 
 ---
 
+## P3-G. Migrate-role IAM gap blocks Commit 4 mint  *(P1, blocks Phase 2 Commit 4)*
+
+**Discovered:** 2026-05-03 during the Commit 4 mint real-run that caught
+the DSN-leak incident (see `docs/recaps/2026-05-03-mint-incident.md`).
+
+**What's missing:** `luciel-ecs-migrate-role`
+(`arn:aws:iam::729005488042:role/luciel-ecs-migrate-role`) lacks the
+SSM permissions the patched `mint_worker_db_password_ssm.py` needs:
+
+- `ssm:GetParameter`, `ssm:GetParameterHistory`, `ssm:PutParameter` on
+  `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url`
+- `ssm:GetParameter` on
+  `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url`
+  (so the task can source the admin URL — though see fix-shape below
+  for an alternative that avoids reading the admin DSN inside the
+  task at all)
+- `kms:Decrypt` on the SSM-default KMS key (implied by SSM SecureString
+  permissions; verify in the policy)
+
+The gap was visible in the real-run: the mint script's `boto3` SSM
+call raised `AccessDeniedException`. The new
+`preflight_ssm_writable()` helper now catches this BEFORE any DB
+mutation, but the underlying IAM gap still blocks Commit 4 from
+landing.
+
+**Why this is P1:** Commit 4 is the prod-touching commit that mints
+the `luciel_worker` password and stores the worker DSN in SSM
+SecureString. Until this IAM gap is closed, Commit 4 cannot land,
+which keeps Phase 2 from closing.
+
+**Fix shape:**
+1. Update `luciel-ecs-migrate-role` IAM policy to grant the three SSM
+   actions on the worker-DSN parameter and `GetParameter` on the
+   admin-DSN parameter.
+2. **Strongly consider** decoupling the mint task: instead of having
+   the ECS task read `/luciel/database-url` from inside the
+   container, have the operator read it locally (via
+   `aws ssm get-parameter --with-decryption`), pass it via the task's
+   container override `command` array, and keep the admin DSN out of
+   the task IAM role's blast radius entirely. This eliminates the
+   class of bug where the admin DSN ever reaches the task's stderr.
+3. Re-run the patched mint script. Pre-flight will pass; SQLAlchemy
+   prefix will be stripped; connect will succeed; `ALTER ROLE`
+   executes; `put_parameter` writes the SecureString.
+4. Document the IAM diff in `docs/runbooks/step-28-commit-8-luciel-worker-sg.md`
+   so the ordering is reproducible.
+
+**Estimated effort:** 1 IAM policy update + 1 commit re-run + recap
+update. ~30 minutes operator time.
+**Cross-references:** `docs/recaps/2026-05-03-mint-incident.md` §8
+(Follow-up A), commit `2b5ff32`.
+
+---
+
+## P3-H. Admin password rotation needed (CloudWatch leak)  *(P1, time-bounded)*
+
+**Discovered:** 2026-05-03 during the Commit 4 mint real-run.
+
+**What happened:** The `luciel_admin` Postgres password
+(`LucielDB2026Secure`) was leaked to one CloudWatch log event in log
+group `/ecs/luciel-backend`, stream
+`migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c`, when an
+unsanitized `psycopg.ProgrammingError` echoed the admin DSN to the
+ECS task's stderr.
+
+**Blast radius (effective audience of one):** AWS account
+`729005488042` is single-tenant; only the `luciel-admin` IAM user has
+CloudWatch read access. No third-party log forwarding, no federated
+roles, no cross-account access. See incident recap §4 for full
+analysis.
+
+**Why this is P1:** The leaked credential persists in CloudWatch
+until rotated. Time-bounded by the next IAM-credential incident or
+any future SOC 2 / penetration-test review that would surface the
+leaked log line.
+
+**Fix shape (sequenced — do as a single deliberate operation):**
+1. Mint a fresh admin password using the patched mint script
+   (`2b5ff32`). Either (a) extend the script with a `--role-name`
+   argument so it can target `luciel_admin` not just `luciel_worker`,
+   or (b) write a parallel `mint_admin_password.py` that reuses the
+   same helpers (`_redact_dsn_in_message`,
+   `_strip_sqla_driver_prefix`, `preflight_ssm_writable`).
+2. Store the new admin DSN at `/luciel/database-url` SecureString with
+   `Overwrite=True`.
+3. Force ECS service redeploy of `luciel-backend` and any other
+   service that consumes `/luciel/database-url`, so they pick up the
+   new value on container restart.
+4. Smoke-test post-redeploy: confirm the backend serves traffic with
+   the new credential.
+5. Delete the leaking log stream:
+   `aws logs delete-log-stream --log-group-name /ecs/luciel-backend --log-stream-name migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c`
+6. Verify no other stream in the log group contains the leaked
+   string:
+   `aws logs filter-log-events --log-group-name /ecs/luciel-backend --filter-pattern '"LucielDB2026Secure"'`
+   (expect zero events).
+7. Append a §9 addendum to `docs/recaps/2026-05-03-mint-incident.md`
+   recording timestamp, actor, new admin-pw fingerprint.
+
+**Sequencing constraint:** Do **after** P3-G (the IAM gap fix) so the
+rotation can run cleanly via the patched mint pattern.
+
+**Estimated effort:** ~1 hour operator time once P3-G is closed.
+**Cross-references:** `docs/recaps/2026-05-03-mint-incident.md` §8
+(Follow-up B).
+
+---
+
+## P3-I. Public ALB attracts opportunistic CVE scanners  *(P3 — informational)*
+
+**Discovered:** 2026-05-03 (incidental observation during Phase 2
+Commit 4 work).
+
+**What's observed:** The public-facing ALB receives constant
+opportunistic scanner traffic — PHPUnit RCE attempts, common-CVE
+fingerprinting, generic admin-path probes. Backend 401s are holding
+correctly; no actual breach surface.
+
+**Why this is P3 (informational, not actionable yet):**
+- The 401 layer is the correct first line of defense and is working.
+- Adding WAF rules costs money per managed rule group and adds
+  latency to every request.
+- The traffic is noise, not signal — it's not Luciel-specific
+  reconnaissance.
+
+This item is logged so that, when Phase 4 hardening considers
+edge-protection posture, we have a reference point for the baseline
+scanner-noise volume.
+
+**Fix shape (when prioritized):**
+1. Enable AWS WAF on the public ALB.
+2. Attach managed rule groups: `AWS-AWSManagedRulesKnownBadInputsRuleSet`,
+   `AWS-AWSManagedRulesCommonRuleSet`, optionally
+   `AWS-AWSManagedRulesSQLiRuleSet`.
+3. Set rules to `Count` mode initially, monitor for false positives
+   for 7 days, then switch to `Block`.
+4. Document expected post-WAF 4xx rate as a baseline for the alarm
+   thresholds in Phase 2 Commit 5.
+
+**Estimated effort:** 1 commit (Terraform/IaC if applicable; manual
+console otherwise) + 7-day observation window. ~2 hours operator
+time spread over a week.
+**Cross-references:** `docs/recaps/2026-05-03-mint-incident.md` §8
+(Follow-up C).
+
+---
+
 ## Sequencing
 
 When Phase 2 lands and we re-open compliance work:
 
-1. **P3-A first.** Onboarding audit gap is the single P0. Everything
-   else is P1/P2.
-2. **P3-B as a bundle with P3-A.** They share the audit-emission code path.
-3. **P3-C** alongside the next canonical recap update (cheap, doc-only).
-4. **P3-D** before any sales motion that markets cross-tenant isolation.
-5. **P3-E and P3-F** before the first SOC 2 readiness assessment.
+1. **P3-G first** (interleaves into Phase 2, not Phase 3 proper) —
+   blocks Commit 4 mint retry, must be closed for Phase 2 to finish.
+2. **P3-H immediately after P3-G** — time-bounded credential rotation;
+   uses the same mint pattern P3-G unblocks.
+3. **P3-A first within Phase 3 proper.** Onboarding audit gap is the
+   single P0. Everything else is P1/P2.
+4. **P3-B as a bundle with P3-A.** They share the audit-emission code path.
+5. **P3-C** alongside the next canonical recap update (cheap, doc-only).
+6. **P3-D** before any sales motion that markets cross-tenant isolation.
+7. **P3-E and P3-F** before the first SOC 2 readiness assessment.
+8. **P3-I** during Phase 4 edge-hardening (informational, no urgency).
 
-**Estimated total:** ~6 commits, ~700 LOC of code + ~200 LOC of docs.
-~1-2 weeks of focused work.
+**Estimated total:** ~9 commits, ~750 LOC of code + ~250 LOC of docs,
+plus operator time for IAM/SSM/credential rotations. ~2-3 weeks of
+focused work, with P3-G and P3-H bridging into the tail of Phase 2.
 
 ---
 
