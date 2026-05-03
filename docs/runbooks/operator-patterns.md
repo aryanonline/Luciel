@@ -11,6 +11,63 @@ is a placeholder for the date-stamped recap filename produced in Commit 9.
 This file currently codifies one new pattern, introduced in Commit 8b-prereq:
 
 ---
+## Pattern E - Secret Handling Discipline
+
+**Rule:** Secrets (admin keys, DB passwords, API tokens) flow through environment
+variables sourced at runtime from authoritative stores (AWS SSM SecureString,
+local password manager). Secrets are never echoed to terminals, never written
+to disk, never committed to git, and never persisted in shell history. The
+operator's authentication state lives in the running shell process and dies
+with it.
+
+### Why this rule exists
+
+- **Brokerage tech-due-diligence:** "How do credentials reach your operators
+  and services?" must have a defensible answer that doesn't include "in a
+  config file" or "in a Slack message."
+- **Blast-radius containment:** if an operator workstation is compromised,
+  shell history and on-disk config files are the first places an attacker
+  reads. Pattern E ensures those locations contain no usable credentials.
+- **Audit traceability:** secrets sourced from SSM produce CloudTrail
+  `GetParameter` events. Secrets typed into a terminal produce no trail.
+  CloudTrail is the canonical "who accessed what credential when" record.
+
+### How
+
+- **Source from SSM at session start, into env var, no echo:**
+$env:LUCIEL_PROD_ADMIN_KEY = (aws ssm get-parameter `
+--name /luciel/production/platform-admin-key `
+--with-decryption --query Parameter.Value --output text)
+- **Verify shape, not value:** assert `StartsWith("luc_sk_")` and `Length == 50`
+to confirm the source returned a valid credential without echoing it.
+- **For pasted credentials (e.g., when re-using across sessions):** paste
+directly into a `$env:` assignment in PowerShell. Do NOT echo back to
+confirm. Close the shell when done if extra paranoia is warranted.
+- **Never:**
+- `echo $env:LUCIEL_PROD_ADMIN_KEY`
+- `Set-Content -Path secrets.txt -Value $env:LUCIEL_PROD_ADMIN_KEY`
+- `git add` a file containing a real credential
+- Pass credentials as positional CLI args (they appear in `ps` output and
+  shell history); use environment variables or `--password-stdin` style
+  flags instead
+
+### Verification gate
+
+- `Get-History | Select-String 'luc_sk_'` should return zero lines after
+any session involving secrets
+- `git log -p -- ':!.env.example'` should show zero real `luc_sk_` prefixes
+- SSM parameters under `/luciel/` should all be `Type=SecureString` (not
+`String`); `aws ssm describe-parameters` returns the type per parameter
+
+### Known violations and follow-ups
+
+- **D-prod-superuser-password-leaked-to-terminal-2026-05-03:** prod RDS
+master password (`luciel_admin`) was echoed in a connection-string error
+message during Commit 13 setup work. Rotation pending Phase 2.
+- **D-shell-history-key-exposure-2026-05-01:** general process improvement
+to codify the corrected Read-Host pattern. Resolved by this section's
+"How" guidance.
+
 
 ## Pattern N - Prod Database Migrations Apply via ECS One-Shot Task
 
@@ -233,6 +290,14 @@ associated teardown contract. This is a separate finding from
 Pillar 10's per-suite teardown integrity, which is suite-internal and
 runs against dev, not prod.
 ## Pattern S - Per-Resource Cleanup Walker for Residue Tenants
+
+**Status note (2026-05-02):** As of Commit 12 (`f9f6f79` - tenant cascade in code),
+the platform's `PATCH /api/v1/admin/tenants/{id}` with `active=false` triggers
+atomic in-code cascade through all child resources. The Pattern S walker is now a
+thin trigger for that cascade plus a teardown-integrity verification probe. Use
+the walker as a backup/recovery tool for partial cleanups or when the API path
+is unavailable; for normal tenant deactivation, prefer the API.
+
 
 **Rule:** Tenant cleanup is operator-driven via per-resource DELETE calls in
 leaf-first order, NOT a single tenant-level cascade. The PATCH on a tenant's
