@@ -402,7 +402,7 @@ class CrossTenantIdentityPillar(Pillar):
         # Generous wait: worker pickup + Gate 6 lookup + audit-row write
         # + DLQ enqueue. Pillar 11 uses 30s SLA for happy-path; rejection
         # path is faster but we wait conservatively to avoid flake.
-        time.sleep(15)
+        time.sleep(60)
 
         # ---------- 3. ASSERTION A1: no memory row landed for spoof ----------
         # The spoof payload referenced t1_message_id, which already has

@@ -1,0 +1,15 @@
+{
+  "containerOverrides": [
+    {
+      "name": "luciel-backend",
+      "command": [
+        "python",
+        "scripts/prod_readonly_query.py",
+        "--sql-literal",
+        "SELECT 'tenant_config' AS table_name, count(*) FILTER (WHERE active = TRUE) AS live_count, count(*) AS total FROM tenant_configs WHERE tenant_id = 'step28-smoke-cascade-372779' UNION ALL SELECT 'domain_configs', count(*) FILTER (WHERE active = TRUE), count(*) FROM domain_configs WHERE tenant_id = 'step28-smoke-cascade-372779' UNION ALL SELECT 'api_keys', count(*) FILTER (WHERE active = TRUE), count(*) FROM api_keys WHERE tenant_id = 'step28-smoke-cascade-372779' UNION ALL SELECT 'memory_items', count(*) FILTER (WHERE active = TRUE), count(*) FROM memory_items WHERE tenant_id = 'step28-smoke-cascade-372779' UNION ALL SELECT 'agents', count(*) FILTER (WHERE active = TRUE), count(*) FROM agents WHERE tenant_id = 'step28-smoke-cascade-372779' UNION ALL SELECT 'luciel_instances', count(*) FILTER (WHERE active = TRUE), count(*) FROM luciel_instances WHERE scope_owner_tenant_id = 'step28-smoke-cascade-372779' UNION ALL SELECT 'agent_configs', count(*) FILTER (WHERE active = TRUE), count(*) FROM agent_configs WHERE tenant_id = 'step28-smoke-cascade-372779' ORDER BY 1",
+        "--row-limit",
+        "20"
+      ]
+    }
+  ]
+}

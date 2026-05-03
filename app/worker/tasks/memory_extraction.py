@@ -119,7 +119,7 @@ def _reject_with_audit(
     Never retries; rejection path is terminal.
     """
     try:
-        ctx = AuditContext.system(label=f"worker:memory_extraction:{task_id}")
+        ctx = AuditContext.worker(task_id=f"memory_extraction:{task_id}", actor_key_prefix=actor_key_prefix)
         audit = AdminAuditRepository(db)
         audit.record(
             ctx=ctx,
@@ -413,8 +413,9 @@ def extract_memory_from_turn(
         content_digest = _content_sha256(
             "\n".join(f"{m['role']}:{m['content']}" for m in messages_payload)
         )
-        ctx = AuditContext.system(
-            label=f"worker:memory_extraction:{task_id}"
+        ctx = AuditContext.worker(
+            task_id=f"memory_extraction:{task_id}",
+            actor_key_prefix=actor_key_prefix,
         )
         AdminAuditRepository(db).record(
             ctx=ctx,
