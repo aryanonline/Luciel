@@ -7,6 +7,15 @@ trail; no third-party exposure; caught before any state mutation)
 **Status:** Contained — patches committed; deliberate follow-ups scheduled
 for next session
 **Author:** Aryan Singh, VantageMind AI
+**Document revisions:**
+- 2026-05-03 (initial) — original write-up
+- 2026-05-03 (evening, this revision) — §5 and §8 Follow-up A corrected
+  inline after reading the actual `luciel-ecs-migrate-role` IAM policy.
+  The original claim that the role lacked `ssm:GetParameter` /
+  `ssm:PutParameter` was wrong; the role has both. The genuine gap is
+  `ssm:GetParameterHistory` only. Strikethroughs preserve the original
+  diagnosis as written so the reasoning trail stays auditable. See also
+  the rescoped P3-G entry in `docs/PHASE_3_COMPLIANCE_BACKLOG.md`.
 
 ---
 
@@ -133,7 +142,7 @@ event in log group `/ecs/luciel-backend`, stream
 
 ---
 
-## 5. Why atomic ordering held (and why we got lucky twice)
+## 5. Why atomic ordering held ~~(and why we got lucky twice)~~
 
 The script's intended ordering is:
 
@@ -145,17 +154,42 @@ The crash happened at step 0 (the connect itself), so steps 1–3 never
 ran. The `luciel_worker` role is still in its post-migration NULL-pw
 state.
 
-But there is a second, independently-protective fact: the
+> **Correction (2026-05-03 evening):** The original §5 went on to claim
+> a "second, independently-protective fact" — that the
+> `luciel-ecs-migrate-role` IAM role lacked `ssm:GetParameter` and
+> `ssm:PutParameter` on `/luciel/production/worker_database_url`,
+> providing belt-and-suspenders protection in case the connect had
+> succeeded. **That claim is wrong.** A direct read of the role's inline
+> policy `luciel-migrate-ssm-write` shows it has both `ssm:GetParameter`
+> and `ssm:PutParameter` on `/luciel/production/*` (which matches the
+> worker DSN parameter), plus `kms:Decrypt` scoped to SSM. The genuine
+> missing action is `ssm:GetParameterHistory`, used only by my new
+> pre-flight code. The original diagnosis came from a separate SSM
+> recon attempt that hit a different permission surface, which I
+> incorrectly conflated into this section. The corrected story:
+> **atomic ordering held because the crash was at `psycopg.connect()`,
+> full stop. There was no second IAM gap to rely on.**
+
+~~But there is a second, independently-protective fact: the
 `luciel-ecs-migrate-role` IAM role lacks `ssm:GetParameter` and
 `ssm:PutParameter` on `/luciel/production/worker_database_url`. So
 even if the connect had succeeded, step 3 would have raised
 `AccessDeniedException`, leaving the worker role with a fresh password
 and SSM with no value — the worker would not be able to authenticate
 on the next ECS task restart, and recovery would have required
-`--force-rotate` to re-mint after fixing the IAM gap.
+`--force-rotate` to re-mint after fixing the IAM gap.~~
 
-That second failure mode is exactly the atomicity gap the new
-`preflight_ssm_writable()` helper now closes (see §6, patch 3).
+~~That second failure mode is exactly the atomicity gap the new
+`preflight_ssm_writable()` helper now closes (see §6, patch 3).~~
+
+**Revised:** `preflight_ssm_writable()` is still sound design — it
+closes a real atomicity gap that would surface on any future IAM
+regression (e.g., a tightened policy that revoked `PutParameter` on the
+worker DSN). Today the gap is closed by the existing policy; the
+pre-flight is insurance against drift. The justification I originally
+gave ("protects against the gap that exists today") was wrong; the
+justification "protects against the gap that could exist tomorrow" is
+correct.
 
 ---
 
@@ -236,25 +270,53 @@ These are explicitly **not** done tonight. Each requires a fresh
 context and at least one prerequisite that the current session cannot
 satisfy.
 
-### Follow-up A — Migrate-role IAM gap (P1, blocks Commit 4 retry)
+### Follow-up A — Migrate-role IAM gap ~~(P1, blocks Commit 4 retry)~~
 
-`luciel-ecs-migrate-role` needs:
+> **Correction (2026-05-03 evening):** Original Follow-up A overstated
+> the gap. The corrected scope is below; the original text is preserved
+> with strikethrough underneath. See `PHASE_3_COMPLIANCE_BACKLOG.md` →
+> P3-G for the rescoped backlog item.
 
-- `ssm:GetParameter`, `ssm:GetParameterHistory`,
-  `ssm:PutParameter` on `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url`
-- `ssm:GetParameter` on `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url`
+**Corrected scope:** `luciel-ecs-migrate-role` is missing only
+`ssm:GetParameterHistory` on `/luciel/production/*`. That is a one-line
+additive diff to the existing `luciel-migrate-ssm-write` inline policy.
+The role already has `ssm:GetParameter`, `ssm:PutParameter`,
+`kms:Decrypt`, and the other SSM management actions on the right paths.
+
+**Architectural decision (separate from the IAM diff):** Even though we
+*could* additionally grant the migrate role `ssm:GetParameter` on
+`/luciel/database-url` so the task could read the admin DSN itself,
+that is **not** what we will do. Per the decision recorded in the
+Phase 3 backlog (P3-K) and master plan (Phase 2 status snapshot), we
+are adopting the **Option 3** boundary: a separate
+`luciel-mint-operator-role`, MFA-required AssumeRole, used by the human
+operator to read the admin DSN locally and pass it to the ECS task via
+`containerOverrides command`. The migrate task role NEVER gets read
+access to the admin DSN. This eliminates the class of bug that produced
+the original leak.
+
+~~Original text (incorrect — over-stated the gap):~~
+
+~~`luciel-ecs-migrate-role` needs:~~
+
+- ~~`ssm:GetParameter`, `ssm:GetParameterHistory`,
+  `ssm:PutParameter` on `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url`~~
+- ~~`ssm:GetParameter` on `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url`
   (so the task can read the admin URL — though we should consider
   switching to a dedicated mint task-def that takes the admin URL via
   `aws ssm get-parameter` outside the task and passes it via task env
   rather than reading inside the container, since the inside-the-task
-  read is what enabled the leak in the first place)
-- KMS `kms:Decrypt` on the SSM-default KMS key (already implied by SSM
-  SecureString permissions, but verify)
+  read is what enabled the leak in the first place)~~
+- ~~KMS `kms:Decrypt` on the SSM-default KMS key (already implied by SSM
+  SecureString permissions, but verify)~~
 
-After this is applied, Commit 4 retry runs the patched mint script
-end-to-end. The pre-flight will pass; the SQLAlchemy prefix will be
-stripped; the connect will succeed; `ALTER ROLE` will execute;
-`put_parameter` will write the SecureString.
+After the corrected diff (`GetParameterHistory` only) lands AND the
+`luciel-mint-operator-role` is created AND MFA is enabled on
+`luciel-admin`, Commit 4 retry runs the patched mint script end-to-end
+via the Option 3 ceremony. The pre-flight will pass; the SQLAlchemy
+prefix will be stripped (defensively, even though the operator is now
+passing a libpq-form DSN directly); the connect will succeed; `ALTER
+ROLE` will execute; `put_parameter` will write the SecureString.
 
 ### Follow-up B — Admin password rotation (P1)
 

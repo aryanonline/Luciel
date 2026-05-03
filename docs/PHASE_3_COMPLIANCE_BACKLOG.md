@@ -262,57 +262,62 @@ but non-identical semantics.
 
 ---
 
-## P3-G. Migrate-role IAM gap blocks Commit 4 mint  *(P1, blocks Phase 2 Commit 4)*
+## P3-G. Migrate-role missing `ssm:GetParameterHistory`  *(P2, rescoped 2026-05-03 evening)*
 
-**Discovered:** 2026-05-03 during the Commit 4 mint real-run that caught
-the DSN-leak incident (see `docs/recaps/2026-05-03-mint-incident.md`).
+**Discovered:** 2026-05-03 during the Commit 4 mint real-run.
+**Rescoped:** 2026-05-03 evening, after a direct read of the
+`luciel-ecs-migrate-role` inline policy `luciel-migrate-ssm-write`.
 
-**What's missing:** `luciel-ecs-migrate-role`
-(`arn:aws:iam::729005488042:role/luciel-ecs-migrate-role`) lacks the
-SSM permissions the patched `mint_worker_db_password_ssm.py` needs:
+**What's actually missing (corrected):**
+`luciel-ecs-migrate-role` (`arn:aws:iam::729005488042:role/luciel-ecs-migrate-role`)
+is missing only one IAM action: `ssm:GetParameterHistory` on
+`/luciel/production/*`. The role's existing inline policy already
+grants:
 
-- `ssm:GetParameter`, `ssm:GetParameterHistory`, `ssm:PutParameter` on
-  `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url`
-- `ssm:GetParameter` on
-  `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url`
-  (so the task can source the admin URL — though see fix-shape below
-  for an alternative that avoids reading the admin DSN inside the
-  task at all)
-- `kms:Decrypt` on the SSM-default KMS key (implied by SSM SecureString
-  permissions; verify in the policy)
+- `ssm:GetParameter`, `ssm:PutParameter`, `ssm:DescribeParameters`,
+  `ssm:AddTagsToResource`, `ssm:ListTagsForResource` on
+  `/luciel/production/*` and `/luciel/bootstrap/*`
+- `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKey` scoped via
+  `kms:ViaService = ssm.ca-central-1`
 
-The gap was visible in the real-run: the mint script's `boto3` SSM
-call raised `AccessDeniedException`. The new
-`preflight_ssm_writable()` helper now catches this BEFORE any DB
-mutation, but the underlying IAM gap still blocks Commit 4 from
-landing.
+The new `preflight_ssm_writable()` helper in commit `2b5ff32` calls
+`ssm:GetParameterHistory` to verify writability without mutating
+state; that single action is the genuine remaining gap.
 
-**Why this is P1:** Commit 4 is the prod-touching commit that mints
-the `luciel_worker` password and stores the worker DSN in SSM
-SecureString. Until this IAM gap is closed, Commit 4 cannot land,
-which keeps Phase 2 from closing.
+**Original (incorrect) framing:** The first version of this item
+claimed the role lacked `ssm:GetParameter` and `ssm:PutParameter` and
+that the gap blocked Commit 4 entirely. That diagnosis was wrong; it
+conflated a separate SSM recon attempt with the actual policy state.
+The corrected severity is P2 (the patched mint script will run today
+with a single IAM action added), not P1.
+
+**Why this is P2 (corrected):** The mint script will function with
+the existing policy IF we drop the pre-flight, but we want to keep
+the pre-flight as drift-insurance (see `2026-05-03-mint-incident.md`
+§5 corrected text). Adding `GetParameterHistory` is a one-line policy
+diff with no risk profile.
+
+**Important: this item does NOT block Commit 4 anymore.** Commit 4 is
+blocked instead on P3-J (MFA on `luciel-admin`) and P3-K
+(mint-operator role) per the Option 3 architectural decision.
 
 **Fix shape:**
-1. Update `luciel-ecs-migrate-role` IAM policy to grant the three SSM
-   actions on the worker-DSN parameter and `GetParameter` on the
-   admin-DSN parameter.
-2. **Strongly consider** decoupling the mint task: instead of having
-   the ECS task read `/luciel/database-url` from inside the
-   container, have the operator read it locally (via
-   `aws ssm get-parameter --with-decryption`), pass it via the task's
-   container override `command` array, and keep the admin DSN out of
-   the task IAM role's blast radius entirely. This eliminates the
-   class of bug where the admin DSN ever reaches the task's stderr.
-3. Re-run the patched mint script. Pre-flight will pass; SQLAlchemy
-   prefix will be stripped; connect will succeed; `ALTER ROLE`
-   executes; `put_parameter` writes the SecureString.
-4. Document the IAM diff in `docs/runbooks/step-28-commit-8-luciel-worker-sg.md`
-   so the ordering is reproducible.
+1. Edit `luciel-migrate-ssm-write` inline policy on
+   `luciel-ecs-migrate-role`. Add `ssm:GetParameterHistory` to the
+   `Action` list of the existing `SsmManageBootstrapAndProductionAdminKeyParams`
+   statement. No new statement needed; no new resource needed.
+2. Save the updated policy JSON to
+   `infra/iam/luciel-ecs-migrate-role-policy.json` for reproducibility.
+3. Apply via `aws iam put-role-policy --role-name luciel-ecs-migrate-role --policy-name luciel-migrate-ssm-write --policy-document file://infra/iam/luciel-ecs-migrate-role-policy.json`.
+4. Verify via `aws iam simulate-principal-policy --policy-source-arn <role-arn> --action-names ssm:GetParameterHistory --resource-arns arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url` (expect `allowed`).
 
-**Estimated effort:** 1 IAM policy update + 1 commit re-run + recap
-update. ~30 minutes operator time.
+**Sequencing:** Bundle with P3-K execution (the mint-operator role
+setup). Same session, same commit.
+
+**Estimated effort:** ~15 minutes including the JSON capture.
 **Cross-references:** `docs/recaps/2026-05-03-mint-incident.md` §8
-(Follow-up A), commit `2b5ff32`.
+Follow-up A (corrected), commit `2b5ff32`. Supersedes the original
+(incorrect) P3-G in commits `31e2b16` and `43e2e7a`.
 
 ---
 
@@ -370,6 +375,135 @@ rotation can run cleanly via the patched mint pattern.
 
 ---
 
+## P3-J. Enable MFA on `luciel-admin` IAM user  *(P0 — highest-severity gap in the entire backlog)*
+
+**Discovered:** 2026-05-03 evening, while designing the Option 3
+boundary (P3-K). Confirmed via `aws iam list-mfa-devices --user-name
+luciel-admin` returning `"MFADevices": []`.
+
+**What's missing:** `luciel-admin` — the single human IAM principal
+that can do anything in AWS account `729005488042` — has no MFA device
+attached. Authentication relies entirely on the long-lived password
++ access key pair. There is no second factor.
+
+**Why this is P0 (the highest-severity item in the backlog):**
+
+- This is bigger than the worker-DSN incident we just spent two
+  sessions diagnosing. That incident had a single-IAM-user blast
+  radius. This gap IS the single IAM user's blast radius.
+- A brokerage CTO doing tech DD will find this in the first 10
+  minutes of an IAM review. Nothing else in the compliance posture
+  matters until this is fixed.
+- For SOC 2 CC6.1, MFA on privileged users is a baseline control,
+  not an aspiration.
+- Every other Option 3-style boundary we're considering depends on
+  MFA being a meaningful condition. `aws:MultiFactorAuthPresent` is
+  paper-only without an actual MFA device.
+
+**Fix shape (operator-executed, ~5 minutes):**
+
+1. Sign in to AWS console as `luciel-admin`.
+2. Top-right → username → Security credentials → Multi-factor
+   authentication → Assign MFA device.
+3. Device name: `luciel-admin-virtual-mfa` (or the operator's
+   convention).
+4. Choose Authenticator app. Open authenticator (Google Authenticator,
+   Authy, 1Password, Bitwarden) on phone, scan QR.
+5. Enter two consecutive 6-digit codes.
+6. Click Add MFA.
+7. Verify with `aws iam list-mfa-devices --user-name luciel-admin` —
+   expect a device entry with a `SerialNumber` ARN.
+8. Record the SerialNumber ARN; it is the MFA condition value used in
+   P3-K's trust policy.
+
+**Sequencing:** This is the absolute first item to execute in any
+remaining Phase 2 / Phase 3 work. Nothing else depends on staying
+deferred.
+
+**Estimated effort:** ~5 minutes operator time.
+**Cross-references:** `docs/recaps/2026-04-27-step-28-master-plan.md`
+Phase 2 Status Snapshot section, commit `2b5ff32`.
+
+---
+
+## P3-K. Create `luciel-mint-operator-role` (MFA-required AssumeRole)  *(P1, Option 3 boundary)*
+
+**Discovered:** 2026-05-03 evening, during the architectural
+discussion of how to hand the admin DSN to mint operations. The
+obvious option (grant the migrate task role `ssm:GetParameter` on the
+admin DSN) reproduces the conditions that produced the original leak.
+A tighter alternative exists.
+
+**What's missing:** A dedicated IAM role for human-operator-initiated
+credential operations, with three properties:
+
+1. Trust policy: only `luciel-admin` IAM user can assume it, AND the
+   assume-role call must include MFA (`aws:MultiFactorAuthPresent =
+   true`).
+2. Permission set: `ssm:GetParameter` on `/luciel/database-url`
+   (admin DSN), `kms:Decrypt` scoped to SSM. Nothing else.
+3. Max session duration: 1 hour (3600 s) or shorter.
+
+The existing pattern (read admin DSN as `luciel-admin` directly) has
+two failure modes the new role eliminates:
+
+- The read looks like normal admin activity in CloudTrail; there is
+  no auditable boundary between "human did a sensitive credential
+  operation" and "human read a config value."
+- If the admin DSN is needed for an automated task, the task role
+  needs read access — which is exactly what produced the original
+  leak.
+
+With the new role, every human-initiated mint produces a CloudTrail
+`AssumeRole` event tagged with the operator's principal and the MFA
+condition. The migrate task role NEVER gets read on the admin DSN.
+
+**Why this is P1 (and where it sits in the priority stack):**
+
+- P3-J (MFA) must come first. Without MFA on `luciel-admin`, this
+  role's trust policy condition is paper-only.
+- After P3-J, this is the immediate next step. It unblocks Commit 4
+  mint re-run (the original Phase 2 work).
+- For SOC 2: this is the IAM-traceable boundary between
+  human-initiated credential operations and routine admin activity.
+  It's the kind of control auditors specifically look for.
+
+**Fix shape:**
+
+1. Author trust policy at
+   `infra/iam/luciel-mint-operator-role-trust-policy.json`. Principal:
+   `arn:aws:iam::729005488042:user/luciel-admin`. Condition:
+   `"Bool": {"aws:MultiFactorAuthPresent": "true"}` AND
+   `"NumericLessThan": {"aws:MultiFactorAuthAge": "3600"}`.
+2. Author permission policy at
+   `infra/iam/luciel-mint-operator-role-policy.json`. Action:
+   `ssm:GetParameter` on
+   `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url`,
+   plus `kms:Decrypt` scoped via `kms:ViaService = ssm.ca-central-1`.
+3. Create role: `aws iam create-role --role-name luciel-mint-operator-role --assume-role-policy-document file://... --max-session-duration 3600`.
+4. Attach inline policy:
+   `aws iam put-role-policy --role-name luciel-mint-operator-role --policy-name luciel-mint-operator-read --policy-document file://...`.
+5. Author PowerShell helper at `scripts/mint-with-assumed-role.ps1`
+   that wraps the assume-role + env-var dance + admin-DSN read +
+   ECS task launch + env-var clear.
+6. Test the ceremony end-to-end (assume-role with MFA token, read
+   `/luciel/database-url`, smoke-test that the migrate task role
+   CANNOT read it).
+7. Document in
+   `docs/runbooks/step-28-commit-8-luciel-worker-sg.md` and link from
+   the canonical recap §2.6 (Operator patterns).
+
+**Sequencing:** Execute after P3-J. Bundle the migrate-role policy
+diff (P3-G corrected) in the same session and same commit — they're
+related IAM work and reviewing them together is cleaner.
+
+**Estimated effort:** ~45 minutes operator + 1 commit (~200 LOC of
+JSON + ~80 LOC of PowerShell helper + runbook update).
+**Cross-references:** `docs/recaps/2026-05-03-mint-incident.md` §8
+(corrected Follow-up A), commit `2b5ff32`.
+
+---
+
 ## P3-I. Public ALB attracts opportunistic CVE scanners  *(P3 — informational)*
 
 **Discovered:** 2026-05-03 (incidental observation during Phase 2
@@ -411,23 +545,39 @@ time spread over a week.
 
 ## Sequencing
 
-When Phase 2 lands and we re-open compliance work:
+Updated 2026-05-03 evening after P3-G rescope and P3-J / P3-K addition.
+The Commit 4 mint re-run is now blocked on P3-J + P3-K, NOT on P3-G.
 
-1. **P3-G first** (interleaves into Phase 2, not Phase 3 proper) —
-   blocks Commit 4 mint retry, must be closed for Phase 2 to finish.
-2. **P3-H immediately after P3-G** — time-bounded credential rotation;
-   uses the same mint pattern P3-G unblocks.
-3. **P3-A first within Phase 3 proper.** Onboarding audit gap is the
-   single P0. Everything else is P1/P2.
-4. **P3-B as a bundle with P3-A.** They share the audit-emission code path.
-5. **P3-C** alongside the next canonical recap update (cheap, doc-only).
-6. **P3-D** before any sales motion that markets cross-tenant isolation.
-7. **P3-E and P3-F** before the first SOC 2 readiness assessment.
-8. **P3-I** during Phase 4 edge-hardening (informational, no urgency).
+**Phase 2 tail (must complete before Phase 2 closes):**
 
-**Estimated total:** ~9 commits, ~750 LOC of code + ~250 LOC of docs,
-plus operator time for IAM/SSM/credential rotations. ~2-3 weeks of
-focused work, with P3-G and P3-H bridging into the tail of Phase 2.
+1. **P3-J FIRST.** MFA on `luciel-admin`. P0. ~5 minutes. Everything
+   else stalls until this lands.
+2. **P3-K next.** Create `luciel-mint-operator-role` with MFA-required
+   trust policy. Bundle the P3-G policy diff (`GetParameterHistory`)
+   into the same IAM-work session and commit.
+3. **Commit 4 mint re-run** via the Option 3 ceremony.
+4. **P3-H** — admin password rotation using the same Option 3
+   ceremony, plus log-stream delete.
+
+**Phase 3 proper (starts after Phase 2 prod-touching commits 4-7
+stabilize for ≥ 7 days):**
+
+5. **P3-A first within Phase 3.** Onboarding audit gap is the single
+   P0 of Phase 3 audit work. Everything else is P1/P2.
+6. **P3-B as a bundle with P3-A.** They share the audit-emission code
+   path.
+7. **P3-C** alongside the next canonical recap update (cheap,
+   doc-only).
+8. **P3-D** before any sales motion that markets cross-tenant
+   isolation.
+9. **P3-E and P3-F** before the first SOC 2 readiness assessment.
+10. **P3-I** during Phase 4 edge-hardening (informational, no
+    urgency).
+
+**Estimated total:** ~10 commits, ~950 LOC of code + ~350 LOC of
+docs, plus operator time for MFA setup, IAM role creation, SSM
+rotations, and CloudWatch log cleanup. ~2-3 weeks of focused work,
+with P3-J/P3-K/P3-G/P3-H bridging into the tail of Phase 2.
 
 ---
 

@@ -457,9 +457,117 @@ Stay in real estate until 35 paying tenants before expanding verticals.
 
 ---
 
+## Section 10 — Phase 2 Status Snapshots
+
+Appended over time. Each snapshot is a dated section; do NOT edit prior
+snapshots in place — history matters. New snapshots go at the bottom of
+this section.
+
+### Snapshot 2026-05-03 (evening) — mid-Phase-2, post-incident reconciliation
+
+**Branch:** `step-28-hardening-impl`, HEAD `43e2e7a` (about to be
+bumped by the docs reconciliation commit this section is part of).
+
+**Phase 2 commits landed so far (chronological):**
+
+| SHA | Type | Status |
+|---|---|---|
+| `75f6015` | Commit 2 — audit-log API mount | Code-only, shipped |
+| `bfa2591` | Commit 2b — audit-log review fixes | Code-only, shipped |
+| `56bdab8` | Commit 3 — Pillar 13 A3 fix | Code-only, shipped |
+| `0d75dfe` | Commit 8 — batched retention deletes | Code-only, shipped |
+| `925c64a` | Commit 9 — Phase 2 close (recap v1.1 + runbook) | Code-only, shipped |
+| `2c7d0fb` | HOTFIX — Pillars 7/17/19 fixes | Code-only, shipped |
+| `31e2b16` | Phase 3 backlog v1 + sandbox e2e | Code-only, shipped |
+| `2b5ff32` | Mint-script hardening (post-incident) | Code-only, shipped |
+| `43e2e7a` | Mint incident recap + Phase 3 backlog v2 | Code-only, shipped |
+
+**Phase 2 commits NOT yet landed (prod-touching):**
+
+| # | Description | Status |
+|---|---|---|
+| 4 | Worker DB role swap to `luciel_worker` + `luciel_admin` rotation | **Blocked on P3-J + P3-K** (see Phase 3 backlog). Mint script is hardened and dry-run clean (`2b5ff32`). |
+| 5 | 5 CloudWatch alarms + SNS pipeline | Pending (untouched) |
+| 6 | ECS auto-scaling target tracking | Pending (untouched) |
+| 7 | Container healthChecks | Pending (untouched) |
+
+**What Phase 2 has revealed but not yet delivered (the discovery
+surface):**
+
+This section exists because the Commit 4 work surfaced gaps that
+weren't on any list at Phase 2 start:
+
+1. **Mint script DSN-leak class of bug.** Caught in dry-run before any
+   prod mutation. Patched in `2b5ff32`. Documented in
+   `docs/recaps/2026-05-03-mint-incident.md`. Pattern E ("plaintext
+   credentials live in SSM only") was correctly stated in the
+   canonical recap but was paper-only without redaction discipline
+   on the leak surfaces.
+2. **Original "second IAM gap" diagnosis was wrong.** Direct read of
+   the migrate-role policy showed `ssm:GetParameter` and
+   `ssm:PutParameter` are both present on `/luciel/production/*`.
+   The genuine gap is `ssm:GetParameterHistory` only. Recap and
+   backlog corrected inline 2026-05-03 evening.
+3. **`luciel-admin` IAM user has no MFA.** P0 finding, bigger than
+   the worker-DSN incident. Captured as P3-J in the Phase 3 backlog;
+   must be the next operator action.
+4. **No IAM-traceable boundary exists between human-initiated
+   credential operations and routine admin activity.** Original
+   architecture would either grant the migrate task role read access
+   to the admin DSN (reproducing the leak conditions) or have
+   `luciel-admin` directly read the DSN (no audit boundary).
+   Resolution: Option 3 boundary captured as P3-K — dedicated
+   `luciel-mint-operator-role` with MFA-required AssumeRole.
+
+**Revised Phase 2 close gate (2026-05-03 evening):**
+
+The original gate (canonical recap §4.1) was: `python -m
+app.verification` 19/19 green, all 5 alarms `OK`, both auto-scaling
+targets registered, both services healthCheck-enabled, zero worker
+connections as `luciel_admin`. That gate stands; we add three
+clauses:
+
+6. **MFA enabled on `luciel-admin`** (P3-J) — verified by
+   `aws iam list-mfa-devices --user-name luciel-admin` returning a
+   non-empty `MFADevices` list.
+7. **`luciel-mint-operator-role` exists with MFA-required trust
+   policy** (P3-K) — verified by
+   `aws iam get-role --role-name luciel-mint-operator-role` showing
+   `aws:MultiFactorAuthPresent` condition on the AssumeRolePolicy.
+8. **Admin password rotated, leak log stream deleted** (P3-H) —
+   verified by
+   `aws logs filter-log-events --log-group-name /ecs/luciel-backend --filter-pattern '"LucielDB2026Secure"'`
+   returning zero events, AND the password fingerprint recorded in
+   the mint incident recap §9 addendum matches the SSM-stored
+   value's first 12 SHA256 hex chars.
+
+**Revised Phase 2 wall-clock estimate:**
+
+Original estimate: 3-4 hours total wall-clock for hands-on execution
+of Commits 4-7. Revised: 5-7 hours, accounting for P3-J (~5 min),
+P3-K (~45 min including helper script + smoke test), P3-G policy
+diff (~15 min), P3-H rotation (~1 hour), plus the original 3-4 hours
+for Commits 4-7. Spread across 2-3 sessions for context hygiene.
+
+**Honest assessment of where Phase 2 is:**
+
+5 of 9 originally-scoped commits land. 4 prod-touching commits
+remain. The Commit 4 blocker has revealed itself as larger than
+originally scoped, but the larger scope is the right scope — we now
+have a defensible IAM architecture for credential operations rather
+than a convenient one. The trade is well-spent.
+
+The canonical recap was bumped v1.0 → v1.1 at Commit 9 (`925c64a`).
+It is now at v1.2 (this commit and the canonical-recap edits in the
+same docs reconciliation pass).
+
+---
+
 **End of master plan.**
 
 Living document. Updates land as commits on `step-28-hardening`.
 Section 3 (drift register) updates with every Step 28 commit.
 Sections 1-2, 5-7 update at phase-close in dedicated `docs(28): re-plan`
 commits.
+Section 10 (Phase 2 Status Snapshots) appends a new dated snapshot at
+any significant Phase 2 milestone or discovery.

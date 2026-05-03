@@ -1,9 +1,9 @@
 # Luciel Canonical Recap
 
-**Version:** v1.1
-**Last updated:** 2026-05-03, on Phase 2 mid-stream close of code-only commits (Commits 2 / 2b / 3 / 8 / 9 shipped; Commits 4–7 prod-touching, packaged for hands-on execution)
-**Supersedes:** v1 (2026-05-03 Phase 1 close)
-**Next update:** at Phase 2 full close (all of Commits 4–7 live in prod) OR when a strategic-question answer changes
+**Version:** v1.2
+**Last updated:** 2026-05-03 evening, mid-Phase-2 docs reconciliation pass following the Commit 4 mint-script DSN-leak incident (`2b5ff32` hardening + `43e2e7a` incident recap) and the IAM-policy / MFA reality-check that surfaced P3-J (P0, MFA on `luciel-admin`) and P3-K (P1, dedicated `luciel-mint-operator-role`). v1.2 supersedes v1.1's optimistic Phase-2-Commit-4 framing.
+**Supersedes:** v1.1 (2026-05-03 Phase 2 mid-stream close); v1 (2026-05-03 Phase 1 close)
+**Next update:** at Phase 2 full close (Commits 4–7 live in prod AND P3-J/P3-K resolved, leaked DSN rotated per P3-H) OR when a strategic-question answer changes
 **Source-of-truth rule:** if a chat recap or session summary contradicts this document, this document wins. Update via PR with rationale; do not produce contradicting recaps inline.
 
 ---
@@ -185,13 +185,17 @@ Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
 | `bfa2591` | **Phase 2 Commit 2b** — audit-log review fixes: H1 (route prefix), H2 (per-resource `_SAFE_DIFF_KEYS` allow-list redaction), H3 (real second-tenant scope guard test), M1/M3, L1/L2 |
 | `56bdab8` | **Phase 2 Commit 3** — Pillar 13 A3 sentinel-extractable fix (user-fact-shaped setup turn, A3 keyed on `MemoryItem.message_id` FK, 30 s polling). Brings dev verification 17/18 → 19/19 (Pillar 19 audit-log mount also green). |
 | `0d75dfe` | **Phase 2 Commit 8** — batched retention deletes/anonymizes via `FOR UPDATE SKIP LOCKED LIMIT n` chunks with per-batch commit. Settings: `retention_batch_size`, `retention_batch_sleep_seconds`, `retention_max_batches_per_run`. Partial-failure semantics: writes `DeletionLog` with `"PARTIAL: ..."` reason then re-raises. Removes outer `db.rollback()` from `enforce_all_policies` (now harmful with per-batch commits + auto-committing audit log). |
-| (this commit) | **Phase 2 Commit 9** — Phase 2 close (code-only portion): canonical recap v1.1 + new `docs/runbooks/step-28-phase-2-deploy.md` covering all 9 Phase-2 commits incl. runbook sections for prod-touching Commits 4–7. |
+| `925c64a` | **Phase 2 Commit 9** — Phase 2 close (code-only portion): canonical recap v1.1 + new `docs/runbooks/step-28-phase-2-deploy.md` covering all 9 Phase-2 commits incl. runbook sections for prod-touching Commits 4–7. |
+| `2c7d0fb` | **Phase 2 HOTFIX** — Pillars 7 (test drift), 17 (real bug), 19 (test design flaw); restores dev verification to green and unblocks Commit 4 attempt. |
+| `31e2b16` | **Phase 3 compliance backlog seeded** — `docs/PHASE_3_COMPLIANCE_BACKLOG.md` (P3-A through P3-G). Items surfaced during Phase 2 hotfix diagnosis but deliberately deferred to Phase 3 to keep Phase 2 focused. |
+| `2b5ff32` | **Phase 2 Commit 4 mint-script hardening** — `scripts/mint_worker_db_password_ssm.py` rebuilt to never log a constructed DSN, never accept admin DSN as runtime input, suppress full-DSN error bodies, and log only sanitized SSM ARN identifiers. Authored after a dry-run of the original mint script leaked the admin DSN (incl. password `LucielDB2026Secure`) into CloudWatch log group `/ecs/luciel-backend` stream `migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c`. |
+| `43e2e7a` | **Mint-incident recap** — `docs/recaps/2026-05-03-mint-incident.md`. Five root causes: (1) admin DSN as input parameter; (2) full-DSN error bodies; (3) shared `luciel-ecs-migrate-role` task role with no separation between migrate and mint duties; (4) no MFA enforcement on the human identity (`luciel-admin`) doing privileged ops; (5) no compensating control for accidental log-line leakage. Drove the P3-J / P3-K / P3-H additions to the Phase 3 backlog. |
 
 **Not yet shipped (prod-touching, packaged for hands-on execution):**
 
 | # | Description | Why packaged-not-executed |
 |---|---|---|
-| 4 | Worker DB role swap to `luciel_worker` + `luciel_admin` password rotation | Touches RDS users + ECS task-def + SSM. User explicitly wants to execute alongside agent at his laptop. Runbook: `docs/runbooks/step-28-phase-2-deploy.md` §4. |
+| 4 | Worker DB role swap to `luciel_worker` + `luciel_admin` password rotation | **BLOCKED on P3-J + P3-K (Option 3 architecture).** First mint attempt (2026-05-03) leaked the admin DSN to CloudWatch via `--dry-run` error body. Hardened mint script (`2b5ff32`) is necessary but not sufficient: prerequisites are (a) MFA enabled on `luciel-admin` per P3-J; (b) dedicated `luciel-mint-operator-role` (MFA-required, scoped to `ssm:GetParameter` on `/luciel/database-url` + KMS Decrypt) per P3-K; (c) leaked password rotation per P3-H (rotate `luciel_admin`, delete the leaking log stream). Migrate task role NEVER receives read on admin DSN. Runbook §4 must be revised to invoke the mint via `aws sts assume-role --serial-number ... --token-code ...` ceremony before re-attempt. |
 | 5 | 5 CloudWatch alarms (SQS backlog, DLQ, RDS conn, ECS CPU, ALB 5xx) + SNS pipeline | Touches CloudWatch + SNS. Runbook: §5. CFN template stub `infra/cloudwatch/alarms.yaml` to be authored at execution time. |
 | 6 | ECS auto-scaling target tracking (web on CPU, worker on SQS depth) | Touches ECS + Application Auto Scaling. Runbook: §6. |
 | 7 | Container-level healthChecks (web `curl localhost:8000/health`, worker `celery inspect ping`) | Touches ECS task-defs. Runbook: §7. |
@@ -238,11 +242,23 @@ Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
 3. **Commit 6 — ECS auto-scaling** — web service target-tracks 50% CPU; worker service target-tracks SQS messages-per-task = 10. Min 1, Max 4 each. CFN templates under `infra/autoscaling/`.
 4. **Commit 7 — Container healthChecks** — backend `curl -fsS localhost:8000/health`, worker `celery inspect ping`. Belt-and-suspenders against ALB target group health.
 
-**Phase 2 full close gate:** `python -m app.verification` 19/19 green against prod, all 5 alarms `OK`, both auto-scaling targets registered, both services on healthCheck-enabled task-def revisions, `pg_stat_activity` shows zero worker connections as `luciel_admin`. When met, tag `step-28-phase-2-complete`.
+**Phase 2 full close gate:** `python -m app.verification` 19/19 green against prod, all 5 alarms `OK`, both auto-scaling targets registered, both services on healthCheck-enabled task-def revisions, `pg_stat_activity` shows zero worker connections as `luciel_admin`, **AND** the following P3 prerequisites for Commit 4 are satisfied:
+- **MFA enforced on `luciel-admin`** — `aws iam list-mfa-devices --user-name luciel-admin` returns a non-empty `MFADevices` array (P3-J resolved).
+- **Dedicated `luciel-mint-operator-role` exists with MFA-required AssumeRole** — `aws iam get-role --role-name luciel-mint-operator-role` returns a trust policy with `Bool: aws:MultiFactorAuthPresent=true` and `NumericLessThan: aws:MultiFactorAuthAge=3600` (P3-K resolved). The migrate task role is NOT granted read on `/luciel/database-url`.
+- **Leaked admin password rotated and leaking log stream deleted** — `aws logs filter-log-events --log-group-name /ecs/luciel-backend --filter-pattern '"LucielDB2026Secure"'` returns zero events (P3-H resolved).
 
-Estimated: 4 prod-touching commits, ~3–4 hours total wall-clock for hands-on execution. Runs in parallel with Steps 29/30.
+When met, tag `step-28-phase-2-complete`.
 
-### 4.2 Step 28 Phase 3 — Hygiene hardening (opportunistic)
+Estimated (REVISED 2026-05-03 evening): 4 prod-touching commits + 3 P3 prerequisites (J, K, H), ~5–7 hours total wall-clock across 2–3 sessions for hands-on execution. Runs in parallel with Steps 29/30.
+
+### 4.2 Step 28 Phase 3 — Hygiene + compliance hardening
+
+**Authoritative tracker:** `docs/PHASE_3_COMPLIANCE_BACKLOG.md` (commit `31e2b16` + 2026-05-03 evening rescope). Items below are a flat snapshot; the backlog file is the canonical priority and sequencing source.
+
+- **P3-J (P0, NEW 2026-05-03)** — Enforce MFA on `luciel-admin` (and any other unMFA'd IAM users). Hard prerequisite for Commit 4 mint re-attempt.
+- **P3-K (P1, NEW 2026-05-03)** — Create `luciel-mint-operator-role` with MFA-required AssumeRole, scoped to `ssm:GetParameter` on `/luciel/database-url` + KMS Decrypt via SSM. Authors `scripts/mint-with-assumed-role.ps1` helper.
+- **P3-H (P0)** — Rotate leaked `luciel_admin` password (`LucielDB2026Secure`); delete CloudWatch log stream `/ecs/luciel-backend / migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c`.
+- **P3-G (P2, RESCOPED 2026-05-03)** — Was "missing GetParameter/PutParameter on migrate role" (incorrect diagnosis). Real state: only `ssm:GetParameterHistory` is missing from `luciel-migrate-ssm-write`. Bundle this single-action diff into the same IAM commit as P3-K.
 - Dedicated read-only recon role
 - Pattern O helper script extraction (`scripts/run_prod_recon.ps1`)
 - LucielInstanceRepo `_for_agent`/`_for_domain` cascade autocommit-aware
@@ -425,6 +441,10 @@ Insurance, legal, mortgage. (Vertical-Q1 strategic question — which first.)
 - SOC2 / HIPAA (would need security audit + Tier B)
 - Encryption-at-rest documentation (RDS encrypts; DD packet doesn't yet codify)
 - Hard-purge timing SLA (soft-deleted rows persist; future retention worker)
+- **MFA on privileged human identities** — `luciel-admin` IAM user has `MFADevices: []` as of 2026-05-03 evening. P3-J fixes; brokerage DD will fail this check until resolved.
+- **Separation-of-duties on operator IAM roles** — `luciel-ecs-migrate-role` is currently used for both Alembic migrations and password mint. P3-K splits mint into a dedicated MFA-required `luciel-mint-operator-role`. Until then the blast radius of a compromised migrate task role includes admin-DSN read.
+- **Audit-emission gaps for IAM-side privileged actions** — AssumeRole calls into the future `luciel-mint-operator-role` will land in CloudTrail, but Luciel's `admin_audit_logs` does not yet ingest CloudTrail. Considered acceptable for Phase 2, but explicit gap for Tier B / SOC2 readiness.
+- **Plaintext credential rotation hygiene** — leaked `luciel_admin` password (`LucielDB2026Secure`) sits in CloudWatch log group `/ecs/luciel-backend` stream `migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c` until P3-H rotates and deletes.
 
 ### 11.3 Brokerage DD answer template
 "When a brokerage cancels their subscription, every memory data point, every API key, every agent persona, every domain, every Luciel instance flips to inactive in a single atomic transaction. Audit logs in admin_audit_logs show exactly what was deactivated, when, by whom, and what cascade reason. Soft-deleted rows scheduled for hard-purge within [N days] (future retention worker)."
@@ -441,7 +461,7 @@ If conversation context is lost, these are the most important facts to preserve:
 4. **Step 30b is the highest-leverage commit on the roadmap** — REMAX trial unblock.
 5. **Step 28 has 4 phases** (security/compliance, observability, hygiene, cosmetic). Phase 1 complete at `bd9446b`.
 6. **Pillar 13 A3 fixed by Phase 2 Commit 3** (`56bdab8`) — was a test-design issue (sentinel-not-extractable), never a security gap. Dev now 19/19 green.
-7. **Worker DB role swap is Phase 2 Commit 4** — packaged as runbook (`docs/runbooks/step-28-phase-2-deploy.md` §4), pending hands-on prod execution. Worker still runs as `luciel_admin` until that commit lands.
+7. **Worker DB role swap is Phase 2 Commit 4** — packaged as runbook (`docs/runbooks/step-28-phase-2-deploy.md` §4), but the first mint attempt on 2026-05-03 leaked the admin DSN to CloudWatch. Re-attempt is BLOCKED on three P3 prerequisites: P3-J (MFA on `luciel-admin`), P3-K (dedicated `luciel-mint-operator-role` with MFA-required AssumeRole; migrate task role does NOT get admin-DSN read), and P3-H (rotate leaked `LucielDB2026Secure` + delete leaking log stream). Option 3 architecture is locked: human operator assumes the mint role via `aws sts assume-role --serial-number ... --token-code ...`, runs mint via `scripts/mint-with-assumed-role.ps1`, then the assumed credentials expire in ≤1 hour. Worker still runs as `luciel_admin` until all three resolve.
 8. **Five willingness-to-pay drivers:** maintainability, scalability, reliability, security, traceability.
 9. **Three deliberate exclusions:** no mobile, no marketplace, no model training. Adding any requires roadmap conversation.
 10. **Operator patterns codified:** E (secrets), N (migrations), O (recon), S (cleanup, now backup). Runbooks at `docs/runbooks/`.
@@ -516,8 +536,12 @@ Only after Step 4, propose work.
 ## Section 15 — Drift register
 
 ### Phase 2 (operational hardening)
-- Worker DB role swap (former Commit 13 work) — packaged as Commit 4, runbook §4
+- Worker DB role swap (former Commit 13 work) — packaged as Commit 4, runbook §4 — **BLOCKED on P3-J + P3-K + P3-H** (see §4.1 close gate)
 - D-prod-superuser-password-leaked-to-terminal-2026-05-03 (rotate `luciel_admin` as part of worker role swap) — packaged as Commit 4, runbook §4.7
+- **D-mint-script-leaks-admin-dsn-via-error-body-2026-05-03** (NEW) — original mint script logged the constructed admin DSN on dry-run error path. Hardened by `2b5ff32`; full incident report at `docs/recaps/2026-05-03-mint-incident.md`. Resolved at code level; operator-side rotation is P3-H.
+- **D-luciel-admin-no-mfa-2026-05-03** (NEW) — `aws iam list-mfa-devices --user-name luciel-admin` returns empty. Tracked as P3-J.
+- **D-migrate-role-conflated-with-mint-duty-2026-05-03** (NEW) — single `luciel-ecs-migrate-role` covers both Alembic migrations and mint operations. Splitting into dedicated `luciel-mint-operator-role` is P3-K.
+- **D-canonical-recap-misdiagnosed-migrate-role-policy-gap-2026-05-03** (NEW, self-referential) — prior session asserted migrate role was missing `ssm:GetParameter` + `ssm:PutParameter`. Real read of `luciel-migrate-ssm-write` shows both are present; only `ssm:GetParameterHistory` is missing. P3-G rescoped P1 → P2 in `31e2b16` follow-up edit (2026-05-03 evening).
 - D-celery-worker-not-running-locally-2026-05-02 (codify in operator-patterns.md or pre-flight check)
 - D-pillar-10-suite-internal-only-2026-05-01 (deploy-time teardown contract)
 - D-cloudwatch-no-retention-policy-2026-05-01 (365-day retention cap)
@@ -560,6 +584,10 @@ Only after Step 4, propose work.
 - D-pillar-13-a3-sentinel-not-extractable-content-2026-05-02 → Commit 3 (`56bdab8`)
 - D-audit-log-api-404 (Phase 2 §4.1 item 4 in v1) → Commit 2 (`75f6015`) + Commit 2b (`bfa2591`)
 - D-retention-unbounded-delete-2026-05-03 (newly named at Phase 2 plan time, see Commit 8 message) → Commit 8 (`0d75dfe`)
+- D-pillar-7-test-drift-2026-05-03 → Phase 2 HOTFIX (`2c7d0fb`)
+- D-pillar-17-real-bug-2026-05-03 → Phase 2 HOTFIX (`2c7d0fb`)
+- D-pillar-19-test-design-flaw-2026-05-03 → Phase 2 HOTFIX (`2c7d0fb`)
+- D-mint-script-leaks-admin-dsn-via-error-body-2026-05-03 (code-level hardening only; operator-side rotation P3-H still open) → Commit 4 mint hardening (`2b5ff32`)
 
 ### Resolved by Phase 1 (cumulative)
 - D-pattern-s-walker-missing-memory-items-leaf-2026-05-01 → Commit 12 (`f9f6f79`)
@@ -614,4 +642,4 @@ If they disagree:
 
 ---
 
-## End of Canonical Recap v1
+## End of Canonical Recap v1.2
