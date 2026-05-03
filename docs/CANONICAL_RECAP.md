@@ -1,9 +1,9 @@
 # Luciel Canonical Recap
 
-**Version:** v1
-**Last updated:** 2026-05-03, on Phase 1 close (commit `bd9446b`, tag `step-28-phase-1-complete`)
-**Supersedes:** all prior recap versions including v3 reframe of 2026-05-01 11 PM
-**Next update:** at Phase 2 close OR when a strategic-question answer changes
+**Version:** v1.1
+**Last updated:** 2026-05-03, on Phase 2 mid-stream close of code-only commits (Commits 2 / 2b / 3 / 8 / 9 shipped; Commits 4–7 prod-touching, packaged for hands-on execution)
+**Supersedes:** v1 (2026-05-03 Phase 1 close)
+**Next update:** at Phase 2 full close (all of Commits 4–7 live in prod) OR when a strategic-question answer changes
 **Source-of-truth rule:** if a chat recap or session summary contradicts this document, this document wins. Update via PR with rationale; do not produce contradicting recaps inline.
 
 ---
@@ -43,7 +43,7 @@ These are settled. Any future recap must read from this section, not infer.
 
 | Category | Step | Description | Status |
 |---|---|---|---|
-| Hardening | **28** | Operational maturity sprint — security/compliance, observability, hygiene, cosmetic — **4 phases**, 13–15 commits | **Phase 1 complete** at `bd9446b` (tag `step-28-phase-1-complete`). Phases 2/3/4 pending |
+| Hardening | **28** | Operational maturity sprint — security/compliance, observability, hygiene, cosmetic — **4 phases**, 13–15 commits | **Phase 1 complete** at `bd9446b` (tag `step-28-phase-1-complete`). **Phase 2 code-only portion shipped** (Commits 2/2b/3/8/9 on `step-28-hardening-impl`); Phase 2 prod-touching commits 4–7 packaged as code+IaC+runbook (`docs/runbooks/step-28-phase-2-deploy.md`), pending hands-on prod execution. Phases 3/4 pending |
 | Identity | **24.5c** | User identity claims (phone/email/SSO) + conversation grouping (Q8) | Candidate, slot before Step 30 |
 | Testing | **29** | Automated testing suite (pytest wrap of `app.verification`) | Planned |
 | Billing | **30a** | Stripe billing (subscription tiers, webhooks, tier-gated features) | Candidate, slot between 29 and 30 |
@@ -70,7 +70,8 @@ These are settled. Any future recap must read from this section, not infer.
 - **Schema naming:** `_configs` suffix (tenant_configs, domain_configs, agent_configs)
 - **Prod region:** ca-central-1, account 729005488042
 - **Prod URL:** api.vantagemind.ai (ALB-fronted, NOT API Gateway)
-- **Database:** RDS Postgres, master role `luciel_admin`. New role `luciel_worker` exists with least-privilege grants (Step 28 Phase 2 will swap worker to use it).
+- **Database:** RDS Postgres, master role `luciel_admin`. New role `luciel_worker` exists with least-privilege grants. **Step 28 Phase 2 Commit 4 will swap the worker to use it AND rotate the `luciel_admin` password** — packaged as runbook, pending hands-on execution.
+- **Retention purges are batched** as of Phase 2 Commit 8 (`0d75dfe`). Defaults: 1000 rows/batch, 50 ms inter-batch sleep, 10000 batches/run cap. `FOR UPDATE SKIP LOCKED` keeps purges safe to run alongside live chat traffic. Tunable via `LUCIEL_RETENTION_*` env vars.
 - **Operator patterns codified:** E (secrets), N (migrations), O (recon), S (cleanup walker)
 - **Three-channel audit** for every prod mutation: CloudTrail + CloudWatch + admin_audit_logs
 
@@ -148,7 +149,7 @@ Plus sub-tenant cascade on agent/domain/instance deactivation. Pillar 18 enforce
 
 ---
 
-## Section 3 — What's accomplished (Step 28 Phase 1 complete)
+## Section 3 — What's accomplished (Step 28 Phase 1 complete; Phase 2 code-only commits shipped)
 
 ### 3.1 Phase 1 commits shipped (chronological, verified from git log)
 
@@ -174,6 +175,27 @@ Plus sub-tenant cascade on agent/domain/instance deactivation. Pillar 18 enforce
 | `2e31797` | 2026-05-02 | **Commit 14: worker audit attribution fix** (Pillar 13 A2) |
 | `bd9446b` | 2026-05-03 | **Commit 9: Phase 1 close** — Pattern E codified, tag `step-28-phase-1-complete` |
 
+### 3.1b Phase 2 commits shipped (code-only portion)
+
+Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
+
+| Hash | Commit |
+|---|---|
+| `75f6015` | **Phase 2 Commit 2** — audit-log API mount (`GET /api/v1/admin/audit-log`); closes recap §4.1 item 4 + drift `D-audit-log-api-404` |
+| `bfa2591` | **Phase 2 Commit 2b** — audit-log review fixes: H1 (route prefix), H2 (per-resource `_SAFE_DIFF_KEYS` allow-list redaction), H3 (real second-tenant scope guard test), M1/M3, L1/L2 |
+| `56bdab8` | **Phase 2 Commit 3** — Pillar 13 A3 sentinel-extractable fix (user-fact-shaped setup turn, A3 keyed on `MemoryItem.message_id` FK, 30 s polling). Brings dev verification 17/18 → 19/19 (Pillar 19 audit-log mount also green). |
+| `0d75dfe` | **Phase 2 Commit 8** — batched retention deletes/anonymizes via `FOR UPDATE SKIP LOCKED LIMIT n` chunks with per-batch commit. Settings: `retention_batch_size`, `retention_batch_sleep_seconds`, `retention_max_batches_per_run`. Partial-failure semantics: writes `DeletionLog` with `"PARTIAL: ..."` reason then re-raises. Removes outer `db.rollback()` from `enforce_all_policies` (now harmful with per-batch commits + auto-committing audit log). |
+| (this commit) | **Phase 2 Commit 9** — Phase 2 close (code-only portion): canonical recap v1.1 + new `docs/runbooks/step-28-phase-2-deploy.md` covering all 9 Phase-2 commits incl. runbook sections for prod-touching Commits 4–7. |
+
+**Not yet shipped (prod-touching, packaged for hands-on execution):**
+
+| # | Description | Why packaged-not-executed |
+|---|---|---|
+| 4 | Worker DB role swap to `luciel_worker` + `luciel_admin` password rotation | Touches RDS users + ECS task-def + SSM. User explicitly wants to execute alongside agent at his laptop. Runbook: `docs/runbooks/step-28-phase-2-deploy.md` §4. |
+| 5 | 5 CloudWatch alarms (SQS backlog, DLQ, RDS conn, ECS CPU, ALB 5xx) + SNS pipeline | Touches CloudWatch + SNS. Runbook: §5. CFN template stub `infra/cloudwatch/alarms.yaml` to be authored at execution time. |
+| 6 | ECS auto-scaling target tracking (web on CPU, worker on SQS depth) | Touches ECS + Application Auto Scaling. Runbook: §6. |
+| 7 | Container-level healthChecks (web `curl localhost:8000/health`, worker `celery inspect ping`) | Touches ECS task-defs. Runbook: §7. |
+
 ### 3.2 Prod state at Phase 1 close
 - Branch: `step-28-hardening`, HEAD `bd9446b`, tag `step-28-phase-1-complete`
 - Backend service: `luciel-backend:17` (digest `sha256:39fecc49...95193`)
@@ -181,7 +203,8 @@ Plus sub-tenant cascade on agent/domain/instance deactivation. Pillar 18 enforce
 - memory_items.actor_user_id NOT NULL enforced
 - Cascade-in-code verified end-to-end via prod smoke test on `step28-smoke-cascade-372779`
 - Pillar 18 (tenant cascade end-to-end) green on dev
-- Dev verification: 17/18 pillars green, Pillar 13 only red (A3 — sentinel-not-extractable, deferred to Phase 2)
+- Dev verification at Phase 1 close: 17/18 pillars green, Pillar 13 only red (A3 — sentinel-not-extractable, deferred to Phase 2)
+- **Dev verification post-Phase-2-Commit-3:** 19/19 green (Pillar 13 A3 fixed + Pillar 19 audit-log mount included)
 
 ### 3.3 Phase 1 business impact
 - **PIPEDA Principle 5 compliance** real in prod (cascade-in-code)
@@ -201,14 +224,23 @@ Plus sub-tenant cascade on agent/domain/instance deactivation. Pillar 18 enforce
 
 ## Section 4 — What's next
 
-### 4.1 Step 28 Phase 2 — Operational hardening
-1. **Worker DB role swap** — mint `luciel_worker` password via `scripts/mint_worker_db_password_ssm.py` (run via ECS one-shot or temporary SG ingress); write `worker_database_url` SSM; update worker task-def; deploy
-2. **Rotate `luciel_admin` password** — drift `D-prod-superuser-password-leaked-to-terminal-2026-05-03`
-3. **Pillar 13 A3 fix** — rewrite test setup turn with extractable user-fact wrapping the sentinel; gets to 18/18 green
-4. **Audit-log API mount** — `/api/v1/admin/audit-log` returns 404 currently
-5. **Worker scope-assignment cascades** — Q6 doctrine extension for edge cases
+### 4.1 Step 28 Phase 2 — Operational hardening (in progress)
 
-Estimated: 3–5 commits, ~4–6 hours total. Runs in parallel with Steps 29/30.
+**Code-only portion: SHIPPED on `step-28-hardening-impl`.** See §3.1b.
+- ~~Pillar 13 A3 fix~~ ✅ Commit 3 `56bdab8`
+- ~~Audit-log API mount~~ ✅ Commit 2 `75f6015` + Commit 2b `bfa2591` review fixes
+- ~~Batched retention~~ ✅ Commit 8 `0d75dfe`
+- ~~Phase 2 deploy runbook + recap update~~ ✅ Commit 9 (this commit)
+
+**Prod-touching portion: PACKAGED, awaiting hands-on execution.** See `docs/runbooks/step-28-phase-2-deploy.md`.
+1. **Commit 4 — Worker DB role swap** — mint `luciel_worker` password via `scripts/mint_worker_db_password_ssm.py` (run via Pattern N one-shot); write `WORKER_DATABASE_URL` SSM; update worker task-def; deploy. Then rotate `luciel_admin` password (drift `D-prod-superuser-password-leaked-to-terminal-2026-05-03`).
+2. **Commit 5 — CloudWatch alarms** — 5 alarms (SQS >50, DLQ >0, RDS conn >80%, ECS CPU >80%, ALB 5xx >1%) + SNS topic + email subscription. CFN template `infra/cloudwatch/alarms.yaml`.
+3. **Commit 6 — ECS auto-scaling** — web service target-tracks 50% CPU; worker service target-tracks SQS messages-per-task = 10. Min 1, Max 4 each. CFN templates under `infra/autoscaling/`.
+4. **Commit 7 — Container healthChecks** — backend `curl -fsS localhost:8000/health`, worker `celery inspect ping`. Belt-and-suspenders against ALB target group health.
+
+**Phase 2 full close gate:** `python -m app.verification` 19/19 green against prod, all 5 alarms `OK`, both auto-scaling targets registered, both services on healthCheck-enabled task-def revisions, `pg_stat_activity` shows zero worker connections as `luciel_admin`. When met, tag `step-28-phase-2-complete`.
+
+Estimated: 4 prod-touching commits, ~3–4 hours total wall-clock for hands-on execution. Runs in parallel with Steps 29/30.
 
 ### 4.2 Step 28 Phase 3 — Hygiene hardening (opportunistic)
 - Dedicated read-only recon role
@@ -408,8 +440,8 @@ If conversation context is lost, these are the most important facts to preserve:
 3. **REMAX Crossroads is Tier 3 / $2K/mo**, gated by Step 30b widget, NOT by Commit 12.
 4. **Step 30b is the highest-leverage commit on the roadmap** — REMAX trial unblock.
 5. **Step 28 has 4 phases** (security/compliance, observability, hygiene, cosmetic). Phase 1 complete at `bd9446b`.
-6. **Pillar 13 A3 deferred to Phase 2** — test-design issue (sentinel-not-extractable), not a security gap.
-7. **Worker DB role swap deferred to Phase 2** — canonical placement per recap §9.4 / §11.3.
+6. **Pillar 13 A3 fixed by Phase 2 Commit 3** (`56bdab8`) — was a test-design issue (sentinel-not-extractable), never a security gap. Dev now 19/19 green.
+7. **Worker DB role swap is Phase 2 Commit 4** — packaged as runbook (`docs/runbooks/step-28-phase-2-deploy.md` §4), pending hands-on prod execution. Worker still runs as `luciel_admin` until that commit lands.
 8. **Five willingness-to-pay drivers:** maintainability, scalability, reliability, security, traceability.
 9. **Three deliberate exclusions:** no mobile, no marketplace, no model training. Adding any requires roadmap conversation.
 10. **Operator patterns codified:** E (secrets), N (migrations), O (recon), S (cleanup, now backup). Runbooks at `docs/runbooks/`.
@@ -448,10 +480,10 @@ Block 3 — Docker:
 Block 4 — Dev admin key (expect True / 50):
 `$env:LUCIEL_PLATFORM_ADMIN_KEY.StartsWith("luc_sk_"); $env:LUCIEL_PLATFORM_ADMIN_KEY.Length`
 
-Block 5 — Verification (expect 17/18 with Pillar 13 only red):
+Block 5 — Verification (expect 19/19 post-Phase-2-Commit-3):
 `python -m app.verification`
 
-If Block 5 returns anything other than 17/18 with Pillar 13 only red, **diagnosis is the only acceptable next action.** Do not proceed to prod work on a red dev.
+If Block 5 returns anything other than 19/19 green, **diagnosis is the only acceptable next action.** Do not proceed to prod work on a red dev. (Pre-Phase-2 baseline was 17/18 with Pillar 13 A3 red — superseded by Commit 3 `56bdab8`.)
 
 ### Step 4: State back to user, in 5 lines
 - Where we are (HEAD, phase, milestone)
@@ -484,14 +516,12 @@ Only after Step 4, propose work.
 ## Section 15 — Drift register
 
 ### Phase 2 (operational hardening)
-- Worker DB role swap (former Commit 13 work)
-- D-prod-superuser-password-leaked-to-terminal-2026-05-03 (rotate `luciel_admin` as part of worker role swap)
-- D-pillar-13-a3-sentinel-not-extractable-content-2026-05-02 (rewrite test setup turn with extractable user-fact)
+- Worker DB role swap (former Commit 13 work) — packaged as Commit 4, runbook §4
+- D-prod-superuser-password-leaked-to-terminal-2026-05-03 (rotate `luciel_admin` as part of worker role swap) — packaged as Commit 4, runbook §4.7
 - D-celery-worker-not-running-locally-2026-05-02 (codify in operator-patterns.md or pre-flight check)
 - D-pillar-10-suite-internal-only-2026-05-01 (deploy-time teardown contract)
 - D-cloudwatch-no-retention-policy-2026-05-01 (365-day retention cap)
 - D-recon-task-role-reuses-migrate-role-2026-05-01 (dedicated `luciel-ecs-recon-role`)
-- Audit-log API mount (`/api/v1/admin/audit-log` returns 404)
 - D-pillar-13-creates-residue-on-failure-2026-05-01
 
 ### Phase 3 (hygiene)
@@ -525,6 +555,11 @@ Only after Step 4, propose work.
 - D-powershell-heredoc-angle-bracket-after-quote-2026-05-01
 - D-powershell-question-mark-in-string-interpolation-2026-05-01
 - D-double-8a-commits-2026-05-01
+
+### Resolved by Phase 2 code-only portion
+- D-pillar-13-a3-sentinel-not-extractable-content-2026-05-02 → Commit 3 (`56bdab8`)
+- D-audit-log-api-404 (Phase 2 §4.1 item 4 in v1) → Commit 2 (`75f6015`) + Commit 2b (`bfa2591`)
+- D-retention-unbounded-delete-2026-05-03 (newly named at Phase 2 plan time, see Commit 8 message) → Commit 8 (`0d75dfe`)
 
 ### Resolved by Phase 1 (cumulative)
 - D-pattern-s-walker-missing-memory-items-leaf-2026-05-01 → Commit 12 (`f9f6f79`)
