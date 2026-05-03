@@ -34,6 +34,14 @@ emits an audit row. Together they cover both halves of the contract.
 Self-cleanup: pillar onboards a throwaway second tenant for assertion
 3 and deactivates it before returning. The suite-level teardown only
 knows about state.tenant_id; this pillar owns its own residue.
+
+Step 28 Phase 2 hotfix: after onboarding the secondary, also mint an
+API key against the secondary tenant via POST /admin/api-keys. The
+onboarding service writes ZERO audit rows (the API mint path is the
+only hook that records ACTION_CREATE for api_key resources), so
+without this anchor mint there would be no rows tagged with
+secondary_tid for assertion 3b to find -- and 3b would silently pass
+for the same reason it was meant to catch.
 """
 
 from __future__ import annotations
@@ -92,6 +100,30 @@ class AuditLogApiMountPillar(Pillar):
                 )
                 secondary_onboarded = True
                 _ = r0.json()  # presence is enough; we only need the tid
+
+                # ---- 0b. Force at least one audit row tagged with
+                #         secondary_tid. OnboardingService.onboard_tenant
+                #         creates the tenant + first admin key directly
+                #         through the service layer and writes ZERO
+                #         admin_audit_logs rows; only the API mint path
+                #         (POST /admin/api-keys) emits an audit row.
+                #         Without this extra mint, assertion 3b would be
+                #         vacuous (no rows tagged secondary_tid would exist
+                #         for platform_admin to find), defeating the very
+                #         vacuous-pass guard the assertion exists to prevent.
+                mint_body: dict[str, Any] = {
+                    "tenant_id": secondary_tid,
+                    "display_name": "Pillar 19 secondary audit anchor",
+                    "permissions": ["chat", "sessions"],
+                }
+                call(
+                    "POST",
+                    "/api/v1/admin/api-keys",
+                    pa,
+                    json=mint_body,
+                    expect=(200, 201),
+                    client=c,
+                )
 
                 # ---- 1. Endpoint resolves (not 404) under tenant_admin ----
                 r1 = c.get("/api/v1/admin/audit-log", headers=h(ak))

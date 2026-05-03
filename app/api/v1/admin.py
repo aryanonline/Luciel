@@ -652,7 +652,45 @@ def deactivate_api_key(
     service = ApiKeyService(db)
     # Fetch first so we can enforce scope on the target.
     target = service.get_key_by_id(key_id) if hasattr(service, "get_key_by_id") else None
-    if target is None:
+
+    # Step 28 Phase 2 HOTFIX: previously the happy path (target found) was
+    # dead code -- it returned 204 without ever calling deactivate_key,
+    # so Pillar 17 D5 saw zero deactivate audit rows. Now we always run
+    # the deactivate path, with scope enforcement when the target is
+    # known. The fallback (target unknown) preserves the legacy 404
+    # behavior for buggy/legacy ApiKeyService implementations missing
+    # get_key_by_id.
+    if target is not None:
+        # Enforce scope: a tenant-scoped caller cannot deactivate keys
+        # belonging to other tenants; a domain-scoped caller cannot
+        # touch keys outside their domain; same for agent.
+        if not ScopePolicy.is_platform_admin(request):
+            caller_tenant = getattr(request.state, "tenant_id", None)
+            caller_domain = getattr(request.state, "domain_id", None)
+            caller_agent = getattr(request.state, "agent_id", None)
+            if caller_tenant and target.tenant_id != caller_tenant:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cannot deactivate API key outside your tenant",
+                )
+            if caller_domain and target.domain_id and target.domain_id != caller_domain:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cannot deactivate API key outside your domain",
+                )
+            if caller_agent and target.agent_id and target.agent_id != caller_agent:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cannot deactivate API key outside your agent",
+                )
+        success = service.deactivate_key(key_id, audit_ctx=audit_ctx)
+        if not success:
+            # Race: target existed at fetch but vanished before deactivate.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="API key not found",
+            )
+    else:
         # Fall back: just try deactivate; 404 if not found.
         success = service.deactivate_key(key_id, audit_ctx=audit_ctx)
         if not success:

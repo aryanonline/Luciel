@@ -10,7 +10,12 @@ silently skipped agent-scope instances, landed would not have caught it.
 Redo closes gap 4 by re-fetching ALL FOUR affected entities post-PATCH
 and asserting each is active=False, then reading the audit log and
 asserting exactly 3 cascade_deactivate rows exist for this tenant
-(one per cascaded child: agent, domain-luciel, agent-luciel).
+(one bulk row for the agent cascade, one bulk row for the
+domain+agent LucielInstance cascade, and one bulk row for the
+memory-items cascade). Per Step 24.5 design (luciel_instance_repository
+.deactivate_all_for_domain) the domain-scope and agent-scope Luciels
+are cascaded together via a single UPDATE and emit ONE summary audit
+row, not two.
 
 The tenant-level LucielInstance is NOT expected to cascade -- it is
 above the domain in scope and should remain active. This is an
@@ -162,11 +167,11 @@ class CascadePillar(Pillar):
                     row for row in rows
                     if (row.get("action") or "").lower() in ("cascade_deactivate", "cascade-deactivate", "cascadedeactivate")
                 ]
-                if len(cascade_rows) != 4:
+                if len(cascade_rows) != 3:
                     raise AssertionError(
-                        f"expected exactly 4 cascade_deactivate audit rows "
-                        f"(agent, domain-luciel, agent-luciel, memory), "
-                        f"got {len(cascade_rows)}. "
+                        f"expected exactly 3 cascade_deactivate audit rows "
+                        f"(agent-bulk, luciel-bulk [covers both domain+agent "
+                        f"scope], memory-bulk), got {len(cascade_rows)}. "
                         f"rows={[{'action': r.get('action'), 'resource_type': r.get('resource_type')} for r in cascade_rows]}"
                     )
                 # New 2026-05-02: domain deactivation now cascades memory_items.
@@ -184,7 +189,7 @@ class CascadePillar(Pillar):
                         f"deactivate_domain may have stopped calling "
                         f"bulk_soft_deactivate_memory_items_for_domain."
                     )
-                audit_note = f"{len(cascade_rows)} rows (incl 1 memory)"
+                audit_note = f"{len(cascade_rows)} rows (agent-bulk, luciel-bulk, memory)"
 
         return (
             f"domain+agent+domain-luciel+agent-luciel all inactive; "
