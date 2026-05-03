@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import secrets
 import sys
 from datetime import datetime, timezone
@@ -98,6 +99,28 @@ WORKER_ROLE_NAME = "luciel_worker"
 DEFAULT_SSM_PATH = "/luciel/production/worker_database_url"
 DEFAULT_REGION = "ca-central-1"
 PASSWORD_ENTROPY_BYTES = 32  # secrets.token_urlsafe(32) -> ~43 chars, ~256 bits
+
+# SQLAlchemy DSN driver suffixes that raw psycopg.connect() does NOT accept.
+# When the operator-supplied --admin-db-url comes from an SSM param that
+# was stored in SQLAlchemy form (e.g., the existing /luciel/database-url
+# is `postgresql+psycopg://...` because the running backend uses
+# SQLAlchemy), we strip the suffix before handing the URL to psycopg.
+SQLA_DRIVER_PREFIXES = (
+    "postgresql+psycopg://",
+    "postgresql+psycopg2://",
+    "postgresql+asyncpg://",
+)
+
+# Pattern to redact a Postgres URL anywhere it appears in an exception
+# message. Captures any postgres scheme (with or without driver suffix),
+# any userinfo, host/port, db, query string. Used by
+# _redact_dsn_in_message to keep credentials out of stderr/CloudWatch on
+# the script's failure paths (see Pattern E discipline notes in module
+# docstring).
+_DSN_REDACT_RE = re.compile(
+    r"postgres(?:ql)?(?:\+\w+)?://[^\s\"']+",
+    re.IGNORECASE,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -205,6 +228,94 @@ def generate_password() -> str:
     secrets.token_urlsafe uses the URL-safe base64 alphabet (-, _).
     """
     return secrets.token_urlsafe(PASSWORD_ENTROPY_BYTES)
+
+
+def _redact_dsn_in_message(msg: str) -> str:
+    """Redact any Postgres DSN found in an arbitrary message string.
+
+    Pattern E discipline: psycopg's exception messages can include the
+    full connection string -- including the password -- when the URL is
+    malformed. We MUST scrub before printing to stderr or any logged
+    surface. This function replaces every postgres-shaped URL in the
+    message with `<DSN-REDACTED>`, preserving the surrounding context so
+    the operator still sees what kind of error happened.
+
+    Incident reference: 2026-05-03 mint dry-run leaked admin DSN to
+    CloudWatch via psycopg ProgrammingError on `+psycopg` driver
+    prefix. See docs/recaps/2026-05-03-mint-incident.md.
+    """
+    return _DSN_REDACT_RE.sub("<DSN-REDACTED>", msg)
+
+
+def _strip_sqla_driver_prefix(url: str) -> str:
+    """Convert a SQLAlchemy-shaped DSN to a libpq-shaped DSN.
+
+    Raw psycopg.connect() rejects `postgresql+psycopg://` etc. as
+    malformed -- the `+driver` suffix is a SQLAlchemy convention, not
+    libpq syntax. Strip it so we can hand the URL to psycopg directly.
+
+    No-op if the URL already starts with plain `postgresql://`.
+    """
+    for prefix in SQLA_DRIVER_PREFIXES:
+        if url.startswith(prefix):
+            return "postgresql://" + url[len(prefix):]
+    return url
+
+
+def preflight_ssm_writable(*, region: str, ssm_path: str) -> None:
+    """Verify the caller can write to ssm_path BEFORE any DB mutation.
+
+    Atomicity defense: the original script ordering was
+    (1) ALTER ROLE in DB, then (2) put_parameter to SSM. If step (2)
+    failed -- e.g., because the task IAM role lacks ssm:PutParameter --
+    the DB password was already changed but SSM had stale or no value,
+    leaving the worker unable to authenticate.
+
+    This pre-flight detects the IAM gap before we touch the DB. We use
+    GetParameterHistory because it requires both ssm:GetParameter and
+    ssm:GetParameterHistory but does NOT require the parameter to
+    already exist (it returns ParameterNotFound, which we treat as
+    success -- the path is writable, just empty). Any AccessDenied
+    response means the caller cannot write either; we abort.
+
+    We deliberately do NOT use a write-then-rollback approach (e.g.,
+    put_parameter + delete_parameter) because that would mutate SSM
+    history -- exactly what we're trying to keep clean. A read-shaped
+    permission check is sufficient because IAM policies that grant
+    PutParameter on a path almost always grant GetParameter on the same
+    path (the bootstrap-and-verify pattern).
+
+    Raises RuntimeError on AccessDenied, no-op on success or
+    ParameterNotFound.
+    """
+    import boto3  # local import keeps --help fast
+    from botocore.exceptions import ClientError
+
+    ssm = boto3.client("ssm", region_name=region)
+    try:
+        ssm.get_parameter_history(Name=ssm_path, MaxResults=1)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "ParameterNotFound":
+            # Path is empty -- writable assumption holds. The actual
+            # put_parameter will create-or-overwrite cleanly.
+            return
+        if code in ("AccessDeniedException", "AccessDenied"):
+            raise RuntimeError(
+                f"SSM pre-flight failed: caller cannot read {ssm_path!r}. "
+                f"This almost certainly means the IAM role also lacks "
+                f"ssm:PutParameter on this path. Refusing to mutate the "
+                f"DB password before SSM write capability is verified. "
+                f"Update the task/operator IAM policy to allow "
+                f"ssm:GetParameter, ssm:GetParameterHistory, and "
+                f"ssm:PutParameter on {ssm_path!r}, then re-run."
+            ) from exc
+        # Any other error (throttling, region misconfig, etc.) is
+        # unexpected; surface it cleanly.
+        raise RuntimeError(
+            f"SSM pre-flight failed with unexpected error code {code!r}. "
+            f"Aborting before any DB mutation."
+        ) from exc
 
 
 def password_fingerprint(password: str) -> str:
@@ -361,6 +472,21 @@ def main() -> int:
         print("Re-run without --dry-run to actually mint.")
         return 0
 
+    # SSM pre-flight: verify we can write to ssm_path BEFORE touching
+    # the DB. Skipped in --no-ssm (local dev, no SSM at all).
+    if not args.no_ssm:
+        try:
+            preflight_ssm_writable(region=args.region, ssm_path=args.ssm_path)
+        except RuntimeError as exc:
+            # Pre-flight messages are operator-targeted and contain no
+            # credentials, but redact defensively in case a downstream
+            # change ever embeds a DSN in one.
+            print(
+                f"FATAL: {_redact_dsn_in_message(str(exc))}",
+                file=sys.stderr,
+            )
+            return 1
+
     # Connect to Postgres as admin.
     try:
         import psycopg  # local import keeps --help fast
@@ -371,12 +497,24 @@ def main() -> int:
         )
         return 1
 
+    # Strip SQLAlchemy driver suffix if present. The existing
+    # /luciel/database-url SSM param is stored in SQLAlchemy form
+    # (postgresql+psycopg://...) because the running backend uses
+    # SQLAlchemy; raw psycopg requires plain postgresql://.
+    admin_dsn = _strip_sqla_driver_prefix(args.admin_db_url)
+
     try:
-        conn = psycopg.connect(args.admin_db_url)
+        conn = psycopg.connect(admin_dsn)
     except Exception as exc:
+        # CRITICAL Pattern E: psycopg's exception messages frequently
+        # embed the full connection string -- including the password --
+        # when the URL is malformed. Redact before printing to any
+        # surface that could be logged (stderr -> CloudWatch via the
+        # awslogs driver, or shell history, or operator paste-back).
+        # Incident: 2026-05-03 mint attempt leaked admin DSN this way.
+        sanitized = _redact_dsn_in_message(f"{type(exc).__name__}: {exc}")
         print(
-            f"FATAL: cannot connect to admin DB: "
-            f"{type(exc).__name__}: {exc}",
+            f"FATAL: cannot connect to admin DB: {sanitized}",
             file=sys.stderr,
         )
         return 1
@@ -385,8 +523,11 @@ def main() -> int:
         verify_role_state(conn, force_rotate=args.force_rotate)
         alter_role_password(conn, password)
     except Exception as exc:
+        # Same Pattern E discipline as the connect path -- DB error
+        # messages can sometimes echo connection metadata.
+        sanitized = _redact_dsn_in_message(f"{type(exc).__name__}: {exc}")
         print(
-            f"FATAL: role update failed: {type(exc).__name__}: {exc}",
+            f"FATAL: role update failed: {sanitized}",
             file=sys.stderr,
         )
         conn.close()
