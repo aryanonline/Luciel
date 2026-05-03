@@ -156,8 +156,10 @@ teardown still has violations, `5` caught exception.
 | Idempotency | 18 tenants (canary + batch) re-run | 0 mutations, 77 skipped-already-inactive, 18 passed |
 
 Audit artifacts:
-- `prod-cleanup-2026-05-01.json` (idempotency-run snapshot, committed
-  with this commit).
+- `docs/evidence/2026-05-01-prod-cleanup-walker.json` (idempotency-run
+  snapshot, originally committed at repo root as
+  `prod-cleanup-2026-05-01.json`; relocated under `docs/evidence/` during
+  the 2026-05-03 evening repo-hygiene pass).
 - `admin_audit_logs` rows in prod RDS (70 from the real run, 0 from
   idempotency re-run).
 - CloudTrail events for each API call.

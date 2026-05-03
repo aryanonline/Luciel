@@ -51,7 +51,13 @@ landed via Commit 8a.
 
 This runbook assumes `luciel-migrate:11` is the active migrate task-def
 revision. If it is not yet registered, complete **Commit 8b-prereq** first
-(see `msg.txt` and `migrate-td-rev11.json` at the repo root). Pattern N
+(see `msg.txt` and the `luciel-migrate:11` task-def in commit
+`7560397` (`feat(28): Commit 8b-prereq - fix luciel-migrate task-def`).
+The rev11 JSON snapshot was previously committed at the repo root as
+`migrate-td-rev11.json` and was removed during the 2026-05-03 evening
+repo-hygiene pass; reach for the commit, or re-export via
+`aws ecs describe-task-definition --task-definition luciel-migrate:11`.
+Pattern N
 (`docs/runbooks/operator-patterns.md`) explains the migrate task-def
 shape and the historical drift it resolved.
 
