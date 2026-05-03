@@ -243,7 +243,7 @@ Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
 4. **Commit 7 — Container healthChecks** — backend `curl -fsS localhost:8000/health`, worker `celery inspect ping`. Belt-and-suspenders against ALB target group health.
 
 **Phase 2 full close gate:** `python -m app.verification` 19/19 green against prod, all 5 alarms `OK`, both auto-scaling targets registered, both services on healthCheck-enabled task-def revisions, `pg_stat_activity` shows zero worker connections as `luciel_admin`, **AND** the following P3 prerequisites for Commit 4 are satisfied:
-- **MFA enforced on `luciel-admin`** — `aws iam list-mfa-devices --user-name luciel-admin` returns a non-empty `MFADevices` array (P3-J resolved).
+- **MFA enforced on `luciel-admin`** — `aws iam list-mfa-devices --user-name luciel-admin` returns a non-empty `MFADevices` array (P3-J resolved). ✅ **Verified 2026-05-03 23:48:11 UTC** — `SerialNumber: arn:aws:iam::729005488042:mfa/Luciel-MFA`. Account-wide sweep (`aws iam list-users`) confirmed `luciel-admin` is the only IAM user, so privileged-human MFA boundary is fully closed.
 - **Dedicated `luciel-mint-operator-role` exists with MFA-required AssumeRole** — `aws iam get-role --role-name luciel-mint-operator-role` returns a trust policy with `Bool: aws:MultiFactorAuthPresent=true` and `NumericLessThan: aws:MultiFactorAuthAge=3600` (P3-K resolved). The migrate task role is NOT granted read on `/luciel/database-url`.
 - **Leaked admin password rotated and leaking log stream deleted** — `aws logs filter-log-events --log-group-name /ecs/luciel-backend --filter-pattern '"LucielDB2026Secure"'` returns zero events (P3-H resolved).
 
@@ -539,7 +539,7 @@ Only after Step 4, propose work.
 - Worker DB role swap (former Commit 13 work) — packaged as Commit 4, runbook §4 — **BLOCKED on P3-J + P3-K + P3-H** (see §4.1 close gate)
 - D-prod-superuser-password-leaked-to-terminal-2026-05-03 (rotate `luciel_admin` as part of worker role swap) — packaged as Commit 4, runbook §4.7
 - **D-mint-script-leaks-admin-dsn-via-error-body-2026-05-03** (NEW) — original mint script logged the constructed admin DSN on dry-run error path. Hardened by `2b5ff32`; full incident report at `docs/recaps/2026-05-03-mint-incident.md`. Resolved at code level; operator-side rotation is P3-H.
-- **D-luciel-admin-no-mfa-2026-05-03** (NEW) — `aws iam list-mfa-devices --user-name luciel-admin` returns empty. Tracked as P3-J.
+- **D-luciel-admin-no-mfa-2026-05-03** (NEW) — `aws iam list-mfa-devices --user-name luciel-admin` returns empty. Tracked as P3-J. ✅ **RESOLVED 2026-05-03 23:48:11 UTC** — virtual MFA `Luciel-MFA` enabled. Account-wide sweep confirms `luciel-admin` is the only IAM user; full privileged-human MFA boundary is closed.
 - **D-migrate-role-conflated-with-mint-duty-2026-05-03** (NEW) — single `luciel-ecs-migrate-role` covers both Alembic migrations and mint operations. Splitting into dedicated `luciel-mint-operator-role` is P3-K.
 - **D-canonical-recap-misdiagnosed-migrate-role-policy-gap-2026-05-03** (NEW, self-referential) — prior session asserted migrate role was missing `ssm:GetParameter` + `ssm:PutParameter`. Real read of `luciel-migrate-ssm-write` shows both are present; only `ssm:GetParameterHistory` is missing. P3-G rescoped P1 → P2 in `31e2b16` follow-up edit (2026-05-03 evening).
 - D-celery-worker-not-running-locally-2026-05-02 (codify in operator-patterns.md or pre-flight check)
@@ -588,6 +588,9 @@ Only after Step 4, propose work.
 - D-pillar-17-real-bug-2026-05-03 → Phase 2 HOTFIX (`2c7d0fb`)
 - D-pillar-19-test-design-flaw-2026-05-03 → Phase 2 HOTFIX (`2c7d0fb`)
 - D-mint-script-leaks-admin-dsn-via-error-body-2026-05-03 (code-level hardening only; operator-side rotation P3-H still open) → Commit 4 mint hardening (`2b5ff32`)
+
+### Resolved by Phase 3 prerequisites (executed alongside Phase 2)
+- D-luciel-admin-no-mfa-2026-05-03 → P3-J resolved 2026-05-03 23:48:11 UTC. Virtual MFA device `arn:aws:iam::729005488042:mfa/Luciel-MFA` attached to `luciel-admin`. Account-wide IAM-user sweep confirmed `luciel-admin` is the only user; no follow-on MFA work needed for current account state. Forward-looking guard recorded in `PHASE_3_COMPLIANCE_BACKLOG.md` P3-J: every future IAM user must have MFA before first console use.
 
 ### Resolved by Phase 1 (cumulative)
 - D-pattern-s-walker-missing-memory-items-leaf-2026-05-01 → Commit 12 (`f9f6f79`)

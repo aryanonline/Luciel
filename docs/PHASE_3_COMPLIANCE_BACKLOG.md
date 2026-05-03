@@ -375,7 +375,56 @@ rotation can run cleanly via the patched mint pattern.
 
 ---
 
-## P3-J. Enable MFA on `luciel-admin` IAM user  *(P0 — highest-severity gap in the entire backlog)*
+## P3-J. Enable MFA on `luciel-admin` IAM user  *(P0 — RESOLVED 2026-05-03 23:48 UTC)*
+
+**Status:** ✅ **RESOLVED** 2026-05-03 23:48:11 UTC.
+
+**Resolution evidence (verbatim from operator console, 2026-05-03 evening):**
+
+```
+aws iam list-mfa-devices --user-name luciel-admin
+{
+    "MFADevices": [
+        {
+            "UserName": "luciel-admin",
+            "SerialNumber": "arn:aws:iam::729005488042:mfa/Luciel-MFA",
+            "EnableDate": "2026-05-03T23:48:11+00:00"
+        }
+    ]
+}
+```
+
+**P3-J Step 0b (account-wide sweep) — also clean:**
+
+```
+aws iam list-users --query "Users[].UserName" --output table
++----------------+
+|  luciel-admin  |
++----------------+
+```
+
+Account `729005488042` has exactly one IAM user. With MFA now enabled
+on that user, the account-wide privileged-human MFA boundary is fully
+closed.
+
+**MFA SerialNumber for downstream P3-K trust policy:**
+`arn:aws:iam::729005488042:mfa/Luciel-MFA` — this is the value the
+`luciel-mint-operator-role` trust policy will use in its
+`Bool: aws:MultiFactorAuthPresent=true` + `NumericLessThan:
+aws:MultiFactorAuthAge=3600` conditions.
+
+**Forward-looking guard (added as part of resolution):** every IAM
+user created in `729005488042` from this point onward must have MFA
+enabled before first console use. This applies to future contractors,
+co-founders, CI users with console access, and any service user that
+is given a console password. Service users created with programmatic
+access only (no console password) are exempt — they authenticate via
+long-lived access keys, which is a separate Phase 3 concern (P3-X,
+future: short-lived credentials via SSO / Identity Center).
+
+---
+
+### Original P3-J entry (preserved for audit trail)
 
 **Discovered:** 2026-05-03 evening, while designing the Option 3
 boundary (P3-K). Confirmed via `aws iam list-mfa-devices --user-name
@@ -418,9 +467,10 @@ attached. Authentication relies entirely on the long-lived password
 
 **Sequencing:** This is the absolute first item to execute in any
 remaining Phase 2 / Phase 3 work. Nothing else depends on staying
-deferred.
+deferred. *(Resolved 2026-05-03 23:48 UTC — see Status block at top
+of this section.)*
 
-**Estimated effort:** ~5 minutes operator time.
+**Estimated effort:** ~5 minutes operator time. *(Actual: ~2 minutes.)*
 **Cross-references:** `docs/recaps/2026-04-27-step-28-master-plan.md`
 Phase 2 Status Snapshot section, commit `2b5ff32`.
 
