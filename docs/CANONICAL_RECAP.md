@@ -1,8 +1,8 @@
 # Luciel Canonical Recap
 
-**Version:** v1.4
-**Last updated:** 2026-05-03 23:56 UTC, after P3-H (rotate leaked `LucielDB2026Secure` + delete CloudWatch log stream + final residual sweep) landed end-to-end. All four Commit-4 prerequisites (P3-J, P3-K, P3-G, P3-H) are now resolved; **Commit 4 mint re-run is unblocked**. P3-L (SSM parameter history retains plaintext v1) was discovered during P3-H execution and is logged as P2, deferred to post-Commit-4. v1.4 supersedes v1.3's open-gate framing for P3-H.
-**Supersedes:** v1.3 (2026-05-03 late-evening, post P3-J/G/K); v1.2 (2026-05-03 evening, mid-Phase-2 docs reconciliation); v1.1 (2026-05-03 Phase 2 mid-stream close); v1 (2026-05-03 Phase 1 close)
+**Version:** v1.5
+**Last updated:** 2026-05-04 ~18:20 UTC, after Commit A (`81b9e5a`) and Commit D landed on `step-28-hardening-impl`. Commit A fixed a one-line auth-middleware typo (`user_id = agent.user_id` shadowed the never-read local while leaving `request.state.actor_user_id` bound to `None`) that caused **every Pillar 13 A3 legitimate setup-turn `MemoryItem` insert to fail Postgres D11 NOT NULL and be silently swallowed** by the extractor's broad `except Exception`. Post-fix verification ran **19/19 GREEN** including Pillars 11 (async memory), 13 (spoof + legit), 16 (D11). Drift entry `D-pillar-13-a3-real-root-cause-2026-05-04` resolved by `81b9e5a`. Commit D archived the 19/19 run to `docs/verification-reports/` and removed the P13_DIAG instrumentation. Five new Phase-3 items (P3-M, P3-N, P3-O, P3-P, P3-Q) logged for the compounding observability/hygiene gaps the bug exposed. v1.5 supersedes v1.4's pre-fix Pillar-13 framing.
+**Supersedes:** v1.4 (2026-05-03 23:56 UTC, post P3-H); v1.3 (2026-05-03 late-evening, post P3-J/G/K); v1.2 (2026-05-03 evening, mid-Phase-2 docs reconciliation); v1.1 (2026-05-03 Phase 2 mid-stream close); v1 (2026-05-03 Phase 1 close)
 **Next update:** at Phase 2 full close (Commits 4–7 live in prod) OR when a strategic-question answer changes
 **Source-of-truth rule:** if a chat recap or session summary contradicts this document, this document wins. Update via PR with rationale; do not produce contradicting recaps inline.
 
@@ -188,6 +188,8 @@ Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
 | `925c64a` | **Phase 2 Commit 9** — Phase 2 close (code-only portion): canonical recap v1.1 + new `docs/runbooks/step-28-phase-2-deploy.md` covering all 9 Phase-2 commits incl. runbook sections for prod-touching Commits 4–7. |
 | `2c7d0fb` | **Phase 2 HOTFIX** — Pillars 7 (test drift), 17 (real bug), 19 (test design flaw); restores dev verification to green and unblocks Commit 4 attempt. |
 | `31e2b16` | **Phase 3 compliance backlog seeded** — `docs/PHASE_3_COMPLIANCE_BACKLOG.md` (P3-A through P3-G). Items surfaced during Phase 2 hotfix diagnosis but deliberately deferred to Phase 3 to keep Phase 2 focused. |
+| `81b9e5a` | **Phase 2 Commit A (Pillar 13 A3 real fix)** — one-line auth-middleware binding fix (`user_id = agent.user_id` → `actor_user_id = agent.user_id`, `app/middleware/auth.py:124`) + 12-line forensic comment + 5-test regression guard at `tests/middleware/test_actor_user_id_binding.py` (AST canary + 4 behavioral). Two-way proven (FAIL with bug, PASS with fix). Resolves drift `D-pillar-13-a3-real-root-cause-2026-05-04`. Post-fix verification 19/19 green. |
+| `13035da` | **Phase 2 Commit D (P13_DIAG removal + verification archive)** — strips P13_DIAG instrumentation from `app/middleware/auth.py` (17 lines) and `app/services/chat_service.py` (41 lines), deletes `diag_p13_repro.py` (269 lines), archives 19/19 verification report at `docs/verification-reports/step28_phase2_postA_sync_2026-05-04.json` + README. Commit B (extractor B-hybrid) and Commit C (async-flag flip) WITHDRAWN — second post-Commit-A repro proved the system was always architected correctly for prose+tool-call replies and Pillar 11 (async path) was already green. Net −147 lines. See `docs/recaps/2026-05-04-pillar-13-a3-real-root-cause.md` for full forensic narrative including 3 discarded hypotheses. |
 | `2b5ff32` | **Phase 2 Commit 4 mint-script hardening** — `scripts/mint_worker_db_password_ssm.py` rebuilt to never log a constructed DSN, never accept admin DSN as runtime input, suppress full-DSN error bodies, and log only sanitized SSM ARN identifiers. Authored after a dry-run of the original mint script leaked the admin DSN (incl. password `LucielDB2026Secure`) into CloudWatch log group `/ecs/luciel-backend` stream `migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c`. |
 | `43e2e7a` | **Mint-incident recap** — `docs/recaps/2026-05-03-mint-incident.md`. Five root causes: (1) admin DSN as input parameter; (2) full-DSN error bodies; (3) shared `luciel-ecs-migrate-role` task role with no separation between migrate and mint duties; (4) no MFA enforcement on the human identity (`luciel-admin`) doing privileged ops; (5) no compensating control for accidental log-line leakage. Drove the P3-J / P3-K / P3-H additions to the Phase 3 backlog. |
 
@@ -545,7 +547,13 @@ Only after Step 4, propose work.
 - **D-luciel-admin-no-mfa-2026-05-03** (NEW) — `aws iam list-mfa-devices --user-name luciel-admin` returns empty. Tracked as P3-J. ✅ **RESOLVED 2026-05-03 23:48:11 UTC** — virtual MFA `Luciel-MFA` enabled. Account-wide sweep confirms `luciel-admin` is the only IAM user; full privileged-human MFA boundary is closed.
 - **D-migrate-role-conflated-with-mint-duty-2026-05-03** (NEW) — single `luciel-ecs-migrate-role` covers both Alembic migrations and mint operations. Splitting into dedicated `luciel-mint-operator-role` is P3-K.
 - **D-canonical-recap-misdiagnosed-migrate-role-policy-gap-2026-05-03** (NEW, self-referential) — prior session asserted migrate role was missing `ssm:GetParameter` + `ssm:PutParameter`. Real read of `luciel-migrate-ssm-write` shows both are present; only `ssm:GetParameterHistory` is missing. P3-G rescoped P1 → P2 in `31e2b16` follow-up edit (2026-05-03 evening).
-- D-celery-worker-not-running-locally-2026-05-02 (codify in operator-patterns.md or pre-flight check)
+- **D-pillar-13-a3-real-root-cause-2026-05-04** (NEW) — auth middleware `app/middleware/auth.py:124` had `user_id = agent.user_id` (typo — never-read local) instead of `actor_user_id = agent.user_id`, leaving `request.state.actor_user_id = None`. Failure chain: chat turn passes `actor_user_id=None` to `MemoryService.extract_and_save` → INSERT violates Postgres D11 NOT NULL → IntegrityError swallowed by `except Exception` at `extract_and_save:116-119` (logs only `type(exc).__name__`, not `repr(exc)`) → chat returns 200 with assistant reply "I'll remember that" while zero `MemoryItem` rows are written. ✅ **RESOLVED 2026-05-04 via `81b9e5a` (Commit A)**. Forensic narrative: `docs/recaps/2026-05-04-pillar-13-a3-real-root-cause.md`. Verification: `docs/verification-reports/step28_phase2_postA_sync_2026-05-04.json` (19/19 green). Compounding observability/hygiene gaps the bug exposed are tracked separately as P3-M / P3-N / P3-O / P3-P / P3-Q.
+- **D-extractor-failure-observability-2026-05-04** (NEW) — `app/services/memory_service.py` `extract_and_save:116-119` swallows save-time exceptions with a `type-only` warning. Without `repr(exc)` the IntegrityError that drove the Pillar 13 A3 silent failure was undetectable in logs. Tracked as P3-O.
+- **D-preflight-degraded-without-celery-2026-05-04** (NEW) — 5-block pre-flight passes when Celery is down because the sync fallback path in ChatService takes over. Recommend pre-flight gate fails fast if `celery -A app.celery_app inspect ping` returns no responders. Tracked as P3-N. Lifts D-celery-worker-not-running-locally-2026-05-02 from a process drift to an enforceable pre-flight check.
+- **D-luciel-instance-admin-delete-returns-500-2026-05-04** (NEW) — anomaly observed during 19/19 verification teardown: `DELETE /api/v1/admin/luciel-instances/354` returned 500. Non-fatal (Pillar 10 still passed); investigation deferred to Phase 3. Tracked as P3-Q.
+- **D-dev-key-storage-hygiene-2026-05-04** (NEW) — `LUCIEL_PLATFORM_ADMIN_KEY` stored in operator Notepad rather than a credential manager. Tracked as P3-P.
+- **D-pg-client-tools-not-on-operator-path-2026-05-04** (NEW) — `psql` and `pg_dump` not on PowerShell PATH; surfaced repeatedly during diag work. Tracked as P3-M.
+- D-celery-worker-not-running-locally-2026-05-02 (codify in operator-patterns.md or pre-flight check) — superseded by D-preflight-degraded-without-celery-2026-05-04 / P3-N
 - D-pillar-10-suite-internal-only-2026-05-01 (deploy-time teardown contract)
 - D-cloudwatch-no-retention-policy-2026-05-01 (365-day retention cap)
 - D-recon-task-role-reuses-migrate-role-2026-05-01 (dedicated `luciel-ecs-recon-role`)
@@ -584,6 +592,7 @@ Only after Step 4, propose work.
 - D-double-8a-commits-2026-05-01
 
 ### Resolved by Phase 2 code-only portion
+- D-pillar-13-a3-real-root-cause-2026-05-04 → Commit A (`81b9e5a`); P13_DIAG instrumentation cleaned up by Commit D (`13035da`); evidence archived at `docs/verification-reports/step28_phase2_postA_sync_2026-05-04.json` (19/19 green). Forensic narrative: `docs/recaps/2026-05-04-pillar-13-a3-real-root-cause.md`. Note: this supersedes `D-pillar-13-a3-sentinel-not-extractable-content-2026-05-02` in scope — the May-02 fix correctly hardened the sentinel-extractable contract for the message-text shape, but the deeper auth-binding bug remained latent until the May-04 diagnosis.
 - D-pillar-13-a3-sentinel-not-extractable-content-2026-05-02 → Commit 3 (`56bdab8`)
 - D-audit-log-api-404 (Phase 2 §4.1 item 4 in v1) → Commit 2 (`75f6015`) + Commit 2b (`bfa2591`)
 - D-retention-unbounded-delete-2026-05-03 (newly named at Phase 2 plan time, see Commit 8 message) → Commit 8 (`0d75dfe`)
@@ -651,4 +660,4 @@ If they disagree:
 
 ---
 
-## End of Canonical Recap v1.4
+## End of Canonical Recap v1.5

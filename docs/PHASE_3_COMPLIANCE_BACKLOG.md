@@ -880,6 +880,238 @@ time spread over a week.
 
 ---
 
+## P3-M. PostgreSQL client tools (`psql`, `pg_dump`) not on operator PATH  *(P3 — hygiene)*
+
+**Discovered:** 2026-05-04 during Pillar 13 A3 diagnosis. Surfaced
+repeatedly across the session whenever a quick DB introspection was
+needed; operator had to fall back to `Invoke-RestMethod` against
+the admin API surface or to running queries via the FastAPI process,
+neither of which is appropriate for low-level schema inspection.
+
+**What's missing:** `psql` and `pg_dump` are not on the operator's
+PowerShell `$Env:Path`.
+
+**Why this is P3 (hygiene, not security):**
+- No data integrity or compliance posture is affected.
+- The workaround (admin-API + FastAPI) is functional, just slower.
+- Adding the tools to PATH is a 5-minute one-time fix; defer until
+  the next operator-environment refresh.
+
+**Fix shape:**
+1. Install PostgreSQL 16 client tools (Postgres.app on macOS or
+   `winget install PostgreSQL.PostgreSQL.16` on Windows).
+2. Add the binary directory to `$Env:Path` permanently via
+   `setx PATH "$Env:Path;C:\Program Files\PostgreSQL\16\bin" /M`.
+3. Verify: `psql --version` and `pg_dump --version` resolve.
+4. Codify in `docs/runbooks/operator-patterns.md` operator-env section.
+
+**Estimated effort:** 5 minutes operator time + 1 docs commit.
+**Cross-references:** drift entry `D-pg-client-tools-not-on-operator-path-2026-05-04`.
+
+---
+
+## P3-N. Pre-flight ritual silently runs degraded with no Celery worker  *(P1)*
+
+**Discovered:** 2026-05-04 during Pillar 13 A3 diagnosis. The 5-block
+pre-flight passed cleanly while the underlying Pillar 13 A3 path was
+silently broken because the sync fallback in `ChatService` took over
+when `settings.memory_extraction_async = False` (the local default).
+This is the same shape of risk as `D-celery-worker-not-running-locally-2026-05-02`,
+lifted to enforceable status now that we have evidence the
+degraded-mode behavior masks real customer-facing bugs.
+
+**What's missing:** the pre-flight does not assert that
+`celery -A app.celery_app inspect ping` returns at least one
+responder, nor that `settings.memory_extraction_async` matches the
+production default (`true` per `backend-td-rev17.json`).
+
+**Why this is P1:**
+- Silent integrity loss class. The customer-facing assistant reply
+  ("I'll remember that") was a lie for an entire prod-parity gap
+  between local sync mode and prod async mode.
+- Pillar 11 already exercises the async path under happy conditions,
+  but pre-flight is what gates the operator's mental model of "my
+  local stack is production-shaped". Today it gives a false green.
+- A correct pre-flight would have caught the Pillar 13 A3 silent
+  failure on the first attempted repro instead of after
+  instrumentation.
+
+**Fix shape:**
+1. Add a pre-flight block (or extend an existing block in
+   `docs/runbooks/operator-patterns.md`) that:
+   - Calls `celery -A app.celery_app inspect ping --timeout 5` and
+     fails if the responder count is `0`.
+   - Loads `app.config.settings` and asserts
+     `settings.memory_extraction_async == True` (matching prod
+     `MEMORY_EXTRACTION_ASYNC=true`) OR explicitly logs that the
+     operator is running in dev-sync mode and the async path will
+     not be exercised.
+2. Wire the assertion into `scripts/preflight.ps1` (or equivalent).
+3. Codify the failure mode in operator-patterns.md so the operator
+   cannot start a verification run with a degraded queue.
+
+**Estimated effort:** ~30 LOC in pre-flight script + ~15 lines in
+operator-patterns.md.
+**Cross-references:** drift entries
+`D-preflight-degraded-without-celery-2026-05-04` (this entry's parent)
+and `D-celery-worker-not-running-locally-2026-05-02` (superseded);
+recap `docs/recaps/2026-05-04-pillar-13-a3-real-root-cause.md` §6.
+
+---
+
+## P3-O. Extractor failure observability — `extract_and_save` swallows save-time exceptions  *(P1)*
+
+**Discovered:** 2026-05-04 during Pillar 13 A3 diagnosis. The actual
+bug (auth-middleware typo binding `actor_user_id = None`) drove a
+Postgres D11 NOT NULL violation on every legitimate `MemoryItem`
+insert, but the IntegrityError was completely invisible in logs
+because `app/services/memory_service.py` `extract_and_save` swallows
+any save-time exception with a type-only warning:
+
+```python
+# extract_and_save:116-119 (current)
+except Exception as exc:
+    logger.warning("memory extraction failed: %s", type(exc).__name__)
+    return 0
+```
+
+The `repr(exc)` would have surfaced the literal Postgres message
+`null value in column "actor_user_id" violates not-null constraint`
+and reduced the diagnosis from "add forensic instrumentation, push
+diag commit, repro, observe, infer" (~2 hours) to a single log read.
+
+**What's missing:**
+1. `repr(exc)` in the warning so the actual exception message survives.
+2. A drift `AdminAuditLog` row for save-time extractor exceptions so
+   compliance has a durable record (the warning log line is not
+   audit-grade).
+3. Possibly a metric / queue-depth counter for `extractor_save_fail`
+   so silent failures show up on dashboards.
+
+**Why this is P1:**
+- Same class as the original Pillar 13 bug: silent integrity loss
+  driven by an `except Exception` that throws away information the
+  customer would care about.
+- Today, any future schema-constraint violation, FK violation, or
+  pgvector-dimension mismatch will be similarly invisible.
+- The fail-open contract (a down memory pipeline must not break the
+  chat turn) is correct in principle and must be preserved — but
+  fail-open is not the same as fail-silent.
+
+**Fix shape:**
+1. Change `extract_and_save:116-119` to:
+   ```python
+   except Exception as exc:
+       logger.warning(
+           "memory extraction save failed: type=%s exc_repr=%r "
+           "session=%s message_id=%s",
+           type(exc).__name__, exc, session_id, message_id,
+       )
+       try:
+           audit_log.write(action="extractor_save_fail", 
+                           detail={"exc_type": type(exc).__name__,
+                                   "exc_repr": repr(exc),
+                                   "session_id": session_id,
+                                   "message_id": message_id})
+       except Exception:
+           pass  # never let the audit failure propagate
+       return 0
+   ```
+2. Add a regression test in `tests/services/test_memory_service.py`
+   that drives a deliberate IntegrityError through the path and
+   asserts both the warning log shape and the audit-row write.
+3. Sweep for sibling `except Exception` blocks across services that
+   throw away `exc` and apply the same `repr` discipline.
+
+**Estimated effort:** ~15 LOC change + ~80 LOC test + ~30 minutes
+sweep audit.
+**Cross-references:** drift entries
+`D-extractor-failure-observability-2026-05-04` and
+`D-pillar-13-a3-real-root-cause-2026-05-04`; recap
+`docs/recaps/2026-05-04-pillar-13-a3-real-root-cause.md` §2.
+
+---
+
+## P3-P. Dev-key storage hygiene — `LUCIEL_PLATFORM_ADMIN_KEY` in operator Notepad  *(P2)*
+
+**Discovered:** 2026-05-04 during Pillar 13 A3 diagnosis. The
+platform admin key (a high-privilege secret — it bypasses
+tenant scoping for diagnostic operations) lives in the operator's
+Notepad rather than a credential manager.
+
+**What's missing:** a credential-manager-backed retrieval pattern
+for dev secrets. The current pattern — manually copying from a
+Notepad window into a PowerShell environment variable — invites
+shell-history leakage, accidental screenshot capture, and
+cross-context paste errors.
+
+**Why this is P2:**
+- The key is dev-only (does not exist in prod — prod uses
+  AssumeRole + KMS-encrypted SSM).
+- The blast radius is the operator's own laptop; no customer data
+  is reachable from this key.
+- But the pattern itself is a habit-shape that, if not corrected,
+  will at some point cross over to a prod-grade secret. Better to
+  fix the habit while the stakes are small.
+
+**Fix shape:**
+1. Move the key into the OS keychain: macOS `security` /
+   Windows `cmdkey` / Linux `secret-tool`.
+2. Create a thin retrieval wrapper, e.g.
+   `scripts/load-dev-secrets.ps1`, that reads from the keychain
+   and exports into the current PowerShell session’s env vars.
+3. Remove the Notepad copy.
+4. Codify in `docs/runbooks/operator-patterns.md`.
+
+**Estimated effort:** ~10 minutes operator time + ~50 LOC of
+script + ~10 lines of runbook.
+**Cross-references:** drift entry
+`D-dev-key-storage-hygiene-2026-05-04`.
+
+---
+
+## P3-Q. `luciel-instance` admin DELETE returns 500 during teardown  *(P2)*
+
+**Discovered:** 2026-05-04 during the post-Commit-A 19/19
+verification run. Pillar 10 still passed (zero residue), so the
+teardown was effective at the data layer, but one of the constituent
+`DELETE /api/v1/admin/luciel-instances/{id}` calls returned HTTP 500
+instead of 204.
+
+**What's observed:** the 500 response is incorrect. Either the
+endpoint is succeeding-then-erroring (commit + post-commit failure
+leaking a 500 to the caller), or it is failing-but-cleanup-cascades
+(the row is removed by a downstream cascade and the original DELETE
+should have returned 204 from the start). Both shapes need
+diagnosis.
+
+**Why this is P2:**
+- Non-fatal: Pillar 10 zero-residue assertion held, so the
+  customer-facing behavior is correct.
+- But returning 500 on a successful delete contradicts the API
+  contract and trains operators to ignore 500s, which is the wrong
+  habit.
+
+**Fix shape:**
+1. Reproduce against a fresh tenant: mint instance, DELETE it,
+   capture status + body.
+2. Walk the delete handler at `app/api/v1/admin/luciel_instances.py`
+   (or wherever the route is mounted) for the failure path.
+3. Either fix the underlying error or correct the handler to
+   return 204 when the row is in fact gone.
+4. Add a regression test in the relevant `tests/api/` module.
+
+**Estimated effort:** ~30 minutes diagnosis + ~10 LOC fix +
+~30 LOC regression test.
+**Cross-references:** drift entry
+`D-luciel-instance-admin-delete-returns-500-2026-05-04`;
+verification report
+`docs/verification-reports/step28_phase2_postA_sync_2026-05-04.json`
+(see Pillar 10 detail — the residue assertion passed but the
+teardown anomaly was logged inline).
+
+---
+
 ## Sequencing
 
 Updated 2026-05-03 evening after P3-G rescope and P3-J / P3-K addition.
@@ -900,6 +1132,20 @@ The Commit 4 mint re-run is now blocked on P3-J + P3-K, NOT on P3-G.
    container healthchecks.
 7. **P3-L** SSM parameter history cleanup — **deferred to post-Commit-4**
    per the rationale in the P3-L entry above.
+
+**Phase 3 additions from 2026-05-04 Pillar 13 A3 diagnosis:**
+
+- **P3-O (P1)** — extractor failure observability. Bundle with **P3-A**
+  / **P3-B** as part of the audit-emission sweep; same class of
+  problem (silent loss of provable signal) and the fix touches
+  adjacent code paths.
+- **P3-N (P1)** — pre-flight Celery / async-flag gate. Cheap, do
+  before the next prod-touching pre-flight run.
+- **P3-Q (P2)** — `luciel-instance` admin DELETE 500. Standalone
+  diagnosis, no dependencies.
+- **P3-M (P3)** and **P3-P (P2)** — operator-environment hygiene.
+  Bundle into a single "operator-env refresh" commit at any
+  convenient time; not blocking.
 
 **Phase 3 proper (starts after Phase 2 prod-touching commits 4-7
 stabilize for ≥ 7 days):**
