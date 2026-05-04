@@ -437,6 +437,24 @@ class ChatService:
 
         # 13. Memory extraction (consent-gated) — async if flag enabled
         memories_extracted = 0
+        # P13_DIAG (temporary -- D-pillar-13-a3-real-root-cause-2026-05-04):
+        # Surface every gate that decides whether the legitimate setup turn
+        # produces a worker task. Single grep-friendly tag: P13_DIAG.
+        logger.warning(
+            "P13_DIAG gate-decision session=%s assistant_msg_id=%s "
+            "user_id=%r tenant_id=%r actor_key_prefix=%r "
+            "actor_user_id=%r luciel_instance_id=%r "
+            "can_use_memory=%s memory_extraction_async=%s",
+            session_id,
+            getattr(assistant_msg, "id", None),
+            user_id,
+            tenant_id,
+            actor_key_prefix,
+            actor_user_id,
+            luciel_instance_id,
+            can_use_memory,
+            settings.memory_extraction_async,
+        )
         if user_id and can_use_memory:
             recent_messages = [
                 {"role": "user", "content": message},
@@ -458,11 +476,27 @@ class ChatService:
                             actor_user_id=actor_user_id,  # Step 24.5b File 2.5
                             trace_id=None,  # no trace_id yet at this point in flow
                         )
+                        # P13_DIAG: confirm enqueue returned without exception
+                        logger.warning(
+                            "P13_DIAG enqueue-ok session=%s message_id=%s "
+                            "actor_key_prefix=%r actor_user_id=%r",
+                            session_id, assistant_msg.id,
+                            actor_key_prefix, actor_user_id,
+                        )
                         memories_extracted = 0  # real count lands in audit row
                     except Exception as enq_exc:
                         # Broker down, validation fail, etc. — log and move on.
                         # Chat turn already succeeded; memory write pauses until
                         # worker recovers. Queue-depth alarm surfaces the gap.
+                        # P13_DIAG: include repr(exc) (not just type) for diagnosis.
+                        logger.warning(
+                            "P13_DIAG enqueue-fail session=%s message_id=%s "
+                            "exc_type=%s exc_repr=%r",
+                            session_id,
+                            assistant_msg.id,
+                            type(enq_exc).__name__,
+                            enq_exc,
+                        )
                         logger.warning(
                             "enqueue_extraction failed (fail-open): type=%s "
                             "session=%s message_id=%s",
@@ -471,6 +505,13 @@ class ChatService:
                             assistant_msg.id,
                         )
                 else:
+                    # P13_DIAG: setup turn went to legacy SYNC path.
+                    logger.warning(
+                        "P13_DIAG sync-path-taken session=%s message_id=%s "
+                        "reason=async_flag_or_key_missing async=%s key_prefix=%r",
+                        session_id, assistant_msg.id,
+                        settings.memory_extraction_async, actor_key_prefix,
+                    )
                     # Legacy sync path — still idempotent if message_id provided.
                     memories_extracted = self.memory_service.extract_and_save(
                         user_id=user_id,

@@ -164,4 +164,21 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
         request.state.luciel_instance_id = luciel_instance_id
         request.state.actor_user_id = actor_user_id  # Step 24.5b
 
+        # P13_DIAG (temporary -- D-pillar-13-a3-real-root-cause-2026-05-04):
+        # Surface the actor_user_id binding decision. If actor_user_id is
+        # None despite a real Agent.user_id existing, that's the bug.
+        try:
+            path = request.url.path
+        except Exception:
+            path = "?"
+        if path == "/api/v1/chat" or path.startswith("/api/v1/chat"):
+            logger.warning(
+                "P13_DIAG auth-bind path=%s tenant=%s agent=%s "
+                "key_prefix=%r api_key_id=%s actor_user_id=%r "
+                "luciel_instance_id=%s permissions=%s",
+                path, tenant_id, agent_id,
+                key_prefix, api_key_id, actor_user_id,
+                luciel_instance_id, permissions,
+            )
+
         return await call_next(request)
