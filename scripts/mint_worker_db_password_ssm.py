@@ -130,14 +130,32 @@ def parse_args() -> argparse.Namespace:
             "worker DB connection string to SSM (SecureString)."
         ),
     )
-    p.add_argument(
+    # Admin DSN can come from EITHER --admin-db-url (the legacy CLI
+    # form, retained for local dev convenience) OR --admin-db-url-stdin
+    # (the production form used by scripts/mint-with-assumed-role.ps1
+    # under the Option 3 boundary; P3-K, 2026-05-03). The stdin form
+    # avoids landing the DSN in process args, which is visible to
+    # other processes on the host via ps / Get-Process.
+    admin_dsn_group = p.add_mutually_exclusive_group(required=True)
+    admin_dsn_group.add_argument(
         "--admin-db-url",
-        required=True,
         help=(
             "Postgres URL with sufficient privileges to ALTER ROLE "
             "luciel_worker (typically the postgres superuser URL or a "
             "role with CREATEROLE). Source from your password manager "
-            "at runtime; this value never leaves the script's memory."
+            "at runtime; this value never leaves the script's memory. "
+            "WARNING: this places the DSN in process args; prefer "
+            "--admin-db-url-stdin for production."
+        ),
+    )
+    admin_dsn_group.add_argument(
+        "--admin-db-url-stdin",
+        action="store_true",
+        help=(
+            "Read the admin DB URL from stdin (one line, trailing "
+            "whitespace stripped). Use this in production via the "
+            "mint-with-assumed-role.ps1 helper so the DSN never "
+            "lands in process args. P3-K (2026-05-03)."
         ),
     )
     p.add_argument(
@@ -497,11 +515,40 @@ def main() -> int:
         )
         return 1
 
+    # Resolve admin DSN from whichever input mode the operator chose.
+    # The argparse mutex group above guarantees exactly one of these
+    # is set.
+    if args.admin_db_url_stdin:
+        # Read one line from stdin; strip trailing whitespace only.
+        # Empty input is a hard error; we deliberately do not echo
+        # what was read (length-only feedback is the helper's job).
+        raw_stdin = sys.stdin.readline().rstrip("\r\n")
+        if not raw_stdin:
+            print(
+                "FATAL: --admin-db-url-stdin set but stdin was empty.",
+                file=sys.stderr,
+            )
+            return 1
+        if len(raw_stdin) < 20:
+            # Sanity bound -- a real Postgres DSN is comfortably > 20
+            # chars. This catches an accidental stray newline or empty
+            # echo that bypasses the empty-string check above without
+            # echoing whatever was actually piped in.
+            print(
+                "FATAL: --admin-db-url-stdin received fewer than 20 "
+                "chars; refusing to proceed.",
+                file=sys.stderr,
+            )
+            return 1
+        admin_dsn_input = raw_stdin
+    else:
+        admin_dsn_input = args.admin_db_url
+
     # Strip SQLAlchemy driver suffix if present. The existing
     # /luciel/database-url SSM param is stored in SQLAlchemy form
     # (postgresql+psycopg://...) because the running backend uses
     # SQLAlchemy; raw psycopg requires plain postgresql://.
-    admin_dsn = _strip_sqla_driver_prefix(args.admin_db_url)
+    admin_dsn = _strip_sqla_driver_prefix(admin_dsn_input)
 
     try:
         conn = psycopg.connect(admin_dsn)
