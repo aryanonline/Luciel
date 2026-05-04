@@ -138,29 +138,37 @@ overwrite it with the **new** password while preserving everything else
 (host, port, dbname, sslmode params).
 
 ```powershell
-# 3.1 Read current value into a variable (via the new MFA-required mint
-#     role, since luciel-admin no longer has direct read after P3-K).
-#     Use the existing helper for pattern consistency:
-.\scripts\mint-with-assumed-role.ps1 -EmitDsnOnly
-# This prompts for MFA, assumes luciel-mint-operator-role, prints the
-# DSN to a SecureString variable $assumedDsn, clears assumed creds.
-#
-# (If mint-with-assumed-role.ps1 lacks an -EmitDsnOnly mode, see §3.1b
-#  below for the manual sts assume-role + ssm get-parameter sequence.)
+# 3.1 Read current DSN as a SecureString via the MFA-gated helper.
+#     This prompts for MFA, assumes luciel-mint-operator-role, reads
+#     /luciel/database-url, returns the DSN as a SecureString, and
+#     clears the assumed credentials in its own finally block.
+$assumedSecure = .\scripts\mint-with-assumed-role.ps1 -EmitDsnOnly
+# Expect: SecureString. Type-check without printing the value:
+$assumedSecure.GetType().FullName  # expect: System.Security.SecureString
+$assumedSecure.Length              # expect: same as DSN char count, ~140-160
 
-# 3.2 Substitute the password segment. The DSN format is
-#     postgresql://luciel_admin:<OLD>@<host>:5432/<db>?sslmode=require
-#     Replace the segment between ":" and "@" after "luciel_admin".
-$oldDsn = $assumedDsn   # SecureString -> plain in this shell only
+# 3.2 Convert SecureString -> plain string in a single tightly-scoped
+#     block, do the password substitution, and IMMEDIATELY clear the
+#     plaintext intermediates.
+$oldDsn = [System.Net.NetworkCredential]::new('', $assumedSecure).Password
+
+# Sanity-check the OLD DSN shape WITHOUT printing it
+($oldDsn -match '^postgresql://luciel_admin:[^@]+@[^:]+:5432/[^?]+\?sslmode=require$')
+# Expect: True. If False, the DSN format has drifted and the regex in
+# 3.3 will not match. Stop and re-derive the regex against the actual
+# shape (do this WITHOUT echoing the value to console).
+
+# 3.3 Build the new DSN by substituting only the password segment
+#     (between 'luciel_admin:' and '@'). $plainNew comes from §1.
 $newDsn = $oldDsn -replace `
   '(postgresql://luciel_admin:)[^@]+(@)', `
   ('${1}' + $plainNew + '${2}')
 
-# Sanity-check shape WITHOUT printing the password
+# Sanity-check the NEW DSN shape
 ($newDsn -match '^postgresql://luciel_admin:[^@]+@[^:]+:5432/[^?]+\?sslmode=require$')
 # Expect: True
 
-# 3.3 Write back to SSM as SecureString with Overwrite, same KMS key
+# 3.4 Write back to SSM as SecureString with Overwrite, same KMS key
 aws ssm put-parameter `
   --name /luciel/database-url `
   --value $newDsn `
@@ -171,43 +179,20 @@ aws ssm put-parameter `
 # Expect: { "Version": <N+1>, "Tier": "Standard" }
 # Capture <N+1> for the evidence record.
 
-# 3.4 Confirm new version is the AdvisedVersion
+# 3.5 Confirm new version is the AdvisedVersion
 aws ssm get-parameter-history `
   --name /luciel/database-url `
   --query "Parameters[-1].[Version,LastModifiedDate,DataType]" `
   --output table
-# Expect: top row matches the Version returned in 3.3.
+# Expect: top row matches the Version returned in 3.4.
 
-# 3.5 Clear sensitive variables
+# 3.6 Clear sensitive variables — do this even if anything above failed.
+#     SecureString.Dispose() actively wipes the protected memory.
 $plainNew = $null
 $oldDsn   = $null
 $newDsn   = $null
-$assumedDsn = $null
+if ($assumedSecure) { $assumedSecure.Dispose(); $assumedSecure = $null }
 [System.GC]::Collect()
-```
-
-### 3.1b — Manual fallback if helper lacks `-EmitDsnOnly`
-
-```powershell
-$mfaSerial = "arn:aws:iam::729005488042:mfa/Luciel-MFA"
-$mfaCode   = Read-Host "Enter MFA code"
-$creds = aws sts assume-role `
-  --role-arn arn:aws:iam::729005488042:role/luciel-mint-operator-role `
-  --role-session-name p3h-rotate-$(Get-Date -Format yyyyMMddHHmmss) `
-  --serial-number $mfaSerial --token-code $mfaCode `
-  --duration-seconds 900 | ConvertFrom-Json
-$env:AWS_ACCESS_KEY_ID     = $creds.Credentials.AccessKeyId
-$env:AWS_SECRET_ACCESS_KEY = $creds.Credentials.SecretAccessKey
-$env:AWS_SESSION_TOKEN     = $creds.Credentials.SessionToken
-try {
-  $assumedDsn = aws ssm get-parameter `
-    --name /luciel/database-url --with-decryption `
-    --query "Parameter.Value" --output text
-} finally {
-  $env:AWS_ACCESS_KEY_ID = $null
-  $env:AWS_SECRET_ACCESS_KEY = $null
-  $env:AWS_SESSION_TOKEN = $null
-}
 ```
 
 ---

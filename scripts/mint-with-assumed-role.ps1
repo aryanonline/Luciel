@@ -53,10 +53,31 @@
   Pass through to the mint script. Performs no Postgres or SSM writes;
   used for ceremony walkthroughs.
 
+.PARAMETER EmitDsnOnly
+  Alternate mode used by P3-H (admin password rotation) and any future
+  runbook that needs to read the admin DSN through the same MFA-gated
+  ceremony but does NOT mint a worker password. When set:
+    - WorkerHost / WorkerDbName / WorkerSsmPath are ignored.
+    - The mint script is NOT invoked.
+    - The admin DSN is converted to a SecureString and written to the
+      pipeline as the script's only output (caller assigns it).
+    - The plain DSN is wiped from memory in the same finally block as
+      the assumed credentials.
+  Caller usage:
+      $assumedDsn = .\scripts\mint-with-assumed-role.ps1 -EmitDsnOnly
+  $assumedDsn is a SecureString; convert via
+      [System.Net.NetworkCredential]::new('',$assumedDsn).Password
+  ONLY in the same shell, immediately, and clear afterwards.
+
 .EXAMPLE
+  # Worker DB role swap mint (P3-K / Phase 2 Commit 4)
   .\scripts\mint-with-assumed-role.ps1 `
       -WorkerHost luciel-db.c3oyiegi01hr.ca-central-1.rds.amazonaws.com `
       -DryRun
+
+.EXAMPLE
+  # Admin DSN read for P3-H rotation
+  $assumedDsn = .\scripts\mint-with-assumed-role.ps1 -EmitDsnOnly
 
 .NOTES
   Author: Aryan Singh
@@ -68,31 +89,51 @@
     - scripts/mint_worker_db_password_ssm.py  (the hardened mint script)
 #>
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Mint')]
 param(
     [string]$MfaSerial    = "arn:aws:iam::729005488042:mfa/Luciel-MFA",
     [string]$MintRoleArn  = "arn:aws:iam::729005488042:role/luciel-mint-operator-role",
-    [Parameter(Mandatory = $true)]
+
+    [Parameter(ParameterSetName = 'Mint', Mandatory = $true)]
     [string]$WorkerHost,
+
+    [Parameter(ParameterSetName = 'Mint')]
     [string]$WorkerDbName  = "luciel",
+
+    [Parameter(ParameterSetName = 'Mint')]
     [string]$WorkerSsmPath = "/luciel/production/worker_database_url",
+
     [string]$AdminDsnSsmPath = "/luciel/database-url",
     [string]$Region        = "ca-central-1",
-    [switch]$DryRun
+
+    [Parameter(ParameterSetName = 'Mint')]
+    [switch]$DryRun,
+
+    [Parameter(ParameterSetName = 'EmitDsn', Mandatory = $true)]
+    [switch]$EmitDsnOnly
 )
 
 $ErrorActionPreference = "Stop"
 
 # ----- Step 1: prompt for TOTP -----
 Write-Host ""
-Write-Host "Option 3 mint ceremony" -ForegroundColor Cyan
-Write-Host "  MFA serial : $MfaSerial"
-Write-Host "  Mint role  : $MintRoleArn"
-Write-Host "  Region     : $Region"
-Write-Host "  Worker host: $WorkerHost"
-Write-Host "  Worker SSM : $WorkerSsmPath"
-Write-Host "  Admin SSM  : $AdminDsnSsmPath"
-Write-Host "  Dry run    : $DryRun"
+if ($EmitDsnOnly) {
+    Write-Host "Option 3 admin-DSN read (EmitDsnOnly)" -ForegroundColor Cyan
+    Write-Host "  MFA serial : $MfaSerial"
+    Write-Host "  Mint role  : $MintRoleArn"
+    Write-Host "  Region     : $Region"
+    Write-Host "  Admin SSM  : $AdminDsnSsmPath"
+    Write-Host "  Mode       : EmitDsnOnly (no mint script invocation)"
+} else {
+    Write-Host "Option 3 mint ceremony" -ForegroundColor Cyan
+    Write-Host "  MFA serial : $MfaSerial"
+    Write-Host "  Mint role  : $MintRoleArn"
+    Write-Host "  Region     : $Region"
+    Write-Host "  Worker host: $WorkerHost"
+    Write-Host "  Worker SSM : $WorkerSsmPath"
+    Write-Host "  Admin SSM  : $AdminDsnSsmPath"
+    Write-Host "  Dry run    : $DryRun"
+}
 Write-Host ""
 
 $tokenCode = Read-Host -Prompt "Enter current MFA 6-digit code"
@@ -145,37 +186,59 @@ try {
     }
     Write-Host "  Admin DSN read OK (length=$($adminDsnPlain.Length) chars; value not echoed)" -ForegroundColor Green
 
-    # ----- Step 4b: invoke the hardened mint script -----
-    # We pipe the DSN to stdin so it never appears in process args
-    # (visible via `ps`/`Get-Process` on multi-user systems).
-    Write-Host "Invoking mint_worker_db_password_ssm with assumed credentials..." -ForegroundColor Yellow
+    if ($EmitDsnOnly) {
+        # ----- EmitDsnOnly branch (P3-H rotation) -----
+        # Convert plaintext DSN to SecureString and emit ONLY that to the
+        # pipeline. Caller captures via:
+        #   $assumedDsn = .\scripts\mint-with-assumed-role.ps1 -EmitDsnOnly
+        # The plaintext copy is wiped in the finally block below.
+        Write-Host "Returning admin DSN as SecureString to caller pipeline..." -ForegroundColor Yellow
+        $secure = ConvertTo-SecureString -String $adminDsnPlain -AsPlainText -Force
+        Write-Output $secure
+        Write-Host "DSN emitted; remember to clear caller-side variable when done." -ForegroundColor Green
+    } else {
+        # ----- Mint branch (Phase 2 Commit 4) -----
+        # We pipe the DSN to stdin so it never appears in process args
+        # (visible via `ps`/`Get-Process` on multi-user systems).
+        Write-Host "Invoking mint_worker_db_password_ssm with assumed credentials..." -ForegroundColor Yellow
 
-    $mintArgs = @(
-        "-m", "scripts.mint_worker_db_password_ssm",
-        "--admin-db-url-stdin",
-        "--worker-host", $WorkerHost,
-        "--worker-port", "5432",
-        "--worker-db-name", $WorkerDbName,
-        "--ssm-path", $WorkerSsmPath,
-        "--region", $Region
-    )
-    if ($DryRun) { $mintArgs += "--dry-run" }
+        $mintArgs = @(
+            "-m", "scripts.mint_worker_db_password_ssm",
+            "--admin-db-url-stdin",
+            "--worker-host", $WorkerHost,
+            "--worker-port", "5432",
+            "--worker-db-name", $WorkerDbName,
+            "--ssm-path", $WorkerSsmPath,
+            "--region", $Region
+        )
+        if ($DryRun) { $mintArgs += "--dry-run" }
 
-    $adminDsnPlain | python @mintArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Mint script exited with code $LASTEXITCODE. See script output above."
+        $adminDsnPlain | python @mintArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Mint script exited with code $LASTEXITCODE. See script output above."
+        }
+
+        Write-Host ""
+        Write-Host "Mint ceremony complete." -ForegroundColor Green
     }
-
-    Write-Host ""
-    Write-Host "Mint ceremony complete." -ForegroundColor Green
 }
 finally {
     # ----- Step 5: clear assumed credentials, ALWAYS -----
     Remove-Item Env:\AWS_ACCESS_KEY_ID     -ErrorAction SilentlyContinue
     Remove-Item Env:\AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue
     Remove-Item Env:\AWS_SESSION_TOKEN     -ErrorAction SilentlyContinue
+
+    # Wipe plaintext DSN copy in this script's scope. In EmitDsnOnly
+    # mode the SecureString in $secure is shared by reference with the
+    # caller's captured variable; we drop our reference here but do NOT
+    # call .Dispose() (that would destroy the caller's copy too). The
+    # caller is responsible for clearing their captured variable when
+    # finished, per the docstring on -EmitDsnOnly.
     if (Get-Variable -Name adminDsnPlain -ErrorAction SilentlyContinue) {
         Remove-Variable adminDsnPlain
+    }
+    if (Get-Variable -Name secure -ErrorAction SilentlyContinue) {
+        Remove-Variable secure
     }
     Write-Host "Assumed credentials cleared from session." -ForegroundColor DarkGray
 }
