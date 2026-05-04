@@ -1112,6 +1112,53 @@ teardown anomaly was logged inline).
 
 ---
 
+## P3-R. MFA TOTP echoes in PowerShell terminal during mint ceremony  *(P2)*
+
+**Discovered:** 2026-05-04 ~19:57 UTC during the Commit 4 mint dry-run.
+
+**Symptom:** `scripts/mint-with-assumed-role.ps1` line that calls
+`Read-Host` for the MFA code reads the input as a plain string,
+which means PowerShell echoes the typed digits visibly in the
+terminal (`Enter current MFA 6-digit code: 123351`). The code
+appears in the operator's scrollback, in any transcript pasted
+elsewhere, and in any window-recording capture.
+
+**Why it's not P0:** TOTP codes are single-use and the 30-second
+window expires within seconds of paste. Even if the displayed
+code is shoulder-surfed or screenshotted, it cannot be replayed
+after the next TOTP rotation. The `aws:MultiFactorAuthPresent`
+condition on the mint role's trust policy still prevents reuse.
+
+**Why it's still worth fixing:** defense in depth + good operator
+habit. If the same operator pattern is later applied to a non-
+TOTP shared secret, the muscle memory of "echo is fine, it's just
+MFA" becomes a vulnerability. Better to never echo any prompted
+secret regardless of its expiry semantics.
+
+**Recommended fix:** change the helper to use
+`Read-Host -AsSecureString` for the MFA prompt and then convert
+to plain text only at the moment of `sts:AssumeRole` invocation
+via `[Runtime.InteropServices.Marshal]::PtrToStringAuto(
+[Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))`,
+with a `try/finally` that zeros the string immediately after
+the AssumeRole call returns. ~10 LOC change in
+`scripts/mint-with-assumed-role.ps1`.
+
+**Forward-looking guard:** any future PowerShell helper that
+reads a secret via `Read-Host` MUST use `-AsSecureString`. Add
+a lint check or a CI grep for `Read-Host` without
+`-AsSecureString` in `scripts/*.ps1`.
+
+**Estimated effort:** ~10 LOC + ~5 LOC try/finally + manual
+verification on next mint ceremony.
+
+**Cross-references:** observed during the dry-run captured in
+this session's transcript; helper script
+`scripts/mint-with-assumed-role.ps1` (commit `9e48098`); operator
+MFA device `arn:aws:iam::729005488042:mfa/Luciel-MFA` (P3-J).
+
+---
+
 ## Sequencing
 
 Updated 2026-05-03 evening after P3-G rescope and P3-J / P3-K addition.

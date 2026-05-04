@@ -172,6 +172,16 @@ If Block 5 isn't 19/19 green, **diagnose, do not deploy**.
   was completed by P3-H on 2026-05-03 23:18 UTC and is no longer part
   of Commit 4. See P3-H entry in `docs/PHASE_3_COMPLIANCE_BACKLOG.md`
   and `docs/runbooks/step-28-p3-h-rotate-and-purge.md`.
+- **v2.1 (this commit, 2026-05-04 post-failed-mint):** adds §4.0.5
+  documenting the IAM policy gap discovered when the v2 mint dry-run
+  passed but the real run was blocked by `mint_worker_db_password_ssm`'s
+  `preflight_ssm_writable` check. Root cause: P3-K's permission policy
+  was scoped only for admin-DSN read, but the Option 3 ceremony runs
+  the mint script INSIDE the assumed role — so the role itself needs
+  worker-SSM write rights. Drift logged as
+  `D-p3-k-policy-missing-worker-ssm-write-2026-05-04`. Fix is policy-
+  only (no code change to script or helper); see §4.0.5 for the
+  apply-and-verify steps.
 
 **Goal:** worker process stops authenticating to RDS as `luciel_admin`
 (superuser) and starts using `luciel_worker` (least-privilege role
@@ -189,6 +199,7 @@ attempts `UPDATE admin_audit_logs ...` it fails at Postgres.
 | P3-K — `luciel-mint-operator-role` | ✅ 2026-05-04 00:14 UTC | role + trust policy + `MaxSessionDuration: 3600` |
 | P3-G — migrate role `ssm:GetParameterHistory` | ✅ 2026-05-03 ≈20:09 EDT | live policy has 6 SSM actions |
 | P3-H — leaked `LucielDB2026Secure` rotated | ✅ 2026-05-03 23:56 UTC | SSM v1 → v2 + log stream deleted |
+| P3-K-followup — mint role has worker-SSM write | ✅ 2026-05-04 (this commit) | live policy has 5 statements; §4.0.5 verifies |
 
 **Code/IaC artifacts that land with this commit:**
 
@@ -216,6 +227,75 @@ attempts `UPDATE admin_audit_logs ...` it fails at Postgres.
 #    that contains Commits A + D + repo-hygiene (`86239ab` or later).
 # 5. The repo working tree has no uncommitted changes.
 ```
+
+### 4.0.5 — Verify mint-role IAM policy (added v2.1)
+
+The mint script's `preflight_ssm_writable` (`scripts/mint_worker_db_password_ssm.py:283`)
+calls `ssm:GetParameterHistory` on the worker SSM path BEFORE any DB
+mutation. This is the atomicity defense for the
+"DB-changed-but-SSM-write-failed" failure mode (drift
+`D-mint-script-leaks-admin-dsn-via-error-body-2026-05-03` resolution
+rationale, see commit `2b5ff32`).
+
+For the pre-flight to pass under the Option 3 ceremony, the assumed
+role must hold:
+
+| Action | Resource | Statement Sid |
+|---|---|---|
+| `ssm:GetParameter` | `/luciel/database-url` | `ReadAdminDsnFromSsm` |
+| `ssm:DescribeParameters` | tag-conditioned | `DescribeAdminDsnParameter` |
+| `kms:Decrypt` | `*` via SSM | `DecryptAdminDsnViaSsm` |
+| `ssm:GetParameter`, `ssm:GetParameterHistory`, `ssm:PutParameter` | `/luciel/production/worker_database_url` | `ReadWorkerSsmForPreflightAndMint` |
+| `kms:Encrypt`, `kms:GenerateDataKey` | `*` via SSM | `EncryptWorkerSsmSecureStringViaSsm` |
+
+Canonical IaC source-of-truth:
+`infra/iam/luciel-mint-operator-role-permission-policy.json`. The
+live AWS policy MUST match this file byte-for-byte.
+
+**Verify the live policy matches:**
+
+```powershell
+# 1. Get the live policy from AWS
+aws iam get-role-policy `
+  --role-name luciel-mint-operator-role `
+  --policy-name luciel-mint-operator-permissions `
+  --region ca-central-1 `
+  --output json | ConvertFrom-Json | Select-Object -ExpandProperty PolicyDocument `
+  | ConvertTo-Json -Depth 10
+
+# 2. Compare against the IaC file
+Get-Content infra/iam/luciel-mint-operator-role-permission-policy.json
+```
+
+If the live policy is missing the `ReadWorkerSsmForPreflightAndMint`
+or `EncryptWorkerSsmSecureStringViaSsm` statements, apply the IaC
+file:
+
+```powershell
+aws iam put-role-policy `
+  --role-name luciel-mint-operator-role `
+  --policy-name luciel-mint-operator-permissions `
+  --policy-document file://infra/iam/luciel-mint-operator-role-permission-policy.json `
+  --region ca-central-1
+```
+
+Then re-run the verify step to confirm the apply succeeded. Only
+proceed to §4.2 once verify passes.
+
+**Why this is safe to apply directly from `luciel-admin`:** the
+assumed-role-with-MFA boundary applies to the mint *operation*, not
+to the *configuration* of the role. `luciel-admin` is the IAM-admin
+identity and creating/updating policies is its expected duty. P3-K's
+original trust-policy creation also ran under `luciel-admin` without
+MFA-AssumeRole gating.
+
+**Why we do NOT widen the policy further:** every action is scoped
+to exactly one resource ARN (the worker SSM path) or KMS-via-SSM
+conditioned. The role still cannot write to the admin DSN, cannot
+read or write any other `/luciel/*` path, cannot decrypt KMS keys
+that aren't via SSM. The blast radius of a compromised mint session
+is: read admin DSN once, write one specific worker DSN once, within
+a 1-hour MFA-gated window.
 
 ### 4.1 — Recon (read-only, safe)
 
