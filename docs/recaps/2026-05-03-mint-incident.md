@@ -9,13 +9,19 @@ for next session
 **Author:** Aryan Singh, VantageMind AI
 **Document revisions:**
 - 2026-05-03 (initial) — original write-up
-- 2026-05-03 (evening, this revision) — §5 and §8 Follow-up A corrected
+- 2026-05-03 (evening) — §5 and §8 Follow-up A corrected
   inline after reading the actual `luciel-ecs-migrate-role` IAM policy.
   The original claim that the role lacked `ssm:GetParameter` /
   `ssm:PutParameter` was wrong; the role has both. The genuine gap is
   `ssm:GetParameterHistory` only. Strikethroughs preserve the original
   diagnosis as written so the reasoning trail stays auditable. See also
   the rescoped P3-G entry in `docs/PHASE_3_COMPLIANCE_BACKLOG.md`.
+- 2026-05-03 (late-evening, this revision) — §11 P3-H Resolution appended
+  after rotation + purge executed end-to-end via
+  `docs/runbooks/step-28-p3-h-rotate-and-purge.md` §1–§7. The leaked
+  `LucielDB2026Secure` is no longer accepted by RDS; the contaminated
+  CloudWatch stream is deleted; final residual sweep returned 0 hits.
+  Follow-up B is now closed; Follow-up A is closed via P3-G + P3-K.
 
 ---
 
@@ -384,3 +390,104 @@ action required tonight.
 - Phase 3 backlog: `docs/PHASE_3_COMPLIANCE_BACKLOG.md` (updated this
   session with §A, §B, §C above)
 - Step 28 master plan: `docs/recaps/2026-04-27-step-28-master-plan.md`
+
+---
+
+## 11. P3-H Resolution — admin password rotation + CloudWatch purge (2026-05-03 23:18–23:56 UTC)
+
+Follow-up B from §8 above is now closed. The `luciel_admin` Postgres
+master password was rotated, `/luciel/database-url` SSM was updated
+in lockstep, end-to-end verification passed via the SQLAlchemy
+consumption path inside an ECS Fargate task, and the contaminated
+CloudWatch log stream was deleted. Final residual sweep returned 0 hits.
+
+### 11.1 Prod-mutation timeline (UTC)
+
+| Time | Action | Evidence |
+|---|---|---|
+| 23:18:31 | `aws rds modify-db-instance --db-instance-identifier luciel-db --master-user-password <NEW> --apply-immediately` returns synchronously | RDS engine version 16.13; no reboot, no downtime; existing connections retained |
+| 23:22:54 | `aws ssm put-parameter --name /luciel/database-url --type SecureString --overwrite` accepted | `Version: 1 → 2`; `Tier: Standard`; KMS key `alias/aws/ssm`; DSN length 118 → 140 |
+| 23:31:53 | §4.A SQLAlchemy verification probe in `luciel-migrate:12` Fargate task completes | Task `cd676526e958436dab2406b5f604e3bd`; exit code 0; runtime ~50 s; CloudWatch event `P3H_VERIFY_OK select=1 user=luciel_admin db=luciel` |
+| 23:52:16 | `aws logs delete-log-stream` on the contaminated stream | Exit code 0; post-delete `describe-log-streams` returns empty |
+| 23:56:22 | §7 final residual-leak sweep | 0 hits across `/ecs/luciel-backend` (targeted `migrate/*` + defensive all-streams) and `/ecs/luciel-worker` (defensive); `/aws/rds/instance/luciel-db/postgresql` log group does not exist |
+
+### 11.2 Deleted-stream metadata (preserved for audit)
+
+```
+arn               : arn:aws:logs:ca-central-1:729005488042:log-group:/ecs/luciel-backend:log-stream:migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c
+creationTime      : 2026-05-03 21:06:23Z
+firstEventTimestamp : 2026-05-03 21:06:35Z
+lastEventTimestamp  : 2026-05-03 21:06:35Z
+storedBytes       : 0  (CloudWatch billing accounting; §5 sweep proved the event existed)
+```
+
+This was a single-event stream from the `mint-with-bare-iam-user.ps1`
+run on 2026-05-03 21:06 UTC — the original incident vector. The
+first-event/last-event timestamps are identical because the failing
+mint task wrote one stderr line (containing the leaked DSN) and exited.
+
+### 11.3 Verification probe contract
+
+The §4 probe (`python -c "..."` invoked via `containerOverrides`) used
+`from sqlalchemy import create_engine, text` — the same library and
+shape the application uses to consume `/luciel/database-url` — to prove
+the rotation works end-to-end through the canonical consumer of record.
+This is materially stronger than a `psycopg2` smoke test because it
+exercises the full SQLAlchemy URL parser (which is what would catch any
+shape drift in the new DSN).
+
+The probe emits exactly three log lines, none of which can leak the DSN:
+
+```python
+print("P3H_VERIFY_START", flush=True)
+print("P3H_VERIFY_OK select=" + str(row[0]) + " user=" + str(row[1]) + " db=" + str(row[2]), flush=True)
+print("P3H_VERIFY_FAIL " + type(e).__name__, flush=True)
+```
+
+No `str(e)` or `repr(e)` — only the exception class name on failure.
+Verified: the new §4 stream
+`migrate/luciel-backend/cd676526e958436dab2406b5f604e3bd` did **not**
+appear in the §5 sweep, confirming the contract held under live
+conditions.
+
+### 11.4 Runtime corrections folded into the P3-H runbook
+
+Three fixes applied inline as we discovered them:
+
+1. **§3 DSN regex.** The runbook design assumed the SSM-stored DSN
+   carried `?sslmode=require`. The real value (read live) was
+   `postgresql+psycopg://luciel_admin:<pw>@host:5432/luciel` — no
+   query string. Working regex:
+   `'(postgresql\+psycopg://luciel_admin:)[^@]+(@)' → '${1}<NEW>${2}'`.
+2. **§4 BOM-free overrides JSON.** Initial `Set-Content -Encoding utf8`
+   wrote a UTF-8 BOM, which `aws ecs run-task --overrides file://`
+   rejected. Fixed by using `[System.IO.File]::WriteAllText($path,
+   $json, (New-Object System.Text.UTF8Encoding $false))` and verifying
+   `[byte[]]::ReadAllBytes($path)[0] -eq 123` (= `'{'`).
+3. **§5/§7 AWS CLI pager + scan-window.** The default `aws` pager hangs
+   on long JSON output. Mitigation: `$env:AWS_PAGER = ""` plus narrower
+   time windows (7 days, not 90) plus `--log-stream-name-prefix
+   migrate/` on the targeted pass. Defensive passes ran with
+   per-page 90 s job timeouts to bound failure modes.
+
+### 11.5 Known residual: SSM history v1 (tracked as P3-L)
+
+The SSM §3 update incremented version 1 → 2; v1 still exists in the
+parameter history with the leaked plaintext. Only `luciel-admin`
+(MFA-gated per P3-J) can call `ssm:GetParameterHistory` on the
+parameter. The `luciel-mint-operator-role` permission policy grants
+only `ssm:GetParameter` (not history). Migrate / worker / backend task
+roles have no read access on this parameter.
+
+Mitigation deferred to post-Commit-4: delete-and-recreate the parameter
+will drop history. Tracked in `PHASE_3_COMPLIANCE_BACKLOG.md` P3-L.
+
+### 11.6 What this unblocks
+
+- All four Commit-4 prerequisites (P3-J, P3-K, P3-G, P3-H) are now
+  resolved.
+- Commit 4 mint re-run via the Option 3 ceremony
+  (`scripts/mint-with-assumed-role.ps1` without `-DryRun`) is the next
+  Phase 2 work item.
+- This recap, the canonical recap (v1.4), and the Phase 3 backlog now
+  agree on the resolved state.

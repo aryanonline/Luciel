@@ -1,6 +1,10 @@
 # P3-H — Rotate `luciel_admin` password + purge CloudWatch leak
 
-**Status:** Design phase. Operator review required before any execution.
+**Status:** ✅ EXECUTED end-to-end 2026-05-03 23:18–23:56 UTC.
+P3-H is RESOLVED. See `docs/recaps/2026-05-03-mint-incident.md` §11
+for the resolution recap and `docs/PHASE_3_COMPLIANCE_BACKLOG.md` P3-H
+for the audit metadata. Three POST-EXECUTION CORRECTION notes are
+inlined at §3, §4, and §5/§7 below.
 **Branch:** `step-28-hardening-impl`.
 **Authoring commit:** (this commit).
 **Prerequisites met:**
@@ -137,6 +141,30 @@ containing the **old** `LucielDB2026Secure` password. We need to
 overwrite it with the **new** password while preserving everything else
 (host, port, dbname, sslmode params).
 
+> **⚠️ POST-EXECUTION CORRECTION (2026-05-03):** The runbook design
+> assumed the stored DSN carried `?sslmode=require`. The real value
+> (read live during execution) was
+> `postgresql+psycopg://luciel_admin:<pw>@host:5432/luciel` — SQLAlchemy
+> scheme prefix, no query string. The shape-check regex on line 156
+> failed on the first pass; the safety guard correctly aborted before
+> any SSM write. **Working regex (used in the actual execution):**
+>
+> ```
+> $oldDsn -match '^postgresql\+psycopg://luciel_admin:[^@]+@[^:]+:5432/[^?]+$'
+> ```
+>
+> **Working substitution:**
+>
+> ```
+> $newDsn = $oldDsn -replace '(postgresql\+psycopg://luciel_admin:)[^@]+(@)', ('${1}' + $plainNew + '${2}')
+> ```
+>
+> Future credential-rotation runbooks should derive the regex from the
+> live DSN shape via a non-destructive read (§3.2 of original) before
+> committing to a substitution pattern. Backlog item also captured for
+> a TLS posture decision: enforce `?sslmode=require` either via DSN or
+> SQLAlchemy `connect_args={"sslmode": "require"}`.
+
 ```powershell
 # 3.1 Read current DSN as a SecureString via the MFA-gated helper.
 #     This prompts for MFA, assumes luciel-mint-operator-role, reads
@@ -204,6 +232,55 @@ The backend ECS service reads `/luciel/database-url` at task start via
 DSN in their environment. We need a fresh task to prove the rotation
 end-to-end.
 
+> **⚠️ POST-EXECUTION CORRECTIONS (2026-05-03):**
+>
+> **(a) Use SQLAlchemy, not psycopg2, in the verification probe.** The
+> design used `import os,psycopg2;c=psycopg2.connect(os.environ[...])`
+> but the application consumes the DSN via SQLAlchemy. The actual probe
+> used:
+>
+> ```python
+> from sqlalchemy import create_engine, text
+> eng = create_engine(url, connect_args={"connect_timeout": 10})
+> with eng.connect() as conn:
+>     row = conn.execute(text("SELECT 1, current_user, current_database()")).fetchone()
+> ```
+>
+> This exercises the SQLAlchemy URL parser — the same library and shape
+> the application uses — so any DSN-shape drift would surface here
+> rather than at first real backend task start.
+>
+> **(b) Probe must emit only safe markers, never `str(e)` / `repr(e)`.**
+>
+> ```python
+> print("P3H_VERIFY_START", flush=True)
+> print("P3H_VERIFY_OK select=" + str(row[0]) + " user=" + str(row[1]) + " db=" + str(row[2]), flush=True)
+> print("P3H_VERIFY_FAIL " + type(e).__name__, flush=True)  # class name only
+> ```
+>
+> This is the contract that prevents the verification step from
+> reproducing the original leak. Verified: §5 sweep did NOT find the
+> new §4 stream.
+>
+> **(c) BOM-free overrides JSON file.** PowerShell's
+> `Set-Content -Encoding utf8` writes a UTF-8 BOM (`EF BB BF`) which
+> `aws ecs run-task --overrides file://` rejects with cryptic JSON parse
+> errors. **Working pattern (PowerShell 5.x and 7.x):**
+>
+> ```powershell
+> $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+> [System.IO.File]::WriteAllText($overridesPath, $overridesJson, $utf8NoBom)
+> # Verify: bytes[0] should be 123 ('{'), NOT 239,187,191 (EF BB BF BOM)
+> $firstBytes = [System.IO.File]::ReadAllBytes($overridesPath)[0..2]
+> if ($firstBytes[0] -ne 123) { throw "BOM still present, abort" }
+> ```
+>
+> **(d) Inline `--overrides` JSON via -c is fragile under PowerShell.**
+> Multi-line Python with embedded quotes gets mangled by PowerShell
+> argument tokenization when passed via `'{...}'` inline. Always write
+> the overrides JSON to a temp file (with the BOM-free pattern above)
+> and pass `--overrides "file://$path"`.
+
 **Two acceptable verification paths** — pick one based on appetite:
 
 ### 4.A — Cheapest: one-shot run-task with the migrate task definition
@@ -253,6 +330,38 @@ restart §1.
 ---
 
 ## 5. Sweep CloudWatch for plaintext contamination
+
+> **⚠️ POST-EXECUTION CORRECTIONS (2026-05-03) — applies to §5 and §7:**
+>
+> **(a) Disable AWS CLI pager.** Default `aws` behavior pipes JSON
+> through a pager when output exceeds terminal height; this hangs
+> PowerShell pipelines silently for minutes. Set
+> `$env:AWS_PAGER = ""` at the start of any sweep block, or pass
+> `--no-cli-pager` to every `aws` invocation.
+>
+> **(b) Bound the time window.** `filter-log-events` over 90 days against
+> a busy log group (`/ecs/luciel-backend`) can take many minutes
+> server-side even with a filter pattern — the filter narrows what is
+> *returned*, not what is *scanned*. The leak happened today; 7 days is
+> generous. Use
+> `[int64]((Get-Date).AddDays(-7) - (Get-Date "1970-01-01Z").ToUniversalTime()).TotalMilliseconds`
+> for `--start-time`.
+>
+> **(c) Use `--log-stream-name-prefix` for targeted passes.** A
+> three-pass sweep (targeted `migrate/*` → defensive all-streams →
+> defensive other log groups) bounds latency on the dominant pass and
+> still catches unknown contamination defensively. The actual execution
+> used: pass 1 `--log-stream-name-prefix migrate/` (fast, 1 page);
+> pass 2 all streams (defensive, same group); pass 3 all streams in
+> `/ecs/luciel-worker` (defensive, different group).
+>
+> **(d) Wrap each page in a 90 s job timeout.** Use `Start-Job` +
+> `Wait-Job -Timeout 90` to bound any single CLI call so a slow
+> server-side scan aborts cleanly with a `TIMEOUT` message instead of
+> a silent hang.
+>
+> See the actual executed sweep block in chat history (or in the
+> retroactive runbook update commit) for the full PowerShell pattern.
 
 The known leak is in stream
 `migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c`. We do not

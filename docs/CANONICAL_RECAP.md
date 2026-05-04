@@ -1,9 +1,9 @@
 # Luciel Canonical Recap
 
-**Version:** v1.3
-**Last updated:** 2026-05-03 late-evening, after P3-J (MFA on `luciel-admin`), P3-G (migrate-role policy diff), and P3-K (`luciel-mint-operator-role` create + smoke test) all landed live in IAM. Three of the four Commit-4 prerequisites are now resolved; P3-H (rotate leaked `LucielDB2026Secure` + delete leaking log stream) is the last gate. v1.3 supersedes v1.2's pre-resolution framing for the IAM-side Option 3 boundary work.
-**Supersedes:** v1.2 (2026-05-03 evening, mid-Phase-2 docs reconciliation); v1.1 (2026-05-03 Phase 2 mid-stream close); v1 (2026-05-03 Phase 1 close)
-**Next update:** at Phase 2 full close (Commits 4–7 live in prod AND P3-H resolved) OR when a strategic-question answer changes
+**Version:** v1.4
+**Last updated:** 2026-05-03 23:56 UTC, after P3-H (rotate leaked `LucielDB2026Secure` + delete CloudWatch log stream + final residual sweep) landed end-to-end. All four Commit-4 prerequisites (P3-J, P3-K, P3-G, P3-H) are now resolved; **Commit 4 mint re-run is unblocked**. P3-L (SSM parameter history retains plaintext v1) was discovered during P3-H execution and is logged as P2, deferred to post-Commit-4. v1.4 supersedes v1.3's open-gate framing for P3-H.
+**Supersedes:** v1.3 (2026-05-03 late-evening, post P3-J/G/K); v1.2 (2026-05-03 evening, mid-Phase-2 docs reconciliation); v1.1 (2026-05-03 Phase 2 mid-stream close); v1 (2026-05-03 Phase 1 close)
+**Next update:** at Phase 2 full close (Commits 4–7 live in prod) OR when a strategic-question answer changes
 **Source-of-truth rule:** if a chat recap or session summary contradicts this document, this document wins. Update via PR with rationale; do not produce contradicting recaps inline.
 
 ---
@@ -246,7 +246,7 @@ Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
 - **MFA enforced on `luciel-admin`** — `aws iam list-mfa-devices --user-name luciel-admin` returns a non-empty `MFADevices` array (P3-J resolved). ✅ **Verified 2026-05-03 23:48:11 UTC** — `SerialNumber: arn:aws:iam::729005488042:mfa/Luciel-MFA`. Account-wide sweep (`aws iam list-users`) confirmed `luciel-admin` is the only IAM user, so privileged-human MFA boundary is fully closed.
 - **Dedicated `luciel-mint-operator-role` exists with MFA-required AssumeRole** — `aws iam get-role --role-name luciel-mint-operator-role` returns a trust policy with `Bool: aws:MultiFactorAuthPresent=true` and `NumericLessThan: aws:MultiFactorAuthAge=3600` (P3-K resolved). The migrate task role is NOT granted read on `/luciel/database-url`. ✅ **Verified 2026-05-04 00:14:10 UTC** (CreateDate). Trust policy, inline permission policy `luciel-mint-operator-permissions`, and `MaxSessionDuration: 3600` all match `infra/iam/*.json` design byte-for-byte. Smoke test (`mint-with-assumed-role.ps1 -DryRun`) succeeded at 2026-05-04 00:19:22 UTC; `aws ssm get-parameter --name /luciel/production/worker_database_url` returned `ParameterNotFound` post-smoke-test, confirming the dry-run wrote nothing.
 - **Migrate-role policy diff applied** — `aws iam get-role-policy --role-name luciel-ecs-migrate-role --policy-name luciel-migrate-ssm-write` returns 6 SSM actions including `ssm:GetParameterHistory` (P3-G resolved). ✅ **Verified 2026-05-03 evening.** Live policy matches `infra/iam/luciel-migrate-ssm-write-after-p3-g.json` byte-for-byte.
-- **Leaked admin password rotated and leaking log stream deleted** — `aws logs filter-log-events --log-group-name /ecs/luciel-backend --filter-pattern '"LucielDB2026Secure"'` returns zero events (P3-H resolved). **STILL OPEN** — last gate before Commit 4 mint re-run.
+- **Leaked admin password rotated and leaking log stream deleted** — `aws logs filter-log-events --log-group-name /ecs/luciel-backend --filter-pattern '"LucielDB2026Secure"'` returns zero events (P3-H resolved). ✅ **Verified 2026-05-03 23:56:22 UTC.** RDS rotation 23:18:31 UTC; SSM `/luciel/database-url` v1→v2 at 23:22:54 UTC; §4 SQLAlchemy ECS verification `P3H_VERIFY_OK select=1 user=luciel_admin db=luciel` at 23:31:53 UTC; contaminated stream `migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c` deleted at 23:52:16 UTC; §7 final sweep returned 0 hits across `/ecs/luciel-backend`, `/ecs/luciel-worker`. Residual SSM history v1 plaintext tracked as P3-L (P2, deferred post-Commit-4).
 
 When met, tag `step-28-phase-2-complete`.
 
@@ -259,7 +259,8 @@ Estimated (REVISED 2026-05-03 evening): 4 prod-touching commits + 3 P3 prerequis
 - ~~**P3-J (P0, NEW 2026-05-03)**~~ — ✅ **RESOLVED** 2026-05-03 23:48 UTC. MFA on `luciel-admin` (`Luciel-MFA`). Account has only one IAM user; privileged-human MFA boundary is fully closed.
 - ~~**P3-K (P1, NEW 2026-05-03)**~~ — ✅ **RESOLVED** 2026-05-04 00:14 UTC (role created + permission policy + smoke-test verified). `luciel-mint-operator-role` live with MFA-required AssumeRole, scoped read on `/luciel/database-url` + KMS Decrypt via SSM. Helper `scripts/mint-with-assumed-role.ps1` shipped in commit `9e48098`; mint script `--admin-db-url-stdin` flag in `ce66d06`.
 - ~~**P3-G (P2, RESCOPED 2026-05-03)**~~ — ✅ **RESOLVED** 2026-05-03 ~20:09 EDT. `ssm:GetParameterHistory` added to `luciel-migrate-ssm-write`; live policy matches design byte-for-byte.
-- **P3-H (P0, OPEN)** — Rotate leaked `luciel_admin` password (`LucielDB2026Secure`); delete CloudWatch log stream `/ecs/luciel-backend / migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c`. **Last gate** before Commit 4 mint re-run.
+- ~~**P3-H (P1, RESOLVED 2026-05-03)**~~ — ✅ **RESOLVED** 2026-05-03 23:56:22 UTC. RDS master pw rotated, SSM v1→v2, §4 ECS SQLAlchemy verification passed, contaminated CloudWatch stream deleted, residual sweep clean. Full timeline + audit metadata in `PHASE_3_COMPLIANCE_BACKLOG.md` P3-H section.
+- **P3-L (P2, NEW 2026-05-03, DEFERRED)** — SSM parameter `/luciel/database-url` history v1 retains plaintext `LucielDB2026Secure` after the P3-H rotation. Only `luciel-admin` (MFA-gated per P3-J) can read parameter history. Mitigation: delete-and-recreate the SSM parameter post-Commit-4. See `PHASE_3_COMPLIANCE_BACKLOG.md` P3-L for full rationale and fix shape.
 - Dedicated read-only recon role
 - Pattern O helper script extraction (`scripts/run_prod_recon.ps1`)
 - LucielInstanceRepo `_for_agent`/`_for_domain` cascade autocommit-aware
@@ -537,8 +538,9 @@ Only after Step 4, propose work.
 ## Section 15 — Drift register
 
 ### Phase 2 (operational hardening)
-- Worker DB role swap (former Commit 13 work) — packaged as Commit 4, runbook §4 — **BLOCKED on P3-J + P3-K + P3-H** (see §4.1 close gate)
-- D-prod-superuser-password-leaked-to-terminal-2026-05-03 (rotate `luciel_admin` as part of worker role swap) — packaged as Commit 4, runbook §4.7
+- Worker DB role swap (former Commit 13 work) — packaged as Commit 4, runbook §4 — **UNBLOCKED 2026-05-03 23:56 UTC** (P3-J + P3-K + P3-G + P3-H all resolved; ready for Option 3 ceremony execution)
+- ~~D-prod-superuser-password-leaked-to-terminal-2026-05-03~~ — ✅ **RESOLVED** 2026-05-03 23:56:22 UTC via P3-H. RDS master pw rotated 23:18:31 UTC; SSM `/luciel/database-url` v1→v2 at 23:22:54 UTC; §4 SQLAlchemy ECS verify passed at 23:31:53 UTC; contaminated stream `migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c` deleted at 23:52:16 UTC; §7 final sweep 0 hits. See `docs/runbooks/step-28-p3-h-rotate-and-purge.md` (executed end-to-end with three inline runtime corrections); full audit metadata in `PHASE_3_COMPLIANCE_BACKLOG.md` P3-H.
+- **D-ssm-parameter-history-retains-plaintext-2026-05-03** (NEW) — SSM `/luciel/database-url` history v1 still contains the rotated-out plaintext password. Tracked as P3-L (P2, deferred to post-Commit-4 cleanup). MFA-gated `luciel-admin` is the only principal that can read parameter history; mint-operator-role and task roles have no `GetParameterHistory` access.
 - **D-mint-script-leaks-admin-dsn-via-error-body-2026-05-03** (NEW) — original mint script logged the constructed admin DSN on dry-run error path. Hardened by `2b5ff32`; full incident report at `docs/recaps/2026-05-03-mint-incident.md`. Resolved at code level; operator-side rotation is P3-H.
 - **D-luciel-admin-no-mfa-2026-05-03** (NEW) — `aws iam list-mfa-devices --user-name luciel-admin` returns empty. Tracked as P3-J. ✅ **RESOLVED 2026-05-03 23:48:11 UTC** — virtual MFA `Luciel-MFA` enabled. Account-wide sweep confirms `luciel-admin` is the only IAM user; full privileged-human MFA boundary is closed.
 - **D-migrate-role-conflated-with-mint-duty-2026-05-03** (NEW) — single `luciel-ecs-migrate-role` covers both Alembic migrations and mint operations. Splitting into dedicated `luciel-mint-operator-role` is P3-K.
@@ -649,4 +651,4 @@ If they disagree:
 
 ---
 
-## End of Canonical Recap v1.3
+## End of Canonical Recap v1.4

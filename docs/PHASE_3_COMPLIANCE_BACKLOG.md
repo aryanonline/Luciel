@@ -380,7 +380,59 @@ Follow-up A (corrected), commit `2b5ff32`. Supersedes the original
 
 ---
 
-## P3-H. Admin password rotation needed (CloudWatch leak)  *(P1, time-bounded)*
+## P3-H. Admin password rotation needed (CloudWatch leak)  *(P1 — RESOLVED 2026-05-03 23:56:22 UTC)*
+
+**Status:** ✅ **RESOLVED** 2026-05-03 23:56:22 UTC. RDS master password
+rotated, SSM `/luciel/database-url` updated to v2, ECS-side end-to-end
+verification passed via SQLAlchemy probe in `luciel-migrate:12` task,
+contaminated CloudWatch log stream deleted, final residual-leak sweep
+returned 0 hits across `/ecs/luciel-backend`, `/ecs/luciel-worker`
+(`/aws/rds/instance/luciel-db/postgresql` log group does not exist).
+
+Applied per `docs/runbooks/step-28-p3-h-rotate-and-purge.md` §1–§7
+end-to-end. Operator + agent walked the runbook step-by-step;
+three runtime fixes were folded into the runbook inline (see
+§§3/§4/§5 correction blocks).
+
+**Prod-mutation timeline (UTC):**
+
+| Time | Action |
+|---|---|
+| 23:18:31 | RDS `modify-db-instance --master-user-password` synchronous return; no reboot, no downtime |
+| 23:22:54 | SSM `put-parameter` v1 → v2 on `/luciel/database-url` (length 118 → 140; standard tier; alias/aws/ssm KMS key) |
+| 23:31:53 | §4 verification: `P3H_VERIFY_OK select=1 user=luciel_admin db=luciel` from `luciel-migrate:12` Fargate task `cd676526e958436dab2406b5f604e3bd`, exit code 0, runtime ~50 s |
+| 23:52:16 | §6 `delete-log-stream` on `/ecs/luciel-backend / migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c` — exit 0, post-delete `describe-log-streams` returned empty |
+| 23:56:22 | §7 final sweep: 0 hits across all three target log groups |
+
+**Deleted-stream metadata snapshot (preserved for audit):**
+
+```
+arn               : arn:aws:logs:ca-central-1:729005488042:log-group:/ecs/luciel-backend:log-stream:migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c
+creationTime      : 2026-05-03 21:06:23Z
+firstEventTimestamp : 2026-05-03 21:06:35Z
+lastEventTimestamp  : 2026-05-03 21:06:35Z
+storedBytes       : 0  (single-event stream; CloudWatch billing accounting)
+```
+
+**Verification probe (the §4 fresh task) used the SQLAlchemy consumption
+path** — `from sqlalchemy import create_engine, text` — not raw psycopg.
+This exercises the same code path the real backend uses to consume the
+DSN, proving the rotation works end-to-end through the canonical
+consumer of record. Probe contract: emit only `P3H_VERIFY_START`,
+`P3H_VERIFY_OK select=N user=X db=Y`, or `P3H_VERIFY_FAIL <ExceptionClassName>`
+— never `str(e)` or `repr(e)`. Verified: the new §4 stream
+`migrate/luciel-backend/cd676526e958436dab2406b5f604e3bd` was excluded
+from the §5 sweep results, confirming the contract held.
+
+**Known residual (tracked separately as P3-L below):** SSM parameter
+`/luciel/database-url` history version 1 still contains the plaintext
+`LucielDB2026Secure`. Only `luciel-admin` (now MFA-gated per P3-J) can
+read parameter history via `ssm:GetParameterHistory`. Mitigation
+deferred to post-Commit-4 cleanup.
+
+---
+
+### Original P3-H entry (preserved for audit trail)
 
 **Discovered:** 2026-05-03 during the Commit 4 mint real-run.
 
@@ -721,6 +773,74 @@ JSON + ~80 LOC of PowerShell helper + runbook update).
 
 ---
 
+## P3-L. SSM parameter history retains plaintext `LucielDB2026Secure`  *(P2 — deferred to post-Commit-4)*
+
+**Discovered:** 2026-05-03 during P3-H execution. The remediation in
+P3-H replaced the *current* value of `/luciel/database-url` (v1 → v2)
+but SSM retains parameter version history. v1 is still readable via
+`aws ssm get-parameter-history --name /luciel/database-url --with-decryption`
+and contains the leaked plaintext.
+
+**Why this is P2, not P0/P1:**
+
+- The only IAM principal that can call `ssm:GetParameterHistory` on this
+  parameter is `luciel-admin`, which is now MFA-gated per P3-J
+  (`Bool: aws:MultiFactorAuthPresent=true` enforced on the AWS account
+  for the only IAM user). The `luciel-mint-operator-role` permission
+  policy only grants `ssm:GetParameter` (not `GetParameterHistory`),
+  and the migrate / worker / backend task roles have no read on this
+  parameter at all.
+- The blast-radius argument from `2026-05-03-mint-incident.md` §4 still
+  applies: any compromise of `luciel-admin` is already a root-equivalent
+  breach via console-driven RDS password reset, so the historical SSM
+  value does not expand the breach surface meaningfully.
+- The plaintext was rotated at 2026-05-03 23:18:31 UTC; the leaked
+  password is no longer accepted by RDS as of that moment.
+
+**Why this is still worth fixing:**
+
+- For SOC 2 / regulator-facing posture, "plaintext credential persists
+  in SSM history" reads worse than "plaintext credential persists in
+  CloudWatch log stream" — even though the access-control story is
+  identical. Cleaner to make the residual zero.
+- Defense-in-depth against future IAM regression that might broaden
+  history-read access.
+
+**Why this is deferred to post-Commit-4:**
+
+- The cleanest mitigation is to **delete and recreate** the parameter
+  (deletion clears all history; recreation starts from v1 with the
+  current rotated value). This is mildly disruptive: SSM lookups by
+  consumers between delete and recreate will fail. Backend tasks already
+  running hold the value in their environment, but any task restart
+  during the window will fail to start.
+- Doing this *before* Commit 4 mint re-run adds an unnecessary outage
+  window to a session that already has prod-mutating work. Doing it
+  *after* Commit 4 lands keeps the rotation work atomic.
+
+**Fix shape (when prioritized):**
+
+1. Coordinate a low-traffic window (off-hours).
+2. Read current parameter value via mint-operator-role into a
+   SecureString.
+3. `aws ssm delete-parameter --name /luciel/database-url`.
+4. Verify history is gone:
+   `aws ssm get-parameter-history --name /luciel/database-url`
+   should return `ParameterNotFound`.
+5. Recreate via
+   `aws ssm put-parameter --name /luciel/database-url --value <secure-string-from-step-2> --type SecureString --key-id alias/aws/ssm`.
+6. Force a backend service redeploy to confirm consumers can read v1
+   of the recreated parameter.
+7. Capture evidence; mark P3-L resolved.
+
+**Estimated effort:** ~30 minutes operator time including the redeploy
+verification window.
+**Cross-references:** `docs/runbooks/step-28-p3-h-rotate-and-purge.md`
+(§3 SSM update is what created the version-1 residual we are cleaning
+here); P3-J (MFA gate that contains the residual risk).
+
+---
+
 ## P3-I. Public ALB attracts opportunistic CVE scanners  *(P3 — informational)*
 
 **Discovered:** 2026-05-03 (incidental observation during Phase 2
@@ -767,14 +887,19 @@ The Commit 4 mint re-run is now blocked on P3-J + P3-K, NOT on P3-G.
 
 **Phase 2 tail (must complete before Phase 2 closes):**
 
-1. **P3-J FIRST.** MFA on `luciel-admin`. P0. ~5 minutes. Everything
-   else stalls until this lands.
-2. **P3-K next.** Create `luciel-mint-operator-role` with MFA-required
-   trust policy. Bundle the P3-G policy diff (`GetParameterHistory`)
-   into the same IAM-work session and commit.
-3. **Commit 4 mint re-run** via the Option 3 ceremony.
-4. **P3-H** — admin password rotation using the same Option 3
-   ceremony, plus log-stream delete.
+1. ~~**P3-J FIRST.**~~ MFA on `luciel-admin`. P0. ✅ Resolved 2026-05-03
+   23:48:11 UTC.
+2. ~~**P3-K next.**~~ `luciel-mint-operator-role`. ✅ Resolved 2026-05-04
+   00:14:10 UTC.
+3. ~~**P3-G** policy diff (`GetParameterHistory`).~~ ✅ Resolved
+   2026-05-03 ~20:09 EDT.
+4. ~~**P3-H** admin password rotation + log-stream delete.~~ ✅ Resolved
+   2026-05-03 23:56:22 UTC.
+5. **Commit 4 mint re-run** via the Option 3 ceremony — **NOW UNBLOCKED**.
+6. **Commits 5–7** prod-touching: CloudWatch alarms, ECS auto-scaling,
+   container healthchecks.
+7. **P3-L** SSM parameter history cleanup — **deferred to post-Commit-4**
+   per the rationale in the P3-L entry above.
 
 **Phase 3 proper (starts after Phase 2 prod-touching commits 4-7
 stabilize for ≥ 7 days):**
