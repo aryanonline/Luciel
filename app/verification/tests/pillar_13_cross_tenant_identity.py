@@ -118,14 +118,18 @@ class CrossTenantIdentityPillar(Pillar):
         domain_id = "general"
 
         # SENTINEL_LEGIT is woven into a user-fact-shaped statement
-        # below ("My account verification token is …") so the memory
-        # extractor recognizes it as a durable fact (`fact` category,
-        # per app/memory/extractor.py EXTRACTION_PROMPT). Older P13
-        # revisions wrapped the sentinel in instructional text
-        # ("Setup turn for Pillar 13...") which the extractor
-        # correctly rejects as trivial/temporary, leading to a
-        # vacuously-failing A3. The fix is on the test-setup side,
-        # not on extraction logic.
+        # below ("My internal employee ID at the brokerage is …") so
+        # the memory extractor recognizes it as a durable fact (`fact`
+        # category, per app/memory/extractor.py EXTRACTION_PROMPT).
+        # Older P13 revisions tried instructional framings ("Please
+        # remember this…", "Setup turn for Pillar 13…") which the
+        # extractor correctly rejects as meta/instructional, leading
+        # to a vacuously-failing A3. The current framing avoids
+        # imperatives and uses canonical "My X is Y" identity-fact
+        # shape with brokerage-domain context. Fix is on the test-
+        # setup side, not on extraction logic.
+        # See drift D-pillar-13-a3-sentinel-not-extractable-content-
+        # 2026-05-02 (resolved by this revision).
         #
         # SENTINEL_SPOOF stays as-is — A1 asserts ABSENCE of any row
         # containing it, so its message text doesn't need to look
@@ -287,10 +291,10 @@ class CrossTenantIdentityPillar(Pillar):
                 json={
                     "session_id": t1_session_id,
                     "message": (
-                        f"Please remember this for future sessions: my "
-                        f"account verification token is {SENTINEL_LEGIT}. "
-                        f"I will reference this token whenever I need to "
-                        f"confirm my identity."
+                        f"My internal employee ID at the brokerage is "
+                        f"{SENTINEL_LEGIT} \u2014 that's the code my manager "
+                        f"uses in our team's roster. I always include it "
+                        f"on my daily standup notes."
                     ),
                 },
                 expect=200, client=c,
