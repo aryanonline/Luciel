@@ -158,32 +158,66 @@ If Block 5 isn't 19/19 green, **diagnose, do not deploy**.
 
 ---
 
-## 4 — Commit 4 — Worker DB role swap + admin password rotation
+## 4 — Commit 4 — Worker DB role swap (Option 3 ceremony)
 
-**Goal:** worker process stops authenticating to RDS as
-`luciel_admin` (superuser) and starts using `luciel_worker` (least-
-privilege role created in Phase 1, drift `D-worker-role`). Then
-rotate the `luciel_admin` password (drift
-`D-prod-superuser-password-leaked-to-terminal-2026-05-03`).
+**Revision history:**
+- v1 (2026-05-03, in `925c64a`): described direct invocation of
+  `python scripts/mint_worker_db_password_ssm.py`. **Superseded.**
+- v2 (this section, 2026-05-04 post-Pillar-13-A3): rewritten to use
+  the Option 3 ceremony via `scripts/mint-with-assumed-role.ps1`. The
+  v1 flow leaked the admin DSN to CloudWatch on its first attempt
+  (see `docs/recaps/2026-05-03-mint-incident.md` for full forensic
+  narrative). The v2 flow closes that boundary architecturally.
+- v2 also removes the old §4.7 `luciel_admin` rotation — that work
+  was completed by P3-H on 2026-05-03 23:18 UTC and is no longer part
+  of Commit 4. See P3-H entry in `docs/PHASE_3_COMPLIANCE_BACKLOG.md`
+  and `docs/runbooks/step-28-p3-h-rotate-and-purge.md`.
+
+**Goal:** worker process stops authenticating to RDS as `luciel_admin`
+(superuser) and starts using `luciel_worker` (least-privilege role
+created in Phase 1, drift `D-worker-role`).
 
 **Why it matters:** Phase 1 enforces audit-log append-only by API.
 This commit enforces it by **DB grant**, so even if a worker bug
 attempts `UPDATE admin_audit_logs ...` it fails at Postgres.
 
-**Code/IaC artifacts to land in this commit (Aryan to author or
-review on the branch before deploy):**
+**Prerequisite gate (all four must be ✅ before §4.2 mint):**
 
-- `scripts/mint_worker_db_password_ssm.py` — already present (Phase 1
-  Commit 8a). Re-verify.
-- New runbook block in `docs/runbooks/step-28-commit-8-luciel-worker-sg.md`
-  (already present) — re-confirm SG ingress instructions.
-- Task-def update for `luciel-worker` to read `WORKER_DATABASE_URL`
-  from SSM `/luciel/production/WORKER_DATABASE_URL` instead of
-  `DATABASE_URL`.
-- `app/core/config.py` already exposes a way for the worker to read
-  a different SSM key — verify before deploy.
+| Prereq | Status | Evidence |
+|---|---|---|
+| P3-J — MFA on `luciel-admin` | ✅ 2026-05-03 23:48 UTC | `arn:aws:iam::729005488042:mfa/Luciel-MFA` |
+| P3-K — `luciel-mint-operator-role` | ✅ 2026-05-04 00:14 UTC | role + trust policy + `MaxSessionDuration: 3600` |
+| P3-G — migrate role `ssm:GetParameterHistory` | ✅ 2026-05-03 ≈20:09 EDT | live policy has 6 SSM actions |
+| P3-H — leaked `LucielDB2026Secure` rotated | ✅ 2026-05-03 23:56 UTC | SSM v1 → v2 + log stream deleted |
 
-### 4.1 Recon (read-only, safe)
+**Code/IaC artifacts that land with this commit:**
+
+- `scripts/mint-with-assumed-role.ps1` — Option 3 helper (commit
+  `9e48098`). Pre-existing; verify present.
+- `scripts/mint_worker_db_password_ssm.py` — hardened mint script
+  with `--admin-db-url-stdin` flag (commit `ce66d06` + `2b5ff32`).
+  Pre-existing; verify present.
+- `app/core/config.py` — already supports per-process SSM key
+  selection. Pre-existing; verify before deploy.
+- Task-def update for `luciel-worker` to read its DSN from SSM
+  `/luciel/production/worker_database_url` (lowercase — canonical)
+  instead of `DATABASE_URL`.
+
+### 4.0 — Pre-mint checklist (operator side, do NOT skip)
+
+```powershell
+# 1. Pre-flight ritual passes (§3 above), all 5 blocks green.
+# 2. Authenticator app is open with the Luciel-MFA TOTP visible.
+# 3. The dev `luciel-admin` AWS profile is the active default profile
+#    (`aws sts get-caller-identity` returns user `luciel-admin`,
+#    account 729005488042). The ceremony assumes
+#    `luciel-mint-operator-role` FROM `luciel-admin`.
+# 4. The branch is clean and on `step-28-hardening-impl` at the head
+#    that contains Commits A + D + repo-hygiene (`86239ab` or later).
+# 5. The repo working tree has no uncommitted changes.
+```
+
+### 4.1 — Recon (read-only, safe)
 
 ```powershell
 # Confirm luciel_worker role exists and has the expected grants.
@@ -192,7 +226,7 @@ review on the branch before deploy):**
 aws ecs run-task --cluster luciel-cluster `
   --task-definition luciel-migrate:N `
   --launch-type FARGATE `
-  --network-configuration "awsvpcConfiguration={subnets=[<private-subnet-id>],securityGroups=[<migrate-sg-id>],assignPublicIp=DISABLED}" `
+  --network-configuration "awsvpcConfiguration={awsvpcConfiguration={subnets=[<private-subnet-id>],securityGroups=[<migrate-sg-id>],assignPublicIp=DISABLED}}" `
   --overrides '{
     "containerOverrides":[{
       "name":"luciel-migrate",
@@ -204,23 +238,77 @@ aws ecs run-task --cluster luciel-cluster `
 Expected: two rows. `luciel_admin` super=t login=t,
 `luciel_worker` super=f login=t.
 
-### 4.2 Mint new worker password and store in SSM
+**Also confirm SSM target is empty (or non-existent) before mint:**
 
 ```powershell
-# From the working repo, dry-run first.
-python scripts/mint_worker_db_password_ssm.py --dry-run
-
-# Real run — writes /luciel/production/WORKER_DATABASE_URL as SecureString
-# AND issues ALTER USER luciel_worker WITH PASSWORD '...' on RDS.
-python scripts/mint_worker_db_password_ssm.py
+aws ssm get-parameter `
+  --name /luciel/production/worker_database_url `
+  --region ca-central-1
+# Expect: ParameterNotFound (the canonical post-P3-K state — nothing
+# was ever written here). If the parameter exists, STOP and audit
+# why before proceeding.
 ```
 
-The mint script self-rotates: it generates a 32-char password, runs
-`ALTER USER luciel_worker WITH PASSWORD ...`, builds the SQLAlchemy
-URL, and writes the SSM SecureString. It does **not** print the
-password anywhere (Pattern E).
+### 4.2 — Mint via Option 3 ceremony (the prod-touching action)
 
-### 4.3 Update worker task-def to read WORKER_DATABASE_URL
+**Important:** the mint script is invoked **only** through
+`mint-with-assumed-role.ps1`. Direct invocation of
+`python scripts/mint_worker_db_password_ssm.py` is **not** part of
+this runbook — the mint script's `--admin-db-url-stdin` flag depends
+on assumed-role credentials being injected into the session by the
+helper, and direct invocation would either fail (no admin DSN read)
+or leak the DSN through some workaround. The Option 3 ceremony is
+the ONLY supported entry point.
+
+**Step 1 — Dry-run ceremony (no DB or SSM mutation):**
+
+```powershell
+.\scripts\mint-with-assumed-role.ps1 -DryRun
+# - Prompts for MFA TOTP.
+# - Assumes luciel-mint-operator-role for 1 h.
+# - Reads /luciel/database-url via the assumed role.
+# - Pipes admin DSN to mint script via --admin-db-url-stdin.
+# - Mint script runs with --dry-run; no Postgres ALTER, no SSM put.
+# - Helper clears assumed credentials on exit.
+#
+# Expected exit: success, with a message confirming the dry-run path.
+```
+
+If the dry-run fails for any reason (MFA expired, role-trust
+rejection, mint-script error), **stop and diagnose**. Do not
+proceed to the real run until dry-run is green.
+
+**Step 2 — Real ceremony (writes to RDS + SSM):**
+
+```powershell
+.\scripts\mint-with-assumed-role.ps1
+# - Same MFA + AssumeRole flow as dry-run.
+# - Mint script generates a fresh 32-char password, runs
+#   ALTER USER luciel_worker WITH PASSWORD '...' on RDS,
+#   builds the SQLAlchemy URL, and writes the SSM SecureString at
+#   /luciel/production/worker_database_url (lowercase).
+# - Password is NEVER printed to terminal, NEVER echoed to logs,
+#   NEVER persisted to disk. Pattern E preserved.
+# - Assumed credentials cleared on exit.
+```
+
+**Post-mint confirmation:**
+
+```powershell
+# Confirm the SSM parameter now exists. The assumed role is gone, so
+# this read goes through the operator's default identity (luciel-admin).
+aws ssm get-parameter `
+  --name /luciel/production/worker_database_url `
+  --region ca-central-1 `
+  --query "Parameter.[Name,Type,Version]" --output table
+# Expect: Name=/luciel/production/worker_database_url, Type=SecureString,
+# Version=1.
+#
+# DO NOT add --with-decryption — there is no operator-side reason to
+# decrypt the worker DSN. Only the worker task role needs that grant.
+```
+
+### 4.3 — Update worker task-def to read worker_database_url
 
 ```powershell
 # Pull current task-def
@@ -231,7 +319,7 @@ aws ecs describe-task-definition --task-definition luciel-worker `
 # Edit taskdef-worker-current.json:
 #  - In containerDefinitions[0].secrets, replace the entry where
 #    name == "DATABASE_URL" so its valueFrom points to
-#    arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/WORKER_DATABASE_URL
+#    arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url
 #    (keep the env var name DATABASE_URL — Celery code reads that).
 #  - Strip read-only fields (taskDefinitionArn, revision, status,
 #    requiresAttributes, compatibilities, registeredAt, registeredBy).
@@ -242,7 +330,10 @@ aws ecs register-task-definition `
   --query "taskDefinition.taskDefinitionArn" --output text
 ```
 
-### 4.4 Roll the worker service onto the new task-def
+The task-def file is in `.gitignore` (`*-task-def-v*.json`) so it
+is local-only by design. Capture the new revision number for §4.4.
+
+### 4.4 — Roll the worker service onto the new task-def
 
 ```powershell
 aws ecs update-service `
@@ -263,7 +354,7 @@ aws ecs describe-services --cluster luciel-cluster `
   --output table
 ```
 
-### 4.5 Verify worker is now connecting as luciel_worker
+### 4.5 — Verify worker is now connecting as luciel_worker
 
 ```powershell
 # CloudWatch logs for the new task — expect normal Celery boot, no
@@ -277,7 +368,7 @@ aws logs tail /ecs/luciel-worker --since 5m --region ca-central-1
 # Expect to see luciel_worker rows from the worker tasks.
 ```
 
-### 4.6 Smoke a write that exercises the role
+### 4.6 — Smoke a write that exercises the role
 
 Trigger a memory-extraction Celery task in prod (pick a low-traffic
 luciel_instance) and confirm:
@@ -288,34 +379,18 @@ luciel_instance) and confirm:
   attempted via Pattern N **fails with permission denied** (the
   whole point of the swap).
 
-### 4.7 Rotate luciel_admin password (drift D-prod-superuser-password)
+### 4.7 — (intentionally removed: `luciel_admin` rotation)
 
-```powershell
-# Generate a new password locally (do NOT echo it).
-$newAdminPwd = -join ((33..126) | Get-Random -Count 32 | %{[char]$_})
+The original v1 of this runbook included an §4.7 to rotate the
+`luciel_admin` master password and update `/luciel/production/database_url`.
+**That work was completed by P3-H on 2026-05-03 23:56 UTC and is no
+longer part of Commit 4.** See `docs/runbooks/step-28-p3-h-rotate-and-purge.md`
+for the executed runbook and the canonical recap drift register for
+the resolution evidence.
 
-# Apply via Pattern N one-shot. The mint pattern for luciel_worker
-# applies here verbatim — write a temporary script that does
-# ALTER USER luciel_admin WITH PASSWORD :pwd from inside the ECS task
-# and writes the new SQLAlchemy URL to /luciel/production/DATABASE_URL.
-# Reuse mint_worker_db_password_ssm.py as a template; clone it as
-# scripts/rotate_admin_db_password_ssm.py for this commit.
+### 4.8 — Rollback (Commit 4)
 
-python scripts/rotate_admin_db_password_ssm.py --dry-run
-python scripts/rotate_admin_db_password_ssm.py
-```
-
-Then roll the **web** service to pick up the new `DATABASE_URL`:
-
-```powershell
-aws ecs update-service --cluster luciel-cluster `
-  --service luciel-backend-service `
-  --force-new-deployment --region ca-central-1
-```
-
-### 4.8 Rollback (Commit 4)
-
-If anything regresses:
+If anything regresses post-mint:
 
 ```powershell
 # Roll worker service back to the prior task-def revision.
@@ -323,11 +398,23 @@ aws ecs update-service --cluster luciel-cluster `
   --service luciel-worker-service `
   --task-definition luciel-worker:<previous-revision> `
   --force-new-deployment --region ca-central-1
-
-# luciel_admin password rotation is NOT rollback-safe (old password
-# is destroyed). If the new password is corrupted, mint another via
-# the same script — do not try to recover the old one.
 ```
+
+The SSM parameter `/luciel/production/worker_database_url` survives
+the service rollback (it was never read by the prior worker
+revision). It can be deleted manually with
+`aws ssm delete-parameter` if a clean re-mint is needed; the next
+`mint-with-assumed-role.ps1` real run would then create v1 again.
+
+**Note:** the worker DSN minted in §4.2 is NOT rollback-safe in the
+sense that `luciel_worker`'s old password is destroyed by the
+`ALTER USER` statement. If the rollout in §4.4 fails, the prior
+worker task-def revision points at `DATABASE_URL` (admin DSN
+post-P3-H rotation), which still works — the rollback path uses
+`luciel_admin`, not the now-rotated `luciel_worker`. This is the
+intended Phase-2 transitional behavior; after Commit 4 stabilizes
+for 7 days, the admin DSN read by the worker task role can be
+revoked entirely (Phase 3 follow-up).
 
 ---
 
