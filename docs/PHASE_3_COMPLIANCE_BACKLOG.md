@@ -1112,6 +1112,99 @@ teardown anomaly was logged inline).
 
 ---
 
+## P3-S. Mint ceremony architectural rework — Pattern N variant for in-VPC execution  *(P0, blocks Phase 2 close)*
+
+**Discovered:** 2026-05-04 ~20:12 UTC during the Commit 4 mint real-run
+attempt. Mint script aborted at `psycopg.connect(admin_dsn)` (line 554)
+with `ConnectionTimeout: connection timeout expired`. See
+`docs/recaps/2026-05-04-mint-architectural-boundary-pause.md` for the
+full narrative.
+
+**Root cause:** the Option 3 ceremony's load-bearing assumption
+("operator runs the ceremony from their laptop") is incompatible with
+the production VPC posture ("RDS is in a private subnet with no public
+ingress"). The boundary was never exercised by any prior smoke test
+because `mint_worker_db_password_ssm.py --dry-run` returns at line 491
+before reaching the DB connect at line 554. Drift entry
+`D-option-3-ceremony-cannot-reach-private-rds-from-laptop-2026-05-04`.
+
+**Why this is P0 for Phase 2 close:** Commit 4 (worker DB role swap)
+cannot complete until the mint runs successfully. Commits 5-7 don't
+strictly depend on Commit 4, but the Phase 2 close gate explicitly
+requires `pg_stat_activity` to show zero worker connections as
+`luciel_admin`, which means the worker must have rotated to
+`luciel_worker` credentials — i.e. Commit 4 must be live.
+
+**Two sub-options for the rework:**
+
+### P3-S.a — Dedicated mint task (recommended)
+
+Create a new ECS Fargate task definition `luciel-mint` with:
+- New IAM task role `luciel-mint-task-role` holding the same 5
+  statements that `luciel-mint-operator-role` has post-`e1154bd`
+  (admin-DSN read + worker-SSM write + KMS via SSM, narrowly scoped).
+- The mint operator role still exists for the AssumeRole-to-pass-
+  credentials path on the laptop side. The task role is what the
+  running task uses for AWS API calls.
+- Container image: same as `luciel-migrate` (the backend image
+  already has `psycopg`, `boto3`, and the mint script).
+- Network: same private subnets as Pattern N. Inherits VPC route to
+  RDS — the missing piece in Option 3.
+- Single-purpose: not part of the `luciel-migrate:N` family. Audit
+  story is unambiguous ("the mint task minted; the migrate task
+  migrated").
+
+Helper rewrite: `mint-with-assumed-role.ps1` becomes
+`mint-via-fargate-task.ps1` (or v2). Same MFA + AssumeRole prelude
+on the laptop, but the body becomes:
+
+```
+aws ecs run-task --cluster luciel-cluster --task-definition luciel-mint:1 ...
+aws logs tail /ecs/luciel-mint --follow ...
+```
+
+Operator sees the mint script's stdout/stderr via CloudWatch Logs
+tail. Pattern E discipline preserved — the task's stdout still goes
+through the same `_redact_dsn_in_message` path. The script's
+pre-flight, outer try/except, and atomicity defenses all still apply.
+
+Estimated effort: 60-90 min for full design + apply + smoke + run.
+
+### P3-S.b — Reuse `luciel-migrate:N` task with command override
+
+Quicker. Use `aws ecs run-task --overrides` to invoke the mint
+script inside the existing migrate task. No new task definition,
+no new IAM role.
+
+**Audit problem:** the migrate task role wasn't designed for minting
+worker credentials. Reusing it creates a "why does the migrate role
+have SSM PutParameter on the worker DSN?" question that ages badly
+in compliance review. The task role would need new permissions, at
+which point we've muddied two ceremonies into one.
+
+Estimated effort: 30-45 min, but creates audit debt.
+
+**Recommendation:** P3-S.a. Multi-tenant SaaS audit posture demands
+single-purpose ceremonies. The 30-45 min savings of P3-S.b is not
+worth the long-term audit muddiness for a brokerage compliance
+audience.
+
+**Smoke test requirement (critical):** whichever sub-option is
+chosen, the smoke test MUST include a non-dry-run connection to RDS
+before the first real mint. Every prior smoke test skipped this
+layer (because dry-run returns before line 554), which is the
+specific reason this gap survived to today. See sister entry
+`D-mint-script-dry-run-skips-preflight-2026-05-04` for a related
+~10 LOC patch that would have caught this earlier.
+
+**Cross-references:** session recap
+`docs/recaps/2026-05-04-mint-architectural-boundary-pause.md`;
+operator patterns `docs/runbooks/operator-patterns.md` Pattern N;
+live IAM policy `infra/iam/luciel-mint-operator-role-permission-policy.json`
+(commit `e1154bd`).
+
+---
+
 ## P3-R. MFA TOTP echoes in PowerShell terminal during mint ceremony  *(P2)*
 
 **Discovered:** 2026-05-04 ~19:57 UTC during the Commit 4 mint dry-run.
