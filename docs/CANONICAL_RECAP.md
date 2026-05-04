@@ -1,9 +1,9 @@
 # Luciel Canonical Recap
 
-**Version:** v1.2
-**Last updated:** 2026-05-03 evening, mid-Phase-2 docs reconciliation pass following the Commit 4 mint-script DSN-leak incident (`2b5ff32` hardening + `43e2e7a` incident recap) and the IAM-policy / MFA reality-check that surfaced P3-J (P0, MFA on `luciel-admin`) and P3-K (P1, dedicated `luciel-mint-operator-role`). v1.2 supersedes v1.1's optimistic Phase-2-Commit-4 framing.
-**Supersedes:** v1.1 (2026-05-03 Phase 2 mid-stream close); v1 (2026-05-03 Phase 1 close)
-**Next update:** at Phase 2 full close (Commits 4–7 live in prod AND P3-J/P3-K resolved, leaked DSN rotated per P3-H) OR when a strategic-question answer changes
+**Version:** v1.3
+**Last updated:** 2026-05-03 late-evening, after P3-J (MFA on `luciel-admin`), P3-G (migrate-role policy diff), and P3-K (`luciel-mint-operator-role` create + smoke test) all landed live in IAM. Three of the four Commit-4 prerequisites are now resolved; P3-H (rotate leaked `LucielDB2026Secure` + delete leaking log stream) is the last gate. v1.3 supersedes v1.2's pre-resolution framing for the IAM-side Option 3 boundary work.
+**Supersedes:** v1.2 (2026-05-03 evening, mid-Phase-2 docs reconciliation); v1.1 (2026-05-03 Phase 2 mid-stream close); v1 (2026-05-03 Phase 1 close)
+**Next update:** at Phase 2 full close (Commits 4–7 live in prod AND P3-H resolved) OR when a strategic-question answer changes
 **Source-of-truth rule:** if a chat recap or session summary contradicts this document, this document wins. Update via PR with rationale; do not produce contradicting recaps inline.
 
 ---
@@ -244,8 +244,9 @@ Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
 
 **Phase 2 full close gate:** `python -m app.verification` 19/19 green against prod, all 5 alarms `OK`, both auto-scaling targets registered, both services on healthCheck-enabled task-def revisions, `pg_stat_activity` shows zero worker connections as `luciel_admin`, **AND** the following P3 prerequisites for Commit 4 are satisfied:
 - **MFA enforced on `luciel-admin`** — `aws iam list-mfa-devices --user-name luciel-admin` returns a non-empty `MFADevices` array (P3-J resolved). ✅ **Verified 2026-05-03 23:48:11 UTC** — `SerialNumber: arn:aws:iam::729005488042:mfa/Luciel-MFA`. Account-wide sweep (`aws iam list-users`) confirmed `luciel-admin` is the only IAM user, so privileged-human MFA boundary is fully closed.
-- **Dedicated `luciel-mint-operator-role` exists with MFA-required AssumeRole** — `aws iam get-role --role-name luciel-mint-operator-role` returns a trust policy with `Bool: aws:MultiFactorAuthPresent=true` and `NumericLessThan: aws:MultiFactorAuthAge=3600` (P3-K resolved). The migrate task role is NOT granted read on `/luciel/database-url`.
-- **Leaked admin password rotated and leaking log stream deleted** — `aws logs filter-log-events --log-group-name /ecs/luciel-backend --filter-pattern '"LucielDB2026Secure"'` returns zero events (P3-H resolved).
+- **Dedicated `luciel-mint-operator-role` exists with MFA-required AssumeRole** — `aws iam get-role --role-name luciel-mint-operator-role` returns a trust policy with `Bool: aws:MultiFactorAuthPresent=true` and `NumericLessThan: aws:MultiFactorAuthAge=3600` (P3-K resolved). The migrate task role is NOT granted read on `/luciel/database-url`. ✅ **Verified 2026-05-04 00:14:10 UTC** (CreateDate). Trust policy, inline permission policy `luciel-mint-operator-permissions`, and `MaxSessionDuration: 3600` all match `infra/iam/*.json` design byte-for-byte. Smoke test (`mint-with-assumed-role.ps1 -DryRun`) succeeded at 2026-05-04 00:19:22 UTC; `aws ssm get-parameter --name /luciel/production/worker_database_url` returned `ParameterNotFound` post-smoke-test, confirming the dry-run wrote nothing.
+- **Migrate-role policy diff applied** — `aws iam get-role-policy --role-name luciel-ecs-migrate-role --policy-name luciel-migrate-ssm-write` returns 6 SSM actions including `ssm:GetParameterHistory` (P3-G resolved). ✅ **Verified 2026-05-03 evening.** Live policy matches `infra/iam/luciel-migrate-ssm-write-after-p3-g.json` byte-for-byte.
+- **Leaked admin password rotated and leaking log stream deleted** — `aws logs filter-log-events --log-group-name /ecs/luciel-backend --filter-pattern '"LucielDB2026Secure"'` returns zero events (P3-H resolved). **STILL OPEN** — last gate before Commit 4 mint re-run.
 
 When met, tag `step-28-phase-2-complete`.
 
@@ -255,10 +256,10 @@ Estimated (REVISED 2026-05-03 evening): 4 prod-touching commits + 3 P3 prerequis
 
 **Authoritative tracker:** `docs/PHASE_3_COMPLIANCE_BACKLOG.md` (commit `31e2b16` + 2026-05-03 evening rescope). Items below are a flat snapshot; the backlog file is the canonical priority and sequencing source.
 
-- **P3-J (P0, NEW 2026-05-03)** — Enforce MFA on `luciel-admin` (and any other unMFA'd IAM users). Hard prerequisite for Commit 4 mint re-attempt.
-- **P3-K (P1, NEW 2026-05-03)** — Create `luciel-mint-operator-role` with MFA-required AssumeRole, scoped to `ssm:GetParameter` on `/luciel/database-url` + KMS Decrypt via SSM. Authors `scripts/mint-with-assumed-role.ps1` helper.
-- **P3-H (P0)** — Rotate leaked `luciel_admin` password (`LucielDB2026Secure`); delete CloudWatch log stream `/ecs/luciel-backend / migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c`.
-- **P3-G (P2, RESCOPED 2026-05-03)** — Was "missing GetParameter/PutParameter on migrate role" (incorrect diagnosis). Real state: only `ssm:GetParameterHistory` is missing from `luciel-migrate-ssm-write`. Bundle this single-action diff into the same IAM commit as P3-K.
+- ~~**P3-J (P0, NEW 2026-05-03)**~~ — ✅ **RESOLVED** 2026-05-03 23:48 UTC. MFA on `luciel-admin` (`Luciel-MFA`). Account has only one IAM user; privileged-human MFA boundary is fully closed.
+- ~~**P3-K (P1, NEW 2026-05-03)**~~ — ✅ **RESOLVED** 2026-05-04 00:14 UTC (role created + permission policy + smoke-test verified). `luciel-mint-operator-role` live with MFA-required AssumeRole, scoped read on `/luciel/database-url` + KMS Decrypt via SSM. Helper `scripts/mint-with-assumed-role.ps1` shipped in commit `9e48098`; mint script `--admin-db-url-stdin` flag in `ce66d06`.
+- ~~**P3-G (P2, RESCOPED 2026-05-03)**~~ — ✅ **RESOLVED** 2026-05-03 ~20:09 EDT. `ssm:GetParameterHistory` added to `luciel-migrate-ssm-write`; live policy matches design byte-for-byte.
+- **P3-H (P0, OPEN)** — Rotate leaked `luciel_admin` password (`LucielDB2026Secure`); delete CloudWatch log stream `/ecs/luciel-backend / migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c`. **Last gate** before Commit 4 mint re-run.
 - Dedicated read-only recon role
 - Pattern O helper script extraction (`scripts/run_prod_recon.ps1`)
 - LucielInstanceRepo `_for_agent`/`_for_domain` cascade autocommit-aware
@@ -591,6 +592,9 @@ Only after Step 4, propose work.
 
 ### Resolved by Phase 3 prerequisites (executed alongside Phase 2)
 - D-luciel-admin-no-mfa-2026-05-03 → P3-J resolved 2026-05-03 23:48:11 UTC. Virtual MFA device `arn:aws:iam::729005488042:mfa/Luciel-MFA` attached to `luciel-admin`. Account-wide IAM-user sweep confirmed `luciel-admin` is the only user; no follow-on MFA work needed for current account state. Forward-looking guard recorded in `PHASE_3_COMPLIANCE_BACKLOG.md` P3-J: every future IAM user must have MFA before first console use.
+- D-migrate-role-conflated-with-mint-duty-2026-05-03 → P3-K resolved 2026-05-04 00:14:10 UTC (role create) + 00:19:22 UTC (smoke-test verified). `luciel-mint-operator-role` is the dedicated mint duty principal; trust policy locked to `luciel-admin` user with `aws:MultiFactorAuthPresent=true` and `aws:MultiFactorAuthAge<3600`; permissions limited to `ssm:GetParameter` on `/luciel/database-url` + KMS decrypt via SSM. Migrate task role does NOT receive admin-DSN read. Helper `scripts/mint-with-assumed-role.ps1` (commit `9e48098`) and mint script `--admin-db-url-stdin` flag (commit `ce66d06`) complete the Option 3 ceremony chain. Smoke-test confirmed: `aws ssm get-parameter --name /luciel/production/worker_database_url` returned `ParameterNotFound` post-dry-run, i.e. mechanism proven without executing real mint.
+- D-canonical-recap-misdiagnosed-migrate-role-policy-gap-2026-05-03 → P3-G resolved 2026-05-03 ~20:09 EDT. `ssm:GetParameterHistory` added to `luciel-migrate-ssm-write`; live policy now has 6 SSM actions matching `infra/iam/luciel-migrate-ssm-write-after-p3-g.json` byte-for-byte. Original misdiagnosis (claiming `GetParameter` + `PutParameter` were missing) was self-corrected in `31e2b16`; this resolution closes the actual single-action gap.
+- **D-iam-changes-applied-out-of-band-with-docs-2026-05-03** (NEW, self-referential) — P3-K execution Steps 2–5 ran on the operator side ~20:09–20:19 EDT without parallel docs-side coordination. Recon pass on 22:54–22:58 EDT confirmed live state matches design byte-for-byte (zero drift) but the resolution-evidence capture was reconstructed post-hoc rather than captured live. Forward-looking guard: when the operator decides to execute multi-step IAM runbooks independently, send a one-line message first so the agent stays in sync and can integrate verbatim outputs into resolution evidence in real time. Not a security drift; a process drift, logged here so the canonical record is honest about how P3-K actually got applied.
 
 ### Resolved by Phase 1 (cumulative)
 - D-pattern-s-walker-missing-memory-items-leaf-2026-05-01 → Commit 12 (`f9f6f79`)
@@ -645,4 +649,4 @@ If they disagree:
 
 ---
 
-## End of Canonical Recap v1.2
+## End of Canonical Recap v1.3

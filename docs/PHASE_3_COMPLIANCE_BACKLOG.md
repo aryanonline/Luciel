@@ -262,7 +262,66 @@ but non-identical semantics.
 
 ---
 
-## P3-G. Migrate-role missing `ssm:GetParameterHistory`  *(P2, rescoped 2026-05-03 evening)*
+## P3-G. Migrate-role missing `ssm:GetParameterHistory`  *(P2 — RESOLVED 2026-05-03 evening)*
+
+**Status:** ✅ **RESOLVED** 2026-05-03 ~20:09 EDT (operator-applied via
+`aws iam put-role-policy` per
+`docs/runbooks/step-28-p3-k-execute.md` Step 2).
+
+**Resolution evidence (verbatim live policy, captured 2026-05-03 22:56 EDT):**
+
+```json
+{
+    "RoleName": "luciel-ecs-migrate-role",
+    "PolicyName": "luciel-migrate-ssm-write",
+    "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "ReadWriteSsmParameters",
+                "Effect": "Allow",
+                "Action": [
+                    "ssm:GetParameter",
+                    "ssm:GetParameterHistory",
+                    "ssm:PutParameter",
+                    "ssm:DescribeParameters",
+                    "ssm:AddTagsToResource",
+                    "ssm:ListTagsForResource"
+                ],
+                "Resource": [
+                    "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/*",
+                    "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/bootstrap/*"
+                ]
+            },
+            {
+                "Sid": "KmsViaSsm",
+                "Effect": "Allow",
+                "Action": [
+                    "kms:Encrypt",
+                    "kms:Decrypt",
+                    "kms:GenerateDataKey"
+                ],
+                "Resource": "*",
+                "Condition": {
+                    "StringEquals": {
+                        "kms:ViaService": "ssm.ca-central-1.amazonaws.com"
+                    }
+                }
+            }
+        ]
+    }
+}
+```
+
+Live state matches
+`infra/iam/luciel-migrate-ssm-write-after-p3-g.json` byte-for-byte
+(verified by canonical-form `diff` post-resolution).
+
+---
+
+### Original P3-G entry (preserved for audit trail)
+
+
 
 **Discovered:** 2026-05-03 during the Commit 4 mint real-run.
 **Rescoped:** 2026-05-03 evening, after a direct read of the
@@ -476,7 +535,115 @@ Phase 2 Status Snapshot section, commit `2b5ff32`.
 
 ---
 
-## P3-K. Create `luciel-mint-operator-role` (MFA-required AssumeRole)  *(P1, Option 3 boundary)*
+## P3-K. Create `luciel-mint-operator-role` (MFA-required AssumeRole)  *(P1 — RESOLVED 2026-05-03 evening)*
+
+**Status:** ✅ **RESOLVED** 2026-05-03 ~20:14 EDT (role created), ~20:14
+EDT (inline policy attached), ~20:19 EDT (smoke test via
+`mint-with-assumed-role.ps1 -DryRun` succeeded).
+
+Applied per `docs/runbooks/step-28-p3-k-execute.md` Steps 3, 4, 5.
+Operator ran the runbook end-to-end without docs-side coordination;
+recon pass on 2026-05-03 22:54 EDT confirmed live state matches design
+byte-for-byte. Drift entry below covers the audit-trail aspect.
+
+**Resolution evidence — role (verbatim, captured 2026-05-03 22:58 EDT):**
+
+```json
+{
+    "Role": {
+        "Path": "/",
+        "RoleName": "luciel-mint-operator-role",
+        "RoleId": "AROA2TPA466VPPPBLFBAJ",
+        "Arn": "arn:aws:iam::729005488042:role/luciel-mint-operator-role",
+        "CreateDate": "2026-05-04T00:14:10+00:00",
+        "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "AllowLucielAdminToAssumeWithMFA",
+                    "Effect": "Allow",
+                    "Principal": {
+                        "AWS": "arn:aws:iam::729005488042:user/luciel-admin"
+                    },
+                    "Action": "sts:AssumeRole",
+                    "Condition": {
+                        "Bool": {
+                            "aws:MultiFactorAuthPresent": "true"
+                        },
+                        "NumericLessThan": {
+                            "aws:MultiFactorAuthAge": "3600"
+                        }
+                    }
+                }
+            ]
+        },
+        "Description": "Option 3 mint-operator role; MFA-required AssumeRole. P3-K (2026-05-03).",
+        "MaxSessionDuration": 3600,
+        "RoleLastUsed": {
+            "LastUsedDate": "2026-05-04T00:19:22+00:00",
+            "Region": "ca-central-1"
+        }
+    }
+}
+```
+
+**Resolution evidence — inline permission policy (verbatim):**
+
+```json
+{
+    "RoleName": "luciel-mint-operator-role",
+    "PolicyName": "luciel-mint-operator-permissions",
+    "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "ReadAdminDsnFromSsm",
+                "Effect": "Allow",
+                "Action": ["ssm:GetParameter"],
+                "Resource": ["arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url"]
+            },
+            {
+                "Sid": "DescribeAdminDsnParameter",
+                "Effect": "Allow",
+                "Action": ["ssm:DescribeParameters"],
+                "Resource": "*",
+                "Condition": {"StringEquals": {"ssm:ResourceTag/luciel:role": "mint-operator"}}
+            },
+            {
+                "Sid": "DecryptAdminDsnViaSsm",
+                "Effect": "Allow",
+                "Action": ["kms:Decrypt"],
+                "Resource": "*",
+                "Condition": {"StringEquals": {"kms:ViaService": "ssm.ca-central-1.amazonaws.com"}}
+            }
+        ]
+    }
+}
+```
+
+**Smoke-test evidence:** `RoleLastUsed.LastUsedDate:
+2026-05-04T00:19:22+00:00` (= 2026-05-03 20:19 EDT). The role was
+successfully assumed via
+`mint-with-assumed-role.ps1 -DryRun` ~5 minutes after creation.
+`aws ssm get-parameter --name /luciel/production/worker_database_url`
+returned `ParameterNotFound` post-smoke-test, confirming the dry-run
+performed no SSM writes and no Postgres mutations — i.e. the mechanism
+is proven without having executed the real Commit 4 mint.
+
+**Live-vs-design verification:** all three policies (trust,
+permission, migrate-role-after-P3-G) confirmed byte-for-byte identical
+to `infra/iam/*.json` design files via canonical-form `diff` on
+2026-05-03 22:58 EDT. Zero drift.
+
+**MaxSessionDuration:** 3600 s (1 hour) as designed.
+**No managed policies attached** (`AttachedPolicies: []` confirmed).
+**Inline policies:** exactly one (`luciel-mint-operator-permissions`).
+
+---
+
+### Original P3-K entry (preserved for audit trail)
+
+
 
 **Discovered:** 2026-05-03 evening, during the architectural
 discussion of how to hand the admin DSN to mint operations. The

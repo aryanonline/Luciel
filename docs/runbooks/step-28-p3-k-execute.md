@@ -1,6 +1,19 @@
 # P3-K + P3-G — Execute runbook
 
-**Status:** Dry-run / execute phase. Design phase complete in commit `9e48098`.
+**Status:** ✅ **EXECUTED** 2026-05-03 ~20:09–20:19 EDT (operator-side).
+Live IAM state verified byte-for-byte against design via canonical-form
+`diff` on 2026-05-03 22:54–22:58 EDT. Resolution evidence captured in
+`PHASE_3_COMPLIANCE_BACKLOG.md` (P3-G + P3-K sections) and
+`CANONICAL_RECAP.md` v1.3 §4.1 close gate + §15 drift register.
+
+P3-K Step 6 (docs sync) completed in the commit that updates this
+runbook. Smoke test (Step 5, `mint-with-assumed-role.ps1 -DryRun`)
+confirmed at `RoleLastUsed: 2026-05-04T00:19:22+00:00` with
+`/luciel/production/worker_database_url` returning `ParameterNotFound`
+post-test — mechanism proven, no SSM/Postgres mutations.
+
+**Original status (preserved for audit trail):** Dry-run / execute
+phase. Design phase complete in commit `9e48098`.
 **Branch:** `step-28-hardening-impl`.
 **Prerequisites met:** P3-J resolved (MFA on `luciel-admin`,
 `arn:aws:iam::729005488042:mfa/Luciel-MFA`).
