@@ -260,10 +260,30 @@ helper, and direct invocation would either fail (no admin DSN read)
 or leak the DSN through some workaround. The Option 3 ceremony is
 the ONLY supported entry point.
 
+**Required parameter — `-WorkerHost`:**
+
+The helper script's `Mint` parameter set declares `-WorkerHost` as
+mandatory (see `scripts/mint-with-assumed-role.ps1` lines 97-98).
+Omitting it triggers an interactive prompt, which is acceptable but
+not what we want during a ceremony — we pass the canonical RDS
+endpoint explicitly so the command is self-documenting and
+copy-pasteable.
+
+Canonical worker host (cross-checked against
+`scripts/mint_worker_db_password_ssm.py:166`,
+`docs/runbooks/step-28-p3-k-execute.md:228`, and
+`docs/runbooks/step-28-commit-8-luciel-worker-sg.md:42`):
+
+```
+luciel-db.c3oyiegi01hr.ca-central-1.rds.amazonaws.com
+```
+
 **Step 1 — Dry-run ceremony (no DB or SSM mutation):**
 
 ```powershell
-.\scripts\mint-with-assumed-role.ps1 -DryRun
+.\scripts\mint-with-assumed-role.ps1 `
+  -WorkerHost "luciel-db.c3oyiegi01hr.ca-central-1.rds.amazonaws.com" `
+  -DryRun
 # - Prompts for MFA TOTP.
 # - Assumes luciel-mint-operator-role for 1 h.
 # - Reads /luciel/database-url via the assumed role.
@@ -281,7 +301,8 @@ proceed to the real run until dry-run is green.
 **Step 2 — Real ceremony (writes to RDS + SSM):**
 
 ```powershell
-.\scripts\mint-with-assumed-role.ps1
+.\scripts\mint-with-assumed-role.ps1 `
+  -WorkerHost "luciel-db.c3oyiegi01hr.ca-central-1.rds.amazonaws.com"
 # - Same MFA + AssumeRole flow as dry-run.
 # - Mint script generates a fresh 32-char password, runs
 #   ALTER USER luciel_worker WITH PASSWORD '...' on RDS,
