@@ -121,7 +121,19 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
                     agent_id=agent_id,
                 )
                 if agent is not None:
-                    user_id = agent.user_id  # None until Commit 3 backfill
+                    # Step 28 Phase 2 fix (D-pillar-13-a3-real-root-cause-2026-05-04):
+                    # this assignment was previously `user_id = agent.user_id`,
+                    # which created a never-read local and left request.state.
+                    # actor_user_id stuck at the line-115 default of None for
+                    # every agent-scoped key in production. The 30-line
+                    # docstring at the top of this file describes the contract
+                    # this typo was silently violating since Step 24.5b. The
+                    # downstream effect was that the worker memory-extraction
+                    # task wrote actor_user_id=NULL, which the post-Step-28
+                    # Phase-1 NOT NULL constraint then rejected -- producing
+                    # the swallowed IntegrityError that surfaced as 0
+                    # MemoryItem rows in Pillar 13 A3.
+                    actor_user_id = agent.user_id  # None until Commit 3 backfill
                 else:
                     # Defensive: ApiKey references a non-existent Agent.
                     # This shouldn't happen in steady state (keys are
