@@ -342,11 +342,20 @@ class DepartureSemanticsPillar(Pillar):
             # /admin/scope-assignments/{id}/end. Same Q6 cascade as
             # production -- rotates keys bound to A1's (tenant=T1) pair
             # only. K2 in T2 must remain untouched.
+            #
+            # Phase 2 Commit 14: audit_label is a Query param on the route
+            # (not a body field). The verify call() helper has no params=
+            # kwarg, so we encode it inline. The label is a controlled
+            # f-string (alnum + colon + hyphen) -- safe to embed without
+            # urlencoding.
+            audit_label_p14 = f"pillar_14:{t1_id}:departure"
             r = call(
                 "POST",
-                f"/api/v1/admin/scope-assignments/{sa1_id}/end",
+                (
+                    f"/api/v1/admin/scope-assignments/{sa1_id}/end"
+                    f"?audit_label={audit_label_p14}"
+                ),
                 pa,
-                params={"audit_label": f"pillar_14:{t1_id}:departure"},
                 json={
                     "reason": EndReason.DEPARTED.value,
                     "note": f"P14: U departed T1 ({t1_id})",

@@ -241,15 +241,13 @@ class IdentityStabilityPillar(Pillar):
             )
             agent_a2_pk = r.json()["id"]
 
-            # Bind A2 -> U via platform-admin route (see Commit 10 note above).
-            call(
-                "POST",
-                f"/api/v1/admin/agents/{tid}/{agent_a2_slug}/bind-user",
-                pa,
-                json={"user_id": str(user_id)},
-                expect=200,
-                client=c,
-            )
+            # NOTE: do NOT bind A2 -> U here. The Step 24.5b invariant
+            # ("a User holds at most one active Agent per tenant") would
+            # reject it because U still holds A1 active. Legacy direct-DB
+            # path never bound A2 -- promote() operates on scope_assignments
+            # only and leaves agents.user_id untouched on the new agent.
+            # K2 minting and post-promote chat attribution work via the
+            # ScopeAssignment lookup, not via agents.user_id.
 
             # Phase 2 Commit 13: HTTP path via /admin/scope-assignments/promote.
             # Same atomic end+create cascade as production; just driven
