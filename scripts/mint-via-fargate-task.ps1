@@ -288,17 +288,36 @@ try {
     }
     $networkConfigJson = $networkConfig | ConvertTo-Json -Compress -Depth 6
 
+    # Pass JSON args via temp files (file://) to avoid the well-known
+    # PowerShell-on-Windows native-command argument-quoting bug, where
+    # embedded double quotes are stripped before reaching aws.exe and the
+    # AWS CLI rejects the resulting bare-token JSON with ParamValidation.
+    # Pattern matches the canonical recon-network.json / Pattern O usage.
+    $tempDir          = [System.IO.Path]::GetTempPath()
+    $netCfgPath       = Join-Path $tempDir "luciel-mint-netcfg-$([Guid]::NewGuid().ToString('N')).json"
+    $overridesPath    = Join-Path $tempDir "luciel-mint-overrides-$([Guid]::NewGuid().ToString('N')).json"
+    Set-Content -Path $netCfgPath    -Value $networkConfigJson -Encoding ascii -NoNewline
+    Set-Content -Path $overridesPath -Value $overridesJson    -Encoding ascii -NoNewline
+
     Write-Host "Launching luciel-mint Fargate task..." -ForegroundColor Yellow
-    $runJson = aws ecs run-task `
-        --cluster $Cluster `
-        --task-definition $TaskDefinition `
-        --launch-type FARGATE `
-        --network-configuration $networkConfigJson `
-        --overrides $overridesJson `
-        --region $Region `
-        --output json
-    if ($LASTEXITCODE -ne 0) {
-        throw "ecs:RunTask failed (exit $LASTEXITCODE). Confirm the assumed role has ecs:RunTask + iam:PassRole on the task and execution roles."
+    Write-Host "  network-config file : $netCfgPath"
+    Write-Host "  overrides file      : $overridesPath"
+    try {
+        $runJson = aws ecs run-task `
+            --cluster $Cluster `
+            --task-definition $TaskDefinition `
+            --launch-type FARGATE `
+            --network-configuration "file://$netCfgPath" `
+            --overrides "file://$overridesPath" `
+            --region $Region `
+            --output json
+        if ($LASTEXITCODE -ne 0) {
+            throw "ecs:RunTask failed (exit $LASTEXITCODE). Confirm the assumed role has ecs:RunTask + iam:PassRole on the task and execution roles."
+        }
+    }
+    finally {
+        if (Test-Path $netCfgPath)    { Remove-Item $netCfgPath    -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $overridesPath) { Remove-Item $overridesPath -Force -ErrorAction SilentlyContinue }
     }
 
     $run = $runJson | ConvertFrom-Json
