@@ -187,6 +187,17 @@ class AgentRepository:
     # Whitelist — identity columns are deliberately not updatable.
     # Promotion / demotion across domains = deactivate + recreate,
     # per the Step 24.5 decision on preserving audit trails.
+    # Step 28 Phase 2 - Commit 9: user_id is updatable via the dedicated
+    # POST /admin/agents/{tenant_id}/{agent_id}/bind-user route ONLY.
+    # The general PATCH /admin/agents/{tenant_id}/{agent_id} route still
+    # silently ignores user_id (handlers do not pass it through), so this
+    # widening does not expose tenant-admin re-binding via display-name
+    # PATCH. The bind-user route is platform-admin gated.
+    #
+    # Why widen here vs. a separate code path: keeps audit-row generation
+    # in one place (repo.update) — the before/after diff captures the
+    # user_id transition exactly the same way it captures display_name
+    # changes. One audit-row schema, no parallel write path to drift.
     _UPDATABLE_FIELDS = frozenset(
         {
             "display_name",
@@ -194,6 +205,7 @@ class AgentRepository:
             "contact_email",
             "active",
             "updated_by",
+            "user_id",  # Step 28 Phase 2 - Commit 9 (bind-user only)
         }
     )
     def update(

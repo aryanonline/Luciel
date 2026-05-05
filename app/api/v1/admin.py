@@ -37,7 +37,7 @@ from app.services.luciel_instance_service import (
 )
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.repositories.agent_repository import AgentRepository
-from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
+from app.schemas.agent import AgentBindUserPayload, AgentCreate, AgentRead, AgentUpdate
 from app.schemas.luciel_instance import (
     LucielInstanceCreate,
     LucielInstanceRead,
@@ -1069,6 +1069,90 @@ def update_agent(
         return AgentRead.model_validate(agent)
 
     updated = repo.update(agent, audit_ctx=audit_ctx, **updates)
+    return AgentRead.model_validate(updated)
+
+
+# ---------------------------------------------------------------------
+# Bind-user (Step 28 Phase 2 - Commit 9)
+#
+# Platform-admin only. Binds an Agent row to a User identity row.
+# Replaces the raw-SQL UPDATE that the verification harness Pillars
+# 12/13/14 used to perform via a local SessionLocal() — a path that
+# correctly fails when the harness runs from a least-privilege Pattern
+# N task with the worker DSN (luciel_worker has no UPDATE on agents).
+#
+# Why a dedicated route (not piggybacking on PATCH /agents):
+#   1. Auth: this route requires platform_admin. The general PATCH
+#      route is tenant-admin scoped — binding identity is more
+#      sensitive and should not be reachable via tenant-admin keys.
+#   2. Audit: ACTION_UPDATE on RESOURCE_AGENT with the user_id diff
+#      shows up cleanly in audit-log queries filtered by resource_type
+#      = agent, action = update, before/after.user_id present.
+#   3. Invariant: enforces "one active Agent per (user, tenant)" at
+#      the route layer before delegating to repo.update.
+#
+# Step 24.5b doctrine: re-binding a user to a *different* Agent is
+# deactivate-and-recreate, not in-place UPDATE — audit trail integrity.
+# This route therefore refuses if the target Agent is inactive.
+# ---------------------------------------------------------------------
+@router.post(
+    "/agents/{tenant_id}/{agent_id}/bind-user",
+    response_model=AgentRead,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def bind_agent_to_user(
+    request: Request,
+    tenant_id: str,
+    agent_id: str,
+    payload: AgentBindUserPayload,
+    repo: Annotated[AgentRepository, Depends(get_agent_repository)],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> AgentRead:
+    permissions = getattr(request.state, "permissions", []) or []
+    if "platform_admin" not in permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may bind an Agent to a User identity.",
+        )
+
+    agent = repo.get(tenant_id=tenant_id, agent_id=agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    if not agent.active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Agent is inactive; binding to inactive Agents is refused. "
+                "Per Step 24.5b doctrine, re-binding a user to a different "
+                "Agent is deactivate-and-recreate, not UPDATE in place."
+            ),
+        )
+
+    # Invariant: one active Agent per (user, tenant). Refuse if the
+    # target user already holds an active Agent in this tenant that
+    # is not this one.
+    existing = repo.get_by_user_and_tenant(
+        user_id=payload.user_id,
+        tenant_id=tenant_id,
+        active_only=True,
+    )
+    if existing is not None and existing.id != agent.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"User {payload.user_id} already holds active Agent "
+                f"{existing.agent_id} in tenant {tenant_id}. Per Step 24.5b "
+                f"invariant, a User holds at most one active Agent per tenant."
+            ),
+        )
+
+    updated = repo.update(
+        agent,
+        audit_ctx=audit_ctx,
+        user_id=payload.user_id,
+        updated_by=payload.updated_by
+            or getattr(request.state, "actor_label", None),
+    )
     return AgentRead.model_validate(updated)
 
 
