@@ -913,7 +913,112 @@ the service, which is what we ran on through Phase 1.
 
 ---
 
-## 7 — Commit 7 — Container-level health checks
+## 7 — Commit 7 — Container-level health checks ✅ SHIPPED 2026-05-05
+
+**Status:** ✅ **SHIPPED 2026-05-05 ~16:15 EDT** via worker rev 11 (`fceb7e9`). The original design in this section (`celery inspect ping` CMD-SHELL probe) was attempted as rev 7→10 and **failed in production all four times**. The shipped design in rev 11 is structurally different — a producer-heartbeat / mtime-probe topology that inverts which side is observable. **The original design below is preserved verbatim for audit continuity; the actual shipped design follows.**
+
+**Backend container:** No separate container probe was shipped. Backend health continues to come from ALB target group health (Phase 1 state). This is intentional: with ALB fronting backend traffic, the target group probe is already the authoritative liveness signal, and adding a redundant container probe would produce duplicate alarms without new diagnostic value. Revisit only if ALB ever stops fronting `luciel-backend-service`.
+
+**Worker container shipped design (rev 11):**
+
+| Element | Detail |
+|---|---|
+| Producer | Daemon thread inside celery process. Hooks `worker_ready` signal in `app/worker/celery_app.py` (+87 lines). Touches `/tmp/celery_alive` every 15s and logs `healthcheck heartbeat: touched /tmp/celery_alive` at INFO. `worker_shutdown` signal stops the thread cleanly via `threading.Event`. Logs go to awslogs — the producer is observable in CloudWatch. |
+| Probe | 4-line `os.stat()` on `/tmp/celery_alive` in `scripts/healthcheck_worker.py`. Exit 0 if mtime within 60s window, else 1. Pure stdlib, sub-ms latency, no broker, no celery imports. |
+| Topology | Producer logs to awslogs (greppable, alarmable, auditable). Probe is silent (CMD-SHELL stdout is opaque — see `D-healthcheck-cmdshell-output-not-in-awslogs-2026-05-05`). |
+| HEALTHCHECK config | `interval: 30, timeout: 15, retries: 3, startPeriod: 60` |
+| Heartbeat interval | 15s |
+| Heartbeat freshness window | 60s |
+| Image (rev 11) | `729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:f5ae6997cf2a9f3b75a1488994810f61054c8fbf1299a2e106be8558763f3da0`, tag `worker-rev11` |
+| Task-definition | `luciel-worker:11` registered via `worker-td-rev11.json` (`fceb7e9`) |
+| Service | `luciel-worker-service` (NOT `luciel-worker` — that's the TD family). See naming-asymmetry callout below. |
+
+### 7.0 Naming-asymmetry callout (added 2026-05-05 from D-ecs-service-name-asymmetry-with-td-family)
+
+The ECS *service name* and the task-definition *family name* are deliberately distinct:
+
+- **Service name** is what `aws ecs update-service` targets: `luciel-worker-service`, `luciel-backend-service`. **Always ends in `-service`.**
+- **Task-def family** is what `aws ecs register-task-definition` increments: `luciel-worker`, `luciel-backend`. **Equals the service name minus `-service`.**
+- Never abbreviate either at the API call site. Every AWS ECS write-side command in this runbook uses the fully-qualified name.
+
+### 7.1 Four-iteration learning record (rev 7 → rev 8 → rev 9 → rev 10 → rev 11)
+
+| Rev | Probe shape | TD commit | Outcome |
+|---|---|---|---|
+| 7 | `celery -A app.worker.celery_app inspect ping -d celery@$HOSTNAME` | `worker-td-rev7.json` (`837da98`) | UNHEALTHY — Fargate `$HOSTNAME` did not match celery's `socket.gethostname()` mid-init (`D-celery-fargate-hostname-mismatch-in-healthcheck-2026-05-05`). |
+| 8 | `celery -A app.worker.celery_app inspect ping` (no `-d` filter) | `worker-td-rev8.json` (`27723b0`) | Failed silently — probe stdout went to Docker per-container health buffer, NOT awslogs (`D-celery-inspect-ping-unobservable-on-fargate-2026-05-05` and generalized `D-healthcheck-cmdshell-output-not-in-awslogs-2026-05-05`). |
+| 9 | `python /app/scripts/healthcheck_worker.py` extracting probe to a script (with `procps` added to image) | `worker-td-rev9.json` (`bb6dd7a`), script in `594821e` | Failed because `pip install -e .` had set entrypoint argv0 to `python` not the script name (`D-pip-entrypoint-argv0-is-python-not-script-name-2026-05-05`). |
+| 10 | Same probe, with element-membership match in script (`celery@<hostname>` ∈ responder set) | `worker-td-rev10.json` (`dbdc469`), fix in `d56f08c` | Same observability gap as rev 9. Element-membership semantics correct, but diagnosis pathway structurally broken because CMD-SHELL stdout still opaque. **Decision point: stop iterating on inspect-ping family.** |
+| 11 | Producer-heartbeat / mtime-probe topology (the win) | `worker-td-rev11.json` (`fceb7e9`), code in `079f327` | ✅ HEALTHY. 17 heartbeat log lines observed in `/ecs/luciel-worker` at 15s cadence, drift 7ms over 3.5min. Single PRIMARY deployment, `rolloutState: COMPLETED`, `failedTasks: 0`. |
+
+**Lessons (locked in as forward-looking guards):**
+
+1. ECS healthcheck CMD-SHELL stdout is invisible to awslogs. It surfaces only via `aws ecs describe-tasks --include CONTAINER_INSTANCE_HEALTH ...`, retained for ~10 most-recent invocations. **Never rely on probe-side stdout being routable.**
+2. If the probe must be silent, attach observability to the *producer* of the liveness signal, not the consumer. The producer logs at INFO via the application's own logger; the probe just reads.
+3. Avoid host/topology assumptions in container probes. Fargate's `$HOSTNAME` env var, `socket.gethostname()`, and `/etc/hostname` can diverge. The shipped probe assumes nothing about hostname.
+4. `pip install -e .` rewrites entrypoint argv0. Never rely on `sys.argv[0]` for self-identification; use `__file__` or pass identity explicitly.
+5. Before any AWS write-side `file://` call referencing local JSON: operator runs `git fetch && git pull origin step-28-hardening-impl` AND a SHA cross-check (`git rev-parse HEAD` matches advisor-provided SHA). Closes `D-operator-pull-skipped-before-write-side-aws-ops-2026-05-05`.
+
+### 7.2 Deploy (as actually executed for rev 11)
+
+```powershell
+# 1. Operator pulls latest from advisor branch (mandatory pre-AWS ritual)
+git fetch origin
+git pull origin step-28-hardening-impl
+git rev-parse HEAD  # Cross-check against advisor-provided SHA
+
+# 2. Register the new task-def revision
+aws ecs register-task-definition `
+  --cli-input-json file://worker-td-rev11.json `
+  --region ca-central-1 `
+  --query "taskDefinition.revision" --output text
+# Expect: 11
+
+# 3. Roll the service (note: service name ends in `-service`, family does not)
+aws ecs update-service `
+  --cluster luciel-cluster `
+  --service luciel-worker-service `
+  --task-definition luciel-worker:11 `
+  --force-new-deployment `
+  --region ca-central-1
+```
+
+### 7.3 Verify (as actually executed for rev 11)
+
+```powershell
+# Deployment reaches COMPLETED
+aws ecs describe-services `
+  --cluster luciel-cluster --services luciel-worker-service `
+  --region ca-central-1 `
+  --query "services[0].deployments[?status=='PRIMARY'].[rolloutState,desiredCount,runningCount,failedTasks]" `
+  --output text
+# Expect: COMPLETED  1  1  0
+
+# Producer heartbeat is visible in awslogs
+aws logs filter-log-events `
+  --log-group-name /ecs/luciel-worker `
+  --filter-pattern "healthcheck heartbeat" `
+  --region ca-central-1 `
+  --query "events[*].[timestamp,message]" --output text
+# Expect: 17+ events at 15s cadence, drift <100ms over several minutes
+```
+
+For rev 11 deploy on 2026-05-05: 17 events from 20:10:55.521 (`initial touch of /tmp/celery_alive`) through 20:14:25.528, exact 15.000s ± 1ms cadence.
+
+### 7.4 Rollback (Commit 7)
+
+```powershell
+aws ecs update-service `
+  --cluster luciel-cluster --service luciel-worker-service `
+  --task-definition luciel-worker:6 `
+  --force-new-deployment --region ca-central-1
+```
+
+Rev 6 is the last pre-healthcheck revision (post-Commit-4 RDS-auth-GREEN). Rolling back removes the container healthCheck block; behavior reverts to ECS task-state-only (no container-level liveness probe). The producer-heartbeat thread is still in the rev-6 image as of the rev-11 deploy because the code shipped together; the thread continues touching `/tmp/celery_alive` and logging — just nothing reads the file. This is harmless. To fully revert the producer too, redeploy from a tag prior to `079f327`.
+
+---
+
+### 7.5 Original design (preserved verbatim for audit continuity)
 
 **Goal:** ECS replaces a sick task before the ALB target group
 notices. Belt-and-suspenders against the existing ALB target health
@@ -926,56 +1031,7 @@ check.
 | Backend (web) | `curl -fsS http://localhost:8000/health || exit 1` | 30 s | 5 s | 3 | 30 s |
 | Worker | `celery -A app.worker.celery_app inspect ping -d celery@$(hostname) \|\| exit 1` | 60 s | 10 s | 3 | 60 s |
 
-**Code/IaC artifacts:**
-- Updated task-def JSON for `luciel-backend` and `luciel-worker`,
-  adding `containerDefinitions[0].healthCheck`.
-- Image must contain `curl` (backend already does — confirm at
-  Dockerfile review). Worker image already has Celery CLI.
-
-### 7.1 Deploy
-
-```powershell
-# Pull current task-defs
-aws ecs describe-task-definition --task-definition luciel-backend `
-  --region ca-central-1 --query "taskDefinition" > td-backend.json
-aws ecs describe-task-definition --task-definition luciel-worker `
-  --region ca-central-1 --query "taskDefinition" > td-worker.json
-
-# Edit each: add the healthCheck block per the table above.
-# Strip read-only fields. Register new revisions.
-aws ecs register-task-definition --cli-input-json file://td-backend-new.json `
-  --region ca-central-1 --query "taskDefinition.revision" --output text
-aws ecs register-task-definition --cli-input-json file://td-worker-new.json `
-  --region ca-central-1 --query "taskDefinition.revision" --output text
-
-# Roll services
-aws ecs update-service --cluster luciel-cluster --service luciel-backend-service `
-  --task-definition luciel-backend:<new> --force-new-deployment --region ca-central-1
-aws ecs update-service --cluster luciel-cluster --service luciel-worker-service `
-  --task-definition luciel-worker:<new> --force-new-deployment --region ca-central-1
-```
-
-### 7.2 Verify
-
-```powershell
-# Tasks should reach healthStatus: HEALTHY
-aws ecs list-tasks --cluster luciel-cluster --service-name luciel-backend-service `
-  --region ca-central-1 --query "taskArns[]" --output text |
-  ForEach-Object {
-    aws ecs describe-tasks --cluster luciel-cluster --tasks $_ `
-      --region ca-central-1 `
-      --query "tasks[0].[lastStatus,healthStatus]" --output text
-  }
-```
-
-Also confirm an intentionally broken container (kill the process
-inside) gets killed and replaced by ECS.
-
-### 7.3 Rollback (Commit 7)
-
-Roll services back to the previous task-def revision. Health checks
-are removed; behavior reverts to ALB-target-group-only (Phase 1
-state).
+**Why this design did not ship:** the worker probe failed in production across rev 7, 8, 9, 10 for the reasons in §7.1. Backend probe was deferred because ALB target group health is the authoritative signal.
 
 ---
 
@@ -1013,13 +1069,13 @@ After Commits 4, 5, 6, 7 are all live in prod:
 - [x] Audit-log API mounted, reviewed, and PII-redacted (Commits 2 +
       2b)
 - [x] Retention purges batched (Commit 8)
-- [ ] Worker connects to RDS as `luciel_worker`, NOT `luciel_admin`
-      (Commit 4)
-- [ ] `luciel_admin` password rotated (Commit 4)
+- [x] Worker connects to RDS as `luciel_worker`, NOT `luciel_admin`
+      (Commit 4, shipped 2026-05-05 14:51:27 UTC)
+- [x] `luciel_admin` password rotated (Commit 4, RDS rotation chain complete)
 - [ ] 5 CloudWatch alarms armed, SNS subscription confirmed
       (Commit 5)
 - [ ] ECS auto-scaling live for backend + worker (Commit 6)
-- [ ] Container healthChecks live for backend + worker (Commit 7)
+- [x] Container healthChecks live for worker (Commit 7, rev 11, shipped 2026-05-05); backend continues on ALB target group health by design
 - [ ] Prod `python -m app.verification` 19/19 green
 - [ ] `docs/CANONICAL_RECAP.md` updated, tag
       `step-28-phase-2-complete` pushed
