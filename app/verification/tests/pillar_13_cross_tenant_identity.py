@@ -210,22 +210,35 @@ class CrossTenantIdentityPillar(Pillar):
             )
             agent_a2_pk = r.json()["id"]
 
-            # Bind both Agents to U (Option D direct DB write, mirroring
-            # Pillar 12's pattern -- no public route accepts user_id).
-            db = SessionLocal()
-            try:
-                from app.models.agent import Agent as AgentModel
-                a1 = db.get(AgentModel, agent_a1_pk)
-                a2 = db.get(AgentModel, agent_a2_pk)
-                if a1 is None or a2 is None:
-                    raise AssertionError(
-                        f"P13 Agent disappeared: a1={a1}, a2={a2}"
-                    )
-                a1.user_id = user_id
-                a2.user_id = user_id
-                db.commit()
-            finally:
-                db.close()
+            # Bind both Agents to U via the platform-admin bind-user route.
+            #
+            # Step 28 Phase 2 - Commit 10: previously this was a direct
+            # SessionLocal() write touching agents.user_id ("Option D"). When
+            # the Pattern N verify task runs against prod with the
+            # least-privilege worker DSN, that write is correctly refused
+            # ("permission denied for table agents"). The bind-user route
+            # shipped in Commit 9 (dddf8cb) is platform-admin gated and
+            # enforces the "one active Agent per (user, tenant)" invariant
+            # at the service layer, so this is functionally equivalent to
+            # the prior raw write but no longer requires admin DB grants on
+            # the harness side. Two calls (one per tenant) — A1 lives in T1,
+            # A2 lives in T2; the invariant is per-tenant so both succeed.
+            call(
+                "POST",
+                f"/api/v1/admin/agents/{t1_id}/{agent_a1_slug}/bind-user",
+                pa,
+                json={"user_id": str(user_id)},
+                expect=200,
+                client=c,
+            )
+            call(
+                "POST",
+                f"/api/v1/admin/agents/{t2_id}/{agent_a2_slug}/bind-user",
+                pa,
+                json={"user_id": str(user_id)},
+                expect=200,
+                client=c,
+            )
 
             # ---------- 6. Mint chat key K1 bound to A1 in T1 ----------
             r = call(

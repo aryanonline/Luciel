@@ -163,20 +163,31 @@ class DepartureSemanticsPillar(Pillar):
             )
             agent_a2_pk = r.json()["id"]
 
-            db = SessionLocal()
-            try:
-                from app.models.agent import Agent as AgentModel
-                a1 = db.get(AgentModel, agent_a1_pk)
-                a2 = db.get(AgentModel, agent_a2_pk)
-                if a1 is None or a2 is None:
-                    raise AssertionError(
-                        f"P14 Agent disappeared: a1={a1}, a2={a2}"
-                    )
-                a1.user_id = user_id
-                a2.user_id = user_id
-                db.commit()
-            finally:
-                db.close()
+            # Bind A1 (in T1) and A2 (in T2) to U via the platform-admin
+            # bind-user route.
+            #
+            # Step 28 Phase 2 - Commit 10: previously a direct SessionLocal()
+            # write to agents.user_id, which the least-privilege worker DSN
+            # used by the Pattern N verify task correctly refuses. Routed
+            # through the bind-user endpoint shipped in Commit 9 (dddf8cb).
+            # See pillar_12 / pillar_13 Commit 10 notes for the full
+            # rationale.
+            call(
+                "POST",
+                f"/api/v1/admin/agents/{t1_id}/{agent_a1_slug}/bind-user",
+                pa,
+                json={"user_id": str(user_id)},
+                expect=200,
+                client=c,
+            )
+            call(
+                "POST",
+                f"/api/v1/admin/agents/{t2_id}/{agent_a2_slug}/bind-user",
+                pa,
+                json={"user_id": str(user_id)},
+                expect=200,
+                client=c,
+            )
 
             # ---------- 4. Mint chat keys K1 (T1) + K2 (T2) ----------
             r = call(

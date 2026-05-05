@@ -107,14 +107,22 @@ class IdentityStabilityPillar(Pillar):
             agent_a1_pk = r.json()["id"]
 
             # Bind A1 -> U
-            db = SessionLocal()
-            try:
-                from app.models.agent import Agent as AgentModel
-                a1 = db.get(AgentModel, agent_a1_pk)
-                a1.user_id = user_id
-                db.commit()
-            finally:
-                db.close()
+            #
+            # Step 28 Phase 2 - Commit 10: was a raw SessionLocal() write to
+            # agents.user_id. The Pattern N verify task runs with the worker
+            # DSN (least privilege) which correctly refuses INSERT/UPDATE on
+            # `agents`, so the previous code crashed in prod with
+            # "permission denied for table agents". Switched to the
+            # platform-admin-gated bind-user route shipped in Commit 9
+            # (dddf8cb) so the harness no longer requires admin DB grants.
+            call(
+                "POST",
+                f"/api/v1/admin/agents/{tid}/{agent_a1_slug}/bind-user",
+                pa,
+                json={"user_id": str(user_id)},
+                expect=200,
+                client=c,
+            )
 
             # ---------- 3. Mint K1 ----------
             r = call(
@@ -225,14 +233,15 @@ class IdentityStabilityPillar(Pillar):
             )
             agent_a2_pk = r.json()["id"]
 
-            db = SessionLocal()
-            try:
-                from app.models.agent import Agent as AgentModel
-                a2 = db.get(AgentModel, agent_a2_pk)
-                a2.user_id = user_id
-                db.commit()
-            finally:
-                db.close()
+            # Bind A2 -> U via platform-admin route (see Commit 10 note above).
+            call(
+                "POST",
+                f"/api/v1/admin/agents/{tid}/{agent_a2_slug}/bind-user",
+                pa,
+                json={"user_id": str(user_id)},
+                expect=200,
+                client=c,
+            )
 
             db = SessionLocal()
             try:
