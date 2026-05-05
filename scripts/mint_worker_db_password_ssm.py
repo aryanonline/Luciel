@@ -84,6 +84,8 @@ Cross-references:
 from __future__ import annotations
 
 import argparse
+import os
+from typing import Optional
 import hashlib
 import re
 import secrets
@@ -130,13 +132,23 @@ def parse_args() -> argparse.Namespace:
             "worker DB connection string to SSM (SecureString)."
         ),
     )
-    # Admin DSN can come from EITHER --admin-db-url (the legacy CLI
-    # form, retained for local dev convenience) OR --admin-db-url-stdin
-    # (the production form used by scripts/mint-with-assumed-role.ps1
-    # under the Option 3 boundary; P3-K, 2026-05-03). The stdin form
-    # avoids landing the DSN in process args, which is visible to
-    # other processes on the host via ps / Get-Process.
-    admin_dsn_group = p.add_mutually_exclusive_group(required=True)
+    # Admin DSN can come from THREE input modes:
+    #   1. --admin-db-url    : legacy CLI form, retained for local dev.
+    #                          Places DSN in process args (visible via
+    #                          ps / Get-Process); not for production.
+    #   2. --admin-db-url-stdin : production-Option-3 form used by
+    #                          scripts/mint-with-assumed-role.ps1.
+    #                          Read one line from stdin. P3-K (2026-05-03).
+    #   3. ADMIN_DSN env var : production-Pattern-N form used by
+    #                          luciel-mint Fargate task. Delivered via
+    #                          task-def `secrets:` block, resolved by
+    #                          ECS through the SSM endpoint inside the
+    #                          VPC. The container never sees the DSN on
+    #                          its argv. P3-S.a (2026-05-05).
+    # Modes are mutually exclusive: the script picks --admin-db-url first
+    # (most explicit), then --admin-db-url-stdin, then ADMIN_DSN env. If
+    # none are set the script aborts.
+    admin_dsn_group = p.add_mutually_exclusive_group(required=False)
     admin_dsn_group.add_argument(
         "--admin-db-url",
         help=(
@@ -145,7 +157,7 @@ def parse_args() -> argparse.Namespace:
             "role with CREATEROLE). Source from your password manager "
             "at runtime; this value never leaves the script's memory. "
             "WARNING: this places the DSN in process args; prefer "
-            "--admin-db-url-stdin for production."
+            "--admin-db-url-stdin or ADMIN_DSN env for production."
         ),
     )
     admin_dsn_group.add_argument(
@@ -158,12 +170,17 @@ def parse_args() -> argparse.Namespace:
             "lands in process args. P3-K (2026-05-03)."
         ),
     )
+    # Worker connection params: required at the value level, but resolved
+    # from CLI flags OR env vars (WORKER_HOST / WORKER_DB_NAME / WORKER_SSM_PATH).
+    # The env-var path is what the luciel-mint Fargate task uses; the CLI-flag
+    # path is what the v2 / v2.1 ceremony used. main() resolves both.
     p.add_argument(
         "--worker-host",
-        required=True,
+        default=None,
         help=(
             "DB host the worker will connect to (e.g., "
-            "luciel-db.c3oyiegi01hr.ca-central-1.rds.amazonaws.com)."
+            "luciel-db.c3oyiegi01hr.ca-central-1.rds.amazonaws.com). "
+            "Falls back to WORKER_HOST env var if not given."
         ),
     )
     p.add_argument(
@@ -174,15 +191,19 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--worker-db-name",
-        required=True,
-        help="DB name on the worker host (e.g., luciel).",
+        default=None,
+        help=(
+            "DB name on the worker host (e.g., luciel). Falls back to "
+            "WORKER_DB_NAME env var if not given."
+        ),
     )
     p.add_argument(
         "--ssm-path",
-        default=DEFAULT_SSM_PATH,
+        default=None,
         help=(
-            f"SSM parameter path for the worker connection string "
-            f"(default: {DEFAULT_SSM_PATH})."
+            f"SSM parameter path for the worker connection string. "
+            f"Falls back to WORKER_SSM_PATH env var if not given, "
+            f"then to {DEFAULT_SSM_PATH}."
         ),
     )
     p.add_argument(
@@ -229,13 +250,50 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dry-run",
         action="store_true",
+        default=None,
         help=(
             "Generate a password and print what WOULD happen, but do "
-            "not connect to Postgres or write SSM. For runbook "
-            "walkthroughs and argparse verification."
+            "not connect to Postgres or write SSM beyond pre-flight "
+            "checks (SSM-writable + DB connection-only). The pre-flight "
+            "layer was added in P3-S Half 1 (2026-05-05) so dry-runs "
+            "actually exercise the IAM and network paths the real run "
+            "depends on. Falls back to MINT_DRY_RUN env var (truthy: "
+            "'1', 'true', 'yes', case-insensitive) if not given."
         ),
     )
     return p.parse_args()
+
+
+def _env_truthy(value: Optional[str]) -> bool:
+    """Parse a string env value as a boolean. Truthy: 1/true/yes/on.
+
+    Returns False for None / empty / any other value. Case-insensitive.
+    Used to resolve MINT_DRY_RUN from the env when --dry-run is not on
+    the CLI. Conservative parser by design: anything ambiguous is False,
+    which means the caller must opt IN to dry-run, not opt OUT.
+    """
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_admin_dsn(args: argparse.Namespace) -> Optional[str]:
+    """Pick the admin DSN from CLI flags or env var, in priority order.
+
+    Priority: --admin-db-url > --admin-db-url-stdin > ADMIN_DSN env.
+    Returns None if none of the three are present; main() handles the
+    abort path. The stdin-mode return is the literal sentinel string
+    `__STDIN__`; main() reads stdin only when it sees that sentinel,
+    so we don't read stdin during arg resolution (which would block).
+    """
+    if args.admin_db_url:
+        return args.admin_db_url
+    if args.admin_db_url_stdin:
+        return "__STDIN__"
+    env_dsn = os.environ.get("ADMIN_DSN")
+    if env_dsn:
+        return env_dsn
+    return None
 
 
 def generate_password() -> str:
@@ -447,6 +505,43 @@ def write_ssm(
 def main() -> int:
     args = parse_args()
 
+    # ----- Resolve env-var fallbacks (Pattern N / luciel-mint Fargate) -----
+    # The CLI-flag path (v2 / v2.1 Option 3 ceremony) and the env-var path
+    # (Pattern N P3-S.a Fargate) coexist. CLI flags take precedence; env
+    # vars are the fallback. Resolve here, then proceed as if the values
+    # had always been on the CLI.
+    if args.worker_host is None:
+        args.worker_host = os.environ.get("WORKER_HOST")
+    if args.worker_db_name is None:
+        args.worker_db_name = os.environ.get("WORKER_DB_NAME")
+    if args.ssm_path is None:
+        args.ssm_path = os.environ.get("WORKER_SSM_PATH") or DEFAULT_SSM_PATH
+    if args.dry_run is None:
+        args.dry_run = _env_truthy(os.environ.get("MINT_DRY_RUN"))
+
+    # Required-value gates (now applied post-resolution; argparse no longer
+    # enforces required=True on these because the env path is legitimate).
+    missing: list[str] = []
+    if not args.worker_host:
+        missing.append("--worker-host or WORKER_HOST env")
+    if not args.worker_db_name:
+        missing.append("--worker-db-name or WORKER_DB_NAME env")
+    if missing:
+        print(
+            f"FATAL: missing required value(s): {'; '.join(missing)}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    admin_dsn_source = _resolve_admin_dsn(args)
+    if admin_dsn_source is None:
+        print(
+            "FATAL: admin DSN not provided. Use --admin-db-url, "
+            "--admin-db-url-stdin, or set ADMIN_DSN env (Pattern N).",
+            file=sys.stderr,
+        )
+        return 1
+
     # Sanity checks on dangerous flag combinations.
     if args.print_url_stdout and not args.no_ssm:
         print(
@@ -469,56 +564,12 @@ def main() -> int:
     )
     minted_at = datetime.now(timezone.utc).isoformat()
 
-    if args.dry_run:
-        print("=" * 72)
-        print("DRY RUN -- no Postgres or SSM writes performed")
-        print("=" * 72)
-        print(f"  role            : {WORKER_ROLE_NAME}")
-        print(f"  worker_host     : {args.worker_host}")
-        print(f"  worker_port     : {args.worker_port}")
-        print(f"  worker_db_name  : {args.worker_db_name}")
-        print(f"  sslmode         : {args.sslmode}")
-        print(f"  ssm_path        : {args.ssm_path}")
-        print(f"  region          : {args.region}")
-        print(f"  pw_fingerprint  : {fingerprint} (sha256 first 12)")
-        print(f"  pw_length       : {len(password)} chars")
-        print(f"  no_ssm          : {args.no_ssm}")
-        print(f"  print_to_stdout : {args.print_url_stdout}")
-        print(f"  force_rotate    : {args.force_rotate}")
-        print(f"  minted_at       : {minted_at}")
-        print("=" * 72)
-        print("Re-run without --dry-run to actually mint.")
-        return 0
-
-    # SSM pre-flight: verify we can write to ssm_path BEFORE touching
-    # the DB. Skipped in --no-ssm (local dev, no SSM at all).
-    if not args.no_ssm:
-        try:
-            preflight_ssm_writable(region=args.region, ssm_path=args.ssm_path)
-        except RuntimeError as exc:
-            # Pre-flight messages are operator-targeted and contain no
-            # credentials, but redact defensively in case a downstream
-            # change ever embeds a DSN in one.
-            print(
-                f"FATAL: {_redact_dsn_in_message(str(exc))}",
-                file=sys.stderr,
-            )
-            return 1
-
-    # Connect to Postgres as admin.
-    try:
-        import psycopg  # local import keeps --help fast
-    except ImportError:
-        print(
-            "FATAL: psycopg is not installed. Activate the project venv.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Resolve admin DSN from whichever input mode the operator chose.
-    # The argparse mutex group above guarantees exactly one of these
-    # is set.
-    if args.admin_db_url_stdin:
+    # Resolve admin DSN BEFORE the dry-run branch, because the dry-run
+    # now exercises a connection-only psycopg.connect(...).close() so
+    # we can verify network reachability and credential validity without
+    # any state mutation. P3-S Half 1 (2026-05-05); resolves drift
+    # `D-mint-script-dry-run-skips-preflight-2026-05-04`.
+    if admin_dsn_source == "__STDIN__":
         # Read one line from stdin; strip trailing whitespace only.
         # Empty input is a hard error; we deliberately do not echo
         # what was read (length-only feedback is the helper's job).
@@ -542,7 +593,7 @@ def main() -> int:
             return 1
         admin_dsn_input = raw_stdin
     else:
-        admin_dsn_input = args.admin_db_url
+        admin_dsn_input = admin_dsn_source
 
     # Strip SQLAlchemy driver suffix if present. The existing
     # /luciel/database-url SSM param is stored in SQLAlchemy form
@@ -550,6 +601,80 @@ def main() -> int:
     # SQLAlchemy; raw psycopg requires plain postgresql://.
     admin_dsn = _strip_sqla_driver_prefix(admin_dsn_input)
 
+    # Import psycopg now (it's needed by both dry-run preflight and real run).
+    try:
+        import psycopg  # local import keeps --help fast
+    except ImportError:
+        print(
+            "FATAL: psycopg is not installed. Activate the project venv.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # ----- Pre-flight layer (runs in BOTH dry-run and real-run paths) -----
+    # Layer 1: SSM-writable. Skipped in --no-ssm (local dev, no SSM at all).
+    if not args.no_ssm:
+        try:
+            preflight_ssm_writable(region=args.region, ssm_path=args.ssm_path)
+        except RuntimeError as exc:
+            # Pre-flight messages are operator-targeted and contain no
+            # credentials, but redact defensively in case a downstream
+            # change ever embeds a DSN in one.
+            print(
+                f"FATAL: {_redact_dsn_in_message(str(exc))}",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Layer 2: DB connect-only. Open and immediately close a connection
+    # to admin RDS. This is the layer that v2 / v2.1 dry-runs skipped --
+    # which is the specific reason the architectural-boundary drift
+    # `D-option-3-ceremony-cannot-reach-private-rds-from-laptop-2026-05-04`
+    # survived undetected through every prior smoke test. P3-S Half 1
+    # patch (2026-05-05) makes connect-only run for BOTH dry-run and
+    # real-run, so an exit-0 dry-run is now real proof of end-to-end
+    # reachability (admin DSN valid, network path open, role can reach
+    # RDS). No SQL is executed; the connection is opened and closed
+    # without a transaction.
+    try:
+        _preflight_conn = psycopg.connect(admin_dsn)
+        _preflight_conn.close()
+    except Exception as exc:
+        # Pattern E: psycopg's exception messages frequently embed the
+        # full connection string -- including the password -- when the
+        # URL is malformed. Redact before printing.
+        sanitized = _redact_dsn_in_message(f"{type(exc).__name__}: {exc}")
+        print(
+            f"FATAL: pre-flight DB connect-only failed: {sanitized}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.dry_run:
+        print("=" * 72)
+        print("DRY RUN -- no Postgres or SSM writes performed")
+        print("  (pre-flight SSM-writable + DB connect-only PASSED)")
+        print("=" * 72)
+        print(f"  role            : {WORKER_ROLE_NAME}")
+        print(f"  worker_host     : {args.worker_host}")
+        print(f"  worker_port     : {args.worker_port}")
+        print(f"  worker_db_name  : {args.worker_db_name}")
+        print(f"  sslmode         : {args.sslmode}")
+        print(f"  ssm_path        : {args.ssm_path}")
+        print(f"  region          : {args.region}")
+        print(f"  pw_fingerprint  : {fingerprint} (sha256 first 12)")
+        print(f"  pw_length       : {len(password)} chars")
+        print(f"  no_ssm          : {args.no_ssm}")
+        print(f"  print_to_stdout : {args.print_url_stdout}")
+        print(f"  force_rotate    : {args.force_rotate}")
+        print(f"  minted_at       : {minted_at}")
+        print("=" * 72)
+        print("Re-run without --dry-run (or with MINT_DRY_RUN=false) to actually mint.")
+        return 0
+
+    # Real-run admin connection. Pre-flight above already verified
+    # connectivity, so this is an expected-success path; we still
+    # wrap it to preserve Pattern E redaction in the failure message.
     try:
         conn = psycopg.connect(admin_dsn)
     except Exception as exc:

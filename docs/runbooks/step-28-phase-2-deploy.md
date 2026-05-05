@@ -172,7 +172,7 @@ If Block 5 isn't 19/19 green, **diagnose, do not deploy**.
   was completed by P3-H on 2026-05-03 23:18 UTC and is no longer part
   of Commit 4. See P3-H entry in `docs/PHASE_3_COMPLIANCE_BACKLOG.md`
   and `docs/runbooks/step-28-p3-h-rotate-and-purge.md`.
-- **v2.1 (this commit, 2026-05-04 post-failed-mint):** adds §4.0.5
+- **v2.1 (commit `e1154bd`, 2026-05-04 post-failed-mint):** adds §4.0.5
   documenting the IAM policy gap discovered when the v2 mint dry-run
   passed but the real run was blocked by `mint_worker_db_password_ssm`'s
   `preflight_ssm_writable` check. Root cause: P3-K's permission policy
@@ -182,6 +182,38 @@ If Block 5 isn't 19/19 green, **diagnose, do not deploy**.
   `D-p3-k-policy-missing-worker-ssm-write-2026-05-04`. Fix is policy-
   only (no code change to script or helper); see §4.0.5 for the
   apply-and-verify steps.
+- **v3 (this commit, 2026-05-05 post-architectural-boundary):** the
+  Option 3 ceremony (v2 / v2.1) is **architecturally superseded** by
+  the Pattern N variant (P3-S.a). The v2 / v2.1 flow assumed the
+  operator could `psycopg.connect(admin_dsn)` from their laptop, which
+  is incompatible with the production VPC posture (RDS in private
+  subnet, no public ingress, no bastion, no VPN). The boundary was
+  never exercised by any prior smoke test because
+  `mint_worker_db_password_ssm.py --dry-run` returned at line 491
+  before reaching the DB connect at line 554; the gap was discovered
+  only on the first real-run attempt 2026-05-04 ~20:12 UTC, which
+  aborted at `ConnectionTimeout: connection timeout expired` before
+  any production state mutation. Drift entries
+  `D-option-3-ceremony-cannot-reach-private-rds-from-laptop-2026-05-04`
+  and sister `D-mint-script-dry-run-skips-preflight-2026-05-04`. Full
+  forensic narrative:
+  `docs/recaps/2026-05-04-mint-architectural-boundary-pause.md`. v3
+  adds **§4.0.6** (Pattern N mint architecture) and rewrites **§4.2**
+  to dispatch to the new ceremony via `mint-via-fargate-task.ps1`.
+  The v2 / v2.1 §4.0.5 IAM policy on `luciel-mint-operator-role`
+  remains in force — that role is still what the operator laptop
+  assumes — but the mint script no longer runs on the laptop; it
+  runs inside the VPC under the new task role `luciel-ecs-mint-role`,
+  which holds the same 5 statements (canonical IaC at
+  `infra/iam/luciel-ecs-mint-role-permission-policy.json`).
+- **v3 also notes the 2026-05-05 admin-DSN chat disclosure incident**
+  (`docs/incidents/2026-05-05-admin-dsn-disclosed-in-chat.md`,
+  drift `D-admin-dsn-disclosed-in-chat-2026-05-05`). The leaked
+  `luciel_admin` master password was rotated end-to-end the same
+  session — RDS modified, SSM `/luciel/database-url` written to v3,
+  end-to-end verified by a clean `luciel-migrate` Fargate task. The
+  v3 mint ceremony described below reads the ROTATED admin DSN; no
+  follow-up action required at the runbook level.
 
 **Goal:** worker process stops authenticating to RDS as `luciel_admin`
 (superuser) and starts using `luciel_worker` (least-privilege role
@@ -297,6 +329,105 @@ that aren't via SSM. The blast radius of a compromised mint session
 is: read admin DSN once, write one specific worker DSN once, within
 a 1-hour MFA-gated window.
 
+### 4.0.6 — Pattern N mint architecture (added v3)
+
+**Why this section exists:** the Option 3 ceremony as designed in v2
+put the mint script's `psycopg.connect(admin_dsn)` call on the
+operator's laptop. Production RDS is in a private VPC subnet with no
+public ingress; the laptop has no path to it. The v2 ceremony's
+first real-run attempt aborted at `ConnectionTimeout`. v3 closes
+that boundary by moving the mint into the VPC.
+
+**Architectural shape (P3-S.a — dedicated Fargate task):**
+
+| Layer | What runs | Identity used | Why |
+|---|---|---|---|
+| Operator laptop | `scripts/mint-via-fargate-task.ps1` | `luciel-admin` IAM user (then assumes `luciel-mint-operator-role` with MFA) | MFA-gated entry point; only purpose is to scope the blast radius of the `aws ecs run-task` call |
+| ECS Fargate task | `python -m scripts.mint_worker_db_password_ssm` (same hardened script as v2) | Task role `luciel-ecs-mint-role` (5 statements, same as operator role post-`e1154bd`) | Holds the IAM rights for admin-DSN read + worker-SSM write + KMS-via-SSM. The container is what actually talks to RDS and SSM, inside the VPC. |
+| Container ENI | runs in production application subnets (not RDS DB subnets — those have no SSM VPC endpoint) | inherits task role | RDS reachability via VPC routing; SSM/SSM-Messages/EC2-Messages reachable via interface endpoints in the application subnets |
+
+**Crucial network detail:** the application subnets and the RDS DB
+subnets are **distinct**. Only the application subnets have the
+SSM/ssmmessages/ec2messages interface endpoints; the RDS subnets are
+deliberately locked-down with no SSM endpoint and no NAT egress (the
+RDS instance itself doesn't need them). A Fargate task launched into
+the RDS subnets fails at startup with
+`ResourceInitializationError: unable to pull secrets ... context deadline exceeded`.
+Verify subnet identity by reading the production `luciel-backend-service`
+network config, **never** by inferring from RDS metadata:
+
+```powershell
+aws ecs describe-services --cluster luciel-cluster `
+  --services luciel-backend-service `
+  --region ca-central-1 `
+  --query "services[0].networkConfiguration.awsvpcConfiguration"
+```
+
+Canonical application subnets (used by `luciel-backend-service` and
+baked into `mint-via-fargate-task.ps1` defaults):
+
+```
+subnet-0e54df62d1a4463bc
+subnet-0e95d953fd553cbd1
+```
+
+Application SG with egress to RDS on 5432: `sg-0f2e317f987925601`.
+
+**Crucial admin-DSN-delivery detail:** the admin DSN no longer
+traverses the operator laptop. It is delivered to the container via
+the task definition's `secrets:` block, which ECS resolves through
+the SSM endpoint inside the VPC. The laptop only sees CloudWatch log
+lines, which the mint script has already passed through
+`_redact_dsn_in_message`.
+
+**Code/IaC artifacts that land with v3:**
+
+| Artifact | Purpose | Status |
+|---|---|---|
+| `infra/iam/luciel-ecs-mint-role-trust-policy.json` | Trust policy for the new task role; lets `ecs-tasks.amazonaws.com` assume it. Byte-identical pattern to `luciel-ecs-migrate-role`. | Half 1 (this commit) |
+| `infra/iam/luciel-ecs-mint-role-permission-policy.json` | Permission policy for the new task role; same 5 statements as `luciel-mint-operator-role-permission-policy.json` | Half 1 (this commit) |
+| `mint-td-rev1.json` | Source-of-truth task definition for `luciel-mint:1`. Family `luciel-mint`, image digest pinned, task role `luciel-ecs-mint-role`, execution role `luciel-ecs-execution-role`, env vars `WORKER_HOST` / `WORKER_DB_NAME` / `WORKER_SSM_PATH` / `MINT_DRY_RUN=true` (safe default), secret `ADMIN_DSN` from `/luciel/database-url`, command `python -m scripts.mint_worker_db_password_ssm`, log stream prefix `mint`. | Half 1 (this commit) |
+| `scripts/mint-via-fargate-task.ps1` | Operator helper that supersedes `mint-with-assumed-role.ps1` for prod mint. Same MFA + AssumeRole prelude; body is `aws ecs run-task` + CloudWatch tail + describe-tasks polling. | Half 1 (this commit) |
+| `scripts/mint_worker_db_password_ssm.py` | Hardened mint script. Patched in this commit to read `ADMIN_DSN` / `WORKER_HOST` / `WORKER_DB_NAME` / `WORKER_SSM_PATH` from env vars (in addition to existing CLI flags) so it works under task-def `secrets:` and `environment:`; plus dry-run preflight fix to exercise `preflight_ssm_writable` AND a connection-only `psycopg.connect(...).close()` before the dry-run early return. | Half 1 (this commit) |
+| `scripts/mint-with-assumed-role.ps1` | v2 / v2.1 helper. **Kept on disk for reference; do NOT invoke for prod mint** — it cannot reach RDS. | retained, marked superseded |
+
+**Half 1 vs Half 2:** this commit (Half 1) lands the **code and IaC**
+in the repo with **zero AWS apply**. Half 2 (separate commit, gated
+on operator scheduling) executes the live AWS apply:
+
+1. `aws iam create-role` for `luciel-ecs-mint-role` with the trust
+   policy file.
+2. `aws iam put-role-policy` with the permission policy file.
+3. `aws ecs register-task-definition --cli-input-json file://mint-td-rev1.json`.
+4. Smoke test: `.\scripts\mint-via-fargate-task.ps1` (default dry-run
+   mode — task-def safe default `MINT_DRY_RUN=true`). Confirm exit
+   code 0, confirm `preflight_ssm_writable` passed, confirm
+   connection-only DB connect passed (this is the layer that v2
+   skipped and that v3 fixes).
+5. Real mint: `.\scripts\mint-via-fargate-task.ps1 -RealRun`.
+   Confirm exit code 0. Verify SSM write:
+   `aws ssm get-parameter --name /luciel/production/worker_database_url --query "Parameter.Version"`
+   (do NOT pass `--with-decryption`).
+
+**Smoke gate (REQUIRED before Half 2 step 5):** the smoke test in
+step 4 above MUST run a non-dry-run-equivalent connection to RDS,
+not just the AssumeRole + SSM-read path. Every prior smoke test
+skipped this layer (because the old `--dry-run` returned before the
+DB connect), which is the specific reason the architectural
+boundary survived to discovery. The `mint_worker_db_password_ssm.py`
+patch in this commit makes `--dry-run` exercise both
+`preflight_ssm_writable` and a connection-only `psycopg.connect`
+before returning; with that patch, Half 2 step 4's exit-0 is real
+proof of end-to-end reachability.
+
+**Cross-references:**
+
+- `docs/PHASE_3_COMPLIANCE_BACKLOG.md` P3-S
+- `docs/recaps/2026-05-04-mint-architectural-boundary-pause.md`
+- `docs/runbooks/operator-patterns.md` Pattern N
+- `docs/incidents/2026-05-05-admin-dsn-disclosed-in-chat.md`
+  (rotation chain that landed before this commit)
+
 ### 4.1 — Recon (read-only, safe)
 
 ```powershell
@@ -329,69 +460,90 @@ aws ssm get-parameter `
 # why before proceeding.
 ```
 
-### 4.2 — Mint via Option 3 ceremony (the prod-touching action)
+### 4.2 — Mint via Pattern N Fargate ceremony (the prod-touching action)
+
+> **v3 SUPERSESSION NOTICE.** The original §4.2 (Option 3 ceremony
+> via `scripts/mint-with-assumed-role.ps1`) is **architecturally
+> superseded** by the Pattern N variant. `mint-with-assumed-role.ps1`
+> cannot reach RDS from the operator laptop — the production VPC
+> posture forbids it by design (see §4.0.6 above and
+> `D-option-3-ceremony-cannot-reach-private-rds-from-laptop-2026-05-04`).
+> The new entry point is `scripts/mint-via-fargate-task.ps1`, which
+> launches the mint as a one-shot Fargate task in the application
+> subnets. The text below has been rewritten accordingly. The
+> original v2 / v2.1 ceremony text is preserved verbatim in git
+> history at commit `e1154bd` for forensic reference.
 
 **Important:** the mint script is invoked **only** through
-`mint-with-assumed-role.ps1`. Direct invocation of
-`python scripts/mint_worker_db_password_ssm.py` is **not** part of
-this runbook — the mint script's `--admin-db-url-stdin` flag depends
-on assumed-role credentials being injected into the session by the
-helper, and direct invocation would either fail (no admin DSN read)
-or leak the DSN through some workaround. The Option 3 ceremony is
-the ONLY supported entry point.
+`mint-via-fargate-task.ps1`. Direct invocation of
+`python scripts/mint_worker_db_password_ssm.py` from a laptop is
+**not** part of this runbook (and structurally cannot succeed —
+the laptop has no route to RDS). The script may also be invoked
+directly inside the container by `aws ecs run-task` overrides for
+recovery scenarios, but the Pattern N helper is the ONLY supported
+routine entry point for Phase 2 Commit 4.
 
-**Required parameter — `-WorkerHost`:**
-
-The helper script's `Mint` parameter set declares `-WorkerHost` as
-mandatory (see `scripts/mint-with-assumed-role.ps1` lines 97-98).
-Omitting it triggers an interactive prompt, which is acceptable but
-not what we want during a ceremony — we pass the canonical RDS
-endpoint explicitly so the command is self-documenting and
-copy-pasteable.
-
-Canonical worker host (cross-checked against
-`scripts/mint_worker_db_password_ssm.py:166`,
-`docs/runbooks/step-28-p3-k-execute.md:228`, and
-`docs/runbooks/step-28-commit-8-luciel-worker-sg.md:42`):
-
-```
-luciel-db.c3oyiegi01hr.ca-central-1.rds.amazonaws.com
-```
+**Where parameters live now:** under v3, the canonical worker host,
+DB name, and SSM path are baked into the `luciel-mint:1` task
+definition (`mint-td-rev1.json`). The helper exposes optional
+per-invocation overrides (`-WorkerHost` / `-WorkerDbName` /
+`-WorkerSsmPath`) for non-production targets, but Phase 2 Commit 4
+uses the task-def defaults. Helper-default subnets and SG are also
+baked to the production application subnets and the application SG
+(canonical values in §4.0.6 above).
 
 **Step 1 — Dry-run ceremony (no DB or SSM mutation):**
 
 ```powershell
-.\scripts\mint-with-assumed-role.ps1 `
-  -WorkerHost "luciel-db.c3oyiegi01hr.ca-central-1.rds.amazonaws.com" `
-  -DryRun
+.\scripts\mint-via-fargate-task.ps1
 # - Prompts for MFA TOTP.
-# - Assumes luciel-mint-operator-role for 1 h.
-# - Reads /luciel/database-url via the assumed role.
-# - Pipes admin DSN to mint script via --admin-db-url-stdin.
-# - Mint script runs with --dry-run; no Postgres ALTER, no SSM put.
-# - Helper clears assumed credentials on exit.
+# - Assumes luciel-mint-operator-role on the laptop for 1 h.
+# - Issues `aws ecs run-task` against luciel-mint:N with task-def
+#   default MINT_DRY_RUN=true. Container launches in application
+#   subnets, picks up task role luciel-ecs-mint-role.
+# - Container runs `python -m scripts.mint_worker_db_password_ssm`,
+#   resolves ADMIN_DSN from the SSM `secrets:` injection, runs
+#   pre-flight (SSM-writable + DB-connect-only), exits 0 without
+#   any ALTER ROLE or SSM put.
+# - Helper polls describe-tasks + tails CloudWatch /ecs/luciel-backend
+#   stream `mint/luciel-backend/<task-id>`, prints the redacted
+#   stdout/stderr to the operator's terminal.
+# - Helper clears assumed laptop credentials on exit.
 #
-# Expected exit: success, with a message confirming the dry-run path.
+# Expected exit: container exitCode 0, with log lines confirming
+# pre-flight passed AND DB connect-only succeeded (this is the
+# layer the v2 ceremony skipped).
 ```
 
 If the dry-run fails for any reason (MFA expired, role-trust
-rejection, mint-script error), **stop and diagnose**. Do not
-proceed to the real run until dry-run is green.
+rejection, ECS run-task failure, container ResourceInitializationError,
+mint-script error), **stop and diagnose**. Do not proceed to the real
+run until dry-run is green AND the dry-run logs explicitly show the
+DB connect-only succeeded.
 
 **Step 2 — Real ceremony (writes to RDS + SSM):**
 
 ```powershell
-.\scripts\mint-with-assumed-role.ps1 `
-  -WorkerHost "luciel-db.c3oyiegi01hr.ca-central-1.rds.amazonaws.com"
+.\scripts\mint-via-fargate-task.ps1 -RealRun
 # - Same MFA + AssumeRole flow as dry-run.
-# - Mint script generates a fresh 32-char password, runs
-#   ALTER USER luciel_worker WITH PASSWORD '...' on RDS,
-#   builds the SQLAlchemy URL, and writes the SSM SecureString at
+# - -RealRun overrides the task-def's MINT_DRY_RUN=true to false.
+# - Container generates a fresh 32-char password, runs
+#   ALTER USER luciel_worker WITH PASSWORD '...' on RDS, builds
+#   the SQLAlchemy URL, and writes the SSM SecureString at
 #   /luciel/production/worker_database_url (lowercase).
-# - Password is NEVER printed to terminal, NEVER echoed to logs,
-#   NEVER persisted to disk. Pattern E preserved.
-# - Assumed credentials cleared on exit.
+# - Password is NEVER printed to container stdout, NEVER echoed to
+#   CloudWatch, NEVER returned to the laptop. Pattern E preserved.
+# - Helper polls + tails as in dry-run.
+# - Assumed laptop credentials cleared on exit.
 ```
+
+**Why -RealRun is a mandatory switch (not a -DryRun-default-off
+switch):** the task-def itself ships with `MINT_DRY_RUN=true` baked
+in as the safe default. Even if someone strips the helper script
+and calls `aws ecs run-task` directly with no overrides, the
+resulting task is a no-op, not a real mint. `-RealRun` on the
+helper is the explicit override that flips the env var to `false`
+for that one task launch.
 
 **Post-mint confirmation:**
 
