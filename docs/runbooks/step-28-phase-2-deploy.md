@@ -223,7 +223,7 @@ created in Phase 1, drift `D-worker-role`).
 This commit enforces it by **DB grant**, so even if a worker bug
 attempts `UPDATE admin_audit_logs ...` it fails at Postgres.
 
-**Prerequisite gate (all four must be ✅ before §4.2 mint):**
+**Prerequisite gate (all six must be ✅ before §4.2 mint):**
 
 | Prereq | Status | Evidence |
 |---|---|---|
@@ -231,7 +231,9 @@ attempts `UPDATE admin_audit_logs ...` it fails at Postgres.
 | P3-K — `luciel-mint-operator-role` | ✅ 2026-05-04 00:14 UTC | role + trust policy + `MaxSessionDuration: 3600` |
 | P3-G — migrate role `ssm:GetParameterHistory` | ✅ 2026-05-03 ≈20:09 EDT | live policy has 6 SSM actions |
 | P3-H — leaked `LucielDB2026Secure` rotated | ✅ 2026-05-03 23:56 UTC | SSM v1 → v2 + log stream deleted |
-| P3-K-followup — mint role has worker-SSM write | ✅ 2026-05-04 (this commit) | live policy has 5 statements; §4.0.5 verifies |
+| P3-K-followup — mint role has worker-SSM write | ✅ 2026-05-04 (`e1154bd`) | live policy has 5 statements |
+| P3-S Half 2 Steps 1–3 — Pattern N infra: `luciel-ecs-mint-role` + task-def `luciel-mint:1` | ✅ 2026-05-05 morning | RoleId AROA2TPA466VKVXLOBI2C; task-def ACTIVE |
+| **P3-S-followup — operator role has `ecs:RunTask` + `iam:PassRole` + DescribeTasks/StopTask + log-read** | **⚠️ apply pending (this commit)** | policy file now has 9 statements; §4.0.7 below verifies post-apply |
 
 **Code/IaC artifacts that land with this commit:**
 
