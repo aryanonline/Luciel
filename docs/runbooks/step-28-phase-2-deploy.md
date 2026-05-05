@@ -496,56 +496,47 @@ baked to the production application subnets and the application SG
 
 **Step 1 — Dry-run ceremony (no DB or SSM mutation):**
 
-> **⚠️ SUPERSEDED — dry-run on `luciel-mint:2` is no longer the
-> canonical entry point.** The Step 5 first real-run attempt on rev 2
-> (task `6dc293a3be784529948e7a7dc0e73091`, 2026-05-05 ~10:30 EDT)
-> failed cleanly with `InsufficientPrivilege: permission denied for
-> table pg_authid` (drift
-> `D-mint-script-uses-pg-authid-not-readable-on-rds-2026-05-05`).
-> Zero production state was mutated. The mint script has been patched
-> to use `pg_roles` instead of `pg_authid`, and the dry-run path now
-> exercises the role-state SELECT (drift
-> `D-dry-run-validates-subset-of-real-run-pg-authid-not-exercised-
-> 2026-05-05`). A new image must be built and a new task-def
-> (`luciel-mint:3`) registered before this Step 1 is re-run. Until
-> rev 3 is the canonical entry point, every prior "dry-run GREEN on
-> rev 2" report is **incomplete** — it never exercised the role-state
-> SELECT.
->
-> **Historical — rev 2 dry-run, 2026-05-05 14:16:39 UTC — GREEN (but
-> incomplete coverage):** Fargate task `33908e96941d4dbda45594f241565c3b`
-> launched on `luciel-mint:2`, exitCode 0, log message `(pre-flight
-> SSM-writable + DB connect-only PASSED)`, explicit `DRY RUN -- no
-> Postgres or SSM writes performed` line, no `<DSN-REDACTED>` strings
-> in stdout, `pw_fingerprint cd9a489dd131`. SSM target
+> **✅ rev 3 dry-run GREEN — 2026-05-05 14:48:55 UTC.** Fargate task
+> `ed5fd118ce024fa8b1e1cce15552eee3` launched on `luciel-mint:3`,
+> exitCode 0, CloudWatch stream
+> `mint/luciel-backend/ed5fd118ce024fa8b1e1cce15552eee3` confirmed
+> the new four-stage pre-flight callout verbatim:
+> `(pre-flight SSM-writable + first-mint-or-force-rotate + DB connect + role-state PASSED)`.
+> The explicit phrasing is the structural proof that the read-only
+> `pg_roles` SELECT actually executed in dry-run, closing
+> `D-dry-run-validates-subset-of-real-run-pg-authid-not-exercised-2026-05-05`.
+> `pw_fingerprint cd9a489dd131` (throwaway dry-run value),
+> `force_rotate False`. **Zero production state mutated** — explicit
+> `DRY RUN -- no Postgres or SSM writes performed` line; SSM
 > `/luciel/production/worker_database_url` remained `ParameterNotFound`
-> post-dry-run. The pg_authid privilege gap was invisible at this
-> stage because rev 2's dry-run path returned before the role-state
-> SELECT.
+> post-dry-run. Pattern E redaction held; no `<DSN-REDACTED>` strings
+> in stdout. One MFA TOTP burned (516097), used productively. rev 3
+> is now the canonical entry point.
 >
-> **🔄 RETRY GATE — before re-running Step 1 on rev 3 the operator
-> must:**
+> **Historical — rev 2 dry-run, 2026-05-05 14:16:39 UTC — GREEN but
+> incomplete coverage (audit history, do not re-run):** Fargate task
+> `33908e96941d4dbda45594f241565c3b` on `luciel-mint:2`, exitCode 0,
+> log message `(pre-flight SSM-writable + DB connect-only PASSED)`.
+> Coverage was incomplete because rev 2's dry-run path returned
+> before `verify_role_state()`, so the `pg_authid` privilege gap that
+> later bit Step 5 first-attempt was invisible at this stage. Drift
+> `D-mint-script-uses-pg-authid-not-readable-on-rds-2026-05-05`
+> resolved by Commit `0cd87be` + `65f8996`; drift
+> `D-dry-run-validates-subset-of-real-run-pg-authid-not-exercised-2026-05-05`
+> resolved by extending pre-flight Layer 2 to also run
+> `verify_role_state(_preflight_conn)` — dry-run = real-run minus
+> mutations is now a structural invariant.
 >
-> 1. `git fetch && git pull` (advisor will have pushed the patch).
-> 2. ECR login + `docker build -t luciel-backend:p3-s-half-2-fix-2026-05-05 .`
->    (one command per window per turn).
-> 3. `docker tag` + `docker push` to
->    `729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend`
->    and capture the new digest from the push output (or via
->    `aws ecr describe-images`).
-> 4. Create `mint-td-rev3.json` (copy `mint-td-rev2.json`, swap the
->    `image:` digest), then
->    `aws ecs register-task-definition --cli-input-json file://mint-td-rev3.json`.
->    Confirm `luciel-mint:3` is ACTIVE; rev 1 and rev 2 stay ACTIVE
->    for rollback.
-> 5. Re-run Step 1 dry-run against rev 3 — same TOTP minute can be
->    reused if Step 4 follows immediately.
-> 6. Verify the dry-run log line now reads
->    `(pre-flight SSM-writable + first-mint-or-force-rotate + DB connect + role-state PASSED)`
->    (the explicit four-stage callout proves all four read-only checks
->    ran). Any other phrasing is a regression.
-> 7. Re-record the rev-3 dry-run outcome HERE in this section before
->    proceeding to Step 2 real-run.
+> **Historical — rev 2 supersession (audit history):** the rev-2 cycle
+> required a fresh image (digest `sha256:dcced3566...`) and a new
+> task-def `mint-td-rev3.json` because the patched script had to
+> ship inside the container. Rev 1 and rev 2 stayed ACTIVE for
+> rollback. The rev-3 cycle ran in this exact order: advisor
+> `git push` → operator `git fetch && git pull` → ECR login →
+> `docker build` → `docker tag` + `docker push` → operator
+> `git pull` rev3-td → `aws ecs register-task-definition
+> --cli-input-json file://mint-td-rev3.json` (luciel-mint:3 ACTIVE) →
+> Step 1 dry-run on rev 3 (above).
 
 > **Known issue — helper bails after task STOPPED.** `scripts/mint-via-fargate-task.ps1`
 > line 394 calls `aws @logArgs 2>$null` to auto-tail CloudWatch logs.
@@ -602,22 +593,45 @@ DB connect-only succeeded.
 
 **Step 2 — Real ceremony (writes to RDS + SSM):**
 
-> **⚠️ Step 5 first-attempt outcome (rev 2, 2026-05-05 ~10:30 EDT):**
-> Task `6dc293a3be784529948e7a7dc0e73091` launched cleanly to ECS,
-> the Pattern N container started, the mint script reached
-> `verify_role_state()`, and the SQL `SELECT rolpassword FROM
-> pg_authid` was correctly refused by Postgres with
-> `InsufficientPrivilege: permission denied for table pg_authid`.
-> Container exitCode 1; CloudWatch stream
-> `mint/luciel-backend/6dc293a3be784529948e7a7dc0e73091`. **Zero
-> production state mutated** — the SELECT failed BEFORE
-> `ALTER ROLE`; SSM `/luciel/production/worker_database_url` stayed
-> `ParameterNotFound`; `luciel_worker` password unchanged. One MFA
-> TOTP was burned; the assumed-role credentials cleared cleanly via
-> `Remove-Item Env:AWS_ACCESS_KEY_ID, Env:AWS_SECRET_ACCESS_KEY,
-> Env:AWS_SESSION_TOKEN`. Step 5 must be retried only after the
-> rev-3 cycle described in Step 1 above completes and the rev-3
-> dry-run is GREEN with the new four-stage callout.
+> **✅ Step 5 GREEN — 2026-05-05 14:51:27 UTC (rev 3 real-run, mint
+> COMPLETE).** Fargate task `27638cebbd8349f8bcb8d70e4c55714b`
+> launched on `luciel-mint:3`, exitCode 0; CloudWatch banner
+> `WORKER DB PASSWORD MINTED`; `pw_fingerprint ff89f2831b32` (sha256
+> first 12 of the actual minted password — fingerprint is the
+> integrity anchor, not a leak); `pw_length 43 chars` (matches
+> `secrets.token_urlsafe(32)` base64url); `force_rotate False`
+> (first-mint path). **Pattern E redaction held perfectly**: no
+> `postgresql://` strings, no DSN, no raw password, no stack traces
+> in container stdout/stderr. **Production state mutated as
+> designed**: (a) `luciel_worker` ALTER ROLE PASSWORD committed to
+> RDS master (old bootstrap password is now dead), (b) SSM
+> SecureString `/luciel/production/worker_database_url` v1 created
+> (KMS-encrypted, `LastModifiedDate 2026-05-05T14:51:29.156Z` — SSM
+> PutParameter ran ~2s after ALTER ROLE; the script's atomicity
+> defenses ensured no partial-mutation window). Both mutations
+> independently verified via `aws ssm get-parameter` (metadata only,
+> no `--with-decryption` per
+> `D-admin-dsn-disclosed-in-chat-2026-05-05`):
+> Name=`/luciel/production/worker_database_url`, Type=SecureString,
+> Version=1. One MFA TOTP burned (074206), used productively.
+> Assumed-role credentials cleared defensively post-ceremony. The
+> `verify_first_mint_or_force_rotate` guard is now armed: with SSM v1
+> present, any future mint without `--force-rotate` will be refused.
+> **Phase 2 Commit 4 (worker DB role swap) is COMPLETE** — the
+> Pattern N ceremony is proven end-to-end through real production
+> mint.
+>
+> **Historical — Step 5 first-attempt on rev 2, 2026-05-05 ~10:30 EDT
+> (audit history, do not re-run):** Task
+> `6dc293a3be784529948e7a7dc0e73091` failed cleanly with
+> `InsufficientPrivilege: permission denied for table pg_authid`
+> (drift `D-mint-script-uses-pg-authid-not-readable-on-rds-2026-05-05`,
+> resolved). Zero production state mutated — the SELECT failed
+> BEFORE `ALTER ROLE`; SSM stayed `ParameterNotFound`; `luciel_worker`
+> password unchanged. One MFA TOTP burned. The patch (`pg_roles` +
+> SSM-presence rotation guard) landed in Commit `0cd87be`; the
+> task-def refresh in Commit `65f8996`; rev 3 is the canonical
+> entry point that succeeded above.
 
 
 ```powershell
