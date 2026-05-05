@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Luciel production Application Auto Scaling for the celery worker service.
+  Step 28 Phase 2 Commit 6.
+
+  Registers service/luciel-cluster/luciel-worker-service as a scalable
+  target on ecs:service:DesiredCount, then attaches a single
+  TargetTracking scaling policy on ECSServiceAverageCPUUtilization at
+  60 percent target. Backlog-per-worker scaling is intentionally
+  deferred to a follow-up commit pending verification of the celery
+  broker (Redis vs SQS) and design of an appropriate backlog signal.
+  See drift register entry
+  D-celery-broker-not-verified-deferring-backlog-autoscaling-2026-05-05.
+
+  Region: ca-central-1
+  Account: 729005488042
+  Cluster: luciel-cluster
+  Service: luciel-worker-service
+
+  Capacity bounds rationale:
+    MinCapacity = 1   keep one worker hot at all times.
+    MaxCapacity = 4   bound RDS connection pressure. db.t3.micro
+                      max_connections ~= 112; the existing
+                      luciel-rds-connection-count alarm fires at 90.
+                      Four workers with a small SQLAlchemy pool stays
+                      well under that ceiling.
+
+  Cooldowns:
+    ScaleOutCooldown = 60s   absorb real bursts quickly.
+    ScaleInCooldown  = 300s  shrink slowly so we do not flap on bursty
+                             arrival patterns or during scale-out tail.
+
+  Reversibility:
+    aws cloudformation delete-stack --stack-name luciel-prod-worker-autoscaling
+    Returns the service to a fixed DesiredCount; no data path impact.
+
+Parameters:
+  WorkerClusterName:
+    Type: String
+    Default: luciel-cluster
+    Description: ECS cluster hosting luciel-worker-service.
+  WorkerServiceName:
+    Type: String
+    Default: luciel-worker-service
+    Description: ECS service running the celery worker.
+  MinCapacity:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: Minimum desired count (always-on floor).
+  MaxCapacity:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    Description: Maximum desired count (RDS-bounded ceiling).
+  CpuTargetPercent:
+    Type: Number
+    Default: 60
+    MinValue: 10
+    MaxValue: 90
+    Description: Target average CPU utilization percent for the worker service.
+  ScaleOutCooldownSeconds:
+    Type: Number
+    Default: 60
+    MinValue: 0
+    Description: Seconds to wait after scale-out before another scale-out.
+  ScaleInCooldownSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 0
+    Description: Seconds to wait after scale-in before another scale-in.
+
+Resources:
+
+  WorkerScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub "service/${WorkerClusterName}/${WorkerServiceName}"
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+
+  WorkerCpuTargetTrackingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: luciel-worker-cpu-target-tracking
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref WorkerScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: !Ref CpuTargetPercent
+        ScaleOutCooldown: !Ref ScaleOutCooldownSeconds
+        ScaleInCooldown: !Ref ScaleInCooldownSeconds
+        DisableScaleIn: false
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+Outputs:
+  ScalableTargetResourceId:
+    Description: Application Auto Scaling resource ID for the worker service.
+    Value: !Sub "service/${WorkerClusterName}/${WorkerServiceName}"
+  CpuPolicyArn:
+    Description: ARN of the CPU TargetTracking scaling policy.
+    Value: !Ref WorkerCpuTargetTrackingPolicy
+  MinCapacityApplied:
+    Description: Effective minimum desired count.
+    Value: !Ref MinCapacity
+  MaxCapacityApplied:
+    Description: Effective maximum desired count.
+    Value: !Ref MaxCapacity
+  CpuTargetApplied:
+    Description: Effective CPU utilization target (percent).
+    Value: !Ref CpuTargetPercent
