@@ -208,6 +208,39 @@ class AgentRepository:
             "user_id",  # Step 28 Phase 2 - Commit 9 (bind-user only)
         }
     )
+    @staticmethod
+    def _audit_safe(value: object) -> object:
+        """Coerce non-JSON-serialisable values to a JSON-safe form for the
+        audit-row before/after snapshots.
+
+        Step 28 Phase 2 - Commit 11: agents.user_id is a uuid.UUID once
+        the row is loaded by SQLAlchemy (PG_UUID(as_uuid=True)). The
+        AdminAuditRepository writes before_diff / after_diff into JSONB
+        columns via psycopg's default JSON adapter, which calls plain
+        json.dumps() and does not know how to encode uuid.UUID — that
+        path raised TypeError("Object of type UUID is not JSON
+        serializable") for every bind-user POST in the v1.0 of Commit 9,
+        producing a 500 from the route and tripping pillars 12, 13, 14.
+
+        diff_updated_fields' docstring already documents the convention:
+        "Values must be JSON-serialisable. For non-serialisable fields
+        (e.g. datetime objects), cast at the call site." Agent is the
+        first repo whose updatable-fields set contains a UUID-typed
+        column, so the cast lands here. Confined to one helper so the
+        next non-string column type added to _UPDATABLE_FIELDS extends
+        this same path rather than re-introducing the bug.
+
+        A future global fix (registering a psycopg JSON dumper that
+        understands UUID/datetime/Decimal) would obsolete this helper
+        but is intentionally out of scope for the Phase 2 close --
+        global JSON-encoder changes touch every JSONB write in the app
+        and need their own verification pass. Logged as drift
+        D-audit-json-uuid-encoder-2026-05-05 for Step 29.
+        """
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        return value
+
     def update(
         self,
         agent: Agent,
@@ -221,8 +254,11 @@ class AgentRepository:
         audit row containing only the fields that actually changed.
         """
         # Snapshot before so the audit diff only reflects real changes.
+        # _audit_safe coerces uuid.UUID -> str so the JSONB write the
+        # audit repo issues at flush() does not fail (Commit 11).
         before_snapshot = {
-            key: getattr(agent, key) for key in self._UPDATABLE_FIELDS
+            key: self._audit_safe(getattr(agent, key))
+            for key in self._UPDATABLE_FIELDS
         }
 
         applied: dict[str, object] = {}
@@ -232,7 +268,8 @@ class AgentRepository:
                 applied[key] = value
 
         after_snapshot = {
-            key: getattr(agent, key) for key in self._UPDATABLE_FIELDS
+            key: self._audit_safe(getattr(agent, key))
+            for key in self._UPDATABLE_FIELDS
         }
 
         if audit_ctx is not None and applied:
