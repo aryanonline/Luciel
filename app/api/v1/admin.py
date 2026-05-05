@@ -1763,3 +1763,324 @@ def get_worker_queue_depth(
             "approximate_messages": dlq_depth,
         },
     }
+
+
+# ================================================================
+# Step 28 Phase 2 Commit 12 -- ScopeAssignment / User-deactivate
+# admin routes for the verify harness.
+#
+# Why these exist:
+#   The verify ECS task runs under the least-privilege luciel_worker
+#   role (per migration f392a842f885). That role intentionally has
+#   ZERO access to the scope_assignments table -- not even SELECT --
+#   because the worker has no production reason to read or write
+#   identity-lifecycle rows. The harness historically called
+#   ScopeAssignmentService and UserService directly with a worker DB
+#   session; once Commit 11 fixed the bind-user UUID encoder, those
+#   direct calls surfaced as InsufficientPrivilege errors in P12/P14.
+#
+#   These thin admin routes give the harness an HTTP path that runs
+#   on the backend (which has full DB privileges) and is gated by
+#   platform_admin permission, mirroring the bind-user route
+#   pattern from Commit 9. No change to the production identity
+#   cascade behaviour -- these routes wrap the same service methods
+#   the production code paths already use.
+#
+# Drift register:
+#   D-verify-task-pure-http-2026-05-05 -- the broader architectural
+#   debt is "verify task should not hold a DB session at all". Logged
+#   for Step 29; out of scope for Phase 2.
+# ================================================================
+
+import uuid as _uuid_p2c12
+
+from app.schemas.scope_assignment import (
+    EndAssignmentRequest as _EndAssignmentRequest_p2c12,
+    ScopeAssignmentCreate as _ScopeAssignmentCreate_p2c12,
+    ScopeAssignmentRead as _ScopeAssignmentRead_p2c12,
+)
+from app.services.scope_assignment_service import (
+    AssignmentNotFoundError as _AssignmentNotFoundError_p2c12,
+    AssignmentUserInactiveError as _AssignmentUserInactiveError_p2c12,
+    AssignmentUserNotFoundError as _AssignmentUserNotFoundError_p2c12,
+    ScopeAssignmentService as _ScopeAssignmentService_p2c12,
+)
+from app.services.user_service import (
+    UserNotFoundError as _UserNotFoundError_p2c12,
+    UserService as _UserService_p2c12,
+)
+from pydantic import BaseModel as _BaseModel_p2c12, Field as _Field_p2c12
+
+
+class _ScopeAssignmentCreatePayload_p2c12(_BaseModel_p2c12):
+    """Wrapper schema: ScopeAssignmentCreate carries (tenant, domain, role)
+    but not user_id (which the existing schema takes from the URL path).
+    For an admin-side create we want user_id in the body, so we wrap."""
+    user_id: _uuid_p2c12.UUID = _Field_p2c12(
+        ...,
+        description="User to which the new ScopeAssignment will be bound.",
+    )
+    payload: _ScopeAssignmentCreate_p2c12 = _Field_p2c12(
+        ...,
+        description="Tenant/domain/role and optional started_at.",
+    )
+    audit_label: str | None = _Field_p2c12(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional caller-provided audit context label. "
+            "Falls back to request actor_label."
+        ),
+    )
+
+
+class _ScopeAssignmentPromotePayload_p2c12(_BaseModel_p2c12):
+    """Compound op: end old + create new in one txn (production path)."""
+    old_assignment_id: _uuid_p2c12.UUID
+    new_payload: _ScopeAssignmentCreate_p2c12
+    end_reason: str = _Field_p2c12(
+        default="PROMOTED",
+        description=(
+            "EndReason enum value: PROMOTED / DEMOTED / REASSIGNED / "
+            "DEPARTED / DEACTIVATED."
+        ),
+    )
+    end_note: str | None = _Field_p2c12(default=None, max_length=500)
+    audit_label: str | None = _Field_p2c12(default=None, max_length=200)
+
+
+class _UserDeactivatePayload_p2c12(_BaseModel_p2c12):
+    reason: str = _Field_p2c12(..., min_length=10, max_length=500)
+    audit_label: str | None = _Field_p2c12(default=None, max_length=200)
+
+
+def _resolve_actor_p2c12(
+    request: Request, audit_label: str | None
+) -> AuditContext:
+    """Build an AuditContext for harness-driven admin ops.
+
+    Falls back to request.state.actor_label (set by the auth
+    middleware), then to a generic system label. Never raises -- a
+    missing actor label is non-fatal.
+    """
+    label = (
+        audit_label
+        or getattr(request.state, "actor_label", None)
+        or "admin:scope-assignment"
+    )
+    return AuditContext.system(label=label)
+
+
+@router.post(
+    "/scope-assignments",
+    response_model=_ScopeAssignmentRead_p2c12,
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def create_scope_assignment_p2c12(
+    request: Request,
+    body: _ScopeAssignmentCreatePayload_p2c12,
+    db: DbSession,
+) -> _ScopeAssignmentRead_p2c12:
+    """Create a ScopeAssignment for an existing User. platform_admin only.
+
+    Phase 2 Commit 12. Thin wrapper over
+    ScopeAssignmentService.create_assignment so the verify task can
+    set up identity-lifecycle preconditions without holding
+    INSERT privileges on scope_assignments at the DB layer.
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only platform_admin may create ScopeAssignments via this "
+                "administrative route."
+            ),
+        )
+
+    actor = _resolve_actor_p2c12(request, body.audit_label)
+    service = _ScopeAssignmentService_p2c12(db)
+    try:
+        sa = service.create_assignment(
+            user_id=body.user_id,
+            payload=body.payload,
+            autocommit=True,
+            audit_ctx=actor,
+        )
+    except _AssignmentUserNotFoundError_p2c12 as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except _AssignmentUserInactiveError_p2c12 as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _ScopeAssignmentRead_p2c12.model_validate(sa)
+
+
+@router.get(
+    "/scope-assignments/{assignment_id}",
+    response_model=_ScopeAssignmentRead_p2c12,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def get_scope_assignment_p2c12(
+    request: Request,
+    assignment_id: _uuid_p2c12.UUID,
+    db: DbSession,
+) -> _ScopeAssignmentRead_p2c12:
+    """Fetch a single ScopeAssignment by id. platform_admin only.
+
+    Phase 2 Commit 12. Used by the verify harness for post-cascade
+    assertions (e.g. P14 A3/A4 reads after end_assignment).
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may read ScopeAssignments here.",
+        )
+    sa = _ScopeAssignmentService_p2c12(db).get_assignment(assignment_id)
+    if sa is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"ScopeAssignment {assignment_id} not found.",
+        )
+    return _ScopeAssignmentRead_p2c12.model_validate(sa)
+
+
+@router.post(
+    "/scope-assignments/{assignment_id}/end",
+    response_model=_ScopeAssignmentRead_p2c12,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def end_scope_assignment_p2c12(
+    request: Request,
+    assignment_id: _uuid_p2c12.UUID,
+    body: _EndAssignmentRequest_p2c12,
+    db: DbSession,
+    audit_label: str | None = Query(default=None, max_length=200),
+) -> _ScopeAssignmentRead_p2c12:
+    """End a ScopeAssignment with mandatory Q6 key-rotation cascade.
+
+    platform_admin only. Phase 2 Commit 12. Thin wrapper over
+    ScopeAssignmentService.end_assignment -- exercises the same
+    cascade path as production. Used by P14 to drive the DEPARTED
+    semantics test.
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may end ScopeAssignments here.",
+        )
+
+    actor = _resolve_actor_p2c12(request, audit_label)
+    service = _ScopeAssignmentService_p2c12(db)
+    ended = service.end_assignment(
+        assignment_id=assignment_id,
+        reason=body.reason,
+        note=body.note,
+        autocommit=True,
+        audit_ctx=actor,
+    )
+    if ended is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"ScopeAssignment {assignment_id} not found.",
+        )
+    return _ScopeAssignmentRead_p2c12.model_validate(ended)
+
+
+@router.post(
+    "/scope-assignments/promote",
+    response_model=dict,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def promote_scope_assignment_p2c12(
+    request: Request,
+    body: _ScopeAssignmentPromotePayload_p2c12,
+    db: DbSession,
+) -> dict:
+    """Atomic role transition: end old + create new in one txn.
+
+    platform_admin only. Phase 2 Commit 12. Thin wrapper over
+    ScopeAssignmentService.promote -- preserves the single-txn
+    invariant that production code relies on. Returns both rows so
+    the harness can assert on both ended_at and new_role without
+    a follow-up GET.
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may promote ScopeAssignments here.",
+        )
+
+    # Late import: EndReason is needed only here, and the admin module
+    # already imports a lot at top level. Keep this scoped.
+    from app.models.scope_assignment import EndReason as _EndReason_p2c12
+
+    try:
+        end_reason = _EndReason_p2c12(body.end_reason)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid end_reason {body.end_reason!r}. "
+                f"Must be one of: "
+                f"{[e.value for e in _EndReason_p2c12]}"
+            ),
+        ) from exc
+
+    actor = _resolve_actor_p2c12(request, body.audit_label)
+    service = _ScopeAssignmentService_p2c12(db)
+    try:
+        ended_old, created_new = service.promote(
+            old_assignment_id=body.old_assignment_id,
+            new_payload=body.new_payload,
+            end_reason=end_reason,
+            end_note=body.end_note,
+            audit_ctx=actor,
+        )
+    except _AssignmentNotFoundError_p2c12 as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except _AssignmentUserInactiveError_p2c12 as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return {
+        "ended_old": _ScopeAssignmentRead_p2c12.model_validate(
+            ended_old
+        ).model_dump(mode="json"),
+        "created_new": _ScopeAssignmentRead_p2c12.model_validate(
+            created_new
+        ).model_dump(mode="json"),
+    }
+
+
+@router.post(
+    "/users/{user_id}/deactivate",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def deactivate_user_p2c12(
+    request: Request,
+    user_id: _uuid_p2c12.UUID,
+    body: _UserDeactivatePayload_p2c12,
+    db: DbSession,
+) -> None:
+    """Soft-deactivate a User and cascade (ends assignments + rotates keys).
+
+    platform_admin only. Phase 2 Commit 12. Thin wrapper over
+    UserService.deactivate_user. Used by P12/P13 teardown so the
+    harness does not need DB write privileges on users or
+    scope_assignments.
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may deactivate users here.",
+        )
+
+    actor = _resolve_actor_p2c12(request, body.audit_label)
+    try:
+        _UserService_p2c12(db).deactivate_user(
+            user_id=user_id,
+            reason=body.reason,
+            audit_ctx=actor,
+        )
+    except _UserNotFoundError_p2c12 as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return None
