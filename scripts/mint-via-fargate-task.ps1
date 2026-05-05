@@ -74,7 +74,7 @@
 
 .PARAMETER Subnets
   Subnet IDs for the task ENI. MUST be application subnets (the ones
-  used by `luciel-backend-service`), not RDS DB subnets — RDS subnets
+  used by `luciel-backend-service`), not RDS DB subnets -- RDS subnets
   have no SSM VPC endpoint and the task will fail with
   ResourceInitializationError. Default values are the production
   application subnets canonicalised in `docs/CANONICAL_RECAP.md`.
@@ -92,7 +92,7 @@
   match `luciel-backend-service`. The task does NOT need a public IP
   for any of its real work (everything goes through VPC endpoints or
   intra-VPC traffic), but matching the backend service's network
-  config keeps subnet/SG troubleshooting consistent — if backend
+  config keeps subnet/SG troubleshooting consistent -- if backend
   reaches AWS APIs from these subnets, mint will too.
 
 .PARAMETER Region
@@ -118,7 +118,7 @@
   mint.
 
 .PARAMETER RealRun
-  When set, overrides MINT_DRY_RUN=false on the task — i.e. the
+  When set, overrides MINT_DRY_RUN=false on the task -- i.e. the
   container will actually `ALTER ROLE` and write to the worker SSM
   parameter. This flag is mutually exclusive with -DryRun and
   REQUIRED for the real mint. The task-def's safe default
@@ -152,12 +152,12 @@
   Author: Aryan Singh
   Created: 2026-05-05 (P3-S.a Half 1)
   Supersedes: scripts/mint-with-assumed-role.ps1 (kept on disk for
-  reference; do NOT invoke for prod mint — it cannot reach RDS).
+  reference; do NOT invoke for prod mint -- it cannot reach RDS).
   Cross-references:
     - docs/recaps/2026-05-04-mint-architectural-boundary-pause.md
     - docs/PHASE_3_COMPLIANCE_BACKLOG.md  P3-S
     - docs/runbooks/operator-patterns.md  Pattern N
-    - docs/runbooks/step-28-phase-2-deploy.md  §4.0.6 (Pattern N mint architecture)
+    - docs/runbooks/step-28-phase-2-deploy.md  section 4.0.6 (Pattern N mint architecture)
     - infra/iam/luciel-ecs-mint-role-trust-policy.json
     - infra/iam/luciel-ecs-mint-role-permission-policy.json
     - mint-td-rev1.json  (task-def registration source)
@@ -438,7 +438,7 @@ try {
         throw "Task stopped without a container exit code. This usually means the container failed to start (image pull, IAM, networking). Check logs above and `aws ecs describe-tasks --tasks $taskArn`."
     }
     if ($exitCode -ne 0) {
-        throw "Mint task exited non-zero (code $exitCode). See log lines above. NOTE: the mint script's atomicity defenses mean a non-zero exit BEFORE the SSM put is non-destructive (no role change, no SSM write). A non-zero exit AFTER the ALTER ROLE but BEFORE the SSM put is the dangerous case — verify by attempting a worker auth as luciel_worker against the OLD password (should fail) and the NEW password (should also fail since we have no copy). If both fail, run scripts/rotate_worker_role.sql to reset, then re-run the mint."
+        throw "Mint task exited non-zero (code $exitCode). See log lines above. NOTE: the mint script atomicity defenses mean a non-zero exit BEFORE the SSM put is non-destructive (no role change, no SSM write). A non-zero exit AFTER the ALTER ROLE but BEFORE the SSM put is the dangerous case -- verify by attempting a worker auth as luciel_worker against the OLD password (should fail) and the NEW password (should also fail since we have no copy). If both fail, run scripts/rotate_worker_role.sql to reset, then re-run the mint."
     }
 
     Write-Host ""
