@@ -1,6 +1,6 @@
 {
     "cluster": "luciel-cluster",
-    "taskDefinition": "luciel-smoke:1",
+    "taskDefinition": "luciel-smoke:2",
     "launchType": "FARGATE",
     "count": 1,
     "networkConfiguration": {
