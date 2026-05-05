@@ -41,11 +41,25 @@ Drift register: closes section 4.6 of the Step-28-Phase-2 runbook.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from typing import List
 
 import psycopg
 from psycopg import errors as e
+
+
+# psycopg v3's exception messages can echo the full conninfo string,
+# which contains the rotated luciel_worker password. Anything we print
+# from an exception MUST go through this redactor. The pattern matches
+# any URL-shaped substring containing user:pass@host and replaces the
+# password segment with [REDACTED].
+_DSN_REDACT_RE = re.compile(r"(postgres(?:ql)?(?:\+\w+)?://[^:]+:)([^@]+)(@)")
+
+
+def _redact(message: str) -> str:
+    """Redact any embedded password from a string before printing."""
+    return _DSN_REDACT_RE.sub(r"\1[REDACTED]\3", message)
 
 
 def main() -> int:
@@ -71,13 +85,25 @@ def main() -> int:
         scheme = dsn[:scheme_end]
         print(f"dsn scheme    : {scheme}")
     except Exception as ex:
-        print(f"FATAL: DSN parse: {type(ex).__name__}: {ex}")
+        print(f"FATAL: DSN parse: {type(ex).__name__}: {_redact(str(ex))}")
         return 2
 
+    # SSM stores the DSN with the SQLAlchemy driver-suffix scheme
+    # (postgresql+psycopg://) because that is what app.db.engine expects.
+    # Bare psycopg.connect, however, only autodetects 'postgresql://' and
+    # 'postgres://' as URL form -- it would otherwise treat the entire
+    # string as key=value conninfo and reject it. We therefore strip the
+    # driver suffix locally before connecting. This does NOT modify SSM;
+    # the canonical stored DSN is unchanged. SQLAlchemy itself performs
+    # the same translation internally via URL.render_as_string + the
+    # dialect's create_connect_args.
+    psycopg_dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
+
     try:
-        conn = psycopg.connect(dsn, autocommit=False)
+        conn = psycopg.connect(psycopg_dsn, autocommit=False)
     except Exception as ex:
-        print(f"FATAL connect : {type(ex).__name__}: {ex}")
+        # Redact in case psycopg echoes conninfo in the error message.
+        print(f"FATAL connect : {type(ex).__name__}: {_redact(str(ex))}")
         return 2
 
     failures: List[str] = []
