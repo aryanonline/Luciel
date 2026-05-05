@@ -1,38 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  Luciel production Application Auto Scaling for the celery worker service.
-  Step 28 Phase 2 Commit 6.
-
-  Registers service/luciel-cluster/luciel-worker-service as a scalable
-  target on ecs:service:DesiredCount, then attaches a single
-  TargetTracking scaling policy on ECSServiceAverageCPUUtilization at
-  60 percent target. Backlog-per-worker scaling is intentionally
-  deferred to a follow-up commit pending verification of the celery
-  broker (Redis vs SQS) and design of an appropriate backlog signal.
-  See drift register entry
-  D-celery-broker-not-verified-deferring-backlog-autoscaling-2026-05-05.
-
-  Region: ca-central-1
-  Account: 729005488042
-  Cluster: luciel-cluster
-  Service: luciel-worker-service
-
-  Capacity bounds rationale:
-    MinCapacity = 1   keep one worker hot at all times.
-    MaxCapacity = 4   bound RDS connection pressure. db.t3.micro
-                      max_connections ~= 112; the existing
-                      luciel-rds-connection-count alarm fires at 90.
-                      Four workers with a small SQLAlchemy pool stays
-                      well under that ceiling.
-
-  Cooldowns:
-    ScaleOutCooldown = 60s   absorb real bursts quickly.
-    ScaleInCooldown  = 300s  shrink slowly so we do not flap on bursty
-                             arrival patterns or during scale-out tail.
-
-  Reversibility:
-    aws cloudformation delete-stack --stack-name luciel-prod-worker-autoscaling
-    Returns the service to a fixed DesiredCount; no data path impact.
+Description: Luciel Step 28 Phase 2 Commit 6 - Application Auto Scaling for luciel-worker-service. CPU TargetTracking at 60 percent, capacity 1-4. Backlog policy deferred (broker not yet verified).
 
 Parameters:
   WorkerClusterName:
