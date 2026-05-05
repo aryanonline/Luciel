@@ -1,0 +1,87 @@
+{
+    "containerDefinitions": [
+        {
+            "name": "luciel-worker",
+            "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:9513cd75b8d2cc19cff95fac30695c67c42ccf63ca4be30f534c09eb6b7cb897",
+            "cpu": 0,
+            "portMappings": [],
+            "essential": true,
+            "command": [
+                "celery",
+                "-A",
+                "app.worker.celery_app",
+                "worker",
+                "--loglevel=info",
+                "-Q",
+                "luciel-memory-tasks",
+                "--concurrency=2",
+                "--without-gossip",
+                "--without-mingle",
+                "--without-heartbeat"
+            ],
+            "healthCheck": {
+                "command": [
+                    "CMD-SHELL",
+                    "celery -A app.worker.celery_app inspect ping -t 10 || exit 1"
+                ],
+                "interval": 30,
+                "timeout": 15,
+                "retries": 3,
+                "startPeriod": 60
+            },
+            "environment": [
+                {
+                    "name": "MEMORY_EXTRACTION_ASYNC",
+                    "value": "true"
+                },
+                {
+                    "name": "CELERY_BROKER_URL",
+                    "value": "sqs://"
+                },
+                {
+                    "name": "AWS_REGION",
+                    "value": "ca-central-1"
+                }
+            ],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "secrets": [
+                {
+                    "name": "ANTHROPIC_API_KEY",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/anthropic-api-key"
+                },
+                {
+                    "name": "DATABASE_URL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url"
+                },
+                {
+                    "name": "OPENAI_API_KEY",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/openai-api-key"
+                },
+                {
+                    "name": "REDIS_URL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/REDIS_URL"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/luciel-worker",
+                    "awslogs-region": "ca-central-1",
+                    "awslogs-stream-prefix": "worker"
+                },
+                "secretOptions": []
+            },
+            "systemControls": []
+        }
+    ],
+    "family": "luciel-worker",
+    "taskRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-worker-role",
+    "executionRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-execution-role",
+    "networkMode": "awsvpc",
+    "volumes": [],
+    "placementConstraints": [],
+    "requiresCompatibilities": ["FARGATE"],
+    "cpu": "512",
+    "memory": "1024"
+}
