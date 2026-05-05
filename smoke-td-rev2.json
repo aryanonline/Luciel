@@ -1,0 +1,37 @@
+{
+    "family": "luciel-smoke",
+    "taskRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-worker-role",
+    "executionRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-execution-role",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "512",
+    "memory": "1024",
+    "containerDefinitions": [
+        {
+            "name": "luciel-smoke",
+            "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:6f5c863a4154a78d6599975ec01e8ce2d0196b8ba35278332384983a3223c694",
+            "essential": true,
+            "command": [
+                "python",
+                "-m",
+                "scripts.smoke_permission_boundary"
+            ],
+            "secrets": [
+                {
+                    "name": "DATABASE_URL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/luciel-worker",
+                    "awslogs-region": "ca-central-1",
+                    "awslogs-stream-prefix": "smoke"
+                }
+            }
+        }
+    ]
+}
