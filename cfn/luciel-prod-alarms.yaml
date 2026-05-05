@@ -129,15 +129,20 @@ Resources:
       AlarmName: luciel-worker-no-heartbeat
       AlarmDescription: >
         Worker producer-heartbeat (Commit 7 rev 11) emits
-        "healthcheck heartbeat: touched" every 15s. Three consecutive
-        90s windows with zero heartbeats means the worker is dead or
-        stuck. Strongest worker-liveness signal in the system.
+        "healthcheck heartbeat: touched" every 15s, so a healthy
+        worker produces ~4 events per 60s window. Alarm fires when
+        4 of 5 consecutive 60s windows have fewer than 1 heartbeat
+        (i.e. ~4-5min outage tolerated for one transient ingestion
+        glitch). CloudWatch alarm Period must be 10/20/30 or a
+        multiple of 60; 60 is the smallest legal value that gives
+        sub-1min granularity. Strongest worker-liveness signal in
+        the system.
       Namespace: Luciel/Worker
       MetricName: HeartbeatTouchCount
       Statistic: Sum
-      Period: 90
-      EvaluationPeriods: 3
-      DatapointsToAlarm: 3
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 4
       Threshold: 1
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
