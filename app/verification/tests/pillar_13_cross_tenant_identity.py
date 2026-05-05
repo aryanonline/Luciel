@@ -61,7 +61,6 @@ from app.models.admin_audit_log import (
 from app.models.api_key import ApiKey
 from app.models.memory import MemoryItem
 from app.models.message import MessageModel
-from app.repositories.admin_audit_repository import AuditContext
 from app.verification.fixtures import RunState
 from app.verification.http_client import call, pooled_client
 from app.verification.runner import Pillar
@@ -695,20 +694,22 @@ class CrossTenantIdentityPillar(Pillar):
         end of the suite walks state.tenant_id only, so leftover Pillar 13
         residue won't surface there. Logged for forensics.
         """
+        # Phase 2 Commit 13: HTTP path via /admin/users/{id}/deactivate.
+        # Worker DSN has no privileges on scope_assignments / users by
+        # design (migration f392a842f885); admin route runs under the API
+        # process which carries the admin DSN.
         try:
-            db = SessionLocal()
-            try:
-                from app.services.user_service import UserService
-                actor = AuditContext.system(
-                    label=f"pillar_13:teardown:{t1_id}+{t2_id}"
-                )
-                UserService(db).deactivate_user(
-                    user_id=user_id,
-                    reason=f"P13 teardown for tenants {t1_id}, {t2_id}",
-                    audit_ctx=actor,
-                )
-            finally:
-                db.close()
+            call(
+                "POST",
+                f"/api/v1/admin/users/{user_id}/deactivate",
+                pa,
+                json={
+                    "reason": f"P13 teardown for tenants {t1_id}, {t2_id}",
+                    "audit_label": f"pillar_13:teardown:{t1_id}+{t2_id}",
+                },
+                expect=(200, 204),
+                client=c,
+            )
 
             # Soft-deactivate both tenants. Order doesn't matter.
             for tid in (t1_id, t2_id):

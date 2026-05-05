@@ -221,34 +221,44 @@ class DepartureSemanticsPillar(Pillar):
             k2_id = k2_body["api_key"]["id"]
 
             # ---------- 5. Create ScopeAssignments SA1 (T1) + SA2 (T2) ----------
-            db = SessionLocal()
-            try:
-                sa_service = ScopeAssignmentService(db)
-                actor = AuditContext.system(label=f"pillar_14:{t1_id}+{t2_id}")
-                sa1 = sa_service.create_assignment(
-                    user_id=user_id,
-                    payload=ScopeAssignmentCreate(
-                        tenant_id=t1_id,
-                        domain_id=domain_id,
-                        role="listings_agent",
-                    ),
-                    autocommit=True,
-                    audit_ctx=actor,
-                )
-                sa1_id = sa1.id
-                sa2 = sa_service.create_assignment(
-                    user_id=user_id,
-                    payload=ScopeAssignmentCreate(
-                        tenant_id=t2_id,
-                        domain_id=domain_id,
-                        role="listings_agent",
-                    ),
-                    autocommit=True,
-                    audit_ctx=actor,
-                )
-                sa2_id = sa2.id
-            finally:
-                db.close()
+            # Phase 2 Commit 13: HTTP path via /admin/scope-assignments.
+            # Verify role has zero DB privileges on scope_assignments by
+            # design (migration f392a842f885); the new platform-admin route
+            # wraps the same service call the production path uses.
+            r = call(
+                "POST",
+                "/api/v1/admin/scope-assignments",
+                pa,
+                json={
+                    "user_id": str(user_id),
+                    "payload": {
+                        "tenant_id": t1_id,
+                        "domain_id": domain_id,
+                        "role": "listings_agent",
+                    },
+                    "audit_label": f"pillar_14:{t1_id}+{t2_id}",
+                },
+                expect=(200, 201),
+                client=c,
+            )
+            sa1_id = uuid.UUID(r.json()["id"])
+            r = call(
+                "POST",
+                "/api/v1/admin/scope-assignments",
+                pa,
+                json={
+                    "user_id": str(user_id),
+                    "payload": {
+                        "tenant_id": t2_id,
+                        "domain_id": domain_id,
+                        "role": "listings_agent",
+                    },
+                    "audit_label": f"pillar_14:{t1_id}+{t2_id}",
+                },
+                expect=(200, 201),
+                client=c,
+            )
+            sa2_id = uuid.UUID(r.json()["id"])
 
             # ---------- 6. Issue chat turn through K1 in T1 (writes T1 memory) ----------
             r = call(
@@ -328,29 +338,28 @@ class DepartureSemanticsPillar(Pillar):
             time.sleep(20)
 
             # ---------- 8. The departure event ----------
-            # Direct service call: end SA1 with reason=DEPARTED. The Q6
-            # cascade fires and rotates keys bound to A1's (tenant=T1)
-            # pair only. K2 in T2 must remain untouched.
-            db = SessionLocal()
-            try:
-                sa_service = ScopeAssignmentService(db)
-                departure_actor = AuditContext.system(
-                    label=f"pillar_14:{t1_id}:departure"
+            # Phase 2 Commit 13: HTTP path via
+            # /admin/scope-assignments/{id}/end. Same Q6 cascade as
+            # production -- rotates keys bound to A1's (tenant=T1) pair
+            # only. K2 in T2 must remain untouched.
+            r = call(
+                "POST",
+                f"/api/v1/admin/scope-assignments/{sa1_id}/end",
+                pa,
+                params={"audit_label": f"pillar_14:{t1_id}:departure"},
+                json={
+                    "reason": EndReason.DEPARTED.value,
+                    "note": f"P14: U departed T1 ({t1_id})",
+                },
+                expect=200,
+                client=c,
+            )
+            ended_sa1_body = r.json()
+            if not ended_sa1_body or not ended_sa1_body.get("id"):
+                raise AssertionError(
+                    f"P14 FAIL: end_assignment(SA1) returned empty body "
+                    f"for assignment_id={sa1_id}"
                 )
-                ended_sa1 = sa_service.end_assignment(
-                    assignment_id=sa1_id,
-                    reason=EndReason.DEPARTED,
-                    note=f"P14: U departed T1 ({t1_id})",
-                    autocommit=True,
-                    audit_ctx=departure_actor,
-                )
-                if ended_sa1 is None:
-                    raise AssertionError(
-                        f"P14 FAIL: end_assignment(SA1) returned None "
-                        f"for assignment_id={sa1_id}"
-                    )
-            finally:
-                db.close()
             
             # ---------- ASSERTIONS A1-A7 (after departure) ----------
             db = SessionLocal()
@@ -386,35 +395,54 @@ class DepartureSemanticsPillar(Pillar):
                     )
 
                 # ---------- A3: SA1.ended_at != None and reason == DEPARTED ----------
-                sa1_after = db.get(ScopeAssignment, sa1_id)
-                if sa1_after is None:
+                # Phase 2 Commit 13: HTTP read via
+                # /admin/scope-assignments/{id}. Verify role has no
+                # SELECT on scope_assignments by design.
+                r = call(
+                    "GET",
+                    f"/api/v1/admin/scope-assignments/{sa1_id}",
+                    pa,
+                    expect=200,
+                    client=c,
+                )
+                sa1_after = r.json()
+                if not sa1_after:
                     raise AssertionError(
                         f"A3 FAIL: SA1 (id={sa1_id}) disappeared after "
                         f"end_assignment"
                     )
-                if sa1_after.ended_at is None:
+                if sa1_after.get("ended_at") is None:
                     raise AssertionError(
                         f"A3 FAIL: SA1 (id={sa1_id}) ended_at is still NULL "
                         f"after end_assignment(DEPARTED). Lifecycle column "
                         f"not written."
                     )
-                if sa1_after.ended_reason != EndReason.DEPARTED:
+                if sa1_after.get("ended_reason") != EndReason.DEPARTED.value:
                     raise AssertionError(
-                        f"A3 FAIL: SA1.ended_reason={sa1_after.ended_reason!r} "
+                        f"A3 FAIL: SA1.ended_reason="
+                        f"{sa1_after.get('ended_reason')!r} "
                         f"!= EndReason.DEPARTED. Reason not recorded correctly."
                     )
 
                 # ---------- A4: SA2.ended_at is None (T2 assignment untouched) ----------
-                sa2_after = db.get(ScopeAssignment, sa2_id)
-                if sa2_after is None:
+                r = call(
+                    "GET",
+                    f"/api/v1/admin/scope-assignments/{sa2_id}",
+                    pa,
+                    expect=200,
+                    client=c,
+                )
+                sa2_after = r.json()
+                if not sa2_after:
                     raise AssertionError(
                         f"A4 FAIL: SA2 (id={sa2_id}) disappeared during P14"
                     )
-                if sa2_after.ended_at is not None:
+                if sa2_after.get("ended_at") is not None:
                     raise AssertionError(
                         f"A4 FAIL (CRITICAL): SA2 (id={sa2_id}, tenant=T2) "
-                        f"ended_at={sa2_after.ended_at} after departure from "
-                        f"T1. Cascade over-fired across tenant boundary."
+                        f"ended_at={sa2_after.get('ended_at')} after "
+                        f"departure from T1. Cascade over-fired across "
+                        f"tenant boundary."
                     )
 
                 # ---------- A5: T1's memory row queryable IF it exists ----------
@@ -481,22 +509,21 @@ class DepartureSemanticsPillar(Pillar):
                 db.close()
 
             # ---------- Self-contained teardown ----------
+            # Phase 2 Commit 13: HTTP path via /admin/users/{id}/deactivate.
             try:
                 # Soft-deactivate U -- cascade ends remaining SA2 and
                 # rotates K2 (which we just asserted is still active).
-                db = SessionLocal()
-                try:
-                    from app.services.user_service import UserService
-                    teardown_actor = AuditContext.system(
-                        label=f"pillar_14:teardown:{t1_id}+{t2_id}"
-                    )
-                    UserService(db).deactivate_user(
-                        user_id=user_id,
-                        reason=f"P14 teardown for tenants {t1_id}, {t2_id}",
-                        audit_ctx=teardown_actor,
-                    )
-                finally:
-                    db.close()
+                call(
+                    "POST",
+                    f"/api/v1/admin/users/{user_id}/deactivate",
+                    pa,
+                    json={
+                        "reason": f"P14 teardown for tenants {t1_id}, {t2_id}",
+                        "audit_label": f"pillar_14:teardown:{t1_id}+{t2_id}",
+                    },
+                    expect=(200, 204),
+                    client=c,
+                )
 
                 # Soft-deactivate both tenants.
                 for tid in (t1_id, t2_id):

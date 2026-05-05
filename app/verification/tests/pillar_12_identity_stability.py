@@ -141,19 +141,27 @@ class IdentityStabilityPillar(Pillar):
             k1_id = k1_body["api_key"]["id"]
 
             # ---------- 4. Create SA1 ----------
-            db = SessionLocal()
-            try:
-                actor = AuditContext.system(label=f"pillar_12:{tid}")
-                sa1 = ScopeAssignmentService(db).create_assignment(
-                    user_id=user_id,
-                    payload=ScopeAssignmentCreate(
-                        tenant_id=tid, domain_id=domain_id, role="listings_agent",
-                    ),
-                    autocommit=True, audit_ctx=actor,
-                )
-                sa1_id = sa1.id
-            finally:
-                db.close()
+            # Phase 2 Commit 13: HTTP path via /admin/scope-assignments.
+            # Verify role has zero DB privileges on scope_assignments by
+            # design (migration f392a842f885); the new platform-admin route
+            # wraps the same service call the production path uses.
+            r = call(
+                "POST",
+                "/api/v1/admin/scope-assignments",
+                pa,
+                json={
+                    "user_id": str(user_id),
+                    "payload": {
+                        "tenant_id": tid,
+                        "domain_id": domain_id,
+                        "role": "listings_agent",
+                    },
+                    "audit_label": f"pillar_12:{tid}",
+                },
+                expect=(200, 201),
+                client=c,
+            )
+            sa1_id = uuid.UUID(r.json()["id"])
 
             # ---------- 5. Session + chat under K1 ----------
             r = call(
@@ -243,28 +251,38 @@ class IdentityStabilityPillar(Pillar):
                 client=c,
             )
 
-            db = SessionLocal()
-            try:
-                actor = AuditContext.system(label=f"pillar_12:{tid}:promote")
-                old_sa, new_sa = ScopeAssignmentService(db).promote(
-                    old_assignment_id=sa1_id,
-                    new_payload=ScopeAssignmentCreate(
-                        tenant_id=tid, domain_id=domain_id, role="team_lead",
-                    ),
-                    end_reason=EndReason.PROMOTED,
-                    end_note="P12 promotion smoke test",
-                    audit_ctx=actor,
+            # Phase 2 Commit 13: HTTP path via /admin/scope-assignments/promote.
+            # Same atomic end+create cascade as production; just driven
+            # by HTTP instead of an in-process service call.
+            r = call(
+                "POST",
+                "/api/v1/admin/scope-assignments/promote",
+                pa,
+                json={
+                    "old_assignment_id": str(sa1_id),
+                    "new_payload": {
+                        "tenant_id": tid,
+                        "domain_id": domain_id,
+                        "role": "team_lead",
+                    },
+                    "end_reason": EndReason.PROMOTED.value,
+                    "end_note": "P12 promotion smoke test",
+                    "audit_label": f"pillar_12:{tid}:promote",
+                },
+                expect=200,
+                client=c,
+            )
+            promote_body = r.json()
+            old_sa = promote_body["ended_old"]
+            new_sa = promote_body["created_new"]
+            if old_sa.get("ended_at") is None:
+                raise AssertionError(
+                    "P12 FAIL: promote() returned ended_old with ended_at=None"
                 )
-                if old_sa.ended_at is None:
-                    raise AssertionError(
-                        "P12 FAIL: promote() returned old_sa with ended_at=None"
-                    )
-                if new_sa.role != "team_lead":
-                    raise AssertionError(
-                        f"P12 FAIL: promote() new_sa.role={new_sa.role!r}"
-                    )
-            finally:
-                db.close()
+            if new_sa.get("role") != "team_lead":
+                raise AssertionError(
+                    f"P12 FAIL: promote() created_new.role={new_sa.get('role')!r}"
+                )
 
             # ---------- A2: K1.active is False ----------
             db = SessionLocal()
@@ -407,18 +425,19 @@ class IdentityStabilityPillar(Pillar):
             )
 
             # ---------- Teardown ----------
+            # Phase 2 Commit 13: HTTP path via /admin/users/{id}/deactivate.
             try:
-                db = SessionLocal()
-                try:
-                    from app.services.user_service import UserService
-                    actor = AuditContext.system(label=f"pillar_12:{tid}:teardown")
-                    UserService(db).deactivate_user(
-                        user_id=user_id,
-                        reason=f"P12 teardown for tenant {tid}",
-                        audit_ctx=actor,
-                    )
-                finally:
-                    db.close()
+                call(
+                    "POST",
+                    f"/api/v1/admin/users/{user_id}/deactivate",
+                    pa,
+                    json={
+                        "reason": f"P12 teardown for tenant {tid}",
+                        "audit_label": f"pillar_12:{tid}:teardown",
+                    },
+                    expect=(200, 204),
+                    client=c,
+                )
                 call(
                     "PATCH", f"/api/v1/admin/tenants/{tid}", pa,
                     json={"active": False},
