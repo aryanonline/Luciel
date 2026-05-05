@@ -496,6 +496,42 @@ baked to the production application subnets and the application SG
 
 **Step 1 — Dry-run ceremony (no DB or SSM mutation):**
 
+> **✅ EXECUTED 2026-05-05 14:16:39 UTC — GREEN.** Fargate task
+> `33908e96941d4dbda45594f241565c3b` launched on `luciel-mint:2`,
+> exitCode 0, log message `(pre-flight SSM-writable + DB connect-only PASSED)`,
+> explicit `DRY RUN -- no Postgres or SSM writes performed` line, no
+> `<DSN-REDACTED>` strings in stdout, `pw_fingerprint cd9a489dd131`
+> for cross-reference. SSM target `/luciel/production/worker_database_url`
+> remains `ParameterNotFound` post-dry-run, confirming zero mutation.
+> Step 5 (real-run) gated behind a fresh `confirm_action` + new MFA
+> TOTP. Re-record this section's outcome on every Step-4 retry.
+
+> **Known issue — helper bails after task STOPPED.** `scripts/mint-via-fargate-task.ps1`
+> line 394 calls `aws @logArgs 2>$null` to auto-tail CloudWatch logs.
+> PowerShell's native-command stderr handling raises
+> `NativeCommandError` even when AWS CLI's stderr is non-empty for
+> non-error reasons, and `2>$null` does NOT suppress it. **Ceremony
+> correctness is unaffected** — the bail happens AFTER the task has
+> reached STOPPED. If the helper bails, read logs manually:
+>
+> ```powershell
+> aws logs get-log-events `
+>   --log-group-name /ecs/luciel-backend `
+>   --log-stream-name mint/luciel-backend/<task-id> `
+>   --region ca-central-1 `
+>   --query 'events[*].message' --output json
+> ```
+>
+> The `<task-id>` is printed by the helper before the bail. Use the
+> assumed-role credentials still in your shell (the helper clears
+> them ONLY on graceful exit — if it bailed, run
+> `Remove-Item Env:AWS_ACCESS_KEY_ID, Env:AWS_SECRET_ACCESS_KEY, Env:AWS_SESSION_TOKEN`
+> after you finish reading logs). Drift
+> `D-mint-helper-aws-stderr-causes-native-command-error-2026-05-05`
+> tracks the helper polish; deferred to a standalone commit AFTER
+> Step 5 GREEN.
+
+
 ```powershell
 .\scripts\mint-via-fargate-task.ps1
 # - Prompts for MFA TOTP.
