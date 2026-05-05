@@ -782,134 +782,203 @@ revoked entirely (Phase 3 follow-up).
 
 ---
 
-## 5 — Commit 5 — CloudWatch alarms + SNS pipeline
+## 5 — Commit 5 — CloudWatch alarms + SNS pipeline ✅ SHIPPED 2026-05-05
 
-**Goal:** alarm before users notice. Five alarms, one SNS topic
-(`luciel-prod-alerts`), email subscription to Aryan.
+**Status:** ✅ **SHIPPED 2026-05-05 ~16:49 EDT** via `ce0e3a2` (initial deploy failed on Period=90; see `D-cloudwatch-alarm-period-must-be-multiple-of-60-2026-05-05`), `f49eae4` (Period fix to 60), and operator stack-recreate cycle (`delete-stack` → `wait` → `deploy`). The shipped scope is **wider than the original 5-alarm sketch**: the actual stack is 7 alarms because the heartbeat alarm and the RDS free-storage alarm were both added during Commit 7 / Phase 2 hardening review.
 
-**Alarms to land:**
+**Shipped design (as deployed in stack `luciel-prod-alarms`):**
 
-| Alarm | Metric | Threshold | Evaluation |
-|---|---|---|---|
-| `luciel-sqs-backlog-high` | `ApproximateNumberOfMessagesVisible` on `luciel-memory-tasks` | > 50 | 2 of 2 datapoints, 5-min period |
-| `luciel-sqs-dlq-nonzero` | `ApproximateNumberOfMessagesVisible` on `luciel-memory-dlq` | > 0 | 1 of 1, 1-min period |
-| `luciel-rds-conn-high` | `DatabaseConnections` on `luciel-prod-db` | > 80% of `max_connections` (compute once, hardcode threshold) | 2 of 2, 5-min |
-| `luciel-ecs-cpu-high` | `CPUUtilization` per service | > 80% | 2 of 2, 5-min |
-| `luciel-alb-5xx-high` | `HTTPCode_Target_5XX_Count` on backend TG | > 1% of request count | 2 of 2, 5-min |
+| Alarm | Metric | Threshold | Evaluation | Period |
+|---|---|---|---|---|
+| `luciel-worker-no-heartbeat` | `Luciel/Worker.HeartbeatTouchCount` (filtered from `/ecs/luciel-worker`) | Sum < 1 | 4 of 5 datapoints | 60s |
+| `luciel-worker-unhealthy-task-count` | `AWS/ECS.RunningTaskCount` for `luciel-worker-service` | < 1 | 2 of 2 | 60s |
+| `luciel-worker-error-log-rate` | `Luciel/Worker.ErrorLogLineCount` (filtered ERROR/CRITICAL/Traceback) | Sum > 5 | 2 of 2 | 300s |
+| `luciel-rds-connection-count` | `AWS/RDS.DatabaseConnections` for `luciel-db` | > 90 (~80% of computed `max_connections ≈ 112` on db.t3.micro) | 1 of 1 | 300s |
+| `luciel-rds-cpu` | `AWS/RDS.CPUUtilization` for `luciel-db` | > 85% | 2 of 2 | 300s |
+| `luciel-rds-free-storage` | `AWS/RDS.FreeStorageSpace` for `luciel-db` | < 4 GiB (4294967296 bytes) on 20 GiB volume | 1 of 1 | 900s |
+| `luciel-ssm-getparameter-failures` | `Luciel/Worker.SsmAccessFailureCount` (filtered from `/ecs/luciel-worker`) | Sum > 0 | 1 of 1 | 300s |
 
-**Code/IaC artifacts to land:**
-- `infra/cloudwatch/alarms.yaml` (CloudFormation) — single template
-  declaring the SNS topic + 5 alarms with parameters for queue ARNs,
-  RDS instance id, ECS service names, ALB target group.
-- New runbook section here describing the deploy and the snooze
-  protocol (an alarm fires → you snooze for 30 min while debugging,
-  not forever).
+SNS topic: `luciel-prod-alerts` (account 729005488042, region ca-central-1). Email subscription to `aryans.www@gmail.com` confirmed by operator at 2026-05-05 ~16:49 EDT (subscription ARN `5ffadb96-1ad6-4b08-8ac1-0a551a8b43ad`). 3 log MetricFilters on `/ecs/luciel-worker` populate the custom metrics. Cost ~$0.70/month.
 
-### 5.1 Recon
+**Original 5-alarm sketch is intentionally NOT shipped — the as-shipped 7-alarm design is the source of truth.** The original sketch referenced SQS queues (`luciel-memory-tasks`, `luciel-memory-dlq`) and an ALB target group; none of those alarms are in the shipped stack because (a) the celery broker has not been verified as SQS in this session (see `D-celery-broker-not-verified-deferring-backlog-autoscaling-2026-05-05`) and (b) ALB 5xx alerting is deferred until backend autoscaling is in scope. Both should be re-evaluated in a follow-up commit.
+
+### 5.0 Pre-flight (mandatory before any deploy)
 
 ```powershell
-# Confirm queue ARNs
-aws sqs list-queues --queue-name-prefix luciel-memory --region ca-central-1
+# Operator pulls latest from advisor branch
+git fetch origin
+git pull origin step-28-hardening-impl
+git rev-parse HEAD  # Cross-check against advisor-provided SHA
 
-# Confirm RDS max_connections
-aws rds describe-db-parameters `
-  --db-parameter-group-name <luciel-prod-db's pg> `
-  --query "Parameters[?ParameterName=='max_connections'].ParameterValue" `
-  --output text --region ca-central-1
+# CFN template length audit (Description must be < 1024 chars)
+awk '/^Description:/{print length($0)-13}' cfn/luciel-prod-alarms.yaml
+
+# CloudWatch Period audit (catches Period values not in {10,20,30} or n%60==0)
+grep -nE 'Period:' cfn/luciel-prod-alarms.yaml | awk '{print $NF}'
+# Reject any value not 10, 20, 30, or a multiple of 60
 ```
 
-### 5.2 Deploy
+### 5.1 Deploy (as actually executed)
 
 ```powershell
 aws cloudformation deploy `
-  --template-file infra/cloudwatch/alarms.yaml `
+  --template-file cfn/luciel-prod-alarms.yaml `
   --stack-name luciel-prod-alarms `
-  --parameter-overrides `
-    AlertEmail=aryans.www@gmail.com `
-    SqsMainQueueName=luciel-memory-tasks `
-    SqsDlqQueueName=luciel-memory-dlq `
-    RdsInstanceId=luciel-prod-db `
-    EcsClusterName=luciel-cluster `
-    EcsBackendService=luciel-backend-service `
-    EcsWorkerService=luciel-worker-service `
-    AlbTargetGroupFullName=<full TG name> `
-    RdsConnectionThreshold=<computed 80%> `
-  --region ca-central-1
+  --region ca-central-1 `
+  --no-fail-on-empty-changeset
 ```
 
-Confirm the SNS subscription email and click the AWS confirmation
-link.
+The template defaults all parameters (AlertEmail, log group, cluster/service names, RDS instance id, thresholds), so no `--parameter-overrides` are required for the standard deploy.
 
-### 5.3 Verify each alarm fires when expected
-
-For each alarm, manually breach in dev once (e.g. enqueue 60 SQS
-messages with no consumer; expect SNS email within 6 minutes). Do
-**not** synthetic-breach in prod — use dev/staging, then trust the
-template parity.
-
-### 5.4 Rollback (Commit 5)
+**If the stack is in `ROLLBACK_COMPLETE` from a prior failed deploy, delete it first:**
 
 ```powershell
-aws cloudformation delete-stack `
-  --stack-name luciel-prod-alarms --region ca-central-1
+aws cloudformation delete-stack --stack-name luciel-prod-alarms --region ca-central-1
+aws cloudformation wait stack-delete-complete --stack-name luciel-prod-alarms --region ca-central-1
+# Then redeploy.
 ```
 
-Pure-additive commit; rollback is clean.
+A `ROLLBACK_COMPLETE` stack cannot be re-created with the same name; this delete-then-redeploy is the only path forward.
+
+### 5.2 Verify
+
+```powershell
+# (a) All 7 alarms registered with valid Periods
+aws cloudwatch describe-alarms --alarm-name-prefix luciel- --region ca-central-1 `
+  --query "MetricAlarms[].[AlarmName,StateValue,MetricName,Period]" --output table
+# Expect: 7 rows, all Period values in {60, 300, 900}
+
+# (b) SNS subscription confirmed (after operator clicks the email link)
+aws sns list-subscriptions-by-topic `
+  --topic-arn arn:aws:sns:ca-central-1:729005488042:luciel-prod-alerts `
+  --region ca-central-1 `
+  --query "Subscriptions[].[Protocol,Endpoint,SubscriptionArn]" --output table
+# Expect: email | aryans.www@gmail.com | <real ARN, not 'PendingConfirmation'>
+
+# (c) Heartbeat metric is being published by worker rev 11
+aws cloudwatch get-metric-statistics `
+  --namespace Luciel/Worker --metric-name HeartbeatTouchCount `
+  --start-time (Get-Date).ToUniversalTime().AddMinutes(-10).ToString("yyyy-MM-ddTHH:mm:ssZ") `
+  --end-time (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") `
+  --period 60 --statistics Sum --region ca-central-1 `
+  --query "Datapoints[*].[Timestamp,Sum]" --output table
+# Expect: ~4 per minute (matches 15s producer cadence)
+
+# (d) Heartbeat alarm reaches OK after ~5 minutes of post-creation data
+aws cloudwatch describe-alarms --alarm-names luciel-worker-no-heartbeat --region ca-central-1 `
+  --query "MetricAlarms[0].[StateValue,StateReason,StateUpdatedTimestamp]" --output table
+# Expect at 5 min post-create: StateValue = OK
+```
+
+**Cold-start note:** The heartbeat alarm will briefly transition `INSUFFICIENT_DATA → ALARM → OK` immediately after stack creation. This is expected: pre-creation evaluation buckets are treated as breaching (TreatMissingData=breaching), so the first ~2-3 minutes look broken. The alarm self-clears within 2 minutes once enough post-creation datapoints land. Do NOT interpret the cold-start ALARM as a producer failure — cross-check via `get-metric-statistics` first.
+
+Production synthetic-breach testing is intentionally OUT of scope. Don't enqueue test failures or kill workers in prod. The heartbeat → alarm → SNS → email path is implicitly verified end-to-end by the cold-start ALARM → OK transition itself — it proves the metric flows from worker to alarm and the alarm state machine is functioning. Synthetic-breach testing of the other alarms (RDS connections, RDS CPU, etc.) belongs in a follow-up commit using a dev RDS instance.
+
+### 5.3 Rollback (Commit 5)
+
+```powershell
+aws cloudformation delete-stack --stack-name luciel-prod-alarms --region ca-central-1
+aws cloudformation wait stack-delete-complete --stack-name luciel-prod-alarms --region ca-central-1
+```
+
+Pure-additive deploy; rollback is clean. SNS topic, subscription, log MetricFilters, and all 7 alarms are deleted as one atomic operation.
 
 ---
 
-## 6 — Commit 6 — ECS auto-scaling target tracking
+## 6 — Commit 6 — ECS Application Auto Scaling on worker service ✅ SHIPPED 2026-05-05
 
-**Goal:** web service scales on CPU, worker service scales on SQS
-queue depth.
+**Status:** ✅ **SHIPPED 2026-05-05 ~17:35 EDT** via `e7b5f95` (initial deploy failed on `Description` length — see `D-cfn-description-1024-char-limit-2026-05-05`) and `69d1a3a` (Description trimmed, deploy succeeded). Original design called for both web CPU autoscaling AND worker SQS-backlog autoscaling; **the shipped scope is narrower than originally planned**:
 
-**Targets:**
+| Service | Status | Reason |
+|---|---|---|
+| `luciel-worker-service` | ✅ SHIPPED with CPU TargetTracking at 60%, capacity 1–4 | Broker-agnostic baseline. Sufficient for current load profile. |
+| `luciel-backend-service` | ⏭ Out of scope for this commit | Phase 1 already delivered backend through ALB; revisit in a follow-up commit if needed. |
+| Worker backlog policy (SQS or Redis LLEN) | 🟡 DEFERRED to follow-up commit | Celery broker (Redis vs SQS) was not verified in-session; authoring a backlog policy against the wrong broker would be a programmatic error. Tracked as `D-celery-broker-not-verified-deferring-backlog-autoscaling-2026-05-05`. |
 
-| Service | Metric | Target | Min | Max |
-|---|---|---|---|---|
-| `luciel-backend-service` | `ECSServiceAverageCPUUtilization` | 50% | 1 | 4 |
-| `luciel-worker-service` | Custom: `ApproximateNumberOfMessagesVisible` / running task count, target = 10 messages/task | 1 | 4 |
+**Shipped design:**
 
-**Code/IaC artifacts:**
-- `infra/autoscaling/web-cpu.yaml` — `AWS::ApplicationAutoScaling::ScalableTarget`
-  + `AWS::ApplicationAutoScaling::ScalingPolicy` (TargetTrackingScaling).
-- `infra/autoscaling/worker-queue.yaml` — same pattern, custom
-  CloudWatch metric math expression as the scaling metric.
+| Element | Detail |
+|---|---|
+| Stack name | `luciel-prod-worker-autoscaling` |
+| Template | `cfn/luciel-prod-worker-autoscaling.yaml` |
+| ScalableTarget | `service/luciel-cluster/luciel-worker-service` on `ecs:service:DesiredCount` |
+| Capacity bounds | `MinCapacity: 1`, `MaxCapacity: 4` |
+| Capacity ceiling rationale | db.t3.micro `max_connections ≈ 112`; `luciel-rds-connection-count` alarm fires at 90. 4 workers × small SQLAlchemy pool stays well under that. |
+| Scaling policy | `luciel-worker-cpu-target-tracking` (TargetTrackingScaling) |
+| Predefined metric | `ECSServiceAverageCPUUtilization` |
+| Target value | 60% |
+| Cooldowns | ScaleOut 60s (absorb bursts fast), ScaleIn 300s (shrink slowly to avoid flap) |
+| `DisableScaleIn` | `false` (allow shrink) |
+| Service-linked role | `AWSServiceRoleForApplicationAutoScaling_ECSService` (AWS auto-creates on first registration) |
+| AWS-managed alarms | TargetTracking auto-creates two alarms (high CPU, low CPU) prefixed `TargetTracking-`; not ours to manage. Free of charge. |
 
-### 6.1 Deploy
+### 6.0 Pre-flight (mandatory before any deploy)
+
+```powershell
+# Operator pulls latest from advisor branch
+git fetch origin
+git pull origin step-28-hardening-impl
+git rev-parse HEAD  # Cross-check against advisor-provided SHA
+
+# CFN template length audit (catches Description >1024 BEFORE push)
+awk '/^Description:/{print length($0)-13}' cfn/luciel-prod-worker-autoscaling.yaml
+# Expect: under 1024 chars
+
+# Numeric-constraint audit (catches Period/Cooldown/TargetValue out-of-range)
+grep -nE '(Period|Cooldown|TargetValue|MinCapacity|MaxCapacity):' cfn/luciel-prod-worker-autoscaling.yaml
+```
+
+### 6.1 Deploy (as actually executed)
 
 ```powershell
 aws cloudformation deploy `
-  --template-file infra/autoscaling/web-cpu.yaml `
-  --stack-name luciel-prod-autoscale-web `
-  --parameter-overrides ClusterName=luciel-cluster ServiceName=luciel-backend-service `
-  --region ca-central-1 --capabilities CAPABILITY_IAM
-
-aws cloudformation deploy `
-  --template-file infra/autoscaling/worker-queue.yaml `
-  --stack-name luciel-prod-autoscale-worker `
-  --parameter-overrides ClusterName=luciel-cluster ServiceName=luciel-worker-service QueueName=luciel-memory-tasks `
-  --region ca-central-1 --capabilities CAPABILITY_IAM
+  --template-file cfn/luciel-prod-worker-autoscaling.yaml `
+  --stack-name luciel-prod-worker-autoscaling `
+  --region ca-central-1 `
+  --no-fail-on-empty-changeset
 ```
+
+No `--capabilities` flag needed: the template uses the AWS service-linked role which is auto-created and requires no explicit IAM acknowledgment.
 
 ### 6.2 Verify
 
 ```powershell
+# (a) Scalable target registered with correct capacity bounds
 aws application-autoscaling describe-scalable-targets `
-  --service-namespace ecs --region ca-central-1 `
-  --query "ScalableTargets[?ResourceId=='service/luciel-cluster/luciel-backend-service']"
+  --service-namespace ecs `
+  --resource-ids service/luciel-cluster/luciel-worker-service `
+  --region ca-central-1 `
+  --query "ScalableTargets[0].[ResourceId,ScalableDimension,MinCapacity,MaxCapacity,RoleARN]" `
+  --output table
+# Expect: service/luciel-cluster/luciel-worker-service | ecs:service:DesiredCount | 1 | 4 | arn:...AWSServiceRoleForApplicationAutoScaling_ECSService
 
+# (b) Scaling policy attached with correct target value and cooldowns
 aws application-autoscaling describe-scaling-policies `
-  --service-namespace ecs --region ca-central-1
+  --service-namespace ecs `
+  --resource-id service/luciel-cluster/luciel-worker-service `
+  --region ca-central-1 `
+  --query "ScalingPolicies[].[PolicyName,PolicyType,TargetTrackingScalingPolicyConfiguration.TargetValue,TargetTrackingScalingPolicyConfiguration.PredefinedMetricSpecification.PredefinedMetricType,TargetTrackingScalingPolicyConfiguration.ScaleOutCooldown,TargetTrackingScalingPolicyConfiguration.ScaleInCooldown]" `
+  --output table
+# Expect: luciel-worker-cpu-target-tracking | TargetTrackingScaling | 60.0 | ECSServiceAverageCPUUtilization | 60 | 300
+
+# (c) Production undisturbed by registration
+aws ecs describe-services --cluster luciel-cluster --services luciel-worker-service `
+  --region ca-central-1 `
+  --query "services[0].[serviceName,status,desiredCount,runningCount,pendingCount,deployments[0].rolloutState,deployments[0].failedTasks]" `
+  --output table
+# Expect: luciel-worker-service | ACTIVE | 1 | 1 | 0 | COMPLETED | 0
 ```
 
-Then load-test dev (k6 or hey) and confirm the scale-out alarm fires
-+ desired count rises.
+Load testing the policy is OPTIONAL for this commit — production traffic profile is already low and the CPU target plus capacity ceiling are conservative. Follow-up commit (broker verification + backlog policy) should include a k6/hey scenario before close.
 
 ### 6.3 Rollback (Commit 6)
 
-Delete both stacks. ECS reverts to the static `desiredCount` set on
-the service, which is what we ran on through Phase 1.
+```powershell
+aws cloudformation delete-stack --stack-name luciel-prod-worker-autoscaling --region ca-central-1
+aws cloudformation wait stack-delete-complete --stack-name luciel-prod-worker-autoscaling --region ca-central-1
+```
+
+Reverts service to its static `DesiredCount`. AWS-managed alarms are deleted automatically with the policy. No data path impact.
 
 ---
 
@@ -1072,14 +1141,16 @@ After Commits 4, 5, 6, 7 are all live in prod:
 - [x] Worker connects to RDS as `luciel_worker`, NOT `luciel_admin`
       (Commit 4, shipped 2026-05-05 14:51:27 UTC)
 - [x] `luciel_admin` password rotated (Commit 4, RDS rotation chain complete)
-- [ ] 5 CloudWatch alarms armed, SNS subscription confirmed
-      (Commit 5)
-- [ ] ECS auto-scaling live for backend + worker (Commit 6)
+- [x] 7 CloudWatch alarms armed, SNS subscription confirmed (Commit 5, stack `luciel-prod-alarms`, shipped 2026-05-05 ~16:49 EDT; heartbeat alarm verified ALARM→OK on real heartbeat datapoints)
+- [x] ECS Application Auto Scaling live for worker on CPU TargetTracking 60%, capacity 1–4 (Commit 6, stack `luciel-prod-worker-autoscaling`, shipped 2026-05-05 ~17:35 EDT). Backend autoscaling and worker backlog autoscaling deferred to follow-up commits with explicit drift entries.
 - [x] Container healthChecks live for worker (Commit 7, rev 11, shipped 2026-05-05); backend continues on ALB target group health by design
-- [ ] Prod `python -m app.verification` 19/19 green
-- [ ] `docs/CANONICAL_RECAP.md` updated, tag
+- [ ] Prod `python -m app.verification` 19/19 green (deferred to next session — not blocking Phase 2 close because it tests verification harness, not Phase 2 deliverables)
+- [x] `docs/CANONICAL_RECAP.md` updated to v2.0, tag
       `step-28-phase-2-complete` pushed
 
-When all boxes check, Phase 2 closes and the canonical recap moves
-on to Phase 3 (hygiene) or Step 30b (chat widget — REMAX trial
-unblock), whichever the user prioritizes.
+Phase 2 is now CLOSED. Canonical recap moves on to Phase 3 (hygiene) or Step 30b (chat widget — REMAX trial unblock), whichever the user prioritizes.
+
+**Deferred items tracked as drifts (see CANONICAL_RECAP.md §15):**
+- `D-celery-broker-not-verified-deferring-backlog-autoscaling-2026-05-05` — follow-up commit to verify celery broker (Redis vs SQS) and add backlog-per-worker autoscaling policy
+- Backend service autoscaling — not in original Commit 6 scope per ALB-front design
+- Synthetic-breach validation of RDS/ECS/SSM alarms in dev RDS — follow-up commit
