@@ -34,7 +34,7 @@ Why process-liveness instead of `celery inspect ping`:
           seconds because kombu raises and Celery's error handler
           eventually exits, at which point process-liveness catches it.
 
-Match criterion (STRICT to avoid self-matching):
+Match criterion (STRICT to avoid self-matching, REVISED in rev 10):
     The probe MUST NOT match itself or any other process that incidentally
     has the bytes 'celery' and 'worker' in its cmdline (e.g. a Python script
     whose path or docstring mentions those words). Substring matching is
@@ -43,17 +43,34 @@ Match criterion (STRICT to avoid self-matching):
     in the script filename. Substring matching would create a false-positive
     where the probe ALWAYS passes because it counts itself.
 
-    Correct criterion: parse cmdline as NUL-separated argv, then require:
-        1. argv[0] basename is exactly 'celery' (the binary name, not
-           a path that contains 'celery' somewhere)
-        2. AND 'worker' is one of the argv elements (Celery subcommand)
+    REVISED criterion (rev 10, after rev 9's argv[0] check failed in prod):
+    Parse cmdline as NUL-separated argv, then require BOTH 'celery' AND
+    'worker' to be EXACT elements (not substrings) of argv.
 
-    Our actual worker command:
+    Why argv[0] basename check was wrong in rev 9:
+        The 'celery' command in our pip-installed image is a Python entry-
+        point script at /usr/local/bin/celery. When the kernel exec's it,
+        the shebang line redirects through python, so /proc/<pid>/cmdline
+        shows argv[0] = /usr/local/bin/python3.14 (or similar), with
+        'celery' appearing as argv[1]. Rev 9's check (argv[0] basename ==
+        'celery') failed every time, exiting 1, marking the container
+        unhealthy. Verified by reasoning about Python entry-point semantics
+        and the fact that the worker boot logs showed ready state but the
+        healthcheck never passed in 129s of probe attempts.
+
+    Our actual worker command at the task-def level:
         celery -A app.worker.celery_app worker --loglevel=info ...
-    argv[0] = 'celery'             -> basename match
-    argv[3] = 'worker'             -> subcommand match
+    But /proc/<celery-worker-pid>/cmdline shows:
+        /usr/local/bin/python3.14 /usr/local/bin/celery -A app.worker.celery_app worker ...
+    So both 'celery' and 'worker' appear as DISTINCT argv elements after
+    NUL-splitting. The element-membership check (b'celery' in argv) will
+    match these but will NOT match a process whose argv contains a path
+    like '/app/scripts/healthcheck_worker.py' (which is one element
+    containing 'worker' as a substring, but the element itself is not
+    equal to b'worker').
+
     Celery prefork creates 1 main process + N child workers (N=concurrency=2).
-    All N+1 processes share the same cmdline, so any of them satisfies the
+    All N+1 processes share similar cmdlines, so any of them satisfies the
     probe. We need >=1, not exactly N+1.
 
 Implementation notes:
@@ -64,8 +81,9 @@ Implementation notes:
     - Defensive: silently skips PIDs that disappear between listdir and
       open (race with process exits).
     - Skips empty cmdlines (kernel threads have empty /proc/<pid>/cmdline).
-    - Uses os.path.basename on argv[0] so 'celery', './celery', and
-      '/usr/local/bin/celery' all match correctly.
+    - Uses element-equality on the full argv list, NOT substring or
+      basename matching, to avoid false positives from script paths
+      that contain 'celery' or 'worker' as path components.
 """
 from __future__ import annotations
 
@@ -76,9 +94,18 @@ import sys
 def worker_process_exists() -> bool:
     """Return True if any process in this PID namespace is a Celery worker.
 
-    Strict argv-based match:
-        argv[0] basename == 'celery' AND 'worker' is in argv
-    See module docstring for why substring matching is unsafe.
+    Element-membership match (rev 10):
+        b'celery' in argv  AND  b'worker' in argv
+    Where argv is /proc/<pid>/cmdline split on NUL bytes.
+
+    Element membership (not substring) is required to avoid the
+    self-matching false positive where the probe's own cmdline
+    (python3 /app/scripts/healthcheck_worker.py) substring-matches
+    'worker' via the script filename. Element membership requires
+    an EXACT byte-equal match on at least one full argv element.
+
+    See module docstring for why argv[0] basename check (rev 9) failed
+    in production despite passing local tests.
     """
     try:
         entries = os.listdir("/proc")
@@ -106,12 +133,13 @@ def worker_process_exists() -> bool:
         argv = [a for a in cmdline.split(b"\x00") if a]
         if not argv:
             continue
-        # argv[0] basename match -- handles 'celery', './celery',
-        # '/usr/local/bin/celery' uniformly
-        argv0_basename = os.path.basename(argv[0])
-        if argv0_basename != b"celery":
+        # Both 'celery' and 'worker' must appear as EXACT elements of argv.
+        # NOT substring match: '/app/scripts/healthcheck_worker.py' contains
+        # 'worker' as a substring but is not equal to b'worker'.
+        # NOT argv[0]-only check: pip entry-point scripts get exec'd with
+        # argv[0] = python interpreter and the script path at argv[1+].
+        if b"celery" not in argv:
             continue
-        # 'worker' subcommand must be in argv (any position)
         if b"worker" not in argv:
             continue
         return True
