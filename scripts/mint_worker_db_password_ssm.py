@@ -50,7 +50,7 @@ What this script does:
   4. Runs ALTER ROLE luciel_worker WITH PASSWORD %s (parameterized;
      the password literal never appears in any SQL log).
   5. Constructs the worker connection string:
-        postgresql://luciel_worker:<pw>@<worker-host>:<port>/<db>?sslmode=require
+        postgresql+psycopg://luciel_worker:<pw>@<worker-host>:<port>/<db>?sslmode=require
   6. Writes it to AWS SSM Parameter Store as SecureString at
      --ssm-path with Overwrite=True. KMS-encrypted at rest, never
      logged in plaintext anywhere.
@@ -467,6 +467,26 @@ def password_fingerprint(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()[:12]
 
 
+# SQLAlchemy dialect prefix that the runtime worker requires.
+# The repo declares `psycopg` (v3) as the Postgres driver in pyproject.toml.
+# SQLAlchemy's default dialect resolution for the bare `postgresql://` scheme
+# is `postgresql+psycopg2`, which fails with `ModuleNotFoundError: psycopg2`
+# inside the worker container (the v2 driver is not installed).
+# We MUST emit `postgresql+psycopg://` so SQLAlchemy loads the v3 driver.
+#
+# Drift: D-mint-script-emits-bare-postgresql-scheme-incompatible-with-psycopg-v3-2026-05-05
+# Caught: 2026-05-05 P3-S Half 2 Step 6 (section 4.4) -- worker rev 6 deploy crashed
+# on `from app.db.session import SessionLocal` -> create_engine(...) ->
+# import psycopg2 -> ModuleNotFoundError. Two rev-6 tasks failed before
+# circuit-breaker triggered explicit rollback. Zero customer impact:
+# rev 5 stayed healthy throughout.
+#
+# Fix: prepend the SQLAlchemy dialect driver explicitly. This matches the
+# scheme the existing /luciel/database-url admin DSN uses (verified
+# empirically by the rev-5 backend's 8-day uptime against psycopg v3).
+WORKER_DSN_SCHEME = "postgresql+psycopg://"
+
+
 def build_worker_url(
     *,
     role: str,
@@ -481,9 +501,13 @@ def build_worker_url(
     quote_plus() handles the case where token_urlsafe ever produces
     chars that would confuse a URL parser. Defensive even though
     token_urlsafe's alphabet (A-Z, a-z, 0-9, -, _) is already safe.
+
+    Scheme is `postgresql+psycopg://` (NOT bare `postgresql://`) because
+    the runtime worker uses SQLAlchemy with psycopg v3. See WORKER_DSN_SCHEME
+    above for full rationale and drift reference.
     """
     return (
-        f"postgresql://{role}:{quote_plus(password)}"
+        f"{WORKER_DSN_SCHEME}{role}:{quote_plus(password)}"
         f"@{host}:{port}/{db_name}?sslmode={sslmode}"
     )
 

@@ -19,6 +19,14 @@ behaviors that the prod-RDS run revealed as broken:
      the contamination that hid drift
      `D-test-coverage-assumed-not-proven-mint-script-env-only-path-2026-05-05`.
 
+  4. `build_worker_url` must emit the `postgresql+psycopg://` scheme so
+     SQLAlchemy loads the v3 driver in the worker container. The bare
+     `postgresql://` scheme triggers SQLAlchemy's default dialect
+     resolution to `postgresql+psycopg2`, which crashes the worker with
+     `ModuleNotFoundError: No module named 'psycopg2'` (drift
+     `D-mint-script-emits-bare-postgresql-scheme-incompatible-with-psycopg-v3-2026-05-05`,
+     caught in P3-S Half 2 section 4.4 worker rev-6 deploy).
+
 These tests do NOT touch real AWS or real Postgres. They mock the
 boto3 SSM client and the psycopg connection. Network and IAM
 correctness are still validated end-to-end by the Fargate ceremony
@@ -253,3 +261,110 @@ class TestEnvVarOnlyPath:
             assert mint._env_truthy(falsy) is False, (
                 f"_env_truthy({falsy!r}) should be False (conservative parser)"
             )
+
+
+# --------------------------------------------------------------------------
+# Test 4: build_worker_url emits postgresql+psycopg:// (NOT bare postgresql://)
+#
+# Drift D-mint-script-emits-bare-postgresql-scheme-incompatible-with-psycopg-v3-2026-05-05
+# (P0, caught 2026-05-05 in P3-S Half 2 section 4.4). The worker container only ships
+# psycopg v3 (per pyproject.toml `psycopg[binary]>=3.2.10`). SQLAlchemy's
+# default dialect resolution for `postgresql://` is `postgresql+psycopg2`,
+# which raises `ModuleNotFoundError: No module named 'psycopg2'` at
+# `create_engine()` time. The fix: emit `postgresql+psycopg://` explicitly.
+# --------------------------------------------------------------------------
+
+class TestBuildWorkerUrlSchemeMatchesSqlAlchemyDriver:
+    """`build_worker_url` MUST emit the `postgresql+psycopg://` scheme.
+
+    The runtime worker uses SQLAlchemy + psycopg v3. Bare `postgresql://`
+    triggers SQLAlchemy to load `psycopg2` (v2), which is not installed,
+    causing `ModuleNotFoundError` at `create_engine()` time. Tests below
+    pin both the scheme constant AND the assembled URL, so a regression
+    that drops the prefix would fail loudly in CI before any deploy.
+    """
+
+    def test_module_constant_is_psycopg_v3_scheme(self):
+        """WORKER_DSN_SCHEME pins the dialect at module level.
+
+        Pinning at the constant ensures any future code that builds DSNs
+        outside `build_worker_url` (e.g., a `--print-url` debug helper)
+        cannot accidentally drop the prefix.
+        """
+        assert mint.WORKER_DSN_SCHEME == "postgresql+psycopg://", (
+            "DSN scheme must be postgresql+psycopg:// to match the worker's "
+            "installed driver (psycopg v3). Bare postgresql:// crashes the "
+            "worker on import psycopg2."
+        )
+
+    def test_build_worker_url_starts_with_psycopg_v3_scheme(self):
+        """Assembled URL begins with `postgresql+psycopg://`."""
+        url = mint.build_worker_url(
+            role="luciel_worker",
+            password="abc123",
+            host="db.example.com",
+            port=5432,
+            db_name="luciel",
+            sslmode="require",
+        )
+        assert url.startswith("postgresql+psycopg://"), (
+            f"DSN must start with postgresql+psycopg://, got: {url[:30]!r}"
+        )
+
+    def test_build_worker_url_does_not_emit_bare_postgresql_scheme(self):
+        """Negative assertion: bare `postgresql://` (no driver) is forbidden.
+
+        Belt-and-suspenders to the positive test above: explicitly catches
+        the regression where someone removes `+psycopg` thinking 'shorter
+        URL is cleaner'. The worker WILL crash with ModuleNotFoundError.
+        """
+        url = mint.build_worker_url(
+            role="luciel_worker",
+            password="abc123",
+            host="db.example.com",
+            port=5432,
+            db_name="luciel",
+            sslmode="require",
+        )
+        # Allow `postgresql+psycopg://` but reject bare `postgresql://`.
+        # urlparse normalizes the scheme to lowercase and strips the `+` part
+        # only into the scheme portion, so we test on the raw string.
+        assert not url.startswith("postgresql://"), (
+            "DSN must NOT use bare postgresql:// scheme: SQLAlchemy will "
+            "try to load psycopg2 (not installed) and the worker will crash"
+        )
+
+    def test_build_worker_url_loadable_by_sqlalchemy_make_url(self):
+        """End-to-end proof: SQLAlchemy parses the URL and resolves the dialect.
+
+        This is the most strict test. `make_url` parses the URL, and
+        `URL.get_dialect()` actually imports the driver module. If the
+        scheme is wrong (or psycopg v3 isn't installed in the test env),
+        this raises -- which is the same crash the worker would see.
+
+        Skipped if SQLAlchemy or psycopg v3 isn't a test dep. We don't pin
+        either as a hard test dep because the mint script doesn't import
+        SQLAlchemy (it uses raw psycopg). But when both ARE available
+        locally, this test is the highest-fidelity assertion that the URL
+        is consumable end-to-end. In CI / on the worker container both
+        are installed, so this test runs there.
+        """
+        sqlalchemy = pytest.importorskip("sqlalchemy")
+        # `get_dialect()` below actually imports the driver module to
+        # construct the Dialect class. Skip if psycopg v3 isn't installed
+        # in this env (advisor sandbox); in CI and on the worker it is.
+        pytest.importorskip("psycopg")
+        url = mint.build_worker_url(
+            role="luciel_worker",
+            password="abc123",
+            host="db.example.com",
+            port=5432,
+            db_name="luciel",
+            sslmode="require",
+        )
+        parsed = sqlalchemy.engine.url.make_url(url)
+        # `+psycopg` resolves to the psycopg v3 dialect.
+        assert parsed.get_dialect().driver == "psycopg", (
+            f"SQLAlchemy must resolve to the psycopg (v3) driver for this URL; "
+            f"got driver={parsed.get_dialect().driver!r}. URL: {url}"
+        )
