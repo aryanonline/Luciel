@@ -28,9 +28,24 @@ v3.0 §15 "Phase 3 closure sweep", NOT swept under the rug):
    deferred to whenever the next prod-touching deploy occurs (a manufactured
    broken-image test would itself be a discipline gap). Runbook entry on
    rollback semantics added in `docs/runbooks/operator-patterns.md`.
-3. **D-ecs-service-name-asymmetry** — persistent `luciel-backend` vs
+3. ~~**D-ecs-service-name-asymmetry** — persistent `luciel-backend` vs
    `luciel-backend-service` transcription hazard; Phase 4 follow-up to
-   add a one-line wrapper or canonicalize the convention.
+   add a one-line wrapper or canonicalize the convention.~~ ✅ **RESOLVED
+   2026-05-06 ~19:00 EDT in P4-B** — `scripts/ecs-service-name.ps1`
+   ships a pure-function wrapper that returns `<family>-service` for
+   long-running families (`luciel-backend`, `luciel-worker`), warns +
+   returns `$null` for one-shot families (`luciel-verify`, `luciel-mint`,
+   `luciel-migrate`), and refuses to guess on unknown families
+   (Write-Error + exit 1). New runbook section
+   `docs/runbooks/operator-patterns.md` "AWS CLI naming hygiene (Phase
+   4 P4-B)" canonicalizes the convention and folds in a sister hazard
+   (`D-aws-cli-profile-name-transcription-hazard-2026-05-06` — the
+   `--profile luciel-admin` mis-transcription that surfaced in P4-A
+   baseline-read; the IAM user is named `luciel-admin` but the local
+   AWS CLI profile is `default`).
+
+*All three Phase-4 carry-overs are now closed except P3-I (calendar-
+gated to 2026-05-13). Phase 3 closure is functionally complete.*
 
 **Original status (preserved for audit history):** Tracked. Items here
 are **not** part of Step 28 Phase 2.

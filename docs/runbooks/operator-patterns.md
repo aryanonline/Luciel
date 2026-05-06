@@ -669,3 +669,115 @@ already in hand.
 - `docs/PHASE_3_COMPLIANCE_BACKLOG.md` P3-U (RESOLVED stamp)
 - `docs/CANONICAL_RECAP.md` Section 15 P4-A entry
 - AWS docs: ECS service deployment circuit breaker
+
+## AWS CLI naming hygiene (Phase 4 P4-B)
+
+**What this section covers:** two recurring transcription hazards that
+have surfaced repeatedly during prod ceremonies, plus the one-line
+canonical fix for each. Both are operator-side hygiene; neither is a
+security issue, but each has cost real ceremony time and risks
+mis-targeting a real production resource if missed at the wrong moment.
+
+### Hazard 1: ECS service-name vs task-definition family
+
+**Symptom:** `aws ecs update-service --service luciel-backend ...`
+returns `ServiceNotFoundException`. Operator (or advisor) used the
+task-definition family name where the service name was required.
+
+**First witness:** Step 28 Commit 7 healthcheck rev 7-11 cycle
+(2026-05-05). Drift `D-ecs-service-name-asymmetry-with-td-family-2026-05-05`.
+
+**Recurred:** Step 28 C10 deploy ceremony (2026-05-06 ~17:30 EDT)
+during the rev28 rollout. Operator self-corrected within one command,
+but the asymmetry held.
+
+**Root cause:** AWS ECS deliberately separates the two namespaces.
+Service names usually carry a suffix that distinguishes them from the
+TD family they target -- in our case, the suffix is `-service`. The TD
+family is what `register-task-definition` increments; the service is
+what `update-service` targets.
+
+**Canonical convention (do not deviate):**
+
+| TD family       | Long-running service name      | Notes                           |
+|-----------------|--------------------------------|---------------------------------|
+| `luciel-backend`  | `luciel-backend-service`         | API; rolling deploys            |
+| `luciel-worker`   | `luciel-worker-service`          | Celery; rolling deploys         |
+| `luciel-verify`   | (none -- one-shot via run-task) | No associated service           |
+| `luciel-mint`     | (none -- one-shot via run-task) | No associated service           |
+| `luciel-migrate`  | (none -- one-shot via run-task) | No associated service           |
+
+**Operator fix:** use `scripts/ecs-service-name.ps1` whenever composing
+an `aws ecs update-service` or `aws ecs describe-services` command:
+
+```
+$svc = .\scripts\ecs-service-name.ps1 luciel-backend
+# -> 'luciel-backend-service'
+
+aws ecs describe-services --cluster luciel-cluster `
+  --services $svc --region ca-central-1
+```
+
+The script is a PURE function -- no AWS API calls, no IAM permissions
+needed. It refuses to guess on unknown families (writes Write-Error
+and exits 1), and warns + returns $null on one-shot families
+(`luciel-verify`, `luciel-mint`, `luciel-migrate`) so calling
+`update-service` against them is rejected before the AWS API is hit.
+
+**Adding a new family:** when a new long-running service is introduced,
+update the `$LongRunningFamilies` array in `scripts/ecs-service-name.ps1`
+in the SAME commit that introduces the new family. Same for one-shot
+families and `$OneShotFamilies`. This keeps the script's knowledge
+graph in sync with reality.
+
+### Hazard 2: --profile luciel-admin transcription
+
+**Symptom:** `aws ecs describe-services ... --profile luciel-admin`
+returns `[ERROR]: The config profile (luciel-admin) could not be found`.
+Operator's local `~/.aws/credentials` only has a `[default]` profile.
+
+**First witness:** P4-A baseline-read attempt (2026-05-06 ~18:56 EDT).
+Drift `D-aws-cli-profile-name-transcription-hazard-2026-05-06`.
+
+**Root cause:** advisor's mental model assumed the `luciel-admin` IAM
+user's keys lived under a `[luciel-admin]` profile heading; in reality
+they live under `[default]`. The IAM USER is named `luciel-admin`; the
+LOCAL PROFILE NAME is `default`. Same root class as Hazard 1 -- two
+namespaces conflated.
+
+**Verification (operator-side):**
+
+```
+aws configure list-profiles
+# Should return exactly: default
+```
+
+If this returns more than `default`, the operator has multiple AWS
+identities configured locally and the rule below does not apply --
+they should consult their own AWS workstation setup notes.
+
+**Canonical convention (assuming the standard one-IAM-user setup):**
+
+- **Drop `--profile` from every `aws` command.** The `default` profile
+  is automatically used when the flag is omitted.
+- If a future workstation introduces a second profile (e.g. for a
+  staging account), THEN `--profile <name>` becomes required; in that
+  scenario, this section gets revised in the same commit that adds
+  the second profile.
+- Never write `--profile luciel-admin` in a runbook, recap, or chat
+  artifact. The IAM user's name is `luciel-admin`; the CLI profile
+  alias is `default`. They are not the same string.
+
+**Operator fix:** if any runbook or recap still has stale
+`--profile luciel-admin` text, a `git grep` sweep should remove it.
+Tracked as a Phase-4 cosmetic for any future cleanup pass; not
+critical because the CLI's error is loud and immediate, not silent.
+
+### Cross-references for this section
+
+- `scripts/ecs-service-name.ps1` (the wrapper shipped with this section)
+- `docs/PHASE_3_COMPLIANCE_BACKLOG.md` D-ecs-service-name-asymmetry
+  carry-over (now RESOLVED via this section + the wrapper)
+- `docs/CANONICAL_RECAP.md` Section 15 "Phase 3 closure sweep" entry
+  for `D-ecs-service-name-asymmetry-with-td-family-2026-05-05`
+- Drift `D-aws-cli-profile-name-transcription-hazard-2026-05-06`
