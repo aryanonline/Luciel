@@ -1,7 +1,11 @@
 # Luciel Canonical Recap
 
-**Version:** v3.2
-**Last updated:** 2026-05-06 ~19:50 EDT (recap-hygiene pass 2 — stamps stale items in §0.3, §3, §3.1b table, §4.1, §4.4, §10 critical-path, §12 anchors 5 + 7. No code changes; supersedes the recap-hygiene pass 1 in `b5eafab` which closed the obvious surface. Pass 2 catches second-order drift the user explicitly called out: items 5 and 6 in the §3.1b prod-touching table were left without strikethroughs even though Commits 5 and 6 had shipped 2026-05-05; §12 anchor 7 still claimed worker runs as `luciel_admin` despite the `pg_stat_activity` witness from 2026-05-06; §12 anchor 5 still claimed only Phase 1 complete; §0.3 Step 28 status still claimed Phases 3/4 pending; §3 header still scoped to Phase 1/Phase 2 code-only; §4.4 still labeled "Post-Phase-1". §10 critical-path now distinguishes between Step 30a Stripe (Milestone 2) and Step 30b widget (Milestone 1, REMAX trial). Original v3.1 footer block preserved verbatim below.)
+**Version:** v3.3
+**Last updated:** 2026-05-06 ~19:48 EDT (roadmap update — lock the 30a + company-website integration scope into canonical §0.3 row + §4.4 paragraph, and lock the 2026-05-06 ordering decision "30a deferred to AFTER 30b" with stated rationale. Constraint surfaced in this session's chat: operator has an existing company website and wants Step 30a to wire Stripe billing into it (checkout flow + marketing-site→app handoff). Without this commit, the constraint would have lived only in chat memory and been lost on next recap re-read. URL itself is captured operator-side, NOT in this recap, until 30a entry. Ordering rationale (also in §4.4): §10 Milestone 1 = REMAX Tier 3 is gated on 30b only; manual invoicing acceptable for trial; 30a + website integration belongs AFTER 30b proves the product surface so we don't design website wiring against a non-existent widget. Docs-only. No code. v3.2 footer preserved verbatim below.)
+
+**v3.2 bullet preserved verbatim below for audit continuity:**
+
+_Last updated: 2026-05-06 ~19:50 EDT (recap-hygiene pass 2 — stamps stale items in §0.3, §3, §3.1b table, §4.1, §4.4, §10 critical-path, §12 anchors 5 + 7. No code changes; supersedes the recap-hygiene pass 1 in `b5eafab` which closed the obvious surface. Pass 2 catches second-order drift the user explicitly called out: items 5 and 6 in the §3.1b prod-touching table were left without strikethroughs even though Commits 5 and 6 had shipped 2026-05-05; §12 anchor 7 still claimed worker runs as `luciel_admin` despite the `pg_stat_activity` witness from 2026-05-06; §12 anchor 5 still claimed only Phase 1 complete; §0.3 Step 28 status still claimed Phases 3/4 pending; §3 header still scoped to Phase 1/Phase 2 code-only; §4.4 still labeled "Post-Phase-1". §10 critical-path now distinguishes between Step 30a Stripe (Milestone 2) and Step 30b widget (Milestone 1, REMAX trial). Original v3.1 footer block preserved verbatim below.)
 
 **v3.1 bullet preserved verbatim below for audit continuity:**
 
@@ -85,7 +89,7 @@ These are settled. Any future recap must read from this section, not infer.
 | Hardening | **28** | Operational maturity sprint — security/compliance, observability, hygiene, cosmetic — **4 phases**, 13–15 commits | **Phase 1 complete** at `bd9446b` (tag `step-28-phase-1-complete`). **Phase 2 closed** at tag `step-28-phase-2-complete` (full §8 prod-hardening evidence captured incl. live `pg_stat_activity` worker-role witness). **Phase 3 closed** at `737a56c` (tag `step-28-complete`, 11-commit C1→C11.b sweep, suite lifted to 23/23 GREEN via Pillars 20/21/22/23). **Phase 4 partial close** at `d425ede` (tag `step-28-phase-4-partial`, P4-A circuit-breaker + P4-B service-name wrapper); P3-I (WAF Count→Block flip) calendar-gated to ≥ 2026-05-13. |
 | Identity | **24.5c** | User identity claims (phone/email/SSO) + conversation grouping (Q8) | Candidate, slot before Step 30 |
 | Testing | **29** | Automated testing suite (pytest wrap of `app.verification`) | Planned |
-| Billing | **30a** | Stripe billing (subscription tiers, webhooks, tier-gated features) | Candidate, slot between 29 and 30 |
+| Billing | **30a** | Stripe billing (subscription tiers, webhooks, tier-gated features) **+ integration with operator's existing company website** (checkout flow + marketing-site→app handoff; canonical website URL captured at 30a entry) | Candidate, slot between 29 and 30b in original sequencing; **deferred to AFTER 30b per 2026-05-06 ordering decision** — first revenue (REMAX Tier 3 trial) is gated on 30b only and manual invoicing is acceptable, so 30a + website integration design happens once 30b proves the product surface |
 | Frontend | **30b** | Embeddable chat widget (JS drop-in for tenant sites) — **highest-leverage commit, REMAX trial unblock** | Planned |
 | Frontend | **31** | Hierarchical tenant dashboards (Q2) | Planned (after 34) |
 | Frontend | **32** | Agent self-service (Sarah spins up her own LucielInstances under her agent scope) | Planned |
@@ -329,8 +333,8 @@ Estimated (HISTORICAL — preserved for audit): 4 prod-touching commits + 3 P3 p
 **Step 29 — Automated test suite** (1–2 sessions)
 Convert `app.verification` to pytest. CI gate on every push.
 
-**Step 30a — Stripe billing** (2–3 sessions, candidate)
-Subscription tiers, signature-validated webhooks, `subscription.deleted` → cascade, tier-gated flags.
+**Step 30a — Stripe billing + company-website integration** (2–3 sessions, candidate; **deferred to AFTER 30b** per 2026-05-06 ordering decision)
+Subscription tiers, signature-validated webhooks, `subscription.deleted` → cascade, tier-gated flags. **Now also includes integration with operator's existing company website**: checkout flow, marketing-site→app identity handoff, tier-gated feature flags exposed to the website. Canonical website URL captured at 30a entry (operator-side, not in this recap until then). Ordering rationale: doing 30a before 30b would mean designing the website integration against a product surface (the widget) that doesn't exist yet, forcing a redesign once 30b lands. §10 Milestone 1 (REMAX Tier 3) is gated on 30b only — manual invoicing acceptable for trial — so 30a sequencing risk is bounded to delaying §10 Milestone 2 ($5K MRR volume play), which is the first milestone that actually requires Stripe.
 
 **Step 30b — Embeddable chat widget** (3–5 sessions)
 **THE highest-leverage commit on the roadmap.** REMAX trial unblock.
@@ -781,4 +785,4 @@ If they disagree:
 
 ---
 
-## End of Canonical Recap v3.2
+## End of Canonical Recap v3.3
