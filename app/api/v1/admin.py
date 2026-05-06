@@ -12,7 +12,6 @@ from app.api.deps import (
     get_luciel_instance_service,
 )
 from app.models.admin_audit_log import (
-    ACTION_CREATE,
     ACTION_DEACTIVATE,
     ACTION_UPDATE,
     RESOURCE_AGENT,
@@ -582,7 +581,11 @@ def create_api_key(
                 ),
             )
 
-    # --- Mint the key ----------------------------------------------
+    # --- Mint the key + audit (Step 28 P3-B) ------------------------
+    # ApiKeyService.create_key now emits the ACTION_CREATE audit row in
+    # the same transaction as the api_keys INSERT (Invariant 4: audit-
+    # before-commit). The endpoint just threads audit_ctx through; no
+    # post-mint audit emission needed.
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
         tenant_id=payload.tenant_id,
@@ -593,28 +596,7 @@ def create_api_key(
         permissions=payload.permissions,
         rate_limit=payload.rate_limit,
         created_by=payload.created_by,
-    )
-
-    # --- Step 24.5: audit the mint ----------------------------------
-    from app.models.admin_audit_log import ACTION_CREATE, RESOURCE_API_KEY
-    from app.repositories.admin_audit_repository import AdminAuditRepository
-    AdminAuditRepository(db).record(
-        ctx=audit_ctx,
-        tenant_id=payload.tenant_id,
-        action=ACTION_CREATE,
-        resource_type=RESOURCE_API_KEY,
-        resource_pk=api_key.id,
-        resource_natural_id=api_key.key_prefix,
-        domain_id=payload.domain_id,
-        agent_id=payload.agent_id,
-        luciel_instance_id=payload.luciel_instance_id,
-        after={
-            "display_name": payload.display_name,
-            "permissions": payload.permissions,
-            "rate_limit": payload.rate_limit,
-            "bound_to_luciel_instance": payload.luciel_instance_id is not None,
-        },
-        autocommit=True,
+        audit_ctx=audit_ctx,
     )
 
     return ApiKeyCreateResponse(

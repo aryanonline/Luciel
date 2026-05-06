@@ -34,6 +34,7 @@ from app.models.api_key import ApiKey
 
 from app.models.admin_audit_log import (
     ACTION_CASCADE_DEACTIVATE,
+    ACTION_CREATE,
     ACTION_DEACTIVATE,
     ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
     RESOURCE_API_KEY,
@@ -130,6 +131,7 @@ class ApiKeyService:
         ssm_write: bool = False,                    # Step 27a
         ssm_region: str | None = None,              # Step 27a
         ssm_path: str | None = None,
+        audit_ctx: AuditContext | None = None,
     ) -> tuple[ApiKey, str | None]:
         """
         Create a new API key.
@@ -156,6 +158,24 @@ class ApiKeyService:
         If SSM write fails, the DB transaction is rolled back (when
         auto_commit=True) to keep DB and SSM in sync. No orphan row lands
         in api_keys.
+
+        Step 28 P3-B (Phase 3, Commit 3): emits an ACTION_CREATE audit
+        row in the same transaction as the api_keys INSERT, upholding
+        Invariant 4 (audit-before-commit). Previously the audit row was
+        emitted at the API endpoint layer (app/api/v1/admin.py
+        create_api_key) AFTER service.create_key() had already auto-
+        committed -- two transactions, with a window where the key
+        existed in the DB without an audit row. Now any caller of
+        create_key (admin endpoint, scripts, future internal callers)
+        automatically lands an audit row atomically with the key.
+
+        ``audit_ctx`` is keyword-only and optional for backward
+        compatibility. When omitted (legacy callers, system-internal
+        flows like SSM bootstrap scripts), an
+        AuditContext.system(label="create_key") actor is used so the
+        audit row is always attributable. New callers (admin endpoints,
+        operator scripts) MUST thread the request-scoped AuditContext
+        through.
         """
         raw_key = generate_raw_key()
         hashed = hash_key(raw_key)
@@ -197,6 +217,35 @@ class ApiKeyService:
                 if auto_commit:
                     self.db.rollback()
                 raise
+
+        # --- Step 28 P3-B: audit-before-commit (Invariant 4) ----------
+        # Emit the ACTION_CREATE audit row in the same transaction as the
+        # api_keys INSERT, BEFORE the commit. autocommit=False so the
+        # audit row rides our commit boundary -- if the commit fails or
+        # is rolled back by a later step (e.g. ssm_write retry path),
+        # the audit row is rolled back with it.
+        AdminAuditRepository(self.db).record(
+            ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
+                label="create_key"
+            ),
+            tenant_id=tenant_id or SYSTEM_ACTOR_TENANT,
+            action=ACTION_CREATE,
+            resource_type=RESOURCE_API_KEY,
+            resource_pk=key_id,
+            resource_natural_id=api_key.key_prefix,
+            domain_id=domain_id,
+            agent_id=agent_id,
+            luciel_instance_id=luciel_instance_id,
+            after={
+                "display_name": display_name,
+                "permissions": api_key.permissions,
+                "rate_limit": rate_limit,
+                "bound_to_luciel_instance": luciel_instance_id is not None,
+                "ssm_write": ssm_write,
+            },
+            note=None,
+            autocommit=False,
+        )
 
         if auto_commit:
             self.db.commit()

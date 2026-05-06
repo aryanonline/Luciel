@@ -20,7 +20,6 @@ from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import (
     ACTION_CREATE,
-    RESOURCE_API_KEY,
     RESOURCE_DOMAIN,
     RESOURCE_RETENTION_POLICY,
     RESOURCE_TENANT,
@@ -143,7 +142,20 @@ class OnboardingService:
             self.db.flush()
             logger.info("Onboard: created %d retention policies for %s", len(retention_policies), tenant_id)
 
-            # 4b. Create the tenant's admin API key (management)
+            # 4b. Create the tenant's admin API key (management).
+            #
+            # Step 28 P3-B: ApiKeyService.create_key now emits its OWN
+            # ACTION_CREATE / RESOURCE_API_KEY audit row in the same
+            # transaction as the api_keys INSERT (Invariant 4). We thread
+            # the request-bound audit_ctx through so the api_key audit
+            # row carries the SAME actor_key_prefix as the other three
+            # rows we emit below -- preserving Pillar 20's atomicity
+            # assertion (exactly one distinct actor across the four
+            # rows). We must resolve `ctx` BEFORE this call so we can
+            # share it.
+            ctx = audit_ctx if audit_ctx is not None else AuditContext.system(
+                label="onboard_tenant"
+            )
             admin_key, admin_raw = self.api_key_service.create_key(
                 tenant_id=tenant_id,
                 domain_id=None,
@@ -153,17 +165,19 @@ class OnboardingService:
                 rate_limit=api_key_rate_limit,
                 created_by=created_by,
                 auto_commit=False,
+                audit_ctx=ctx,
             )
             logger.info("Onboard: created admin API key for %s", tenant_id)
 
-            # 4c. Emit audit rows (P3-A) — four ACTION_CREATE rows
+            # 4c. Emit audit rows (P3-A) — three ACTION_CREATE rows for
+            # tenant_config, domain_config, and retention_policy,
             # written in the SAME transaction as the mutations they
-            # describe. Per Invariant 4 (audit-before-commit): the
-            # audit rows MUST land before the commit so they cannot
-            # drift out of sync with the data they describe.
-            ctx = audit_ctx if audit_ctx is not None else AuditContext.system(
-                label="onboard_tenant"
-            )
+            # describe. The fourth required row -- ACTION_CREATE /
+            # RESOURCE_API_KEY for the admin key -- is emitted by
+            # ApiKeyService.create_key itself (Step 28 P3-B), so
+            # OnboardingService no longer emits it directly. Pillar 20
+            # still observes all four pairs because they all land in
+            # the same transaction under the same audit_ctx.
             audit_repo = AdminAuditRepository(self.db)
 
             audit_repo.record(
@@ -208,22 +222,12 @@ class OnboardingService:
                 },
                 note=f"onboard_tenant: created {len(retention_policies)} default retention policies (PIPEDA)",
             )
-            audit_repo.record(
-                ctx=ctx,
-                tenant_id=tenant_id,
-                action=ACTION_CREATE,
-                resource_type=RESOURCE_API_KEY,
-                resource_pk=admin_key.id,
-                resource_natural_id=admin_key.key_prefix,
-                after={
-                    "display_name": admin_key.display_name,
-                    "permissions": ["chat", "sessions", "admin"],
-                    "rate_limit": api_key_rate_limit,
-                    "bound_to_luciel_instance": False,
-                },
-                note="onboard_tenant: created admin api_key (first key)",
-            )
-            logger.info("Onboard: emitted 4 audit rows for %s", tenant_id)
+            # NOTE: the fourth ACTION_CREATE/RESOURCE_API_KEY audit row
+            # is NOT emitted here -- ApiKeyService.create_key already
+            # emitted it (P3-B). Three rows here + one from create_key
+            # = four total, satisfying Pillar 20's pair-coverage
+            # assertion.
+            logger.info("Onboard: emitted 3 audit rows for %s (4th from create_key)", tenant_id)
 
             # 5. Commit everything atomically
             self.db.commit()
