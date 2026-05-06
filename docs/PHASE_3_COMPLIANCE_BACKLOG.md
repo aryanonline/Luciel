@@ -977,7 +977,33 @@ time spread over a week.
 
 ---
 
-## P3-M. PostgreSQL client tools (`psql`, `pg_dump`) not on operator PATH  *(P3 — hygiene)*
+## P3-M. PostgreSQL client tools (`psql`, `pg_dump`) not on operator PATH  *(P3 -- RESOLVED 2026-05-06)*
+
+**Status:** RESOLVED in Step 28 C11.a (2026-05-06).
+
+**Docs shipped:** `docs/runbooks/operator-patterns.md` gains an
+"Operator-environment refresh" section (P3-M sub-section) with the
+exact `winget install --id PostgreSQL.PostgreSQL.16` invocation and
+the `setx PATH ... /M` command to add the client binary directory
+to the system PATH permanently. Verification step is `psql --version`
+and `pg_dump --version` from a fresh PowerShell window (PATH is
+startup-time, not per-command).
+
+Security boundary clarification added to the runbook: installing the
+client binaries does NOT grant any DB access -- connecting to prod
+RDS still requires the admin DSN from SSM, which still requires
+MFA-gated `luciel-admin` (P3-J) or AssumeRole+MFA via
+`luciel-mint-operator-role` (P3-K). The tools just make the
+introspection step possible once those credentials are in hand.
+
+**Operator action item:** run the `winget install` and the
+`setx PATH` commands at next operator-env touch. The runbook section
+is the canonical reference; this backlog entry no longer tracks the
+tool installation as a gap.
+
+---
+
+### Original P3-M content (preserved for audit history)
 
 **Discovered:** 2026-05-04 during Pillar 13 A3 diagnosis. Surfaced
 repeatedly across the session whenever a quick DB introspection was
@@ -1284,7 +1310,54 @@ sweep audit.
 
 ---
 
-## P3-P. Dev-key storage hygiene — `LUCIEL_PLATFORM_ADMIN_KEY` in operator Notepad  *(P2)*
+## P3-P. Dev-key storage hygiene -- `LUCIEL_PLATFORM_ADMIN_KEY` in operator Notepad  *(P2 -- RESOLVED 2026-05-06)*
+
+**Status:** RESOLVED in Step 28 C11.a (2026-05-06).
+
+**Code shipped:**
+
+1. `scripts/load-dev-secrets.ps1` -- new 240-line PowerShell script
+   that reads dev secrets from Windows Credential Manager (DPAPI-
+   encrypted, current-user scope) and exports them into the current
+   PowerShell session's env vars. First-run path prompts for missing
+   secrets via `Read-Host -AsSecureString`, stores into Credential
+   Manager via `cmdkey /generic:Luciel:dev:<ENV_VAR>`, then loads.
+   Subsequent runs read straight from Credential Manager with no
+   prompt. The catalogue of managed secrets is the
+   `$DevSecretEnvVars` array at the top of the script -- currently
+   `LUCIEL_PLATFORM_ADMIN_KEY` only; extend the array as more dev
+   secrets join the workflow.
+
+2. `docs/runbooks/operator-patterns.md` gains "Operator-environment
+   refresh" section with the P3-P sub-section codifying when to use
+   the script (every new PowerShell window) and how to rotate stored
+   values (`-Refresh`).
+
+**Forward-looking guard:** secret reads inside the script use
+`Read-Host -AsSecureString` and the BSTR materialisation is wrapped
+in a try/finally that zeros the BSTR and disposes the SecureString
+regardless of cmdkey's exit status. Same shape as the P3-R fix in
+`mint-with-assumed-role.ps1`.
+
+**Security boundary:** DPAPI scoped to the Windows user account.
+Threat model treats Windows account compromise as out of scope --
+anyone who can already log in as the operator can already read the
+stored value, which is a separate concern from the Notepad-leak
+vector this fixes (Notepad windows leak via screenshot capture,
+cross-context paste buffers, and forgotten-open windows). Production
+secrets are unchanged: they live in KMS-encrypted SSM and the
+operator never holds a copy.
+
+**Operator action item (one-time):** run `.\scripts\load-dev-secrets.ps1`
+in a fresh PowerShell window, paste the current
+`LUCIEL_PLATFORM_ADMIN_KEY` value when prompted, then close the
+Notepad copy. From that point forward, every new PowerShell window
+starts with `.\scripts\load-dev-secrets.ps1` (silent on subsequent
+runs).
+
+---
+
+### Original P3-P content (preserved for audit history)
 
 **Discovered:** 2026-05-04 during Pillar 13 A3 diagnosis. The
 platform admin key (a high-privilege secret — it bypasses
@@ -1553,7 +1626,42 @@ live IAM policy `infra/iam/luciel-mint-operator-role-permission-policy.json`
 
 ---
 
-## P3-R. MFA TOTP echoes in PowerShell terminal during mint ceremony  *(P2)*
+## P3-R. MFA TOTP echoes in PowerShell terminal during mint ceremony  *(P2 -- RESOLVED 2026-05-06)*
+
+**Status:** RESOLVED in Step 28 C11.a (2026-05-06).
+
+**Code shipped:** `scripts/mint-with-assumed-role.ps1` lines 139-181
+rewritten:
+
+1. The MFA prompt now uses `Read-Host -AsSecureString`, so the typed
+   digits do NOT echo to terminal scrollback, transcripts, or
+   window-recording capture.
+2. The plaintext is materialised only inside a `try { ... } finally
+   { ... }` block via `SecureStringToBSTR` + `PtrToStringAuto`, used
+   exactly once as the `--token-code` argument to `aws sts assume-role`,
+   and the BSTR is zeroed via `ZeroFreeBSTR` plus the SecureString is
+   disposed in the `finally` block whether or not AssumeRole
+   succeeds.
+3. The exit-code check moved out of the `try` block so the throw on
+   AssumeRole failure happens after the secrets are zeroed.
+
+**Forward-looking guard:** the same `Read-Host -AsSecureString` +
+BSTR-with-finally pattern is used in `scripts/load-dev-secrets.ps1`
+(P3-P). Future PowerShell helpers that prompt for any secret should
+copy this shape. A lint check or CI grep for `Read-Host` without
+`-AsSecureString` in `scripts/*.ps1` is a Phase 4 follow-up (logged
+in the recap, not a separate backlog entry since it's enforcement
+of an already-resolved pattern).
+
+**Verification:** the change is validated at next mint ceremony --
+the MFA prompt should display `Enter current MFA 6-digit code: ****`
+(or no echo at all depending on PowerShell version) instead of the
+plaintext digits. No automated test because the prompt path is
+interactive by design.
+
+---
+
+### Original P3-R content (preserved for audit history)
 
 **Discovered:** 2026-05-04 ~19:57 UTC during the Commit 4 mint dry-run.
 
@@ -1640,9 +1748,22 @@ The Commit 4 mint re-run is now blocked on P3-J + P3-K, NOT on P3-G.
   `scope_owner_tenant_id` not `tenant_id`. Plus collateral fix:
   bare `return` in `bulk_soft_deactivate_memory_items_for_luciel_instance`
   replaced with `return count`. Plus 4-test AST regression suite.
-- **P3-M (P3)** and **P3-P (P2)** — operator-environment hygiene.
+- ~~**P3-M (P3)** and **P3-P (P2)** -- operator-environment hygiene.
   Bundle into a single "operator-env refresh" commit at any
-  convenient time; not blocking.
+  convenient time; not blocking.~~ **RESOLVED 2026-05-06 in Step 28
+  C11.a** -- `scripts/load-dev-secrets.ps1` ships with Windows
+  Credential Manager integration (P3-P); `operator-patterns.md`
+  gains "Operator-environment refresh" section codifying both the
+  dev-secret loading workflow (P3-P) and the
+  `winget install --id PostgreSQL.PostgreSQL.16` + `setx PATH` flow
+  (P3-M).
+- ~~**P3-R (P2)** -- MFA TOTP echoes in PowerShell terminal during
+  mint ceremony.~~ **RESOLVED 2026-05-06 in Step 28 C11.a** --
+  `scripts/mint-with-assumed-role.ps1` rewritten to use
+  `Read-Host -AsSecureString` + BSTR-with-finally zero-out.
+  Forward-looking guard: the same shape is used in
+  `scripts/load-dev-secrets.ps1`, establishing it as the canonical
+  pattern for any future operator-side secret prompt.
 
 **Phase 3 proper (starts after Phase 2 prod-touching commits 4-7
 stabilize for ≥ 7 days):**

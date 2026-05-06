@@ -482,3 +482,93 @@ of drift.
 - Recap `docs/recaps/2026-05-04-pillar-13-a3-real-root-cause.md` Section 6
 - `CANONICAL_RECAP.md` Section 13 Step 3 (historical 5-block, now
   subsumed by this script)
+
+---
+
+## Operator-environment refresh (Step 28 C11.a / P3-M, P3-P)
+
+This section codifies the dev-environment hygiene fixes shipped in
+Step 28 C11.a (2026-05-06). Two unrelated-but-bundleable items:
+
+### P3-P: dev-secret loading via Credential Manager
+
+**Old (deprecated) pattern:** copy `LUCIEL_PLATFORM_ADMIN_KEY` from a
+Notepad window, paste into PowerShell as `$env:LUCIEL_PLATFORM_ADMIN_KEY = "..."`.
+Leaks into shell history, screenshot capture, and cross-context paste
+buffers.
+
+**New pattern:** `scripts/load-dev-secrets.ps1`. First run prompts for
+each managed secret (currently just `LUCIEL_PLATFORM_ADMIN_KEY`; extend
+the `$DevSecretEnvVars` array as more dev secrets join the list) and
+stores it in Windows Credential Manager under target name
+`Luciel:dev:<ENV_VAR_NAME>`. Subsequent runs read straight from
+Credential Manager and export into the current session's env. No
+Notepad copy.
+
+Usage:
+
+```powershell
+# First time (prompts for missing values, then loads):
+.\scripts\load-dev-secrets.ps1
+
+# In every new PowerShell window (silently loads):
+.\scripts\load-dev-secrets.ps1
+
+# Inspect what is stored without revealing values:
+.\scripts\load-dev-secrets.ps1 -List
+
+# Rotate a stored value:
+.\scripts\load-dev-secrets.ps1 -Refresh
+```
+
+Security boundary: DPAPI, scoped to the current Windows user. Threat
+model treats Windows account compromise as out of scope (separate
+concern from the Notepad-leak vector this fixes). Production secrets
+are unchanged -- they live in KMS-encrypted SSM and the operator
+never holds a copy.
+
+Remove the old Notepad copy of `LUCIEL_PLATFORM_ADMIN_KEY` after the
+first successful run of this script.
+
+### P3-M: PostgreSQL client tools on operator PATH
+
+**Old (workaround) pattern:** when DB introspection was needed, fall
+back to `Invoke-RestMethod` against the admin API or to running queries
+via the FastAPI process. Both are wrong tools for low-level schema
+inspection (the latter has connection-pool side effects).
+
+**New pattern:** install PostgreSQL 16 client tools and add to PATH.
+One-time operator action.
+
+```powershell
+# Install (run as admin or with elevation prompt):
+winget install --id PostgreSQL.PostgreSQL.16 --accept-package-agreements --accept-source-agreements
+
+# Add to system PATH (run as admin):
+setx PATH "$Env:Path;C:\Program Files\PostgreSQL\16\bin" /M
+
+# Open a NEW PowerShell window, then verify:
+psql --version
+pg_dump --version
+```
+
+Both commands should print `psql (PostgreSQL) 16.x` and
+`pg_dump (PostgreSQL) 16.x`. If `psql --version` returns
+"command not found", the PATH update did not take effect -- close the
+shell and open a fresh one (PowerShell reads PATH at startup, not
+per-command).
+
+Security boundary: installing the client binaries does NOT grant any
+DB access. Connecting to prod RDS still requires the admin DSN from
+SSM, which still requires `luciel-admin` (MFA-gated per P3-J) or
+`luciel-mint-operator-role` (AssumeRole + MFA per P3-K). The tools
+just make the introspection step actually possible once those
+credentials are in hand.
+
+### Cross-references for this section
+
+- `docs/PHASE_3_COMPLIANCE_BACKLOG.md` P3-P (Notepad hygiene)
+- `docs/PHASE_3_COMPLIANCE_BACKLOG.md` P3-M (psql/pg_dump on PATH)
+- `scripts/load-dev-secrets.ps1` (the script shipped with this section)
+- Drift `D-dev-key-storage-hygiene-2026-05-04`
+- Drift `D-pg-client-tools-not-on-operator-path-2026-05-04`

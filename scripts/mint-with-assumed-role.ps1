@@ -136,8 +136,17 @@ if ($EmitDsnOnly) {
 }
 Write-Host ""
 
-$tokenCode = Read-Host -Prompt "Enter current MFA 6-digit code"
-if ([string]::IsNullOrWhiteSpace($tokenCode)) {
+# P3-R fix (2026-05-06, Step 28 C11.a): Read MFA code as SecureString so
+# the typed digits do NOT echo to the terminal scrollback. The plaintext
+# is materialised only inside the AssumeRole call's argument array via a
+# BSTR conversion, then the BSTR is zeroed and the SecureString disposed
+# in a try/finally that runs whether or not AssumeRole succeeds. Even
+# though TOTP codes are single-use within a 30-second window, the habit
+# of "never echo any prompted secret" is the forward-looking guard --
+# any future helper that prompts for a non-TOTP shared secret inherits
+# the same shape.
+$secureToken = Read-Host -Prompt "Enter current MFA 6-digit code" -AsSecureString
+if ($null -eq $secureToken -or $secureToken.Length -eq 0) {
     throw "MFA code is empty; aborting."
 }
 
@@ -145,15 +154,31 @@ if ([string]::IsNullOrWhiteSpace($tokenCode)) {
 Write-Host "Calling sts:AssumeRole with MFA..." -ForegroundColor Yellow
 
 $sessionName = "mint-ceremony-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-$assumeJson = aws sts assume-role `
-    --role-arn $MintRoleArn `
-    --role-session-name $sessionName `
-    --serial-number $MfaSerial `
-    --token-code $tokenCode `
-    --duration-seconds 3600 `
-    --output json
-if ($LASTEXITCODE -ne 0) {
-    throw "AssumeRole failed (exit $LASTEXITCODE). Most likely cause: wrong MFA code, expired code, or trust policy mismatch."
+$bstr = [IntPtr]::Zero
+try {
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
+    $tokenPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+    $assumeJson = aws sts assume-role `
+        --role-arn $MintRoleArn `
+        --role-session-name $sessionName `
+        --serial-number $MfaSerial `
+        --token-code $tokenPlain `
+        --duration-seconds 3600 `
+        --output json
+    $assumeExit = $LASTEXITCODE
+} finally {
+    if ($bstr -ne [IntPtr]::Zero) {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+    if ($null -ne $tokenPlain) {
+        $tokenPlain = $null
+    }
+    if ($null -ne $secureToken) {
+        $secureToken.Dispose()
+    }
+}
+if ($assumeExit -ne 0) {
+    throw "AssumeRole failed (exit $assumeExit). Most likely cause: wrong MFA code, expired code, or trust policy mismatch."
 }
 
 $assumed = $assumeJson | ConvertFrom-Json
