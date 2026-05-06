@@ -13,10 +13,21 @@ v3.0 §15 "Phase 3 closure sweep", NOT swept under the rug):
 1. **P3-I** — WAF in Count mode for the 7-day rule-tuning window opened
    2026-05-06; Block flip on or after 2026-05-13 once metrics confirm
    zero false positives.
-2. **P3-U** (NEW) — ECS `luciel-backend-service` does not yet have
+2. ~~**P3-U** (NEW) — ECS `luciel-backend-service` does not yet have
    `deploymentConfiguration.deploymentCircuitBreaker.enable=true,rollback=true`.
    Phase 4 follow-up: single `update-service --deployment-configuration`
-   call gated by an updated runbook section.
+   call gated by an updated runbook section.~~ ✅ **RESOLVED 2026-05-06
+   ~18:58 EDT in P4-A** — single `aws ecs update-service
+   --deployment-configuration` call flipped both flags to `true` while
+   preserving `maximumPercent=200` / `minimumHealthyPercent=100`. Read-back
+   via fresh `describe-services` confirmed persistence and zero task
+   churn (Status=ACTIVE, RunningCount=1, DesiredCount=1, FailedTasks=0,
+   RolloutState=COMPLETED, TaskDefinition=`luciel-backend:28` unchanged).
+   No new image, no new TD, no new tasks — the safety net is armed for
+   the *next* deploy, not retroactively. Live-fire validation is intentionally
+   deferred to whenever the next prod-touching deploy occurs (a manufactured
+   broken-image test would itself be a discipline gap). Runbook entry on
+   rollback semantics added in `docs/runbooks/operator-patterns.md`.
 3. **D-ecs-service-name-asymmetry** — persistent `luciel-backend` vs
    `luciel-backend-service` transcription hazard; Phase 4 follow-up to
    add a one-line wrapper or canonicalize the convention.

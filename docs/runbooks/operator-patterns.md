@@ -572,3 +572,100 @@ credentials are in hand.
 - `scripts/load-dev-secrets.ps1` (the script shipped with this section)
 - Drift `D-dev-key-storage-hygiene-2026-05-04`
 - Drift `D-pg-client-tools-not-on-operator-path-2026-05-04`
+
+## ECS deployment circuit breaker (Phase 4 P4-A / P3-U)
+
+**What this section covers:** the rollback semantics of
+`luciel-backend-service`'s `deploymentCircuitBreaker` config flipped
+on 2026-05-06 ~18:58 EDT in P4-A, and the operator-side mental model
+needed to interpret deploy outcomes correctly going forward.
+
+### Current configuration (post-P4-A)
+
+```
+deploymentCircuitBreaker:
+  enable:   true   <- detect failed deployments
+  rollback: true   <- auto-revert to last-successful task definition
+maximumPercent: 200            <- standard rolling-deploy bounds
+minimumHealthyPercent: 100
+strategy: ROLLING
+bakeTimeInMinutes: 0           <- N/A for ROLLING strategy
+```
+
+Read back at any time via:
+
+```
+aws ecs describe-services --cluster luciel-cluster `
+  --services luciel-backend-service `
+  --query "services[0].deploymentConfiguration" `
+  --output json --region ca-central-1
+```
+
+(No `--profile` flag -- the operator's `default` profile is wired to
+the `luciel-admin` IAM user. See drift `D-aws-cli-profile-name-
+transcription-hazard-2026-05-06` for context.)
+
+### What the circuit breaker does
+
+ECS continuously monitors the `failedTasks` count of any in-flight
+deployment. If the count crosses an internal threshold (managed
+by AWS, not operator-tunable), the deployment is flagged FAILED.
+
+With `rollback: true`, ECS then automatically initiates a new
+deployment back to the *last successful* task definition revision.
+The previously-running tasks (under the prior TD) are left untouched
+during this rollback -- only the new bad tasks are replaced.
+
+### What the circuit breaker does NOT protect against
+
+The breaker watches `failedTasks`, which is incremented when a task
+fails to reach a steady RUNNING state (image-pull failures, container
+crashes during startup, healthcheck failures during the grace period).
+
+It does NOT detect:
+
+- Tasks that start cleanly but serve broken responses to a specific
+  endpoint (e.g. the C8-class audit-emission silent-bug surface).
+- Logic bugs that manifest only under real customer traffic.
+- Performance regressions that don't trip healthchecks.
+
+These failure modes are the verify task's territory. The breaker is
+a complement to verify, not a replacement.
+
+### Operator interpretation guide for future deploys
+
+When you run `aws ecs update-service --task-definition <new-rev>`:
+
+1. **Healthy deploy (today's expected case):** rolloutState=IN_PROGRESS
+   -> COMPLETED, failedTasks=0, runningCount stays at desiredCount
+   throughout. Same as every C2-C11.b deploy in Step 28.
+2. **Breaker trips, rollback succeeds:** rolloutState=IN_PROGRESS ->
+   FAILED -> a NEW deployment kicks off automatically targeting the
+   prior TD revision -> that one goes IN_PROGRESS -> COMPLETED. Net
+   effect: production stayed on the prior revision, no manual
+   intervention needed. **You will see this as two consecutive
+   `aws ecs describe-services` deployments blocks** -- the failed
+   one and the rollback one. The runbook for the next deploy must
+   acknowledge this is the success path, not a second incident.
+3. **Breaker trips, rollback also fails:** rare; ECS leaves the
+   service in a degraded state and emits the relevant
+   `RollbackFailed` event. Manual `update-service` to a known-good
+   TD is then required. CloudWatch alarms on the existing
+   `luciel-prod-alarms` stack should fire on this case via the
+   failedTasks metric.
+
+### Live-fire validation status
+
+P4-A intentionally did NOT manufacture a broken deploy to test the
+breaker. The next prod-touching deploy (Step 29 work, or whenever)
+will be the live-fire test. If that deploy succeeds cleanly, the
+breaker stays armed silently. If it fails, the breaker's behavior
+under load is the actual validation -- documented here so the
+operator interpreting the outcome at that time has the mental model
+already in hand.
+
+### Cross-references for this section
+
+- `docs/PHASE_3_COMPLIANCE_BACKLOG.md` P3-U (RESOLVED stamp)
+- `docs/CANONICAL_RECAP.md` Section 15 P4-A entry
+- AWS docs: ECS service deployment circuit breaker
