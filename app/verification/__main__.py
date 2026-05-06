@@ -61,9 +61,10 @@ from app.verification.tests.pillar_16_memory_items_actor_user_id_not_null import
 from app.verification.tests.pillar_17_api_key_deactivate_audit import PILLAR as P17
 from app.verification.tests.pillar_18_tenant_cascade import PILLAR as P18
 from app.verification.tests.pillar_19_audit_log_api_mount import PILLAR as P19
+from app.verification.tests.pillar_20_onboarding_audit import PILLAR as P20
 
 
-PRE_TEARDOWN_PILLARS = [P1, P2, P3, P4, P5, P6, P7, P8, P11, P12, P13, P14, P15, P16, P17, P18, P19]
+PRE_TEARDOWN_PILLARS = [P1, P2, P3, P4, P5, P6, P7, P8, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20]
 
 
 def _thorough_teardown(state: RunState) -> list[str]:

@@ -150,6 +150,12 @@ def onboard_tenant(
     """
     service = OnboardingService(db)
 
+    # P3-A: capture caller identity once at the request boundary so
+    # the four audit rows OnboardingService emits are attributed to
+    # the platform_admin who actually performed the onboarding, not
+    # to AuditContext.system().
+    audit_ctx = AuditContext.from_request(request)
+
     try:
         result = service.onboard_tenant(
             tenant_id=payload.tenant_id,
@@ -169,6 +175,7 @@ def onboard_tenant(
             retention_days_traces=payload.retention_days_traces,
             retention_days_knowledge=payload.retention_days_knowledge,
             created_by=payload.created_by,
+            audit_ctx=audit_ctx,
         )
     except ValueError as exc:
         raise HTTPException(

@@ -37,11 +37,19 @@ knows about state.tenant_id; this pillar owns its own residue.
 
 Step 28 Phase 2 hotfix: after onboarding the secondary, also mint an
 API key against the secondary tenant via POST /admin/api-keys. The
-onboarding service writes ZERO audit rows (the API mint path is the
-only hook that records ACTION_CREATE for api_key resources), so
-without this anchor mint there would be no rows tagged with
-secondary_tid for assertion 3b to find -- and 3b would silently pass
-for the same reason it was meant to catch.
+anchor mint is preserved as defense-in-depth so this pillar still
+guards correctly under any future regression that re-breaks
+onboarding audit emission.
+
+Step 28 Phase 3 update (P3-A, C2): OnboardingService.onboard_tenant
+NOW emits 4 ACTION_CREATE audit rows (tenant_config, domain_config,
+retention_policy, api_key) in the same transaction as the writes.
+Pillar 20 is the regression guard for that contract. This pillar
+(19) continues to anchor with an explicit api-key mint so its
+assertion-3b sanity check remains independent of P3-A wiring -- if
+future work were to silently disable the four onboarding rows, this
+pillar would still detect the cross-tenant scope question correctly
+because the explicit mint provides its own anchor row.
 """
 
 from __future__ import annotations
@@ -102,15 +110,14 @@ class AuditLogApiMountPillar(Pillar):
                 _ = r0.json()  # presence is enough; we only need the tid
 
                 # ---- 0b. Force at least one audit row tagged with
-                #         secondary_tid. OnboardingService.onboard_tenant
-                #         creates the tenant + first admin key directly
-                #         through the service layer and writes ZERO
-                #         admin_audit_logs rows; only the API mint path
-                #         (POST /admin/api-keys) emits an audit row.
-                #         Without this extra mint, assertion 3b would be
-                #         vacuous (no rows tagged secondary_tid would exist
-                #         for platform_admin to find), defeating the very
-                #         vacuous-pass guard the assertion exists to prevent.
+                #         secondary_tid. As of P3-A (C2) OnboardingService
+                #         emits 4 audit rows during onboard, but we mint
+                #         an explicit api-key here as defense-in-depth so
+                #         this pillar's cross-tenant scope assertion (3b)
+                #         remains independent of P3-A wiring. If a future
+                #         regression re-broke onboarding audit emission,
+                #         this anchor mint guarantees secondary_tid still
+                #         has at least one row for 3b to discover.
                 mint_body: dict[str, Any] = {
                     "tenant_id": secondary_tid,
                     "display_name": "Pillar 19 secondary audit anchor",

@@ -18,9 +18,17 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from app.models.admin_audit_log import (
+    ACTION_CREATE,
+    RESOURCE_API_KEY,
+    RESOURCE_DOMAIN,
+    RESOURCE_RETENTION_POLICY,
+    RESOURCE_TENANT,
+)
 from app.models.domain_config import DomainConfig
 from app.models.retention import RetentionPolicy
 from app.models.tenant import TenantConfig
+from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService
 
@@ -62,6 +70,7 @@ class OnboardingService:
         retention_days_traces: int = 30,
         retention_days_knowledge: int = 0,
         created_by: str | None = None,
+        audit_ctx: AuditContext | None = None,
     ) -> dict:
         """
         Create everything a tenant needs in one atomic transaction.
@@ -146,6 +155,75 @@ class OnboardingService:
                 auto_commit=False,
             )
             logger.info("Onboard: created admin API key for %s", tenant_id)
+
+            # 4c. Emit audit rows (P3-A) — four ACTION_CREATE rows
+            # written in the SAME transaction as the mutations they
+            # describe. Per Invariant 4 (audit-before-commit): the
+            # audit rows MUST land before the commit so they cannot
+            # drift out of sync with the data they describe.
+            ctx = audit_ctx if audit_ctx is not None else AuditContext.system(
+                label="onboard_tenant"
+            )
+            audit_repo = AdminAuditRepository(self.db)
+
+            audit_repo.record(
+                ctx=ctx,
+                tenant_id=tenant_id,
+                action=ACTION_CREATE,
+                resource_type=RESOURCE_TENANT,
+                resource_natural_id=tenant_id,
+                after={
+                    "display_name": display_name,
+                    "description": description,
+                    "escalation_contact": escalation_contact,
+                    "allowed_domains": [default_domain_id],
+                },
+                note="onboard_tenant: created tenant_config",
+            )
+            audit_repo.record(
+                ctx=ctx,
+                tenant_id=tenant_id,
+                action=ACTION_CREATE,
+                resource_type=RESOURCE_DOMAIN,
+                resource_natural_id=default_domain_id,
+                domain_id=default_domain_id,
+                after={
+                    "display_name": default_domain_display_name,
+                    "description": default_domain_description,
+                },
+                note="onboard_tenant: created default domain_config",
+            )
+            # Bulk retention-policy audit row — one row with the full
+            # category breakdown in after_json. Five categories.
+            audit_repo.record(
+                ctx=ctx,
+                tenant_id=tenant_id,
+                action=ACTION_CREATE,
+                resource_type=RESOURCE_RETENTION_POLICY,
+                resource_natural_id=f"onboard:{tenant_id}",
+                after={
+                    "categories": list(retention_map.keys()),
+                    "retention_days_by_category": dict(retention_map),
+                    "action": "anonymize",
+                },
+                note=f"onboard_tenant: created {len(retention_policies)} default retention policies (PIPEDA)",
+            )
+            audit_repo.record(
+                ctx=ctx,
+                tenant_id=tenant_id,
+                action=ACTION_CREATE,
+                resource_type=RESOURCE_API_KEY,
+                resource_pk=admin_key.id,
+                resource_natural_id=admin_key.key_prefix,
+                after={
+                    "display_name": admin_key.display_name,
+                    "permissions": ["chat", "sessions", "admin"],
+                    "rate_limit": api_key_rate_limit,
+                    "bound_to_luciel_instance": False,
+                },
+                note="onboard_tenant: created admin api_key (first key)",
+            )
+            logger.info("Onboard: emitted 4 audit rows for %s", tenant_id)
 
             # 5. Commit everything atomically
             self.db.commit()
