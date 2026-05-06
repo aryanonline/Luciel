@@ -1322,7 +1322,99 @@ script + ~10 lines of runbook.
 
 ---
 
-## P3-Q. `luciel-instance` admin DELETE returns 500 during teardown  *(P2)*
+## P3-Q. `luciel-instance` admin DELETE returns 500 during teardown  *(P2 -- RESOLVED 2026-05-06)*
+
+**Status:** RESOLVED in Step 28 C10 (2026-05-06).
+
+**Root cause (proven by CloudWatch traceback 2026-05-06T21:14:46Z,
+backend stream `ecs/luciel-backend/5925782c9da648ec9ea63f69a3455462`):**
+
+```
+File "/app/app/api/v1/admin.py", line 904, in deactivate_luciel_instance
+    tenant_id=instance.tenant_id,
+AttributeError: 'LucielInstance' object has no attribute 'tenant_id'
+```
+
+The `LucielInstance` ORM model is a multi-scope resource (tenant /
+domain / agent) and consistently uses `scope_owner_*` prefixes for
+its scope columns: `scope_owner_tenant_id`, `scope_owner_domain_id`,
+`scope_owner_agent_id`. There is no flat `tenant_id` attribute. The
+DELETE route handler at `app/api/v1/admin.py:904` read
+`instance.tenant_id` when constructing the memory cascade call;
+Python raised `AttributeError` which propagated as HTTP 500 BEFORE
+`bulk_soft_deactivate_memory_items_for_luciel_instance` was ever
+called.
+
+Pillar 10 zero-residue still passed in every verify run because the
+verify teardown PATCHes `tenant active=false` at the very end, which
+fires the tenant-level cascade in `AdminService.deactivate_tenant_with_cascade`
+that sweeps every LucielInstance under the tenant regardless of
+whether the explicit per-instance DELETE succeeded. The teardown
+500 was therefore non-fatal but the API contract was wrong and
+the cascade audit-row class for memory was never being emitted on
+the per-instance path in production.
+
+Observed across three consecutive verify runs without diagnosis:
+2026-05-04 (luciel 69), 2026-05-05 (luciel 42), and 2026-05-06
+(luciel 73, the run that finally got CloudWatch-tailed). C7's
+audit-emission posture analysis assumed the cascade was firing on
+the per-instance DELETE path -- this fix corrects that assumption.
+
+**Code shipped:**
+1. `app/api/v1/admin.py` line 904: `instance.tenant_id` ->
+   `instance.scope_owner_tenant_id`. Fix is one-line, plus a
+   six-line comment block citing this backlog entry, the model
+   line reference, and the failure-shape explanation.
+2. `app/services/admin_service.py` line 692: bare `return` in
+   `bulk_soft_deactivate_memory_items_for_luciel_instance`
+   replaced with `return count`. Pre-fix the function returned
+   `None` despite the `-> int` annotation; current call sites
+   drop the return value so this never produced a runtime error,
+   but it violates the type contract and would have broken any
+   future caller that reads the cascade count (e.g. structured
+   route response). Fixed in the same commit because it lives in
+   the same code path the C10 traceback exposed.
+3. `tests/api/test_luciel_instance_delete_uses_scope_owner_tenant_id.py`
+   -- new 224-line AST regression test, four assertions:
+   - LucielInstance model exposes `scope_owner_tenant_id` annotation
+   - LucielInstance model does NOT expose top-level `tenant_id`
+     (catches a future maintainer adding a flat tenant_id column
+     that would re-create the same ambiguity)
+   - `deactivate_luciel_instance` route reads
+     `instance.scope_owner_tenant_id`
+   - `deactivate_luciel_instance` route does NOT read
+     `instance.tenant_id` (belt-and-braces companion -- a
+     future maintainer might add the right reference while
+     leaving the bad one in place)
+   All four pass against the fixed code; sanity-checked by
+   simulating the regression (replacing scope_owner_tenant_id with
+   tenant_id in admin.py) and confirming tests 3 and 4 fail loudly
+   with the diagnostic messages. Follows the existing AST-only
+   convention from `tests/memory/test_extractor_save_fail_observability.py`
+   and `tests/middleware/test_actor_user_id_binding.py` so CI runs
+   without sqlalchemy / pgvector / Postgres.
+
+**Forward-looking guard:** the C10 traceback also surfaced that the
+LucielInstance model's `scope_owner_*` naming convention is exactly
+the kind of subtle divergence from the flat `tenant_id` convention
+(used by Agent, ApiKey, DomainConfig, MemoryItem, etc.) that produces
+these errors. Test 2 above codifies the boundary: if anyone later
+adds a top-level `tenant_id` column to LucielInstance to "unify"
+the interface, the regression test fires loud and forces a design
+conversation instead of a silent merge.
+
+**Cross-references:** drift entries
+`D-luciel-instance-admin-delete-returns-500-2026-05-04` (originating)
+and `D-luciel-instance-hard-delete-500-still-observed-2026-05-05`
+(reference); CloudWatch traceback at backend stream
+`ecs/luciel-backend/5925782c9da648ec9ea63f69a3455462` event time
+2026-05-06T21:14:46.077Z; original verify-report logs in
+`docs/verification-reports/step28_phase2_postA_sync_2026-05-04.json`
+(Pillar 10 detail noted the teardown anomaly inline).
+
+---
+
+### Original entry (preserved verbatim for audit trail)
 
 **Discovered:** 2026-05-04 during the post-Commit-A 19/19
 verification run. Pillar 10 still passed (zero residue), so the
@@ -1541,8 +1633,13 @@ The Commit 4 mint re-run is now blocked on P3-J + P3-K, NOT on P3-G.
   (5 historical + Gate 6 celery responder + Gate 7 async-flag);
   operator-patterns.md gains "Pre-flight gate" section codifying
   when strict mode is mandatory.
-- **P3-Q (P2)** — `luciel-instance` admin DELETE 500. Standalone
-  diagnosis, no dependencies.
+- ~~**P3-Q (P2)** — `luciel-instance` admin DELETE 500. Standalone
+  diagnosis, no dependencies.~~ **RESOLVED 2026-05-06 in Step 28 C10**
+  -- root cause was `instance.tenant_id` AttributeError at
+  `app/api/v1/admin.py:904`; LucielInstance ORM model uses
+  `scope_owner_tenant_id` not `tenant_id`. Plus collateral fix:
+  bare `return` in `bulk_soft_deactivate_memory_items_for_luciel_instance`
+  replaced with `return count`. Plus 4-test AST regression suite.
 - **P3-M (P3)** and **P3-P (P2)** — operator-environment hygiene.
   Bundle into a single "operator-env refresh" commit at any
   convenient time; not blocking.

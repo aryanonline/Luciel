@@ -689,7 +689,13 @@ class AdminService:
             self.db.rollback()
             raise
 
-        return 
+        # Step 28 C10 (P3-Q): return count, not bare return. Pre-fix
+        # this method returned None despite the -> int annotation. The
+        # current call sites all drop the return value, so this did not
+        # cause a runtime failure, but it violates the type contract
+        # and breaks any future caller that reads the return value
+        # (e.g. structured cascade summary at the route level).
+        return count
 
 
     def bulk_soft_deactivate_memory_items_for_domain(

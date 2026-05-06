@@ -900,8 +900,16 @@ def deactivate_luciel_instance(
     # AdminService (would be a circular import).
     # autocommit=True is fine here -- service.deactivate_instance below
     # opens its own transaction for the instance row + audit row.
+    #
+    # Step 28 C10 (P3-Q): use scope_owner_tenant_id, not tenant_id. The
+    # LucielInstance ORM model exposes the tenant column as
+    # scope_owner_tenant_id (see app/models/luciel_instance.py line 99).
+    # Pre-fix this line raised AttributeError before the cascade ever
+    # ran, so every DELETE returned 500 in prod even though Pillar 10
+    # zero-residue still passed thanks to the tenant-level cascade
+    # firing later in the verify teardown PATCH.
     AdminService(db).bulk_soft_deactivate_memory_items_for_luciel_instance(
-        tenant_id=instance.tenant_id,
+        tenant_id=instance.scope_owner_tenant_id,
         luciel_instance_id=pk,
         audit_ctx=audit_ctx,
         updated_by=getattr(request.state, "actor_label", None),
