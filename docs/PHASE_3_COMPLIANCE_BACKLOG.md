@@ -265,7 +265,41 @@ and superuser short-circuits for local-dev as `luciel_admin`.
 Production verify task connects as `luciel_worker` (per migration
 `f392a842f885`) so the strict branch runs in prod.
 
-**P3-E.2 (Pillar 23 hash chain):** OPEN. Targeted for Step 28 C6.
+**Resolution P3-E.2 (Pillar 23 hash chain):** ~~Closed in Step 28 C6
+(2026-05-06).~~ Migration `8ddf0be96f44_step28_p3e2_audit_log_hash_
+chain.py` adds `row_hash CHAR(64)` and `prev_row_hash CHAR(64)`
+columns to `admin_audit_logs` (NULLABLE for deploy-window tolerance,
+UNIQUE INDEX on `row_hash`). Migration backfills all existing rows
+in `id ASC` order using sha256 of canonical content + previous hash;
+genesis row uses `'0' * 64`. New module
+`app/repositories/audit_chain.py` exposes `canonical_row_hash(...)`
+and registers a SQLAlchemy `before_flush` event that takes
+`pg_advisory_xact_lock(hashtext('admin_audit_logs_chain'))`, reads
+the tail row's hash, and populates both columns on every pending
+`AdminAuditLog` instance -- catching BOTH the canonical
+`AdminAuditRepository.record()` path AND direct-instantiation paths
+like `scripts/rotate_platform_admin_keys.py`. Event installed at
+module-import time from `app.main` (web tier) and
+`app.worker.celery_app` (worker tier) so every ORM session inherits
+it. New `app/verification/tests/pillar_23_audit_log_hash_chain.py`
+registered in `PRE_TEARDOWN_PILLARS`: walks rows in `id ASC`,
+verifies hex format, uniqueness, linkage, and recomputes each hash
+from row contents -- any mismatch FAILs with the earliest offending
+id. Tolerates a contiguous trailing run of NULL hashes (deploy-
+window remnant) but FAILs hard on a NULL gap with non-NULL rows on
+both sides (indicates a code path bypassed the event). NO GRANT
+changes needed -- column-level grants inherit from the existing
+`SELECT, INSERT` on `admin_audit_logs` for `luciel_worker`; UPDATE
+remains forbidden so the chain stays append-only at the engine
+layer. Future migration in C11 cosmetics may flip both columns to
+NOT NULL once we have months of clean prod data.
+
+**Followup observation (deferred to Phase 4):** the `NULLABLE` columns
+are a deploy-window concession, not a permanent design. Once all
+images in any environment have run the new code path for >30 days
+with zero NULL gaps detected by Pillar 23, run a follow-up migration
+to flip both columns to `NOT NULL`. Tracked as a Phase 4 cosmetic in
+the C11 sweep list.
 
 ---
 

@@ -33,7 +33,7 @@ Domain-agnostic: no vertical enums, no imports from app/domain/.
 """
 from __future__ import annotations
 
-from sqlalchemy import Index, Integer, String, Text
+from sqlalchemy import CHAR, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -241,9 +241,38 @@ class AdminAuditLog(Base, TimestampMixin):
     before_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     after_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    # Optional human note — e.g. "cascade from domain deactivate",
+    # Optional human note -- e.g. "cascade from domain deactivate",
     # "replace by sourceId=foo.pdf v=3", etc.
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # -----------------------------------------------------------------
+    # CHAIN -- Step 28 P3-E.2 (Pillar 23). Tamper-evidence.
+    # -----------------------------------------------------------------
+    #
+    # row_hash       = sha256(canonical_content + prev_row_hash)
+    # prev_row_hash  = the row_hash of the row with the next-lower id;
+    #                  genesis row uses '0' * 64.
+    #
+    # Both columns are populated by the SQLAlchemy session event in
+    # app.repositories.audit_chain (registered at app startup). They
+    # are NULLABLE in the schema to tolerate the deploy window where
+    # an old container image without the event still runs; Pillar 23
+    # FAILs if any row has NULL hashes after deploy completion.
+    #
+    # Never modify these columns after insert. The migration that
+    # added them (8ddf0be96f44) deliberately did NOT grant UPDATE on
+    # admin_audit_logs to luciel_worker, so a compromised worker
+    # cannot rewrite the chain.
+    row_hash: Mapped[str | None] = mapped_column(
+        CHAR(64), nullable=True, unique=True,
+        comment="sha256 hex of canonical_content + prev_row_hash; "
+                "NULLABLE for deploy-window tolerance.",
+    )
+    prev_row_hash: Mapped[str | None] = mapped_column(
+        CHAR(64), nullable=True,
+        comment="row_hash of the prior row in id ASC order; "
+                "genesis = '0'*64.",
+    )
 
     __table_args__ = (
         # The query we care about most: "show me all admin actions for

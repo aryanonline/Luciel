@@ -200,3 +200,14 @@ celery_app.conf.update(
     worker_send_task_events=True,
     task_send_sent_event=True,
 )
+
+# Step 28 P3-E.2 / Pillar 23: install the audit-log hash-chain
+# before_flush event on the global ORM Session. The worker writes
+# AdminAuditLog rows from memory_extraction.py via
+# AdminAuditRepository.record(); without the event, those rows would
+# have NULL row_hash / prev_row_hash and Pillar 23 would FAIL on the
+# next verify run. Installed at module-import time so every worker
+# process picks it up before the first task runs.
+from app.repositories.audit_chain import install_audit_chain_event  # noqa: E402
+
+install_audit_chain_event()

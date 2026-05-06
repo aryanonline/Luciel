@@ -9,6 +9,16 @@ from app.middleware.rate_limit import (
     rate_limit_exceeded_handler,
     create_rate_limit_middleware,
 )
+from app.repositories.audit_chain import install_audit_chain_event
+
+# Step 28 P3-E.2 / Pillar 23: tamper-evident hash chain on every audit
+# row. The before_flush event populates row_hash / prev_row_hash on
+# every AdminAuditLog instance pending in any session. Installed here
+# at module-import time so every ORM session created downstream
+# (FastAPI requests, scripts that import from app.*) inherits it.
+# Worker processes install the event in their own bootstrap (worker
+# does not import app.main).
+install_audit_chain_event()
 
 app = FastAPI(title=settings.app_name)
 
