@@ -488,6 +488,20 @@ Insurance, legal, mortgage. (Vertical-Q1 strategic question — which first.)
 ### 11.3 Brokerage DD answer template
 "When a brokerage cancels their subscription, every memory data point, every API key, every agent persona, every domain, every Luciel instance flips to inactive in a single atomic transaction. Audit logs in admin_audit_logs show exactly what was deactivated, when, by whom, and what cascade reason. Soft-deleted rows scheduled for hard-purge within [N days] (future retention worker)."
 
+### 11.4 Audit emission posture (canonical)
+Luciel runs two append-only audit streams. `admin_audit_logs` carries
+control-plane and data-plane control events (hash-chained per Pillar
+23, append-only at the DB-grant level per Pillar 22). `deletion_logs`
+is the **canonical** record for retention purge events (Step 28 C7,
+P3-F resolved as Option A). Cascade events emit one bulk-summary row
+in `admin_audit_logs` with full per-resource detail in `after_json`
+(`affected_pks` / `breakdown`); regulator-facing exports merge the two
+streams ordered by `created_at` and expand bulk rows on demand. Full
+rationale (schema fit, write amplification, hash-chain economy,
+action-class hygiene), per-bulk-path `after_json` contract table, and
+the unified-export procedure live in
+`docs/compliance/audit-emission-posture.md`.
+
 ---
 
 ## Section 12 — Working memory anchors (drift recovery)

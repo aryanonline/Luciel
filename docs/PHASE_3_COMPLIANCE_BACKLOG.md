@@ -126,7 +126,21 @@ an audit row, end of story.
 
 ---
 
-## P3-C. Bulk-summary audit emission is undocumented as compliance posture  *(P2)*
+## P3-C. Bulk-summary audit emission is undocumented as compliance posture  *(P2 -- RESOLVED 2026-05-06)*
+
+**Status:** RESOLVED in Step 28 C7 (2026-05-06). Posture documented in
+`docs/compliance/audit-emission-posture.md` Section 4 (bulk-summary emission),
+including the per-bulk-path `after_json` contract table, the empty-cascade
+emission contract, and the per-resource expansion procedure for
+audit-export tooling. Empty-cascade emission inconsistency in
+`LucielInstanceRepository.deactivate_all_for_domain` (emits only when
+`updated > 0` vs the AdminService bulk paths which emit even when
+`count == 0`) is logged in the posture doc Section 4.5 and tracked as a
+Phase 4 cosmetic in the C11 sweep.
+
+---
+
+### Original P3-C entry (preserved for audit trail)
 
 **Discovered:** 2026-05-03 during Pillar 7 diagnosis.
 
@@ -303,7 +317,21 @@ the C11 sweep list.
 
 ---
 
-## P3-F. Retention purge audit coverage  *(P1)*
+## P3-F. Retention purge audit coverage  *(P1 -- RESOLVED 2026-05-06)*
+
+**Status:** RESOLVED in Step 28 C7 (2026-05-06) as **Option A**:
+`deletion_logs` is the canonical compliance record for retention purge
+events. Rationale, schema-fit / write-amplification / hash-chain-churn /
+action-class-hygiene argument, and unified audit-export contract
+(merge ordered union of `admin_audit_logs` and `deletion_logs`)
+documented in `docs/compliance/audit-emission-posture.md` Section 3. One known
+follow-up gap (`app/policy/retention.py:322-327` swallows DeletionLog
+write failures with no metric and no fallback) is logged in the
+posture doc Section 3.5 and tracked in the C11 sweep close.
+
+---
+
+### Original P3-F entry (preserved for audit trail)
 
 **Discovered:** 2026-05-03 (during Phase 2 Commit 8 retention work).
 
