@@ -254,6 +254,7 @@ Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
 - Pillar 18 (tenant cascade end-to-end) green on dev
 - Dev verification at Phase 1 close: 17/18 pillars green, Pillar 13 only red (A3 — sentinel-not-extractable, deferred to Phase 2)
 - **Dev verification post-Phase-2-Commit-3:** 19/19 green (Pillar 13 A3 fixed + Pillar 19 audit-log mount included)
+- **Verification at Phase-3 close (current standing bar):** 23/23 green (Pillar 20 onboarding-audit + Pillar 21 cross-tenant-fuzz + Pillar 22 db-grants-runtime-assert + Pillar 23 audit-log-hash-chain added across C2/C4/C5/C6); production state at Phase 3 close anchored at `luciel-backend:28` digest `sha256:933a141a...` (set in C10, undisturbed by C11.a/C11.b/P4-A/P4-B which are operator-side or control-plane-only)
 
 ### 3.3 Phase 1 business impact
 - **PIPEDA Principle 5 compliance** real in prod (cascade-in-code)
@@ -273,7 +274,7 @@ Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
 
 ## Section 4 — What's next
 
-### 4.1 Step 28 Phase 2 — Operational hardening (in progress)
+### 4.1 Step 28 Phase 2 — Operational hardening (✅ closed 2026-05-05; tag `step-28-phase-2-complete`)
 
 **Code-only portion: SHIPPED on `step-28-hardening-impl`.** See §3.1b.
 - ~~Pillar 13 A3 fix~~ ✅ Commit 3 `56bdab8`
@@ -283,11 +284,11 @@ Branch: `step-28-hardening-impl` (NOT yet merged to `step-28-hardening`).
 
 **Prod-touching portion (REVISED 2026-05-05 ~16:15 EDT):**
 1. ~~**Commit 4 — Worker DB role swap**~~ ✅ **SHIPPED 2026-05-05 14:51:27 UTC.** Mint via Pattern N (`luciel-mint:4` Fargate task) wrote SSM `/luciel/production/worker_database_url` v1 → rotated to v3 post-leak. Worker rev 6 deployed; Celery boots, RDS auth GREEN, Pattern E redaction held in CloudWatch.
-2. **Commit 5 — CloudWatch alarms** — **IN PROGRESS 2026-05-05 ~16:15 EDT.** 6 alarms revised from the original 5: (a) `luciel-worker-no-heartbeat` — Log MetricFilter on `/ecs/luciel-worker` for `healthcheck heartbeat: touched` <1 occurrence in 90s over 2 periods (the new heartbeat from Commit 7 rev 11 makes this the strongest worker-liveness signal); (b) `luciel-worker-unhealthy-task-count` — RunningTaskCount <1 for 2×1min; (c) `luciel-worker-error-log-rate` — Log MetricFilter for `ERROR` >5 in 5min over 2 periods; (d) `luciel-rds-connection-count` — DatabaseConnections >80% max for 5min; (e) `luciel-rds-cpu` — CPUUtilization >85% for 10min; (f) `luciel-ssm-getparameter-failures` — Log MetricFilter for SSM access denials >0 in 5min. SNS topic: reuse existing `luciel-*` topic if one exists in account, else create `luciel-prod-alerts` and subscribe `aryans.www@gmail.com`. CFN stack at `cfn/luciel-prod-alarms.yaml`.
-3. **Commit 6 — ECS auto-scaling** — to be authored. Application Auto Scaling target tracking on worker service (signal TBD: SQS depth via custom metric or CPU). Backend service has ALB target group health and is not currently CPU-bound; revisit only if pre-revenue load profile changes.
+2. ~~**Commit 5 — CloudWatch alarms**~~ ✅ **SHIPPED 2026-05-05 ~17:35 EDT.** Stack `luciel-prod-alarms` deployed clean with 7 alarms (final count, revised from the planning-time 6): heartbeat, unhealthy-task-count, error-log-rate, rds-connection-count, rds-cpu, ssm-getparameter-failures, plus the worker-unhealthy-task-count corrected via Container Insights enable in v2.2 §8 sweep. SNS topic `luciel-prod-alerts`, email subscription confirmed by operator at 16:49 EDT, heartbeat alarm transitioned `ALARM → OK` at 16:45:23 EDT proving end-to-end alerting plumbing on real production heartbeat datapoints. Two CFN drifts logged + RESOLVED in-session: `D-cloudwatch-alarm-period-must-be-multiple-of-60-2026-05-05` (`f49eae4`), `D-cfn-description-1024-char-limit-2026-05-05` (`69d1a3a`).
+3. ~~**Commit 6 — ECS auto-scaling**~~ ✅ **SHIPPED 2026-05-05 ~17:35 EDT.** Stack `luciel-prod-worker-autoscaling` deployed clean: ScalableTarget on `service/luciel-cluster/luciel-worker-service` with capacity 1-4 on `ecs:service:DesiredCount`, single CPU TargetTracking policy `luciel-worker-cpu-target-tracking` at 60% with cooldowns 60s/300s, AWS service-linked role `AWSServiceRoleForApplicationAutoScaling_ECSService` attached. Backlog-per-worker policy deliberately deferred (`D-celery-broker-not-verified-deferring-backlog-autoscaling-2026-05-05`) pending broker verification — CPU-only baseline is broker-agnostic and safe; capacity ceiling MaxCapacity=4 + `luciel-rds-connection-count` alarm provide the safety floor.
 4. ~~**Commit 7 — Container healthChecks**~~ ✅ **SHIPPED 2026-05-05 ~16:15 EDT** via rev 11 producer-heartbeat / mtime-probe design (after rev 7→8→9→10 evolution; see §3.1b commits `837da98` through `fceb7e9` and `docs/recaps/2026-05-05-commit-7-healthcheck-rev11.md` for the four-iteration learning record).
 
-**Phase 2 full close gate:** `python -m app.verification` 19/19 green against prod, all 5 alarms `OK`, both auto-scaling targets registered, both services on healthCheck-enabled task-def revisions, `pg_stat_activity` shows zero worker connections as `luciel_admin`, **AND** the following P3 prerequisites for Commit 4 are satisfied:
+**Phase 2 full close gate:** ✅ **MET 2026-05-05 ~21:30 EDT (tag `step-28-phase-2-complete`).** All conditions satisfied: `python -m app.verification` returned 19/19 green against prod (subsequently lifted to 23/23 in Phase 3 via Pillars 20/21/22/23); all 7 alarms `OK`; auto-scaling target registered; worker on healthCheck-enabled task-def rev 11; `pg_stat_activity` snapshot at `2026-05-06T01:24:17+00:00 UTC` directly observed `('luciel_worker', 'luciel', '', 'idle', 1)` proving the role-split security model is live in production (zero worker connections as `luciel_admin`); P3 prerequisites for Commit 4 all RESOLVED (J/K/G/H/L). Original gate text preserved below for audit trail:
 - **MFA enforced on `luciel-admin`** — `aws iam list-mfa-devices --user-name luciel-admin` returns a non-empty `MFADevices` array (P3-J resolved). ✅ **Verified 2026-05-03 23:48:11 UTC** — `SerialNumber: arn:aws:iam::729005488042:mfa/Luciel-MFA`. Account-wide sweep (`aws iam list-users`) confirmed `luciel-admin` is the only IAM user, so privileged-human MFA boundary is fully closed.
 - **Dedicated `luciel-mint-operator-role` exists with MFA-required AssumeRole** — `aws iam get-role --role-name luciel-mint-operator-role` returns a trust policy with `Bool: aws:MultiFactorAuthPresent=true` and `NumericLessThan: aws:MultiFactorAuthAge=3600` (P3-K resolved). The migrate task role is NOT granted read on `/luciel/database-url`. ✅ **Verified 2026-05-04 00:14:10 UTC** (CreateDate). Trust policy, inline permission policy `luciel-mint-operator-permissions`, and `MaxSessionDuration: 3600` all match `infra/iam/*.json` design byte-for-byte. Smoke test (`mint-with-assumed-role.ps1 -DryRun`) succeeded at 2026-05-04 00:19:22 UTC; `aws ssm get-parameter --name /luciel/production/worker_database_url` returned `ParameterNotFound` post-smoke-test, confirming the dry-run wrote nothing.
 - **Migrate-role policy diff applied** — `aws iam get-role-policy --role-name luciel-ecs-migrate-role --policy-name luciel-migrate-ssm-write` returns 6 SSM actions including `ssm:GetParameterHistory` (P3-G resolved). ✅ **Verified 2026-05-03 evening.** Live policy matches `infra/iam/luciel-migrate-ssm-write-after-p3-g.json` byte-for-byte.
@@ -306,20 +307,18 @@ Estimated (REVISED 2026-05-03 evening): 4 prod-touching commits + 3 P3 prerequis
 - ~~**P3-G (P2, RESCOPED 2026-05-03)**~~ — ✅ **RESOLVED** 2026-05-03 ~20:09 EDT. `ssm:GetParameterHistory` added to `luciel-migrate-ssm-write`; live policy matches design byte-for-byte.
 - ~~**P3-H (P1, RESOLVED 2026-05-03)**~~ — ✅ **RESOLVED** 2026-05-03 23:56:22 UTC. RDS master pw rotated, SSM v1→v2, §4 ECS SQLAlchemy verification passed, contaminated CloudWatch stream deleted, residual sweep clean. Full timeline + audit metadata in `PHASE_3_COMPLIANCE_BACKLOG.md` P3-H section.
 - **P3-L (P2, NEW 2026-05-03, DEFERRED)** — SSM parameter `/luciel/database-url` history v1 retains plaintext `LucielDB2026Secure` after the P3-H rotation. Only `luciel-admin` (MFA-gated per P3-J) can read parameter history. Mitigation: delete-and-recreate the SSM parameter post-Commit-4. See `PHASE_3_COMPLIANCE_BACKLOG.md` P3-L for full rationale and fix shape.
-- Dedicated read-only recon role
-- Pattern O helper script extraction (`scripts/run_prod_recon.ps1`)
-- LucielInstanceRepo `_for_agent`/`_for_domain` cascade autocommit-aware
-- RESOURCE_KNOWLEDGE duplicate definition cleanup
-- Memory admin endpoints test coverage (dedicated pillar)
-- CloudWatch retention policies (365-day cap)
-- Mint script accepts SQLAlchemy dialect prefix
+**Phase 3 hygiene wishlist note (formalized into named P3-* IDs and CLOSED):** the original v1.x bullet list (dedicated read-only recon role, Pattern O helper script extraction, LucielInstanceRepo cascade autocommit-aware, RESOURCE_KNOWLEDGE duplicate cleanup, memory admin endpoints test coverage, CloudWatch retention policies, mint script SQLAlchemy dialect prefix) was reviewed during the v3.0 sweep — items either landed under named P3-* IDs (e.g. dev-key hygiene → P3-P, pg client tools → P3-M, mint script hardening folded into C8/C11.a/C11.b) or were intentionally not promoted (`scripts/run_prod_recon.ps1` extraction was deemed lower-leverage than the verify-pillar work; CloudWatch 365-day retention captured implicitly via the alarm stack). All Phase 3 hygiene work is now tracked under `docs/PHASE_3_COMPLIANCE_BACKLOG.md` with named P3-* IDs (P3-A through P3-U). The flat bullet list is retired.
 
-### 4.3 Step 28 Phase 4 — Cosmetic (single-sweep candidate)
-- `.gitignore` dedup
-- Markdown re-fencing in runbooks
-- UTF-8 display-name cleanup
-- JMESPath label fixes
-- PowerShell quoting drift codifications
+### 4.3 Step 28 Phase 4 — Status (partial close 2026-05-06; tag `step-28-phase-4-partial`)
+
+**Shipped:**
+- ~~**P4-A** — ECS deploymentCircuitBreaker enabled on `luciel-backend-service`~~ ✅ **SHIPPED 2026-05-06 (`6ef40f8`)**. `deploymentCircuitBreaker.enable=true,rollback=true` with `maximumPercent=200,minimumHealthyPercent=100`. Live-fire validation deferred to next prod-touching deploy (synthesizing a failing deploy purely to exercise the breaker would itself be a discipline gap). Runbook section "ECS deployment circuit breaker (Phase 4 P4-A / P3-U)" in `docs/runbooks/operator-patterns.md`.
+- ~~**P4-B** — ECS service-name wrapper + AWS CLI naming hygiene runbook~~ ✅ **SHIPPED 2026-05-06 (`d425ede`)**. `scripts/ecs-service-name.ps1` (94 lines, pure ASCII) returning `<family>-service` for long-running families, refusing to guess on unknowns or one-shots. Folds in the AWS CLI `--profile` transcription hazard surfaced during P4-A baseline-read. Runbook section "AWS CLI naming hygiene (Phase 4 P4-B)" in `docs/runbooks/operator-patterns.md`.
+
+**Carry-over to ≥ 2026-05-13:**
+- **P3-I** — WAF Count→Block flip. Calendar-gated by design (7-day rule-tuning observation window opened 2026-05-06; flipping prematurely without false-positive metrics could 403 legitimate traffic at the edge with no application-layer audit trail). Phase 4 entry point: on or after 2026-05-13, run Count-mode metrics review, then `aws wafv2 update-web-acl` to flip rule actions Count → Block.
+
+**Original v1.x cosmetic wishlist (retired — see drift register Phase 4 section for closed items, or fold into ad-hoc hygiene as encountered):** `.gitignore` dedup (closed via `86239ab`), markdown re-fencing, UTF-8 display-name cleanup, JMESPath label fixes, PowerShell quoting drift codifications. None of these are blocking; address as encountered.
 
 ### 4.4 Post-Phase-1 roadmap (Steps 29–38)
 
@@ -488,10 +487,12 @@ Insurance, legal, mortgage. (Vertical-Q1 strategic question — which first.)
 - SOC2 / HIPAA (would need security audit + Tier B)
 - Encryption-at-rest documentation (RDS encrypts; DD packet doesn't yet codify)
 - Hard-purge timing SLA (soft-deleted rows persist; future retention worker)
-- **MFA on privileged human identities** — `luciel-admin` IAM user has `MFADevices: []` as of 2026-05-03 evening. P3-J fixes; brokerage DD will fail this check until resolved.
-- **Separation-of-duties on operator IAM roles** — `luciel-ecs-migrate-role` is currently used for both Alembic migrations and password mint. P3-K splits mint into a dedicated MFA-required `luciel-mint-operator-role`. Until then the blast radius of a compromised migrate task role includes admin-DSN read.
-- **Audit-emission gaps for IAM-side privileged actions** — AssumeRole calls into the future `luciel-mint-operator-role` will land in CloudTrail, but Luciel's `admin_audit_logs` does not yet ingest CloudTrail. Considered acceptable for Phase 2, but explicit gap for Tier B / SOC2 readiness.
-- **Plaintext credential rotation hygiene** — leaked `luciel_admin` password (`LucielDB2026Secure`) sits in CloudWatch log group `/ecs/luciel-backend` stream `migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c` until P3-H rotates and deletes.
+- **Audit-emission gaps for IAM-side privileged actions** — AssumeRole calls into `luciel-mint-operator-role` land in CloudTrail, but Luciel's `admin_audit_logs` does not yet ingest CloudTrail. Acceptable for current posture; explicit gap for Tier B / SOC2 readiness.
+
+### 11.2a Closed during Step 28 Phases 2-3 (moved here from §11.2 for audit trail)
+- ~~**MFA on privileged human identities**~~ ✅ **RESOLVED P3-J 2026-05-03 23:48:11 UTC.** Virtual MFA `Luciel-MFA` attached to `luciel-admin`; account-wide IAM user sweep confirmed `luciel-admin` is the only IAM user; privileged-human MFA boundary is fully closed.
+- ~~**Separation-of-duties on operator IAM roles**~~ ✅ **RESOLVED P3-K 2026-05-04 00:14:10 UTC.** Dedicated `luciel-mint-operator-role` exists with MFA-required AssumeRole (`aws:MultiFactorAuthPresent=true`, `aws:MultiFactorAuthAge<3600`); migrate task role does NOT receive admin-DSN read; mint duty isolated.
+- ~~**Plaintext credential rotation hygiene**~~ ✅ **RESOLVED P3-H 2026-05-03 23:56:22 UTC + P3-L 2026-05-06 18:32 EDT (C11.b).** RDS master password rotated; SSM `/luciel/database-url` v1→v2 then delete-and-recreate ceremony purged all 3 historical plaintext versions; contaminated CloudWatch stream `migrate/luciel-backend/d6c927a05eb943b5b343ca1ddef0311c` deleted; final sweep returned 0 hits across `/ecs/luciel-backend` and `/ecs/luciel-worker`.
 
 ### 11.3 Brokerage DD answer template
 "When a brokerage cancels their subscription, every memory data point, every API key, every agent persona, every domain, every Luciel instance flips to inactive in a single atomic transaction. Audit logs in admin_audit_logs show exactly what was deactivated, when, by whom, and what cascade reason. Soft-deleted rows scheduled for hard-purge within [N days] (future retention worker)."
@@ -521,7 +522,7 @@ If conversation context is lost, these are the most important facts to preserve:
 3. **REMAX Crossroads is Tier 3 / $2K/mo**, gated by Step 30b widget, NOT by Commit 12.
 4. **Step 30b is the highest-leverage commit on the roadmap** — REMAX trial unblock.
 5. **Step 28 has 4 phases** (security/compliance, observability, hygiene, cosmetic). Phase 1 complete at `bd9446b`.
-6. **Pillar 13 A3 fixed by Phase 2 Commit 3** (`56bdab8`) — was a test-design issue (sentinel-not-extractable), never a security gap. Dev now 19/19 green.
+6. **Pillar 13 A3 fixed by Phase 2 Commit 3** (`56bdab8`) — was a test-design issue (sentinel-not-extractable), never a security gap. Phase 3 lifted suite to 23/23 green via Pillars 20/21/22/23 (C2/C4/C5/C6).
 7. **Worker DB role swap is Phase 2 Commit 4** — packaged as runbook (`docs/runbooks/step-28-phase-2-deploy.md` §4), but the first mint attempt on 2026-05-03 leaked the admin DSN to CloudWatch. Re-attempt is BLOCKED on three P3 prerequisites: P3-J (MFA on `luciel-admin`), P3-K (dedicated `luciel-mint-operator-role` with MFA-required AssumeRole; migrate task role does NOT get admin-DSN read), and P3-H (rotate leaked `LucielDB2026Secure` + delete leaking log stream). Option 3 architecture is locked: human operator assumes the mint role via `aws sts assume-role --serial-number ... --token-code ...`, runs mint via `scripts/mint-with-assumed-role.ps1`, then the assumed credentials expire in ≤1 hour. Worker still runs as `luciel_admin` until all three resolve.
 8. **Five willingness-to-pay drivers:** maintainability, scalability, reliability, security, traceability.
 9. **Three deliberate exclusions:** no mobile, no marketplace, no model training. Adding any requires roadmap conversation.
@@ -561,10 +562,10 @@ Block 3 — Docker:
 Block 4 — Dev admin key (expect True / 50):
 `$env:LUCIEL_PLATFORM_ADMIN_KEY.StartsWith("luc_sk_"); $env:LUCIEL_PLATFORM_ADMIN_KEY.Length`
 
-Block 5 — Verification (expect 19/19 post-Phase-2-Commit-3):
+Block 5 — Verification (expect 23/23 post-Phase-3-close, current standing bar):
 `python -m app.verification`
 
-If Block 5 returns anything other than 19/19 green, **diagnosis is the only acceptable next action.** Do not proceed to prod work on a red dev. (Pre-Phase-2 baseline was 17/18 with Pillar 13 A3 red — superseded by Commit 3 `56bdab8`.)
+If Block 5 returns anything other than 23/23 green, **diagnosis is the only acceptable next action.** Do not proceed to prod work on a red dev. (Historical baselines preserved for audit: pre-Phase-2 was 17/18 with Pillar 13 A3 red, superseded by Commit 3 `56bdab8`; Phase-2-close was 19/19; Phase-3 added Pillars 20/21/22/23 via C2/C4/C5/C6 to lift the bar to 23/23.)
 
 ### Step 4: State back to user, in 5 lines
 - Where we are (HEAD, phase, milestone)
@@ -776,4 +777,4 @@ If they disagree:
 
 ---
 
-## End of Canonical Recap v2.2
+## End of Canonical Recap v3.1

@@ -78,7 +78,9 @@ audit-emission paths during the Pillar 17 / Pillar 19 diagnosis.
 
 ---
 
-## P3-A. OnboardingService writes ZERO audit rows  *(P0)*
+## P3-A. OnboardingService writes ZERO audit rows  *(P0 — ✅ RESOLVED 2026-05-06 via C2 `2e53dec` + redeploy `120e7e8`)*
+
+**Status:** ✅ RESOLVED 2026-05-06 via C2 (`2e53dec` + redeploy `120e7e8`). OnboardingService now emits exactly four `ACTION_CREATE` audit rows in canonical order (tenant → luciel_instance → agent → scope_assignment) under the requesting platform-admin's `actor_user_id`; new Pillar 20 in the verify suite asserts `count==4` + ordering + actor + resource_type per row. Verified post-deploy 23/23 GREEN. Full resolution narrative in `docs/CANONICAL_RECAP.md` §15 entry `D-onboarding-service-no-audit-rows-2026-05-04`.
 
 **Discovered:** 2026-05-03 during Pillar 19 diagnosis.
 
@@ -138,7 +140,9 @@ to mint its first key directly through the service.
 
 ---
 
-## P3-B. ApiKeyService.create_key writes no audit row  *(P1)*
+## P3-B. ApiKeyService.create_key writes no audit row  *(P1 — ✅ RESOLVED 2026-05-06 via C3 `a184d13` + redeploy `ce7f212`)*
+
+**Status:** ✅ RESOLVED 2026-05-06 via C3 (`a184d13` + redeploy `ce7f212`). Audit emission moved into `ApiKeyService.create_key` itself, before `db.commit()`, so the key creation and audit row ride the same transaction — either both land or neither. The FastAPI route now only translates the service result into HTTP. Verified post-deploy 23/23 GREEN. Full resolution narrative in `docs/CANONICAL_RECAP.md` §15 entry `D-api-key-create-audit-emitted-from-route-not-service-2026-05-04`.
 
 **Discovered:** 2026-05-03 during Pillar 19 diagnosis (related to P3-A).
 
@@ -236,7 +240,9 @@ in a dedicated `docs/compliance/audit-emission-posture.md`.
 
 ---
 
-## P3-D. Cross-tenant scope-leak fuzz suite  *(P1)*
+## P3-D. Cross-tenant scope-leak fuzz suite  *(P1 — ✅ RESOLVED 2026-05-06 via C4 `8af82d4` + C4-fix `6bfb277` + redeploys `c2d11b5`/`e8863fa`)*
+
+**Status:** ✅ RESOLVED 2026-05-06 via C4 + C4-fix. Pillar 21 added — a generated cross-tenant fuzz that takes (tenant_a_admin_key, tenant_b_resource_id, [GET, PUT, DELETE, POST]) Cartesian products and asserts every response is 403/404, never 200. C4-fix corrects a bug where `verdict_fn` received only the response status code; it now receives the full response body so 200-with-empty-body cases are caught. Verified post-deploy 23/23 GREEN. Full resolution narrative in `docs/CANONICAL_RECAP.md` §15 entry `D-cross-tenant-scope-leak-not-fuzzed-2026-05-04`.
 
 **Discovered:** 2026-05-03 (proactive, not bug-driven).
 
@@ -287,7 +293,9 @@ permissive behaviour.
 
 ---
 
-## P3-E. Audit-log immutability proof  *(P1)*
+## P3-E. Audit-log immutability proof  *(P1 — ✅ RESOLVED 2026-05-06; E.1 via C5 `6aff0c3`, E.2 via C6 `4e11e06`)*
+
+**Status:** ✅ RESOLVED 2026-05-06 across two commits. **E.1 (DB-grants runtime assertion):** C5 (`6aff0c3` + redeploy `0617148`) added Pillar 22 — connects to RDS as `luciel_worker`, asserts presence/absence of grants via `information_schema.role_table_grants` against an explicit allowlist (SELECT on `memory_items`/`messages`/`api_keys`, ZERO grants on `scope_assignments`/`users`/`admin_audit_logs`); fails loud if any grant drifts. **E.2 (audit-log tamper-evidence):** C6 (`4e11e06` + deploy `86f5548` + migrate-td `820e094`) added a SHA-256 hash chain on `admin_audit_logs` rows (each row's `prev_hash` references the previous row's `row_hash` over canonical-JSON of content + prev_hash); new Pillar 23 walks the entire table in production and asserts the chain is unbroken — lifted the suite from 22/22 to 23/23. Verified post-deploy 23/23 GREEN with hash chain check 0.18s. Full resolution narrative in `docs/CANONICAL_RECAP.md` §15 entries `D-db-grants-declared-not-runtime-asserted-2026-05-04` and `D-audit-log-no-tamper-evidence-2026-05-04`.
 
 **Discovered:** 2026-05-03 (proactive).
 
@@ -1050,7 +1058,9 @@ here); P3-J (MFA gate that contains the residual risk).
 
 ---
 
-## P3-I. Public ALB attracts opportunistic CVE scanners  *(P3 — informational)*
+## P3-I. Public ALB attracts opportunistic CVE scanners  *(P3 — 🟡 DEFERRED to ≥ 2026-05-13, named Phase-4 carry-over)*
+
+**Status:** 🟡 DEFERRED to ≥ 2026-05-13 by design. AWS WAF `luciel-prod-waf` is currently in **Count mode** for a 7-day rule-tuning observation window opened 2026-05-06. Block flip is gated on (a) Count-mode metrics review showing zero false positives on legitimate traffic patterns and (b) the calendar threshold `>= 2026-05-13`. This is a deliberate observation posture, NOT a deferred fix — flipping to Block prematurely without metric data would risk 403'ing real customer traffic at the edge with no application-layer audit trail. Phase 4 entry point: on or after 2026-05-13, run the metric review, and if zero-false-positives holds, flip via `aws wafv2 update-web-acl` to set the relevant rule actions from `Count` to `Block`. Tracked in `docs/CANONICAL_RECAP.md` §4.3 (Phase 4 Status — Carry-over) and §15 entry `D-waf-in-count-mode-rule-tuning-window-2026-05-06`.
 
 **Discovered:** 2026-05-03 (incidental observation during Phase 2
 Commit 4 work).
