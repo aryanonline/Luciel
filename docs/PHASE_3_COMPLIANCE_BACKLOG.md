@@ -1056,7 +1056,83 @@ recap `docs/recaps/2026-05-04-pillar-13-a3-real-root-cause.md` §6.
 
 ---
 
-## P3-O. Extractor failure observability — `extract_and_save` swallows save-time exceptions  *(P1)*
+## P3-O. Extractor failure observability -- `extract_and_save` swallows save-time exceptions  *(P1 -- RESOLVED 2026-05-06)*
+
+**Status:** RESOLVED in Step 28 C8 (2026-05-06).
+
+**Code shipped:**
+1. `MemoryService.extract_and_save` (`app/memory/service.py`) save-loop
+   except handler now logs `repr(exc)` plus full forensic context
+   (session_id, message_id, category) and emits a durable
+   `admin_audit_logs` row (`action=ACTION_EXTRACTOR_SAVE_FAIL`,
+   `resource_type=RESOURCE_MEMORY`) with after_json carrying
+   exc_type, exc_repr, session_id, message_id, category, user_id,
+   actor_user_id. Audit emission uses a **separate side session**
+   (`SessionLocal()`) opened on the same engine, NOT the repository's
+   own session. Rationale per `MemoryRepository.upsert_by_message_id`
+   Invariant 4: the worker / chat caller owns the parent transaction;
+   earlier successful items in this same transaction are pending
+   commit by the caller together with the caller's own Invariant-4
+   audit row. Calling `rollback()` or `commit()` on the parent
+   session would either destroy pending saves or steal the caller's
+   commit point. The side session writes in its own connection,
+   leaving the parent untouched. The Pillar 23 hash-chain `before_flush`
+   listener is registered on the `Session` class so the side session
+   inherits it; chain advances correctly. The whole audit emission
+   is wrapped in try/except so an audit-write failure cannot break
+   the chat turn (fail-open contract preserved). Uses `autocommit=True`
+   on the side session so the forensic row lands deterministically.
+2. New action constant `ACTION_EXTRACTOR_SAVE_FAIL = "extractor_save_fail"`
+   added to `app/models/admin_audit_log.py` and to `ALLOWED_ACTIONS`
+   so `AdminAuditRepository.record` accepts it.
+3. `MemoryService.extract_and_save` accepts an optional
+   `audit_ctx: AuditContext | None = None` parameter; when None,
+   falls back to `AuditContext.system(label="extractor_save_fail")`.
+   Threading audit_ctx through ChatService is deferred -- the
+   originating HTTP key is not semantically the actor of an
+   internal pipeline failure, so system-labelling is honest.
+4. P3-O sweep applied to ChatService (`app/services/chat_service.py`):
+   four `logger.warning` call sites for memory extraction / enqueue
+   failures upgraded from `type=%s` to `type=%s exc_repr=%r` plus
+   session/message_id context. No durable audit row at the
+   ChatService layer because the inner `extract_and_save` already
+   emits one for save-time failures; the ChatService outer except
+   only catches pre-save events (LLM extractor errors, malformed
+   messages) for which a log line is the right primitive.
+
+**Tests shipped:**
+- `tests/memory/test_extractor_save_fail_observability.py` -- four
+  AST-level regression tests (constant exists in `ALLOWED_ACTIONS`,
+  except handler surfaces `repr(exc)` / `%r`, except handler emits
+  `AdminAuditRepository.record(action=ACTION_EXTRACTOR_SAVE_FAIL)`,
+  audit emission is wrapped in its own try/except). All four pass
+  against the new code; sanity-checked by simulating a regression
+  (type-only logging + missing audit row) and confirming both
+  affected tests fail loudly. Follows the existing
+  `tests/middleware/test_actor_user_id_binding.py` AST-only
+  convention so CI runs without sqlalchemy / pgvector / Postgres.
+
+**Deliberately deferred / honestly tracked (not silently dropped):**
+- Prometheus counter `extractor_save_fail_total` was listed as
+  optional in the original P3-O fix shape. The codebase has no
+  Prometheus client wired up today (verified: no `prometheus_client`
+  import, no `Counter(` usage, no metrics endpoint). Introducing
+  metrics infrastructure from scratch is a standalone effort, not a
+  P3-O subtask. Tracked in the C11 sweep close as a Phase 4
+  cosmetic: "introduce Prometheus client + first counter
+  `extractor_save_fail_total` + `retention_audit_write_failure_total`
+  (from C7 follow-up)."
+- Threading `AuditContext` through ChatService into the synchronous
+  `extract_and_save` call sites would let the row be attributed to
+  the originating HTTP key instead of `system`. Not done in C8 to
+  avoid a cross-cutting refactor on the chat hot path mid-deploy-
+  recovery-day. The system-attributed row already satisfies the
+  durable-record requirement; per-actor attribution is a refinement
+  for a future stride and is logged here.
+
+---
+
+### Original P3-O entry (preserved for audit trail)
 
 **Discovered:** 2026-05-04 during Pillar 13 A3 diagnosis. The actual
 bug (auth-middleware typo binding `actor_user_id = None`) drove a

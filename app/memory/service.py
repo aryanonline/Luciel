@@ -67,6 +67,7 @@ class MemoryService:
         message_id: int | None = None,
         luciel_instance_id: int | None = None,
         actor_user_id: "uuid.UUID | None" = None,  # Step 24.5b File 2.6c
+        audit_ctx=None,  # Step 28 C8 (P3-O): optional AuditContext
     ) -> int:
         """Extract memories from a turn and persist via the repository.
 
@@ -114,9 +115,103 @@ class MemoryService:
                     )
                     saved_count += 1
             except Exception as exc:
+                # Step 28 C8 (P3-O): repr(exc) surfaces the actual
+                # Postgres / SQLAlchemy / pgvector message instead of
+                # just the type name. Without this, integrity
+                # violations (NOT NULL, FK, dimension mismatches)
+                # were invisible diagnostically -- this is the same
+                # class of bug as Pillar 13 A3 (D11 actor_user_id
+                # NOT NULL violation) where the type-only log forced
+                # a multi-hour forensic detour.
                 logger.warning(
-                    "Failed to save memory: type=%s", type(exc).__name__,
+                    "memory extraction save failed: type=%s exc_repr=%r "
+                    "session=%s message_id=%s category=%s",
+                    type(exc).__name__, exc, session_id, message_id,
+                    item.get("category"),
                 )
+                # Step 28 C8 (P3-O): durable audit row so compliance
+                # has a record of every save-time failure beyond the
+                # transient warning log. Critical correctness point:
+                # we use a SEPARATE side session for the audit insert,
+                # NOT self.repository.db. Rationale (per Invariant 4 in
+                # MemoryRepository.upsert_by_message_id):
+                #
+                #   The worker / chat caller owns the parent
+                #   transaction. When a per-item save fails inside
+                #   the loop, EARLIER items in this same transaction
+                #   may have already been added (flushed but not
+                #   committed) -- they are the worker's to commit
+                #   together with its own Invariant-4 audit row.
+                #   Calling rollback() on self.repository.db here
+                #   would destroy those pending saves; calling
+                #   commit() would steal the worker's commit point.
+                #   Neither is acceptable.
+                #
+                # A side session opened on the same engine writes the
+                # audit row in its own connection / transaction,
+                # leaving the parent transaction untouched. The
+                # before_flush hash-chain listener (Pillar 23, P3-E.2)
+                # is registered on the Session class, so the side
+                # session inherits it and the chain advances
+                # correctly. Wrapped in try/except so an audit-write
+                # failure cannot escalate to a chat-turn break --
+                # preserves fail-open contract.
+                try:
+                    from app.db.session import SessionLocal
+                    from app.repositories.admin_audit_repository import (
+                        AdminAuditRepository, AuditContext,
+                    )
+                    from app.models.admin_audit_log import (
+                        ACTION_EXTRACTOR_SAVE_FAIL, RESOURCE_MEMORY,
+                    )
+                    # Caller-provided audit_ctx wins; otherwise tag
+                    # as system. The originating HTTP key is not
+                    # semantically the actor of an internal pipeline
+                    # failure -- system labelling is honest.
+                    ctx = audit_ctx or AuditContext.system(
+                        label="extractor_save_fail",
+                    )
+                    side_db = SessionLocal()
+                    try:
+                        AdminAuditRepository(side_db).record(
+                            ctx=ctx,
+                            tenant_id=tenant_id,
+                            action=ACTION_EXTRACTOR_SAVE_FAIL,
+                            resource_type=RESOURCE_MEMORY,
+                            resource_pk=None,
+                            resource_natural_id=None,
+                            domain_id=None,
+                            agent_id=agent_id,
+                            luciel_instance_id=luciel_instance_id,
+                            after={
+                                "exc_type": type(exc).__name__,
+                                "exc_repr": repr(exc),
+                                "session_id": session_id,
+                                "message_id": message_id,
+                                "category": item.get("category"),
+                                "user_id": user_id,
+                                "actor_user_id": (
+                                    str(actor_user_id) if actor_user_id
+                                    else None
+                                ),
+                            },
+                            note=(
+                                "Memory extractor save-time failure "
+                                "(fail-open; chat turn unaffected)"
+                            ),
+                            autocommit=True,
+                        )
+                    finally:
+                        side_db.close()
+                except Exception as audit_exc:
+                    # Last-resort log only. Never let audit failure
+                    # propagate -- the chat turn must not break.
+                    logger.error(
+                        "extractor_save_fail audit-row write failed: "
+                        "audit_type=%s audit_repr=%r orig_type=%s",
+                        type(audit_exc).__name__, audit_exc,
+                        type(exc).__name__,
+                    )
 
         if saved_count:
             logger.info(

@@ -74,6 +74,14 @@ ACTION_WORKER_IDENTITY_SPOOF_REJECT = "worker_identity_spoof_reject"
 # role-change-induced revocations.
 ACTION_KEY_ROTATED_ON_ROLE_CHANGE = "key_rotated_on_role_change"
 
+# Step 28 C8 (P3-O): durable record for memory extractor save-time failures.
+# The chat turn must NOT fail when memory persistence fails (fail-open
+# contract), but fail-open is not the same as fail-silent. Every save-time
+# exception writes one of these rows so compliance has a record beyond the
+# transient warning log. exc_type, exc_repr, session_id, message_id,
+# category go into after_json. resource_type=RESOURCE_MEMORY.
+ACTION_EXTRACTOR_SAVE_FAIL = "extractor_save_fail"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -96,6 +104,8 @@ ALLOWED_ACTIONS = (
     ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
     ACTION_WORKER_USER_INACTIVE,
     ACTION_WORKER_IDENTITY_SPOOF_REJECT,
+    # Step 28 C8 (P3-O): extractor save-time failure record.
+    ACTION_EXTRACTOR_SAVE_FAIL,
 )
 
 

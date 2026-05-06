@@ -463,10 +463,14 @@ class ChatService:
                         # Broker down, validation fail, etc. — log and move on.
                         # Chat turn already succeeded; memory write pauses until
                         # worker recovers. Queue-depth alarm surfaces the gap.
+                        # Step 28 C8 (P3-O sweep): repr(enq_exc) so
+                        # broker / validation failures surface the
+                        # actual message instead of just the class.
                         logger.warning(
                             "enqueue_extraction failed (fail-open): type=%s "
-                            "session=%s message_id=%s",
+                            "exc_repr=%r session=%s message_id=%s",
                             type(enq_exc).__name__,
+                            enq_exc,
                             session_id,
                             assistant_msg.id,
                         )
@@ -483,8 +487,18 @@ class ChatService:
                         actor_user_id=actor_user_id,  # Step 24.5b File 2.5
                     )
             except Exception as exc:
+                # Step 28 C8 (P3-O sweep): repr(exc) on the outer
+                # extractor wrapper too. Per-item save failures are
+                # already audit-rowed inside extract_and_save; this
+                # block catches things that happen *before* the save
+                # loop (LLM extractor errors, malformed messages,
+                # etc), where a durable audit row is not warranted
+                # but the diagnostic detail is.
                 logger.warning(
-                    "Memory extraction failed: type=%s", type(exc).__name__,
+                    "Memory extraction failed: type=%s exc_repr=%r "
+                    "session=%s message_id=%s",
+                    type(exc).__name__, exc, session_id,
+                    getattr(assistant_msg, "id", None),
                 )
 
         # 14. Trace (now carries luciel_instance_id)
@@ -655,10 +669,12 @@ class ChatService:
                                 trace_id=None,
                             )
                         except Exception as enq_exc:
+                            # Step 28 C8 (P3-O sweep): repr(enq_exc).
                             logger.warning(
                                 "enqueue_extraction failed (fail-open, stream): "
-                                "type=%s session=%s message_id=%s",
+                                "type=%s exc_repr=%r session=%s message_id=%s",
                                 type(enq_exc).__name__,
+                                enq_exc,
                                 session_id,
                                 assistant_msg.id,
                             )
@@ -674,8 +690,12 @@ class ChatService:
                             actor_user_id=actor_user_id,  # Step 24.5b File 2.5
                         )
                 except Exception as exc:
+                    # Step 28 C8 (P3-O sweep): repr(exc) on stream path too.
                     logger.warning(
-                        "Memory extraction failed: type=%s", type(exc).__name__,
+                        "Memory extraction failed: type=%s exc_repr=%r "
+                        "session=%s message_id=%s",
+                        type(exc).__name__, exc, session_id,
+                        getattr(assistant_msg, "id", None),
                     )
 
             # Step 24.5 File 15: record trace for the streaming path too,
