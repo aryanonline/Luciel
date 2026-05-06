@@ -11,7 +11,7 @@
     "containerDefinitions": [
         {
             "name": "luciel-verify",
-            "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:201179ff9595d740186f0dc26f3f6998c35c8163988689efd54b2e2be0d3b374",
+            "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:59e18230e950771f340fe6de9a38e12cf376b6f5d39e93345e8cb5543d4a3527",
             "essential": true,
             "command": [
                 "python",
