@@ -1,6 +1,28 @@
 # Phase 3 — Compliance Backlog
 
-**Status:** Tracked. Items here are **not** part of Step 28 Phase 2.
+**Status:** ✅ **CLOSED 2026-05-06** by the 11-commit C1→C11.b sweep on
+`step-28-hardening-impl`, tagged `step-28-complete`. All in-scope items
+(P3-A, P3-B, P3-C, P3-D, P3-E.1, P3-E.2, P3-F, P3-G, P3-H, P3-J, P3-K,
+P3-L, P3-M, P3-N, P3-O, P3-P, P3-Q, P3-R, P3-S) are RESOLVED with
+in-document RESOLVED stamps and Section-15 drift entries in
+`docs/CANONICAL_RECAP.md` v3.0.
+
+**Three named carry-overs to Phase 4** (recorded in CANONICAL_RECAP
+v3.0 §15 "Phase 3 closure sweep", NOT swept under the rug):
+
+1. **P3-I** — WAF in Count mode for the 7-day rule-tuning window opened
+   2026-05-06; Block flip on or after 2026-05-13 once metrics confirm
+   zero false positives.
+2. **P3-U** (NEW) — ECS `luciel-backend-service` does not yet have
+   `deploymentConfiguration.deploymentCircuitBreaker.enable=true,rollback=true`.
+   Phase 4 follow-up: single `update-service --deployment-configuration`
+   call gated by an updated runbook section.
+3. **D-ecs-service-name-asymmetry** — persistent `luciel-backend` vs
+   `luciel-backend-service` transcription hazard; Phase 4 follow-up to
+   add a one-line wrapper or canonicalize the convention.
+
+**Original status (preserved for audit history):** Tracked. Items here
+are **not** part of Step 28 Phase 2.
 They surfaced during Phase 2 hotfix diagnosis and represent compliance
 gaps in service of Luciel's PIPEDA posture and future SOC 2 / GDPR
 readiness for the multi-tenant brokerage SaaS use case.
