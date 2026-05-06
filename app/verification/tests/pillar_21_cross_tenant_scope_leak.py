@@ -226,7 +226,10 @@ class FuzzCase:
             )
         except Exception as exc:
             return False, f"network error: {exc!r}", 0
-        passed, reason = self.verdict_fn(resp.status_code, resp.text[:200])
+        # Full body must be handed to the verdict function so that JSON
+        # parsers in list-verdicts can inspect every item. Truncation is
+        # for failure-message formatting only, never for verdict input.
+        passed, reason = self.verdict_fn(resp.status_code, resp.text)
         return passed, reason, resp.status_code
 
 

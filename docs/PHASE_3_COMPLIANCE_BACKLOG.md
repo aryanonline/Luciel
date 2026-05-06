@@ -204,6 +204,25 @@ forgets to also force that filter for non-platform-admin callers.
 
 **Estimated effort:** 1 commit, ~150 LOC.
 
+**Resolution:** ~~Closed in Step 28 C4 (2026-05-06).~~ Pillar 21
+(`app/verification/tests/pillar_21_cross_tenant_scope_leak.py`, 31
+fuzz cases across path-tenant / IDOR / query-param / body-tenant
+attack vectors) registered in `PRE_TEARDOWN_PILLARS`. First deploy
+surfaced a verdict-fn bug (response body was truncated to 200 chars
+before JSON parsing); fixed in C4 follow-up by passing full
+`resp.text` to the verdict function. Final result: 21/21 GREEN.
+
+**Followup observation (NOT a leak, logged for due diligence):**
+The three list endpoints `/admin/api-keys`, `/admin/tenants`,
+`/admin/domains` accept `?tenant_id={someone-else}` from a non-
+platform caller and silently rewrite to caller's tenant_id rather
+than returning 403. Pillar 21 confirms zero victim data is leaked
+(returned items all carry caller's tenant_id), so this is a
+defense-in-depth ergonomic concern, not a security regression.
+Deferred to Phase 4 cosmetics sweep (C11) -- changing this would
+break existing platform-admin tooling that relies on the current
+permissive behaviour.
+
 ---
 
 ## P3-E. Audit-log immutability proof  *(P1)*
