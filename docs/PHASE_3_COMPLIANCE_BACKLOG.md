@@ -251,6 +251,22 @@ surface. But:
 **Estimated effort:** Pillar 22: ~1 commit, ~80 LOC. Pillar 23:
 ~3 commits, schema + repo + verification, ~400 LOC.
 
+**Resolution P3-E.1 (Pillar 22):** ~~Closed in Step 28 C5
+(2026-05-06).~~ `app/verification/tests/pillar_22_db_grants_audit_log_
+append_only.py` registered in `PRE_TEARDOWN_PILLARS`. Two-layer
+assertion mirroring Pillar 16: (1) GRANTS layer queries
+`information_schema.role_table_grants` for `current_user` on
+`admin_audit_logs` and `memory_items`, asserts privilege set is
+exactly `{SELECT, INSERT}` (no UPDATE/DELETE/TRUNCATE); (2)
+ENFORCEMENT layer attempts direct `UPDATE` and `DELETE` on
+`admin_audit_logs` -- both must raise `InsufficientPrivilege`
+(SQLSTATE 42501) wrapped as `ProgrammingError`. Owns table-owner
+and superuser short-circuits for local-dev as `luciel_admin`.
+Production verify task connects as `luciel_worker` (per migration
+`f392a842f885`) so the strict branch runs in prod.
+
+**P3-E.2 (Pillar 23 hash chain):** OPEN. Targeted for Step 28 C6.
+
 ---
 
 ## P3-F. Retention purge audit coverage  *(P1)*
