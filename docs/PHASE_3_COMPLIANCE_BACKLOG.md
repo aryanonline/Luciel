@@ -1007,7 +1007,86 @@ PowerShell `$Env:Path`.
 
 ---
 
-## P3-N. Pre-flight ritual silently runs degraded with no Celery worker  *(P1)*
+## P3-N. Pre-flight ritual silently runs degraded with no Celery worker  *(P1 -- RESOLVED 2026-05-06)*
+
+**Status:** RESOLVED in Step 28 C9 (2026-05-06).
+
+**Code shipped:**
+1. `scripts/preflight.ps1` -- new 280-line PowerShell script. Runs
+   the 5 historical gates from `CANONICAL_RECAP.md` Section 13 Step 3
+   (AWS identity, git state, docker, dev admin key, local
+   `python -m app.verification`) plus two new gates:
+   - Gate 6: `celery -A app.worker.celery_app inspect ping --timeout 5`
+     fails the script (exit 1) unless at least one responder answers.
+     The regex `->\s*[^:]+:\s*OK` counts responders so a celery
+     binary that exits 0 with zero responders is still treated as
+     failure. Backlog entry referenced `app.celery_app`; the actual
+     module path is `app.worker.celery_app` -- script uses the real
+     path.
+   - Gate 7: loads `app.core.config.settings` via
+     `python -c "from app.core.config import settings; print(...)"`
+     and asserts `memory_extraction_async == True` (matching prod
+     `MEMORY_EXTRACTION_ASYNC=true` from `backend-td-rev*.json`).
+     Default local value is `False`, so this gate fails by default
+     in dev environments unless the operator has explicitly set
+     the env var.
+2. `-AllowDevSync` switch -- converts both Gate 6 and Gate 7 from
+   FAIL to DEGRADED WARN. Documented as acceptable only when the
+   intended workflow does NOT exercise the async memory path.
+   The operator-patterns.md section enumerates which workflows
+   require strict mode (Pillar 11 / Pillar 13 verification, any
+   `MemoryService` / `ChatService` extractor work, any prod-touching
+   ceremony) and which permit -AllowDevSync (UI, docs, schema,
+   read-only investigations, Pillars 1-8 / 15-23 work).
+3. `-ExpectedSha <prefix>` switch -- Gate 2 also asserts
+   `git rev-parse HEAD` starts with the prefix. Closes the
+   `D-operator-pull-skipped-before-write-side-aws-ops-2026-05-05`
+   class of drift by giving operator a single command that fails
+   loudly if they forgot to `git pull` after advisor pushed.
+4. `-SkipVerification` switch -- skips Gate 5 (the ~90s expensive
+   gate) for fast re-runs when working tree has not changed since
+   the last green run.
+5. `docs/runbooks/operator-patterns.md` -- new "Pre-flight gate
+   (Step 28 C9 / P3-N)" section (~85 lines). Documents the rationale
+   (Pillar 13 A3 incident as the originating evidence), enumerates
+   when strict mode is mandatory vs when `-AllowDevSync` is
+   acceptable, gives the celery-worker-start command and the env-var
+   command for the two failure-recovery paths, and cross-references
+   the originating drifts and recaps.
+
+**No deploy:** P3-N is operator-side tooling. No prod code paths
+changed, no image rebuild, no task definition changes, no service
+update. Verification matrix unchanged at 23/23.
+
+**Deliberately deferred / honestly tracked (not silently dropped):**
+- A pytest-ish self-test for the script is not authored. Rationale:
+  the script's behavior is opaque to AST-only tests (it shells out
+  to celery / aws / docker / git) and authoring a mock-based PowerShell
+  test harness is a 4-6 hour standalone effort. The script is small
+  enough to read end-to-end, and its first real-run on the next
+  pre-prod ceremony will surface any issues. Tracked in C11 sweep
+  as a Phase 4 cosmetic.
+- The historical 5-block pre-flight in `CANONICAL_RECAP.md`
+  Section 13 Step 3 is NOT removed -- it remains the canonical
+  inline reference for cases where the operator does not have
+  the working tree available (e.g. emergency triage from a clean
+  laptop). The new script is the preferred path; the inline blocks
+  are the fallback. Note added to operator-patterns.md cross-references.
+- Linux/macOS port (`scripts/preflight.sh`) is not authored.
+  Operator works on Windows / PowerShell exclusively per the
+  user's standing tooling preference. Tracked in C11 sweep as
+  a Phase 4 cosmetic if a non-Windows operator ever onboards.
+
+**Cross-references:** drift entries
+`D-preflight-degraded-without-celery-2026-05-04` (parent) and
+`D-celery-worker-not-running-locally-2026-05-02` (superseded);
+recap `docs/recaps/2026-05-04-pillar-13-a3-real-root-cause.md` Section 6;
+originator drift `D-pillar-13-a3-real-root-cause-2026-05-04`
+(resolved by Commit A `81b9e5a`, this is its compounding-gap follow-up).
+
+---
+
+### Original entry (preserved verbatim for audit trail)
 
 **Discovered:** 2026-05-04 during Pillar 13 A3 diagnosis. The 5-block
 pre-flight passed cleanly while the underlying Pillar 13 A3 path was
@@ -1456,8 +1535,12 @@ The Commit 4 mint re-run is now blocked on P3-J + P3-K, NOT on P3-G.
   / **P3-B** as part of the audit-emission sweep; same class of
   problem (silent loss of provable signal) and the fix touches
   adjacent code paths.
-- **P3-N (P1)** — pre-flight Celery / async-flag gate. Cheap, do
-  before the next prod-touching pre-flight run.
+- ~~**P3-N (P1)** — pre-flight Celery / async-flag gate. Cheap, do
+  before the next prod-touching pre-flight run.~~ **RESOLVED 2026-05-06
+  in Step 28 C9** -- `scripts/preflight.ps1` ships with 7 gates
+  (5 historical + Gate 6 celery responder + Gate 7 async-flag);
+  operator-patterns.md gains "Pre-flight gate" section codifying
+  when strict mode is mandatory.
 - **P3-Q (P2)** — `luciel-instance` admin DELETE 500. Standalone
   diagnosis, no dependencies.
 - **P3-M (P3)** and **P3-P (P2)** — operator-environment hygiene.

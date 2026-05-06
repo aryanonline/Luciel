@@ -395,3 +395,90 @@ fully-cleaned tenant produces zero mutations.
 5. Verify final state: residue active count = 0.
 6. Re-run `python -m app.verification`, expect 16/17 (no regression).
 7. Commit cleanup log as audit artifact.
+
+---
+
+## Pre-flight gate (Step 28 C9 / P3-N)
+
+**Authored 2026-05-06 to resolve P3-N. Supersedes the inline 5-block
+pre-flight in `CANONICAL_RECAP.md` Section 13 Step 3 for any workflow
+that exercises the async memory path.**
+
+### Why a script
+
+The original 5-block pre-flight (AWS identity, git state, docker, dev
+admin key, local verification) passed cleanly during the Pillar 13 A3
+incident on 2026-05-04 even though the local stack was running
+degraded -- celery was not up, `settings.memory_extraction_async` was
+the local default `False`, and `ChatService`'s sync fallback was
+silently servicing memory-extraction calls. The customer-facing
+assistant reply ("I'll remember that") was a lie for an entire
+prod-parity gap. A correct pre-flight would have caught this on the
+first attempted repro instead of after instrumentation.
+
+`scripts/preflight.ps1` runs the 5 historical gates plus 2 new ones:
+
+- **Gate 6** -- `celery -A app.worker.celery_app inspect ping --timeout 5`
+  must return at least one responder.
+- **Gate 7** -- `app.core.config.settings.memory_extraction_async`
+  must equal `True` (matching prod `MEMORY_EXTRACTION_ASYNC=true`
+  in `backend-td-rev*.json`).
+
+Both new gates fail loudly by default. The operator can pass
+`-AllowDevSync` to convert them to DEGRADED warnings, but ONLY if
+the intended workflow does not exercise the async memory path.
+
+### When the script is mandatory (strict mode, no -AllowDevSync)
+
+- Before any verification run targeting Pillar 11 (async memory
+  extraction) or Pillar 13 (identity stability under role change /
+  cross-tenant identity-spoof guard / departure semantics).
+- Before any prod-touching ceremony where local repro must mirror
+  prod async behavior.
+- Before opening a Phase-3 backlog item that involves
+  `MemoryService`, `ChatService` extractor paths, or the celery
+  worker.
+- Before authoring or modifying any code in `app/memory/service.py`
+  or `app/services/chat_service.py` that affects extraction control
+  flow.
+
+### When -AllowDevSync is acceptable
+
+- Local UI / docs / schema work that does not invoke chat turns.
+- Read-only investigations (e.g. recap drafting, audit-log reads).
+- Pillar work that does not touch memory extraction (Pillars 1-8,
+  15-23 are all green under sync mode in current matrix).
+
+### Failure mode and recovery
+
+If Gate 6 fails strict, start the celery worker locally:
+
+```
+celery -A app.worker.celery_app worker --loglevel=info
+```
+
+If Gate 7 fails strict, set the env var before re-running
+`python -m app.verification` or `scripts/preflight.ps1`:
+
+```
+$env:MEMORY_EXTRACTION_ASYNC = 'true'
+```
+
+### SHA pin (operator pull guard)
+
+`scripts/preflight.ps1 -ExpectedSha <prefix>` adds a Gate 2 SHA
+assertion that `git rev-parse HEAD` matches the prefix. Use this
+after `git pull origin step-28-hardening-impl` when an advisor has
+just pushed a specific commit and the next AWS write-side call
+references `file://<task-def>.json` from that commit. Resolves the
+`D-operator-pull-skipped-before-write-side-aws-ops-2026-05-05` class
+of drift.
+
+### Cross-references
+
+- `docs/PHASE_3_COMPLIANCE_BACKLOG.md` P3-N (the originating item)
+- Drift `D-preflight-degraded-without-celery-2026-05-04`
+- Drift `D-celery-worker-not-running-locally-2026-05-02` (superseded)
+- Recap `docs/recaps/2026-05-04-pillar-13-a3-real-root-cause.md` Section 6
+- `CANONICAL_RECAP.md` Section 13 Step 3 (historical 5-block, now
+  subsumed by this script)
