@@ -868,9 +868,73 @@ JSON + ~80 LOC of PowerShell helper + runbook update).
 **Cross-references:** `docs/recaps/2026-05-03-mint-incident.md` §8
 (corrected Follow-up A), commit `2b5ff32`.
 
+*(IAM-K item is unchanged by C11.b; only P3-L below is RESOLVED.)*
+
 ---
 
-## P3-L. SSM parameter history retains plaintext `LucielDB2026Secure`  *(P2 — deferred to post-Commit-4)*
+## P3-L. SSM parameter history retains plaintext `LucielDB2026Secure`  *(P2 — RESOLVED 2026-05-06 in C11.b)*
+
+**RESOLVED 2026-05-06 (C11.b — SSM parameter delete + recreate ceremony)**
+
+The `/luciel/database-url` parameter was deleted and recreated end-to-end
+by `luciel-admin` (MFA-gated, per P3-J) on 2026-05-06. The recreated
+parameter has exactly one version (v1) whose value matches the pre-delete
+v3 value, and the v1 plaintext (and v2 transitional value) are no longer
+retrievable through `aws ssm get-parameter-history --with-decryption`.
+
+**Ceremony evidence:**
+
+- **Pre-delete history (3 versions):**
+  - v1 — created 2026-04-12 by `luciel-admin` (original plaintext
+    `LucielDB2026Secure`, the credential leaked in the
+    2026-05-03 mint-incident postmortem)
+  - v2 — modified 2026-05-03 by `luciel-admin` (P3-H rotation —
+    new RDS password, KMS-encrypted at rest, but v1 still in history)
+  - v3 — modified 2026-05-05 by `luciel-admin`
+- **Capture step:** decrypted DSN read into a PowerShell `SecureString`
+  ($secureDsn, 148 chars). No plaintext was ever printed, logged, or
+  written to disk — only the character length was emitted to the operator
+  console for sanity-check.
+- **Delete step:** `aws ssm delete-parameter --name /luciel/database-url`
+  succeeded silently (idempotent success contract). All 3 historical
+  versions were purged together with the parameter — SSM does not retain
+  history across delete/recreate cycles.
+- **Recreate step:** `aws ssm put-parameter --name /luciel/database-url
+  --type SecureString --tier Standard --description "Recreated 2026-05-06
+  to purge v1 plaintext history (P3-L). Value identical to pre-delete v3."`
+  returned `Version: 1, Tier: Standard`. Encrypted at rest under
+  `alias/aws/ssm` (account default KMS CMK), same as pre-delete posture.
+- **Post-recreate history (1 version):** `get-parameter-history` returns
+  exactly one row, version 1, LastModified `2026-05-06T18:32:35.137000-04:00`,
+  with the P3-L description above. v1/v2/v3 plaintexts are unreachable.
+- **Plaintext discipline:** the `$secureDsn` SecureString was disposed
+  immediately after the put-parameter call. At no point during the
+  ceremony did plaintext appear in shell history, command output, log
+  files, or process arguments.
+
+**Production verification:**
+
+- **ECS deploy:** `aws ecs update-service --cluster luciel-cluster
+  --service luciel-backend-service --force-new-deployment` →
+  deployment ID `ecs-svc/1707498806651852181` (task definition
+  `luciel-backend:28`, same digest
+  `sha256:933a141ad5d5b617d2d134bb9eb2c1d934b65a84ea32bd837f4c698bb3c2d87f`
+  as the C10 deploy). The new task pulled the recreated SSM v1 at
+  container start; `failedTasks: 0`, `runningCount: 1`, `PRIMARY
+  COMPLETED`.
+- **Verify task:** `fe5c7d9da05b42ca9c7243566d6fe5cb` (`luciel-verify:13`)
+  ran post-deploy → **23/23 GREEN**, including `luciel 81 DELETE -> 200`
+  (the C10 regression-proof signal still holds against fresh DSN read)
+  and the Pillar 23 hash chain check (0.18s).
+
+**Posture going forward:** any future rotation of `/luciel/database-url`
+MUST follow the same delete + recreate ceremony rather than a simple
+`put-parameter --overwrite`, otherwise the rotated-out plaintext
+persists in SSM history. This pattern is documented in
+`docs/runbooks/operator-patterns.md` § "SSM credential rotation —
+plaintext-history-safe ceremony" (carried over to Phase 4 docs work).
+
+**Original P3-L content (preserved for audit history):**
 
 **Discovered:** 2026-05-03 during P3-H execution. The remediation in
 P3-H replaced the *current* value of `/luciel/database-url` (v1 → v2)
@@ -1726,8 +1790,13 @@ The Commit 4 mint re-run is now blocked on P3-J + P3-K, NOT on P3-G.
 5. **Commit 4 mint re-run** via the Option 3 ceremony — **NOW UNBLOCKED**.
 6. **Commits 5–7** prod-touching: CloudWatch alarms, ECS auto-scaling,
    container healthchecks.
-7. **P3-L** SSM parameter history cleanup — **deferred to post-Commit-4**
-   per the rationale in the P3-L entry above.
+7. ~~**P3-L** SSM parameter history cleanup — **deferred to post-Commit-4**
+   per the rationale in the P3-L entry above.~~ ✅ **RESOLVED 2026-05-06 in
+   C11.b** — SSM `/luciel/database-url` deleted and recreated as v1 by
+   `luciel-admin`; pre-rotation plaintext history purged; rev28
+   force-new-deployment + verify task `fe5c7d9d...` confirmed 23/23 GREEN
+   against the recreated parameter. See P3-L entry above for full ceremony
+   evidence.
 
 **Phase 3 additions from 2026-05-04 Pillar 13 A3 diagnosis:**
 
