@@ -1112,7 +1112,11 @@ teardown anomaly was logged inline).
 
 ---
 
-## P3-S. Mint ceremony architectural rework — Pattern N variant for in-VPC execution  *(P0, blocks Phase 2 close)*
+## ~~P3-S. Mint ceremony architectural rework — Pattern N variant for in-VPC execution~~  *(P0 — RESOLVED 2026-05-05 14:51:27 UTC)*
+
+**Status:** ✅ **RESOLVED** 2026-05-05 14:51:27 UTC. Pattern N variant `luciel-mint:3` Fargate task ran end-to-end clean: `WORKER DB PASSWORD MINTED`, `pw_fingerprint ff89f2831b32`, `force_rotate False` (first-mint path). RDS `ALTER ROLE luciel_worker PASSWORD` committed; SSM SecureString `/luciel/production/worker_database_url` v1 created (KMS-encrypted, `LastModifiedDate 2026-05-05T14:51:29.156Z`). Worker rolling-deploy completed 2026-05-05; `pg_stat_activity` evidence at 2026-05-06T01:24:17 UTC confirms worker connects as `luciel_worker` (NOT `luciel_admin`). Helper `mint-via-fargate-task.ps1` and `mint-td-rev3.json` shipped via commits `0cd87be` + `65f8996`. Original entry preserved below for audit trail.
+
+### Original P3-S entry (preserved for audit trail)
 
 **Discovered:** 2026-05-04 ~20:12 UTC during the Commit 4 mint real-run
 attempt. Mint script aborted at `psycopg.connect(admin_dsn)` (line 554)
