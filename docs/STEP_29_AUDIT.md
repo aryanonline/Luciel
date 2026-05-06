@@ -284,17 +284,27 @@ The next commit (which DOES change code) must:
 2. ✅ `pytest -m verify` against a running backend produces 23/23 green matching today's `python -m app.verification`.
 3. ✅ FINAL STEP 26 MATRIX runner (`__main__.py`) remains intact and continues to work — the pytest harness is **additive**, not a replacement, until CI proves stable for ≥1 week.
 4. ✅ `.github/workflows/verify.yml` runs on push to `step-28-hardening-impl` and produces the same 23/23 green result.
-5. ✅ Closes drifts `D-verify-task-pure-http-2026-05-05` and `D-call-helper-missing-params-kwarg-2026-05-05` IF folded in, OR explicitly defers them to a follow-up commit with a dated note in `docs/PHASE_3_COMPLIANCE_BACKLOG.md`.
+5. ✅ Closes drifts `D-verify-task-pure-http-2026-05-05` AND `D-call-helper-missing-params-kwarg-2026-05-05` within Step 29 — NOT deferred to a follow-up step. Per the 2026-05-06 ordering revision (see §10 below), both drift closures land BEFORE the pytest harness so the harness wraps the honest end-state, not the transitional one.
 
 ---
 
-## 10. Audit closure
+## 10. Audit closure (REVISED 2026-05-06 ~19:55 EDT — no-deferral order)
 
-This audit is **read-only**. No source files in `app/` are modified. The next commit is the implementation commit.
+This audit is **read-only**. No source files in `app/` are modified. The next commits are the implementation commits.
 
-**Recommended commit shape for the implementation:**
-- Commit A (this audit): **THIS DOC ONLY**, docs-only, no tag.
-- Commit B (the pytest harness): code commit, deps + test file + marker + CI workflow. Verify-after-every-commit doctrine RE-ENGAGES here. Tag candidate: `step-29-pytest-harness`.
-- Commit C (drift closures, optional): `D-verify-task-pure-http` + `D-call-helper-missing-params-kwarg`. Can land as one or two commits. Tag candidate: `step-29-complete`.
+**REVISED commit shape for the implementation (replaces the v1 ordering):**
+
+The initial draft of this section recommended landing the pytest harness first and folding the two drifts into a follow-up commit "for smaller blast radius." On re-read against the user's standing principle — "we are designing so let us not defer errors, it could come back to bite us" / "honest long term fixes and not just taking shortcuts" / "I dont want to defer anything we need to be a little due dilligent with our business" — that recommendation was the avoiding-problems pattern. The drifts have already been deferred once (logged 2026-05-05, parked for Step 29). Step 29 IS the explicit window to close them. Landing the harness first and pushing the drifts forward a third time would be a textbook lazy-defer dressed up as engineering hygiene.
+
+Revised order (all three commits land within Step 29):
+
+- **Commit A (this audit):** docs-only, no tag. SHIPPED at `4212072`.
+- **Commit B — `D-call-helper-missing-params-kwarg-2026-05-05` closure:** smallest of the three, lowest risk. Extend `app/verification/http_client.py:call()` to accept `params=` and forward to `httpx`. Migrate P14 line 347's inlined `?audit_label=...` back to `params={"audit_label": ...}`. Add a unit test for `call(..., params={"k": "v"})`. Verify FINAL STEP 26 MATRIX 23/23 green before moving on. Verify-after-every-commit doctrine RE-ENGAGES here. No tag.
+- **Commit C — `D-verify-task-pure-http-2026-05-05` closure:** larger surface, 12 `SessionLocal()` SELECT sites across P11/P12/P13/P14 (enumerated in §6 above). Estimated 4-7 new platform-admin-gated GET endpoints. Migrate ONE pillar at a time, verify 23/23 green after each migration, drop `from app.db.session import SessionLocal` only when the pillar is fully HTTP. Sub-commit shape proposed to operator BEFORE authoring any of it. No tag until the suite is fully pure-HTTP.
+- **Commit D — pytest harness:** lands AFTER C, on the pure-HTTP suite, so the harness wraps the honest end-state. Thin `tests/integration/test_pillars.py`, pytest+pytest-asyncio in deps, `verify` marker, `.github/workflows/verify.yml`. Tag candidate: `step-29-complete`.
+
+Why this order matters: doing the harness first then refactoring under it would mean rewriting 12 pillar test bodies twice (once into pytest collection, once for the HTTP migration). Doing the HTTP migration first means the harness wraps a clean surface and Commit D becomes a thin wrapper rather than a deep rewrite.
+
+**Verify-after-every-commit doctrine** is fully enforced from Commit B onward, including after each per-pillar sub-step inside Commit C.
 
 End of audit.
