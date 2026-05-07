@@ -267,15 +267,34 @@ class MemoryService:
         # parses back to uuid.UUID at task entry. None stays None.
         actor_user_id_str = str(actor_user_id) if actor_user_id else None
 
-        async_result = extract_memory_from_turn.delay(
-            session_id=session_id,
-            user_id=user_id,
-            tenant_id=tenant_id,
-            message_id=message_id,
-            actor_key_prefix=actor_key_prefix,
-            agent_id=agent_id,
-            luciel_instance_id=luciel_instance_id,
-            trace_id=trace_id,
-            actor_user_id=actor_user_id_str,  # Step 24.5b File 2.6c
+        # Step 29.y Cluster 4 (E-5): use .apply_async(kwargs=...)
+        # explicitly instead of .delay() so:
+        #   1. Future positional-arg additions cannot silently
+        #      change which value lands in which kwarg.
+        #   2. Kombu/SQS message headers carry trace_id and
+        #      tenant_id for cross-process correlation -- worker-side
+        #      log lines tag from headers without re-deriving from
+        #      the payload, which speeds up incident-response grep.
+        #   3. Headers travel through SQS as MessageAttributes so
+        #      CloudWatch / DLQ tools can filter on them without
+        #      decoding the body. Body still carries trace_id and
+        #      tenant_id too because the worker's _reject_with_audit
+        #      builds resource_natural_id from the body.
+        async_result = extract_memory_from_turn.apply_async(
+            kwargs={
+                "session_id": session_id,
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "message_id": message_id,
+                "actor_key_prefix": actor_key_prefix,
+                "agent_id": agent_id,
+                "luciel_instance_id": luciel_instance_id,
+                "trace_id": trace_id,
+                "actor_user_id": actor_user_id_str,  # Step 24.5b File 2.6c
+            },
+            headers={
+                "trace_id": trace_id,
+                "tenant_id": tenant_id,
+            },
         )
         return async_result.id
