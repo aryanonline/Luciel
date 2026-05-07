@@ -169,36 +169,141 @@ These are the two drifts the Step 28 close-out flagged for Step 29. The audit co
 
 ### D-verify-task-pure-http-2026-05-05
 
-**Scope:** Eliminate all 12 `SessionLocal()` sites in P11/P12/P13/P14 by routing reads through new admin GET endpoints.
+**Scope:** Decouple the verify task from the application's in-process Python interfaces (`SessionLocal` for direct DB access, `MemoryService`/`MemoryRepository` for ORM mutations, `extract_memory_from_turn.delay()`/`apply_async()` for direct Celery enqueue) by routing as much of the surface as is honest through HTTP. The original framing of "12 SELECT sites" was an undercount and is corrected below; see also `D-step29-audit-undercounts-verify-debt-2026-05-06` (opened-and-closed in Commit B.3, the same commit that authored this re-audit).
 
-**Surface enumerated (from `grep -n SessionLocal`):**
+**REVISED surface enumeration (B.3, 2026-05-06 ~20:55 EDT, against tree at `8a06652`):**
 
-| File | Sites | Purpose |
+The 2026-05-05 v1 enumeration counted only `SessionLocal()` block opens (8 in total — itself an undercount of 12 because it missed several blocks). It did not separate read-only forensic SELECTs (which can move to admin GET endpoints, the easy case) from in-process **producer-side calls** that mutate state through the application's Python API rather than the HTTP layer (which require either admin POST endpoints or a deliberate scope decision to leave them as in-process producers because they ARE what the pillar is testing). The honest enumeration is below.
+
+#### `pillar_11_async_memory.py` (508 lines)
+
+DB-session blocks: 1 (line 191), spans through line 503.
+
+Forensic READS (5 distinct `db.scalars` / `db.scalar` / `db.get` calls):
+- L197 `select(ApiKey).where(id=...)` — fetch the agent chat key's `key_prefix`
+- L238 `select(MemoryItem.message_id).where(tenant=..., message_id IS NOT NULL)` — idempotency probe target
+- L274 `select(AdminAuditLog).where(action='worker_cross_tenant_reject', tenant=...)` — F3 rejection-row poll
+- L312 `select(AdminAuditLog).where(action='worker_malformed_payload', tenant=...)` — F4 rejection-row poll
+- L399 `select(func.count()).where(action IN [...], actor_label LIKE 'worker:%')` — F9 forbidden-action audit count
+- L419 / L453 `db.get(LucielInstance, id)` — fetch instance for F10 active-flag toggle
+- L476 `select(AdminAuditLog).where(action='worker_instance_deactivated', tenant=...)` — F10 rejection-row poll
+
+In-process WRITES (3 distinct paths, ALL producer-side / state-mutating):
+- L207 `MemoryService(...).enqueue_extraction(...)` — F1 *direct call into the application's service layer*; measures the enqueue path's latency. Cannot be replaced by an HTTP call without losing what F1 is asserting (the in-process latency budget).
+- L246 `MemoryRepository(db).upsert_by_message_id(...)` — F2 *direct repository call*; tests the idempotent no-op return value, which is a Python-API contract not exposed over HTTP.
+- L300 / L462 `extract_memory_from_turn.apply_async(kwargs={...})` — F4 / F10 *direct Celery enqueue*; tests Gate-1 (malformed payload) and Gate-4 (instance deactivated) on the **worker side**, requiring the harness to act as a Celery producer to inject specific malformed/edge-case payloads that the legitimate API path can never construct.
+- L425-426 / L459-460 / L499-500 `inst.active = ...; db.commit()` — F10 *direct ORM write* against `luciel_instances.active`. Currently works because the verify role has SELECT+UPDATE on `luciel_instances` for cascade-deactivate flows; could move to a small admin POST `/admin/forensics/luciel_instances/{id}/active_p2c12_step29c` route.
+
+#### `pillar_12_identity_stability.py` (461 lines)
+
+DB-session blocks: 3 (lines 200, 286, 347).
+
+Forensic READS (5 distinct calls):
+- L202 `select(...) FROM messages WHERE tenant=..., user_id=...` — first chat-turn message lookup
+- L288 `db.get(ApiKey, k1_id)` — post-rotation key state check
+- L349 `select(...) FROM messages WHERE tenant=..., session=...` — second-turn message lookup after rotation
+- L376 `select(...) FROM messages WHERE tenant=..., user_id=...` ORDER BY id — user-scoped message ordering assertion
+- L395 `select(...) FROM agents WHERE tenant=..., user_id=...` — agent-binding stability check
+
+In-process WRITES: 0. P12's mutations are all already routed through admin HTTP routes (Commit 12 of Phase 2 closed that surface).
+
+#### `pillar_13_cross_tenant_identity.py` (765 lines)
+
+DB-session blocks: 7 (lines 346, 479, 497, 556, 614, 632, 674).
+
+Forensic READS (10 distinct calls):
+- L348 `select(Message)` for T1's seed message id
+- L481 `select(MemoryItem)` for spoof-rows leak check (T2 scope)
+- L499 / L513 `select(AdminAuditLog).where(action='worker_identity_spoof_reject', ...)` — A2 spoof-reject audit poll (the assertion B.1 fixed the mode-gate around)
+- L558 `select(MemoryItem)` for legitimate row presence in T1
+- L616 `select(MemoryItem)` for T2 leak rows after spoof
+- L634 `db.get(ApiKey, k1_id)` — post-spoof key state
+- L676 `select(MemoryItem)` for legit row second-pass check
+- L690 `select(MemoryItem)` for T2 leak second-pass check
+- L697 `db.get(ApiKey, k1_id)` — post-spoof key state second-pass
+
+In-process WRITES (1 path, producer-side):
+- L448 `extract_memory_from_turn.delay(...)` — the spoof payload enqueue. SAME exemption rationale as P11 F4/F10: the harness MUST act as a Celery producer here because the spoof payload (mismatched `tenant_id` vs `agent_id` slug) is by construction one the legitimate HTTP path will never produce. This is what Gate 6 is FOR.
+
+#### `pillar_14_departure_semantics.py` (570 lines)
+
+DB-session blocks: 1 (line 378).
+
+Forensic READS (4 distinct calls):
+- L381 `db.get(ApiKey, k1_id)` — post-departure key state for user 1
+- L397 `db.get(ApiKey, k2_id)` — post-departure key state for user 2
+- L474 `select(MemoryItem)` for T1 memory rows after departure
+- L490 `db.get(User, user_id)` — user row state after departure
+- L510 `select(MemoryItem)` for T2 memory rows after departure (cross-tenant non-leak)
+
+In-process WRITES: 0.
+
+#### Honest totals
+
+| Pillar | `SessionLocal` blocks | Forensic reads | In-process service calls | Direct Celery enqueues | Direct ORM writes |
+| --- | ---:| ---:| ---:| ---:| ---:|
+| P11 | 1 | 7 | 2 (`MemoryService.enqueue_extraction`, `MemoryRepository.upsert_by_message_id`) | 2 (F4 malformed, F10 deactivated) | 1 (`luciel_instances.active` toggle, restored after) |
+| P12 | 3 | 5 | 0 | 0 | 0 |
+| P13 | 7 | 10 | 0 | 1 (spoof-payload enqueue for Gate-6 test) | 0 |
+| P14 | 1 | 5 | 0 | 0 | 0 |
+| **total** | **12** | **27** | **2** | **3** | **1** |
+
+The v1 audit's "12 SELECT statements" was a count of `SessionLocal` block opens; the actual read count inside those blocks is **27 distinct forensic queries**. The v1 audit's "4-7 new admin GET routes" estimate was based on the undercount; corrected estimate below.
+
+#### Architectural decision: producer-side calls are SCOPED OUT of pure-HTTP
+
+The in-process service calls (P11 F1 latency probe via `MemoryService.enqueue_extraction`, P11 F2 idempotency probe via `MemoryRepository.upsert_by_message_id`) and the direct Celery enqueues (P11 F4 malformed payload, P11 F10 deactivated-instance, P13 A1/A2 spoof payload) are by deliberate design what those pillars are TESTING. Replacing them with HTTP-routed equivalents would either (a) defeat the assertion (F1's latency budget IS the in-process enqueue path, not a network round-trip) or (b) require constructing malformed/spoof payloads that the legitimate API path cannot produce (F4, F10, A1, A2). These five callsites are therefore exempted from `D-verify-task-pure-http-2026-05-05`'s scope and that exemption is now an architectural rule:
+
+> **Producer-side exemption:** A verification pillar is permitted to act as a direct Celery producer (`task.delay()` / `task.apply_async()`) and as a direct service-layer caller (`Service(...).method()` / `Repository(...).method()`) WHEN AND ONLY WHEN the assertion under test is a property of the producer-side path itself (latency, idempotency, or the worker's response to a payload shape that the HTTP API contract does not permit). This exemption MUST be declared inline in the pillar's docstring with a one-line justification; otherwise the call must be routed through HTTP.
+
+This exemption preserves the security boundary `D-verify-task-pure-http` was actually written to enforce: the verify task does not hold privileges (DB role grants, secrets) that the production worker doesn't already have, because every producer-side call uses the SAME `app.worker.celery_app` and the SAME `app.memory.service.MemoryService` the production code uses. The privilege the verify task does NOT need (and per Commit 4 of Phase 2 does NOT have) is direct INSERT/UPDATE on `users`, `scope_assignments`, etc. — those are gated behind admin HTTP routes per Commit 12.
+
+The one direct ORM write that remains under this exemption (P11 F10 toggling `luciel_instances.active`) is borderline: it is not testing the mutation itself, only using it as setup/teardown for the Gate-4 assertion. Honest call: this gets a small admin POST `/admin/forensics/luciel_instances/{id}/active_step29c` route in Commit C, and P11 F10 is migrated to call it. Documented as Commit C.5 below.
+
+#### REVISED Commit C sub-shape (replaces v1's 4-sub-commit shape)
+
+With reads, exempt-producer-calls, and the one borderline ORM write disambiguated, the honest sub-commit shape is:
+
+| Sub-commit | Scope | New endpoints (suffix `_step29c`) |
 | --- | --- | --- |
-| `pillar_11_async_memory.py` | 1 (line 191) | Read `memory_items` for the throwaway tenant |
-| `pillar_12_identity_stability.py` | 3 (lines 200, 286, 347) | Read `messages` / `api_keys` for identity-stability assertions |
-| `pillar_13_cross_tenant_identity.py` | 7 (lines 314, 447, 465, 524, 582, 600, 642) | Multi-tenant SELECTs on `agents`, `users`, `messages`, `api_keys`, `scope_assignments` |
-| `pillar_14_departure_semantics.py` | 1 (line 374) | Departure semantics forensics |
+| **C.1** | P11 — 7 forensic reads → admin GETs. NO change to F1/F2/F4/F10 producer-side calls (declare exemption in docstring). | 4 GETs: `/admin/forensics/api_keys` (id-or-prefix lookup), `/admin/forensics/memory_items` (by tenant + filters), `/admin/forensics/admin_audit_logs` (by tenant + action), `/admin/forensics/luciel_instances/{id}` (state read). |
+| **C.2** | P12 — 5 forensic reads → admin GETs (some reuse from C.1). | 1 new GET: `/admin/forensics/messages` (by tenant + user/session/order). `api_keys` and `agents` reuse C.1 + a new `/admin/forensics/agents` route. So 1–2 new endpoints. |
+| **C.3** | P13 — 10 forensic reads → admin GETs (heavy reuse from C.1+C.2). NO change to A1/A2 producer-side spoof enqueue (declare exemption). | 0–1 new endpoint: `/admin/forensics/admin_audit_logs` filter extension to include `action_in=[...]` for the multi-action spoof poll, if not already covered by C.1's design. |
+| **C.4** | P14 — 5 forensic reads → admin GETs (likely full reuse). | 1 new GET: `/admin/forensics/users/{id}` (state read). |
+| **C.5** | P11 F10 — the one borderline ORM write (`luciel_instances.active` toggle). Admin POST route + harness migration; F10 docstring updated to reflect HTTP-routed setup. | 1 new POST: `/admin/forensics/luciel_instances/{id}/active`. |
+| **C.6** | Cross-pillar cleanup — drop `from app.db.session import SessionLocal` from all four pillar files; consolidate inline `_worker_reachable()` (P11 + P13) into new `app/verification/_infra_probes.py`; harness module `app/verification/http_client.py` gains a small `forensics_get(path, **filters)` convenience wrapper to keep callsites short. | 0 new endpoints; 1 new module. |
 
-**Honest scope assessment:** This is 12 SELECT statements, NOT 12 endpoints (some likely consolidate). Estimated 4-7 new admin GET routes. Each must be `platform_admin`-gated.
+**Total estimated endpoint surface:** 6–8 new admin routes (5–7 GETs + 1 POST), all `platform_admin`-gated, all with audit-log rows on call, all returning forensic-shape JSON. Each sub-commit is followed by a verify gate (FINAL STEP 26 MATRIX 23/23 green) before the next sub-commit starts. The `SessionLocal` import is dropped per-pillar inside C.1–C.4; the import line stays present in any pillar still under migration to keep mid-state honest.
 
-**Resolution path (NOT implemented in this commit, only documented):**
-1. Enumerate every SELECT (column list, WHERE shape).
-2. Design admin GET routes returning the projection each pillar needs.
-3. Migrate one file at a time (P11 first — smallest), re-verify suite green after each.
-4. Drop `from app.db.session import SessionLocal` from each pillar; do NOT delete the import from the verify image until all four are migrated, to avoid mid-migration breakage.
+**Verify-after-every-commit doctrine** is enforced from C.1 through C.6 inclusive. Any sub-commit whose verify gate is not 23/23 green halts C-series work until the regression is understood and either fixed or honestly logged as a new drift.
 
 ### D-call-helper-missing-params-kwarg-2026-05-05
 
-**Surface:** `app/verification/http_client.py:call()` does not accept `params=`. P14 line 347 has the workaround comment. Only one site currently uses inlined query strings.
+RESOLVED 2026-05-06. See `docs/CANONICAL_RECAP.md` §15 "Resolved by Step 29 (verify-harness debt closure, no production touch)" for full resolution evidence. Original surface and resolution path (extend `call()` with `params=` kwarg, migrate P14 inlined query string, add unit tests) preserved here for cross-reference:
 
-**Resolution path (NOT implemented in this commit, only documented):**
-1. Extend `call()` signature: `def call(method, path, key, *, json=None, files=None, data=None, params=None, expect=200, client=None) -> httpx.Response`
-2. Forward `params=params` to `httpx.Client.request(...)`.
-3. Migrate P14's inlined `?audit_label=...` back to `params={"audit_label": ...}`.
-4. Add a one-line unit test asserting `call(...., params={"k": "v"})` builds the right query string.
+**Surface:** `app/verification/http_client.py:call()` did not accept `params=`. P14 line ~347 had the workaround comment. Only one site used inlined query strings.
 
-**Either drift can be the FIRST code commit after the harness lands**, or they can be folded into the same commit. The pytest harness commit should land FIRST so we have CI-gated verification of any subsequent change.
+**Resolution path (SHIPPED at Commit B `17cd12b`):**
+1. Extended `call()` signature: `def call(method, path, key, *, json=None, files=None, data=None, params=None, expect=200, client=None) -> httpx.Response`.
+2. Forwarded `params=params` to `httpx.Client.request(...)`.
+3. Migrated P14's inlined `?audit_label=...` back to `params={"audit_label": ...}`.
+4. Added 5 unit tests in `tests/verification/test_http_client_params.py` covering basic forwarding, URL-encoding of unsafe chars, interaction with pre-existing query strings, `params=None` no-op, `params={}` no-op.
+
+**Drift entry flipped to RESOLVED at Commit B.2 (`8a06652`).**
+
+### D-step29-audit-undercounts-verify-debt-2026-05-06
+
+(NEW, opened-and-closed in this commit B.3.) The 2026-05-05 v1 enumeration of `D-verify-task-pure-http-2026-05-05`'s surface counted `SessionLocal()` block opens (and miscounted that at 8 vs the true 12) but did not enumerate the reads inside each block, did not separate forensic reads from producer-side service/Celery calls, and did not surface the one borderline direct ORM write in P11 F10. The v1 estimate of "4-7 new admin GET routes" was based on this undercount and would have caused Commit C.1's sub-commit boundary to not match the actual code surface, leaving P11 partially migrated mid-Step-29.
+
+**Diagnosis:** The v1 audit was authored 2026-05-06 ~19:55 EDT under time pressure (Step 28 close-out in flight), and its §6 enumeration was a `grep -n SessionLocal` snapshot rather than a read of each block's body. The v1 also did not consider that some in-process calls are by deliberate design what the pillar is testing and therefore cannot be migrated without losing the assertion (the producer-side exemption now codified above).
+
+**Resolution (this commit, B.3, docs-only):** §6 above re-enumerated against the tree at `8a06652` with full per-callsite breakdown. New architectural rule "Producer-side exemption" added inline. Commit C sub-shape revised from v1's 4 sub-commits (estimated 4–7 GETs) to v2's 6 sub-commits C.1–C.6 (estimated 6–8 routes including 1 POST). §10 Commit C entry updated to point at this revised shape. No production state touched. No verify re-run — docs-only.
+
+**Forward-looking guard:** Future Step-N audit documents that enumerate code-surface debt MUST do so by reading each call-site's body (not just `grep` for the entry-point construct), MUST distinguish read-only forensics from producer-side mutations, and MUST declare any architectural exemption inline at the audit point rather than discovering it mid-implementation. A pre-implementation re-audit pass (B.3 here) is now the locked pattern when an audit's enumeration was not produced by per-callsite read.
+
+---
+
+**Either drift can be the FIRST code commit after the harness lands**, or they can be folded into the same commit — historical recommendation, superseded by the no-deferral commit order locked in §10 below.
 
 ---
 
@@ -284,7 +389,7 @@ The next commit (which DOES change code) must:
 2. ✅ `pytest -m verify` against a running backend produces 23/23 green matching today's `python -m app.verification`.
 3. ✅ FINAL STEP 26 MATRIX runner (`__main__.py`) remains intact and continues to work — the pytest harness is **additive**, not a replacement, until CI proves stable for ≥1 week.
 4. ✅ `.github/workflows/verify.yml` runs on push to `step-28-hardening-impl` and produces the same 23/23 green result.
-5. ✅ Closes drifts `D-verify-task-pure-http-2026-05-05` AND `D-call-helper-missing-params-kwarg-2026-05-05` within Step 29 — NOT deferred to a follow-up step. Per the 2026-05-06 ordering revision (see §10 below), both drift closures land BEFORE the pytest harness so the harness wraps the honest end-state, not the transitional one. **Status update 2026-05-06 ~20:50 EDT: `D-call-helper-missing-params-kwarg-2026-05-05` is now RESOLVED — code shipped at `17cd12b` (Commit B), drift entry flipped to RESOLVED at Commit B.2 (this commit). Resolution evidence: `step29-commit-b1-local.json` 23/23 green run, which exercises the post-B `params=` kwarg path in P14. `D-verify-task-pure-http-2026-05-05` remains OPEN and is owned by Commit C.**
+5. ✅ Closes drifts `D-verify-task-pure-http-2026-05-05` AND `D-call-helper-missing-params-kwarg-2026-05-05` within Step 29 — NOT deferred to a follow-up step. Per the 2026-05-06 ordering revision (see §10 below), both drift closures land BEFORE the pytest harness so the harness wraps the honest end-state, not the transitional one. **Status update 2026-05-06 ~21:00 EDT: `D-call-helper-missing-params-kwarg-2026-05-05` is RESOLVED — code shipped at `17cd12b` (Commit B), drift entry flipped to RESOLVED at Commit B.2 (`8a06652`). Resolution evidence: `step29-commit-b1-local.json` 23/23 green run, which exercises the post-B `params=` kwarg path in P14. `D-verify-task-pure-http-2026-05-05` remains OPEN and is owned by Commit C, with a revised 6-sub-commit shape (C.1–C.6) authored by Commit B.3 (`<this-commit>`). The revised §6 enumeration distinguishes 27 forensic reads + 1 borderline ORM write (in scope) from 5 producer-side callsites (exempt by the new rule codified in B.3). Adjacent drift `D-step29-audit-undercounts-verify-debt-2026-05-06` was opened-and-closed by B.3 to log the honest reason the v1 enumeration was insufficient and the forward-looking guard against the same pattern in future Step-N audits.**
 
 ---
 
@@ -300,9 +405,10 @@ Revised order (all three commits land within Step 29):
 
 - **Commit A (this audit):** docs-only, no tag. SHIPPED at `4212072`.
 - **Commit B — `D-call-helper-missing-params-kwarg-2026-05-05` closure:** smallest of the three, lowest risk. Extend `app/verification/http_client.py:call()` to accept `params=` and forward to `httpx`. Migrate P14 line 347's inlined `?audit_label=...` back to `params={"audit_label": ...}`. Add a unit test for `call(..., params={"k": "v"})`. Verify FINAL STEP 26 MATRIX 23/23 green before moving on. Verify-after-every-commit doctrine RE-ENGAGES here. No tag. **SHIPPED at `17cd12b`. Drift entry RESOLVED at Commit B.2 (docs-only flip, no production touch, no verify re-run — resolution evidence is the post-B.1 `step29-commit-b1-local.json` 23/23 green run which exercises the post-B `params=` kwarg path in P14).**
-- **Commit B.2 — docs-only flip of `D-call-helper-missing-params-kwarg-2026-05-05` from DEFERRED to RESOLVED (NEW, 2026-05-06 ~20:50 EDT):** docs-only edit-pass on `docs/CANONICAL_RECAP.md` and this file. Strikes through the original DEFERRED drift entry with a forward-pointer to the new "Resolved by Step 29 (verify-harness debt closure, no production touch)" subsection in CANONICAL_RECAP §15, which records the resolution lineage: Commit B (`17cd12b`) shipped the code fix, Commit B.1 (`e4b03a4`) shipped an unrelated honesty fix discovered by verify-after-every-commit, and the resolution claim is backed by the `step29-commit-b1-local.json` 23/23 green run captured 2026-05-06 ~20:40 EDT (the B.1 run, not a B-only run, because B.1 superseded the B-only run in the audit trail). No production touch. No verify re-run — there is no code change to validate. No tag.
+- **Commit B.2 — docs-only flip of `D-call-helper-missing-params-kwarg-2026-05-05` from DEFERRED to RESOLVED (NEW, 2026-05-06 ~20:50 EDT):** docs-only edit-pass on `docs/CANONICAL_RECAP.md` and this file. Strikes through the original DEFERRED drift entry with a forward-pointer to the new "Resolved by Step 29 (verify-harness debt closure, no production touch)" subsection in CANONICAL_RECAP §15, which records the resolution lineage: Commit B (`17cd12b`) shipped the code fix, Commit B.1 (`e4b03a4`) shipped an unrelated honesty fix discovered by verify-after-every-commit, and the resolution claim is backed by the `step29-commit-b1-local.json` 23/23 green run captured 2026-05-06 ~20:40 EDT (the B.1 run, not a B-only run, because B.1 superseded the B-only run in the audit trail). No production touch. No verify re-run — there is no code change to validate. No tag. **SHIPPED at `8a06652`.**
+- **Commit B.3 — re-audit of `D-verify-task-pure-http-2026-05-05` surface + new drift `D-step29-audit-undercounts-verify-debt-2026-05-06` opened-and-closed (NEW, 2026-05-06 ~21:00 EDT):** docs-only re-audit. Reading the four pillar files end-to-end against the tree at `8a06652` revealed that the v1 §6 enumeration counted only `SessionLocal()` block opens (and miscounted at 8 vs the true 12), did not enumerate the reads inside each block (true count is 27 distinct forensic queries), did not separate read-only forensics from in-process producer-side calls (`MemoryService.enqueue_extraction`, `MemoryRepository.upsert_by_message_id`, `extract_memory_from_turn.delay()`/`apply_async()`), and did not surface the one borderline direct ORM write in P11 F10 (`luciel_instances.active` toggle). The v1's "4-7 new admin GET routes" estimate was based on this undercount. B.3 replaces §6 with a per-callsite breakdown by pillar, codifies a new architectural rule ("Producer-side exemption": a verification pillar may act as a direct Celery producer or service-layer caller WHEN AND ONLY WHEN the assertion under test is a property of the producer-side path itself — latency, idempotency, or a payload shape that the HTTP API contract does not permit — and the exemption must be declared inline in the pillar's docstring), and revises the Commit C sub-shape from v1's 4 sub-commits to v2's 6 sub-commits (C.1–C.6, estimated 6–8 new routes including 5–7 GETs and 1 POST for the borderline ORM write). The exemption preserves the security boundary `D-verify-task-pure-http` was actually written to enforce: the verify task does not hold privileges (DB role grants, secrets) that the production worker doesn't already have, since every exempt callsite uses the SAME `app.worker.celery_app` and the SAME `app.memory.service` that production code uses. The `luciel_worker` Postgres role's zero-INSERT/UPDATE-on-`scope_assignments`/`users` boundary established by Commit 4 of Phase 2 is unchanged. Driver discovery: while preparing C.1, a per-callsite read showed P11's `SessionLocal()` block at line 191–503 contains direct `MemoryService` and `MemoryRepository` calls plus `apply_async()` enqueues plus an ORM write to `luciel_instances.active` — surfaces v1 had not enumerated. Per the user's standing principle ("we are designing so let us not defer errors" / "honest long term fixes and not just taking shortcuts" / "we cannot make any compromises in our security and programmatic errors"), this re-audit had to land BEFORE C.1 was authored, not be discovered mid-commit. No production touch. No verify re-run — docs-only. No tag.
 - **Commit B.1 — `D-pillar-13-mode-gate-broker-only-2026-05-06` closure (NEW, inserted 2026-05-06 ~20:30 EDT):** discovered when B's local verify gate ran 22/23 with P13 silently FAIL on Assertion A2 in the absence of a local Celery worker. Diagnosis: P13's mode-detection line `mode_full = _broker_reachable()` checks Redis ping only (proves enqueue capability, not consumer presence) while P11's mode-detection correctly uses `_broker_reachable() and _worker_reachable()`; without a worker subscribed to the queue, P13 enqueues the spoof payload, sleeps 60s, then asserts on an audit row no worker had any chance to write. The Gate 6 worker code at `app/worker/tasks/memory_extraction.py` is innocent. Fix: mirror P11's `_worker_reachable()` helper inline in P13 (verbatim copy, no shared module yet) and update the mode-detect line to require both probes True. Inline duplication is intentional and bounded — both copies will move into a shared `app/verification/_infra_probes.py` module in Commit D when the pytest harness lift already needs to touch the verification infra layer. Doing the consolidation in B.1 would expand the blast radius to P11 unnecessarily. Verify gate after B.1: P13 declares MODE=degraded under no-worker conditions and the suite returns 23/23 green honestly. Full A1/A2 spoof-guard verification is owned by the prod gate that runs against the deployed Celery worker. No tag. Forward-looking guard recorded in CANONICAL_RECAP §15: any future verification pillar declaring a `MODE=full` branch dependent on async infrastructure must verify the FULL chain (broker AND consumer), never the nearest-hop reachability alone.
-- **Commit C — `D-verify-task-pure-http-2026-05-05` closure:** larger surface, 12 `SessionLocal()` SELECT sites across P11/P12/P13/P14 (enumerated in §6 above). Estimated 4-7 new platform-admin-gated GET endpoints. Migrate ONE pillar at a time, verify 23/23 green after each migration, drop `from app.db.session import SessionLocal` only when the pillar is fully HTTP. Sub-commit shape proposed to operator BEFORE authoring any of it. No tag until the suite is fully pure-HTTP.
+- **Commit C — `D-verify-task-pure-http-2026-05-05` closure (REVISED 2026-05-06 ~21:00 EDT by Commit B.3):** 27 forensic reads + 1 borderline ORM write across P11/P12/P13/P14 (per-callsite breakdown in §6 above). 5 producer-side callsites (P11 F1/F2/F4/F10 and P13 A1/A2 spoof enqueue) are scoped OUT under the new "Producer-side exemption" rule because the assertion under test IS the producer path. Estimated 6–8 new platform-admin-gated routes (5–7 GETs + 1 POST), all suffixed `_step29c`, all with audit-log rows on call. Sub-commit shape (replaces v1's 4-sub-commit shape): **C.1** P11 reads (4 GETs new), **C.2** P12 reads (1–2 GETs, some reuse), **C.3** P13 reads (0–1 GET, heavy reuse + spoof exemption declaration), **C.4** P14 reads (1 GET, mostly reuse), **C.5** P11 F10 borderline ORM write → admin POST + harness migration, **C.6** cross-pillar cleanup (drop `SessionLocal` imports, consolidate `_worker_reachable()` into `app/verification/_infra_probes.py`, add `forensics_get()` wrapper to `http_client.py`). Verify 23/23 green between each sub-commit. Drop `from app.db.session import SessionLocal` per-pillar inside C.1–C.4; the import line stays present in any pillar still under migration to keep mid-state honest. No tag until the suite is fully pure-HTTP.
 - **Commit D — pytest harness:** lands AFTER C, on the pure-HTTP suite, so the harness wraps the honest end-state. Thin `tests/integration/test_pillars.py`, pytest+pytest-asyncio in deps, `verify` marker, `.github/workflows/verify.yml`. Tag candidate: `step-29-complete`.
 
 Why this order matters: doing the harness first then refactoring under it would mean rewriting 12 pillar test bodies twice (once into pytest collection, once for the HTTP migration). Doing the HTTP migration first means the harness wraps a clean surface and Commit D becomes a thin wrapper rather than a deep rewrite.
