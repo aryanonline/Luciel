@@ -67,6 +67,12 @@ ACTION_WORKER_INSTANCE_DEACTIVATED = "worker_instance_deactivated"
 # Step 24.5b: worker defense-in-depth gates for User identity layer
 ACTION_WORKER_USER_INACTIVE = "worker_user_inactive"
 ACTION_WORKER_IDENTITY_SPOOF_REJECT = "worker_identity_spoof_reject"
+# Step 29.y Cluster 4 (E-3): permanent (non-transient) task
+# failures route through _reject_with_audit using this action,
+# so they land in DLQ deterministically and emit a single
+# rejection audit row covered by the
+# ux_admin_audit_logs_worker_reject_idem partial unique index.
+ACTION_WORKER_PERMANENT_FAILURE = "worker_permanent_failure"
 # Step 24.5b: Q6 resolution -- mandatory key rotation cascade on role change.
 # Distinct from ACTION_DEACTIVATE because the key was active+valid; this
 # captures "key was good but the User's scope assignment ended, so we
@@ -153,6 +159,7 @@ ALLOWED_ACTIONS = (
     ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
     ACTION_WORKER_USER_INACTIVE,
     ACTION_WORKER_IDENTITY_SPOOF_REJECT,
+    ACTION_WORKER_PERMANENT_FAILURE,  # Step 29.y Cluster 4 (E-3)
     # Step 28 C8 (P3-O): extractor save-time failure record.
     ACTION_EXTRACTOR_SAVE_FAIL,
     # Step 29 Commit C.5: forensic-only toggle of luciel_instances.active.
