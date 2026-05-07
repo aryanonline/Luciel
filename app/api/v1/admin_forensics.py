@@ -14,8 +14,18 @@ for the User.active assertion (A6 — User persists across
 departure); the two ApiKey reads (A1/A2) reuse C.1's
 `api_keys_step29c?id=` and the two MemoryItem reads (A5/A7)
 reuse C.2's `memory_items_step29c?tenant_id=&actor_user_id=`.
-C.5 adds one POST for the P11 F10 `luciel_instances.active`
-toggle. C.6 cross-pillar cleanup drops `from app.db.session
+C.5 (P11 F10 ORM-write migration) adds the first and only
+mutation in the C-series: a platform_admin POST at
+`/luciel_instances_step29c/{instance_id}/toggle_active` that
+forensically flips `luciel_instances.active` so P11's instance-
+liveness Gate-4 assertion can be set up and torn down without
+direct ORM writes from inside the verify harness. The route
+emits an `ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE` audit row
+BEFORE mutating active so an audit-write failure aborts the
+mutation; the audit-row-before-mutation invariant is pinned by
+an AST test in tests/api/test_admin_forensics_step29c.py
+(test 18) and the ALLOWED_ACTIONS membership invariant by
+test 19. C.6 cross-pillar cleanup drops `from app.db.session
 import SessionLocal` from the four pillar files.
 
 Routes
@@ -43,8 +53,11 @@ Routes
         ?session_id=<str>               # P13 setup-message lookup
         &limit=<int=100>
     GET /api/v1/admin/forensics/users_step29c/{user_id}    # P14, C.4
+    POST /api/v1/admin/forensics/luciel_instances_step29c
+         /{instance_id}/toggle_active                     # P11 F10, C.5
+        body: {"active": <bool>}
 
-All routes (4 in C.1, +1 in C.3, +1 in C.4 = 6 today):
+All routes (4 in C.1, +1 in C.3, +1 in C.4 GET, +1 in C.5 POST = 7 today):
   - require platform_admin via ScopePolicy.is_platform_admin
   - are rate-limited via ADMIN_RATE_LIMIT
   - are SELECT-only against tables the API process's luciel_admin
@@ -124,13 +137,21 @@ from app.middleware.rate_limit import (
     get_api_key_or_ip,
     limiter,
 )
-from app.models.admin_audit_log import AdminAuditLog
+from app.models.admin_audit_log import (
+    ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE,
+    AdminAuditLog,
+    RESOURCE_LUCIEL_INSTANCE,
+)
 from app.models.api_key import ApiKey
 from app.models.luciel_instance import LucielInstance
 from app.models.memory import MemoryItem
 from app.models.message import MessageModel
 from app.models.user import User
 from app.policy.scope import ScopePolicy
+from app.repositories.admin_audit_repository import (
+    AdminAuditRepository,
+    AuditContext,
+)
 
 
 router = APIRouter(prefix="/admin/forensics", tags=["admin", "forensics"])
@@ -279,6 +300,19 @@ class LucielInstanceForensic(BaseModel):
     created_at: datetime
 
     model_config = {"populate_by_name": True}
+
+
+class LucielInstanceToggleRequest(BaseModel):
+    """Request body for the C.5 forensic toggle POST.
+
+    A single field `active`. The route emits an audit row carrying
+    both the previous and the requested value, then mutates the row
+    only if the previous value differs (no-op writes are still
+    audited but skip the SQL UPDATE so audit history accurately
+    reflects observable state changes).
+    """
+
+    active: bool
 
 
 # ---------------------------------------------------------------------
@@ -650,4 +684,126 @@ def list_messages_forensic_step29c(
             )
             for r in rows
         ]
+    )
+
+
+@router.post(
+    "/luciel_instances_step29c/{instance_id}/toggle_active",
+    response_model=LucielInstanceForensic,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def toggle_luciel_instance_active_step29c(
+    request: Request,
+    db: DbSession,
+    instance_id: int,
+    payload: LucielInstanceToggleRequest,
+) -> LucielInstanceForensic:
+    """Forensic toggle of one luciel_instances row's `active` flag.
+
+    Step 29 Commit C.5 -- the first and only mutation in the C-series.
+    Backs P11 F10 at pillar_11_async_memory.py L535-541 (deactivate to
+    set up the instance-liveness Gate-4 assertion) and L614-615
+    (restore previous state in the finally-block teardown). Both
+    callsites previously used direct ORM writes
+    (`inst.active = ...; db.commit()`) inside the verify harness;
+    routing them through this POST migrates the last ORM-write
+    surface in the four-pillar verify suite to platform-admin HTTP.
+
+    platform_admin only. Rate-limited by ADMIN_RATE_LIMIT identically
+    to the C.1-C.4 forensic GETs.
+
+    Audit-row-before-mutation invariant
+    -----------------------------------
+
+    The route writes the admin_audit_log row BEFORE mutating
+    `luciel_instances.active`. If the audit insert fails (constraint
+    violation, permission denied, etc.), the function raises and the
+    SQL UPDATE never executes. Both writes commit atomically in a
+    single `db.commit()` so a commit-time failure rolls both back.
+    AdminAuditRepository.record(autocommit=False) gives us this
+    behavior: the row is `add()`'d and `flush()`'d (gets an id) but
+    only persists when the caller's commit succeeds.
+
+    The ordering is pinned by an AST test in
+    tests/api/test_admin_forensics_step29c.py (test 18) -- the audit
+    .record() call must appear at a lower line number than the
+    `inst.active = ...` assignment. A future maintainer who refactors
+    this route into a "mutate then audit" shape (which is wrong because
+    a mutation that fails to audit silently breaks the compliance
+    contract) breaks the test.
+
+    No-op writes
+    ------------
+
+    When the requested `active` already matches the row's current
+    state, we still write the audit row (so the harness's POST is
+    fully traceable in admin_audit_log) but skip the SQL UPDATE so
+    `updated_at` does not advance. This keeps audit history aligned
+    with observable state changes: a row ages only when something
+    actually changed.
+
+    Action constant
+    ---------------
+
+    ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE is deliberately distinct
+    from ACTION_DEACTIVATE / ACTION_REACTIVATE. The latter pair are
+    operational verbs used across many resource_types (tenants,
+    api_keys, memory items, scope assignments) and disambiguated only
+    by resource_type. The forensic toggle is NOT operational -- it
+    is a verify-harness fixture lever, and an auditor scanning
+    admin_audit_log for real LucielInstance deactivations should not
+    see harness traffic mixed in. The constant's membership in
+    ALLOWED_ACTIONS is pinned by test 19.
+
+    404 if the luciel_instances row does not exist.
+    """
+    _require_platform_admin_step29c(request)
+
+    inst = db.get(LucielInstance, instance_id)
+    if inst is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"luciel_instances row id={instance_id} not found.",
+        )
+
+    previous_active = bool(inst.active)
+    requested_active = bool(payload.active)
+
+    audit_ctx = AuditContext.from_request(request)
+    audit_repo = AdminAuditRepository(db)
+    # Audit FIRST -- if record() raises (e.g. unknown action/resource_type
+    # validation, DB constraint), the mutation below never executes.
+    audit_repo.record(
+        ctx=audit_ctx,
+        tenant_id=inst.scope_owner_tenant_id,
+        action=ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE,
+        resource_type=RESOURCE_LUCIEL_INSTANCE,
+        resource_pk=inst.id,
+        resource_natural_id=inst.instance_id,
+        domain_id=inst.scope_owner_domain_id,
+        agent_id=inst.scope_owner_agent_id,
+        luciel_instance_id=inst.id,
+        before={"active": previous_active},
+        after={"active": requested_active},
+        note="step29-c5-forensic-toggle",
+        autocommit=False,
+    )
+
+    # Mutate only if the requested value differs from current. No-op
+    # writes still audit (above) but do not bump updated_at.
+    if requested_active != previous_active:
+        inst.active = requested_active
+
+    db.commit()
+    db.refresh(inst)
+
+    return LucielInstanceForensic(
+        id=inst.id,
+        instance_id=inst.instance_id,
+        scope_owner_tenant_id=inst.scope_owner_tenant_id,
+        scope_level=inst.scope_level,
+        scope_owner_domain_id=inst.scope_owner_domain_id,
+        scope_owner_agent_id=inst.scope_owner_agent_id,
+        active=inst.active,
+        created_at=inst.created_at,
     )

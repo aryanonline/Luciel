@@ -1,11 +1,13 @@
 """
-Contract test for Step 29 Commits C.1, C.2, C.3, and C.4:
+Contract test for Step 29 Commits C.1, C.2, C.3, C.4, and C.5:
     GET /api/v1/admin/forensics/api_keys_step29c
     GET /api/v1/admin/forensics/memory_items_step29c
     GET /api/v1/admin/forensics/admin_audit_logs_step29c
     GET /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}
     GET /api/v1/admin/forensics/messages_step29c               (C.3)
     GET /api/v1/admin/forensics/users_step29c/{user_id}        (C.4)
+    POST /api/v1/admin/forensics/luciel_instances_step29c
+         /{instance_id}/toggle_active                          (C.5)
 
 C.2 EXTENDS:
     memory_items_step29c gains two query params (actor_user_id,
@@ -40,6 +42,29 @@ C.4 EXTENDS:
     cross-correlation). The two ApiKey reads in P14 (A1/A2) and
     the two MemoryItem reads (A5/A7) reuse C.1+C.2 endpoints with
     no new params; only A6 needs the new endpoint.
+
+C.5 EXTENDS:
+    Adds a seventh route, toggle_luciel_instance_active_step29c,
+    which is a POST (the first and only mutation in the C-series).
+    It backs the P11 F10 ORM-write migration: deactivate (setup)
+    and restore (teardown) of the instance-liveness Gate-4
+    assertion. C.5 ships TWO EXTRA AST tests beyond the C.x
+    pattern (per the bisect-surface compensation rule locked at
+    87e4068, which suspended the verify-after-every-commit
+    doctrine for C.4 -> D):
+      - Test 18 (audit-row-before-mutation invariant): the route's
+        AST shows the AdminAuditRepository.record() call appears at
+        a lower line number than the `inst.active = ...` assignment.
+        A future maintainer who refactors this route into a
+        "mutate then audit" shape silently breaks the compliance
+        contract -- this test fails loud the moment that happens.
+      - Test 19 (ALLOWED_ACTIONS membership invariant):
+        ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE is in
+        ALLOWED_ACTIONS in app/models/admin_audit_log.py. If a
+        maintainer adds the constant but forgets to extend the
+        tuple, AdminAuditRepository.record() raises ValueError
+        on every C.5 POST -- the route 500s in production. This
+        test catches the half-applied refactor at AST time.
 
 CONTRACT GUARDED:
     1. The four route functions exist in app/api/v1/admin_forensics.py
@@ -129,6 +154,7 @@ _ROUTE_FUNCTION_NAMES = (
     "get_luciel_instance_forensic_step29c",
     "list_messages_forensic_step29c",
     "get_user_forensic_step29c",
+    "toggle_luciel_instance_active_step29c",  # C.5
 )
 
 _RESPONSE_MODEL_NAMES = (
@@ -141,6 +167,7 @@ _RESPONSE_MODEL_NAMES = (
     "MessageForensic",
     "MessagesForensic",
     "UserForensic",
+    "LucielInstanceToggleRequest",  # C.5 request body schema
 )
 
 
@@ -607,6 +634,159 @@ def test_get_user_route_accepts_user_id_path_param() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 17 (C.5, EXTRA #1): audit-row-BEFORE-mutation invariant.
+#
+# The C.5 POST `toggle_luciel_instance_active_step29c` writes an
+# admin_audit_log row BEFORE mutating `luciel_instances.active`. If
+# a future maintainer flips the order (mutate then audit), an
+# audit-write failure would leave a mutation persisted with no
+# trace -- silently breaking the compliance contract that audit
+# rows must accompany every state change. This test pins the
+# ordering at AST time: the AdminAuditRepository(...).record(...)
+# call must appear at a lower line number than the
+# `inst.active = ...` assignment in the function body.
+#
+# This is one of the TWO EXTRA AST tests C.5 ships beyond the C.x
+# pattern, per the bisect-surface compensation rule locked at
+# 87e4068 (verify-after-every-commit doctrine suspended for
+# C.4 -> D).
+# ---------------------------------------------------------------------------
+
+def test_toggle_route_audits_before_mutating() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    func = _find_function(tree, "toggle_luciel_instance_active_step29c")
+    assert func is not None, (
+        "toggle_luciel_instance_active_step29c missing (Step 29 "
+        "Commit C.5)"
+    )
+
+    record_lineno: int | None = None
+    mutation_lineno: int | None = None
+
+    for node in ast.walk(func):
+        # AdminAuditRepository(...).record(...) -- a Call whose func
+        # is an Attribute with attr == "record". We do not pin the
+        # exact receiver chain (could be `audit_repo.record(...)` or
+        # `AdminAuditRepository(db).record(...)`); attribute name is
+        # the contract.
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "record":
+                if record_lineno is None or node.lineno < record_lineno:
+                    record_lineno = node.lineno
+        # `inst.active = ...` Assign with target Attribute.attr == "active"
+        # on a Name receiver. We pin Name receiver (not arbitrary
+        # expression) because the conventional pattern is
+        # `inst = db.get(...); inst.active = <new>`.
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if (
+                    isinstance(tgt, ast.Attribute)
+                    and tgt.attr == "active"
+                    and isinstance(tgt.value, ast.Name)
+                ):
+                    if mutation_lineno is None or node.lineno < mutation_lineno:
+                        mutation_lineno = node.lineno
+
+    assert record_lineno is not None, (
+        "toggle_luciel_instance_active_step29c must call "
+        ".record(...) (AdminAuditRepository's audit-row writer). "
+        "Without an audit row, every state mutation through this "
+        "route is invisible to compliance -- the precise outcome "
+        "the C.5 design rejects."
+    )
+    assert mutation_lineno is not None, (
+        "toggle_luciel_instance_active_step29c must contain an "
+        "`<name>.active = ...` assignment to actually flip the "
+        "flag. If the route returns the row unmodified, P11 F10's "
+        "deactivated-instance Gate-4 assertion can never fire."
+    )
+    assert record_lineno < mutation_lineno, (
+        f"toggle_luciel_instance_active_step29c records audit at "
+        f"line {record_lineno} but mutates active at line "
+        f"{mutation_lineno}. The audit row MUST be written before "
+        f"the mutation so an audit-insert failure aborts the "
+        f"mutation (atomic in a single commit). Reversing this "
+        f"order means a mutation can persist with no audit trail "
+        f"if the audit insert later raises -- the compliance "
+        f"contract this route exists to satisfy."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 18 (C.5, EXTRA #2): ALLOWED_ACTIONS membership invariant.
+#
+# AdminAuditRepository.record() validates `action` against
+# ALLOWED_ACTIONS in app/models/admin_audit_log.py and raises
+# ValueError on unknown actions. If a maintainer defines
+# ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE but forgets to extend
+# the ALLOWED_ACTIONS tuple, every C.5 POST raises ValueError at
+# the audit-write step -- which means the route 500s in
+# production while local sandboxes that never hit the audit path
+# stay green. This AST test catches the half-applied refactor.
+#
+# This is the second of the TWO EXTRA AST tests C.5 ships
+# beyond the C.x pattern, per the bisect-surface compensation
+# rule locked at 87e4068.
+# ---------------------------------------------------------------------------
+
+def test_action_luciel_instance_forensic_toggle_in_allowed_actions() -> None:
+    audit_log_path = _PROJECT_ROOT / "app" / "models" / "admin_audit_log.py"
+    tree = _parse(audit_log_path)
+
+    # 1. The constant exists at module-top-level as a string assignment.
+    constant_value: str | None = None
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign):
+            for tgt in stmt.targets:
+                if (
+                    isinstance(tgt, ast.Name)
+                    and tgt.id == "ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE"
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                ):
+                    constant_value = stmt.value.value
+    assert constant_value is not None, (
+        "ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE must be defined as a "
+        "module-level string constant in app/models/admin_audit_log.py "
+        "(Step 29 Commit C.5). The C.5 POST route imports it and passes "
+        "it as the action= argument to AdminAuditRepository.record(); "
+        "removing the constant 500s every forensic-toggle POST."
+    )
+
+    # 2. ALLOWED_ACTIONS is a tuple at module-top-level whose elements
+    #    include a Name node with id == "ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE".
+    allowed_actions_elts: list[ast.expr] | None = None
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign):
+            for tgt in stmt.targets:
+                if (
+                    isinstance(tgt, ast.Name)
+                    and tgt.id == "ALLOWED_ACTIONS"
+                    and isinstance(stmt.value, ast.Tuple)
+                ):
+                    allowed_actions_elts = list(stmt.value.elts)
+    assert allowed_actions_elts is not None, (
+        "ALLOWED_ACTIONS must be defined as a module-level tuple in "
+        "app/models/admin_audit_log.py."
+    )
+
+    member_names = {
+        elt.id
+        for elt in allowed_actions_elts
+        if isinstance(elt, ast.Name)
+    }
+    assert "ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE" in member_names, (
+        "ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE is defined but NOT "
+        "in ALLOWED_ACTIONS. AdminAuditRepository.record() validates "
+        "action against ALLOWED_ACTIONS and raises ValueError on "
+        "unknown actions, so the C.5 POST would 500 in production "
+        "while local sandboxes that never hit the audit path stay "
+        "green. Add the constant to the tuple in "
+        "app/models/admin_audit_log.py."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Manual runner so the suite works without pytest installed.
 # ---------------------------------------------------------------------------
 
@@ -628,6 +808,8 @@ def _run_all() -> int:
         test_user_forensic_projection_excludes_pii,
         test_user_forensic_projection_includes_synthetic,
         test_get_user_route_accepts_user_id_path_param,
+        test_toggle_route_audits_before_mutating,
+        test_action_luciel_instance_forensic_toggle_in_allowed_actions,
     ]
     failed = 0
     for t in tests:

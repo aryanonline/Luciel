@@ -82,6 +82,24 @@ ACTION_KEY_ROTATED_ON_ROLE_CHANGE = "key_rotated_on_role_change"
 # category go into after_json. resource_type=RESOURCE_MEMORY.
 ACTION_EXTRACTOR_SAVE_FAIL = "extractor_save_fail"
 
+# Step 29 Commit C.5: forensic toggle of luciel_instances.active via
+# the platform_admin POST endpoint at
+#   /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}/toggle_active
+# This is intentionally distinct from ACTION_DEACTIVATE / ACTION_REACTIVATE
+# (which are the operational deactivate/reactivate verbs used across
+# tenants, api_keys, memory items, scope assignments, etc., disambiguated
+# only by resource_type). The forensic toggle is NOT an operational
+# admin action -- it is a verify-harness fixture lever exposed through
+# the same platform_admin gate as the C.1-C.4 forensic GETs, used by
+# pillar_11_async_memory.py F10 to set up its instance-liveness Gate-4
+# assertion and to restore the prior state when the assertion finishes.
+# Giving it its own ACTION constant keeps the audit trail honest: a
+# compliance auditor scanning admin_audit_log for operational
+# deactivations of LucielInstance rows will not see harness traffic
+# mixed in, and a future incident response that needs to find harness
+# fingerprints can filter on this exact action.
+ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE = "luciel_instance_forensic_toggle"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -106,6 +124,8 @@ ALLOWED_ACTIONS = (
     ACTION_WORKER_IDENTITY_SPOOF_REJECT,
     # Step 28 C8 (P3-O): extractor save-time failure record.
     ACTION_EXTRACTOR_SAVE_FAIL,
+    # Step 29 Commit C.5: forensic-only toggle of luciel_instances.active.
+    ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE,
 )
 
 

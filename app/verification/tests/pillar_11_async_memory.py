@@ -26,14 +26,37 @@ Pre-conditions:
   - Pillar 2 has populated state.instance_agent for the audit-row scope
     assertion.
 
-Step 29 Commit C.1: forensic reads migrated to HTTP
----------------------------------------------------
+Step 29 Commit C.1 + Commit C.5: forensic reads + write migrated to HTTP
+-----------------------------------------------------------------------
 
-The 7 forensic reads in `_run_full_checks` (api_keys lookup at F1;
-memory_items idempotency probe at F2; admin_audit_logs polls at F3,
-F4, F9, F10; luciel_instances reads at F10) now go through the
+C.1 migrated the 7 forensic reads in `_run_full_checks` (api_keys
+lookup at F1; memory_items idempotency probe at F2; admin_audit_logs
+polls at F3, F4, F9, F10; luciel_instances reads at F10) to the
 platform_admin-gated HTTP endpoints under
 `/api/v1/admin/forensics/*_step29c` (see app/api/v1/admin_forensics.py).
+
+C.5 migrated the last forensic *write* in this pillar -- the F10
+`inst.active = False` toggle (deactivate to set up the instance-
+liveness Gate-4 assertion) and the matching teardown
+`inst.active = previous_active` (restore prior state) -- to a
+platform_admin POST at
+`/api/v1/admin/forensics/luciel_instances_step29c/{instance_id}/toggle_active`.
+The POST emits an `ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE` audit row
+before mutating active so an audit-write failure aborts the mutation.
+
+IMPORTANT: Unlike P12/P13/P14, this pillar still holds a direct
+`SessionLocal` import and opens a real DB session in `_run_full_checks`.
+The reason is the B.3 producer-side exemption: F1's
+`MemoryService(MemoryRepository(db), ModelRouter())` and F2's
+`MemoryRepository(db).upsert_by_message_id(...)` are direct producer-side
+calls (the assertions under test ARE the latency budget and idempotency
+contract on the producer path, which the HTTP layer cannot reach), and
+both need a real `Session` argument. The `LucielInstance` ORM-model
+import, however, IS dropped in C.5 because all `LucielInstance` access
+(reads + the toggle write) is now HTTP-mediated. The F10 producer-side
+`extract_memory_from_turn.apply_async` callsite remains direct under
+the B.3 producer-side exemption (the assertion under test IS the
+deactivated-instance Gate-4 behavior on the producer path).
 
 Producer-side exemption (Step 29 Commit B.3, drift
 D-step29-audit-undercounts-verify-debt-2026-05-06): the four
@@ -46,15 +69,6 @@ itself (latency budget, idempotency contract, malformed-payload Gate-1
 behavior, deactivated-instance Gate-4 behavior). Migrating these would
 not test the contract; the HTTP layer can never reach them. See
 docs/STEP_29_AUDIT.md Section 6 for the full rule.
-
-The F10 `inst.active = False` ORM write is OUT of scope for C.1; it is
-the only forensic *write* in this pillar and migrates separately in
-Step 29 Commit C.5 to a dedicated platform_admin POST endpoint.
-
-The `from app.db.session import SessionLocal` import remains until Step
-29 Commit C.6 because the F10 ORM write still uses it; that import gets
-removed at C.6 once the toggle is migrated to HTTP and the ORM session
-is no longer needed in this pillar.
 """
 
 from __future__ import annotations
@@ -63,8 +77,17 @@ import os
 import time
 from typing import Any
 
-from app.db.session import SessionLocal  # Retained until Step 29 Commit C.6
-from app.models.luciel_instance import LucielInstance  # Retained for F10 ORM write (migrates in C.5)
+# Step 29 Commit C.5: LucielInstance import dropped. F10's ORM-write
+# callsites (deactivate + restore) now go through the platform_admin POST
+# at /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}
+# /toggle_active, so this pillar no longer needs the LucielInstance model.
+# `SessionLocal` is RETAINED because F1/F2 producer-side direct calls
+# (`MemoryService(MemoryRepository(db), ...)` and
+# `MemoryRepository(db).upsert_by_message_id(...)`) require a real DB
+# Session per the B.3 producer-side exemption -- the assertions under
+# test (latency budget, idempotency) are properties of the producer path
+# and cannot be exercised over HTTP without defeating the contract.
+from app.db.session import SessionLocal
 from app.verification.fixtures import RunState
 from app.verification.http_client import BASE_URL, call, h, pooled_client
 from app.verification.runner import Pillar
@@ -204,8 +227,13 @@ class AsyncMemoryPillar(Pillar):
         deactivated-instance Gate 4). The forensic READS those
         producers depend on now go through HTTP.
 
-        F10 ORM write (`inst.active = False`) remains direct in C.1; it
-        migrates to a platform_admin POST in Commit C.5.
+        F10 ORM write (`inst.active = False`) is migrated in Commit
+        C.5 to a platform_admin POST at
+        `/api/v1/admin/forensics/luciel_instances_step29c/{instance_id}/toggle_active`.
+        Both the deactivate (setup) and the restore (teardown) go
+        through that POST. The route emits an
+        `ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE` audit row before
+        mutating active.
         """
         agent_ck = state.chat_key_for(state.instance_agent) if state.instance_agent else None
         if agent_ck is None:
@@ -511,10 +539,13 @@ class AsyncMemoryPillar(Pillar):
             # the agent instance and re-enqueue; expect WORKER_INSTANCE_DEACTIVATED.
             # We restore active=True at the end so teardown isn't surprised.
             #
-            # Forensic READ of luciel_instances goes through HTTP.
-            # ORM WRITE (`inst.active = False`) remains direct in C.1;
-            # it migrates to a platform_admin POST in Commit C.5.
-            # Producer-side .apply_async also stays direct.
+            # Step 29 Commit C.5: forensic READ + WRITE of luciel_instances
+            # both go through platform_admin HTTP. The deactivate (setup)
+            # and restore (teardown) use the new POST at
+            # /admin/forensics/luciel_instances_step29c/{id}/toggle_active
+            # which emits an ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE audit
+            # row before mutating active. Producer-side .apply_async stays
+            # direct under the B.3 producer-side exemption.
             with pooled_client() as c:
                 r = call(
                     "GET",
@@ -530,19 +561,30 @@ class AsyncMemoryPillar(Pillar):
             inst_body = r.json()
             previous_active = bool(inst_body.get("active"))
 
-            # ORM-side write: still required because C.1 doesn't migrate
-            # the toggle. The corresponding POST endpoint lands in C.5.
-            inst = db.get(LucielInstance, state.instance_agent)
-            if inst is None:
-                raise AssertionError(
-                    f"F10 instance_agent={state.instance_agent} missing (orm)"
+            # Step 29 Commit C.5: deactivate via HTTP POST. The route's
+            # audit-row-before-mutation invariant guarantees that if the
+            # audit insert fails, the SQL UPDATE never executes (atomic
+            # in a single commit; rolls back on commit failure).
+            with pooled_client() as c:
+                r = call(
+                    "POST",
+                    f"/api/v1/admin/forensics/luciel_instances_step29c/{state.instance_agent}/toggle_active",
+                    state.platform_admin_key,
+                    json={"active": False},
+                    expect=200,
+                    client=c,
                 )
-            inst.active = False
-            db.commit()
+            deact_body = r.json()
+            if bool(deact_body.get("active")) is not False:
+                raise AssertionError(
+                    f"F10 toggle_active POST returned active="
+                    f"{deact_body.get('active')!r} after requesting False; "
+                    f"row id={state.instance_agent}"
+                )
             # F10 needs a REAL session whose tenant matches, so Gate 3 passes
             # and Gate 4 (instance liveness) actually gets evaluated. Create
             # a throwaway session via the existing admin API, bound to the
-            # agent-scoped LucielInstance that we're about to deactivate.
+            # agent-scoped LucielInstance that we just deactivated.
             with pooled_client() as c:
                 r = call(
                     "POST",
@@ -609,10 +651,20 @@ class AsyncMemoryPillar(Pillar):
                 )
             finally:
                 # Restore active state regardless of assertion outcome.
-                # ORM write retained (C.5 will move this to the same
-                # POST endpoint as the deactivate write above).
-                inst.active = previous_active
-                db.commit()
+                # Step 29 Commit C.5: restore via the same toggle_active
+                # POST as the deactivate write above. We do NOT swallow
+                # the response error here -- if the restore fails, the
+                # next pillar run will see a still-deactivated instance,
+                # which is a real problem the harness must surface.
+                with pooled_client() as c:
+                    call(
+                        "POST",
+                        f"/api/v1/admin/forensics/luciel_instances_step29c/{state.instance_agent}/toggle_active",
+                        state.platform_admin_key,
+                        json={"active": previous_active},
+                        expect=200,
+                        client=c,
+                    )
 
         finally:
             db.close()
