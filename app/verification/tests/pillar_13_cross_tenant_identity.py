@@ -72,9 +72,12 @@ P13_TENANT_PREFIX = "step24-5b-p13-"
 def _broker_reachable() -> bool:
     """Best-effort Redis ping (mirrors Pillar 11). False on any failure.
 
-    Local dev uses Redis broker. Prod uses SQS (Step 27c-final). For the
-    purposes of "is there a worker consuming tasks", a healthy Redis
-    ping is the local proxy. Prod gate runs against SQS-backed worker.
+    Local dev uses Redis broker. Prod uses SQS (Step 27c-final). A healthy
+    broker means tasks can be enqueued -- it does NOT prove a worker is
+    subscribed and consuming. For full MODE detection we also require
+    _worker_reachable(); see drift D-pillar-13-mode-gate-broker-only-2026-05-06
+    in CANONICAL_RECAP for why this matters (silent FAIL of A2 when broker
+    is up but no worker is running locally).
     """
     try:
         import redis  # noqa: WPS433
@@ -86,6 +89,30 @@ def _broker_reachable() -> bool:
             url, socket_connect_timeout=1.0, socket_timeout=1.0,
         )
         return bool(client.ping())
+    except Exception:
+        return False
+
+
+def _worker_reachable() -> bool:
+    """Inspect Celery worker liveness via control.ping(). Empty list = none.
+
+    Mirrors Pillar 11's helper verbatim. Required because P13's full-mode
+    assertions (A1, A2) depend on a worker actually consuming the spoof
+    payload and routing it through Gate 6. Without a live worker, the
+    payload sits in the broker queue forever and A2 silently FAILs as if
+    Gate 6 itself were broken -- a misleading signal.
+
+    Will be deduplicated with Pillar 11's copy in Commit D (pytest harness
+    + shared verification infra module). Kept inline here to keep this
+    commit's scope tight to the mode-gate honesty fix.
+    """
+    try:
+        from app.worker.celery_app import celery_app
+    except ImportError:
+        return False
+    try:
+        replies = celery_app.control.ping(timeout=1.0)
+        return bool(replies)
     except Exception:
         return False
 
@@ -106,7 +133,12 @@ class CrossTenantIdentityPillar(Pillar):
             )
 
         # ---------- Mode detection ----------
-        mode_full = _broker_reachable()
+        # Both broker AND a live worker are required for MODE=full. Broker
+        # alone (the previous gate) means "can enqueue" but not "will be
+        # consumed" -- under that gate a local run with no worker silently
+        # FAILed A2 as if Gate 6's audit emission were broken. See drift
+        # D-pillar-13-mode-gate-broker-only-2026-05-06.
+        mode_full = _broker_reachable() and _worker_reachable()
 
         # ---------- Setup (always runs, both modes) ----------
         # Phase 0 builds the tenant pair, User, Agents, key, and session
