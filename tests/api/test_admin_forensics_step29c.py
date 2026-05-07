@@ -1,10 +1,11 @@
 """
-Contract test for Step 29 Commits C.1, C.2, and C.3:
+Contract test for Step 29 Commits C.1, C.2, C.3, and C.4:
     GET /api/v1/admin/forensics/api_keys_step29c
     GET /api/v1/admin/forensics/memory_items_step29c
     GET /api/v1/admin/forensics/admin_audit_logs_step29c
     GET /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}
     GET /api/v1/admin/forensics/messages_step29c               (C.3)
+    GET /api/v1/admin/forensics/users_step29c/{user_id}        (C.4)
 
 C.2 EXTENDS:
     memory_items_step29c gains two query params (actor_user_id,
@@ -27,6 +28,18 @@ C.3 EXTENDS:
        (actor_key_prefix) so P13 can scope the SPOOF_REJECT audit-row
        poll to the exact tenant-A platform_admin key without scanning
        the global audit log. Test 13 pins that filter.
+
+C.4 EXTENDS:
+    Adds a sixth route, get_user_forensic_step29c, with a strict
+    UserForensic projection that EXCLUDES `email` and `display_name`
+    (both PII -- the forensic surface has no business returning
+    them). Tests 14 and 15 pin the route's existence and the
+    PII-exclusion contract; test 16 pins that `synthetic` IS in
+    the projection (the boolean Option-B-onboarding-auto-created
+    flag is metadata, not PII, and is useful for forensic
+    cross-correlation). The two ApiKey reads in P14 (A1/A2) and
+    the two MemoryItem reads (A5/A7) reuse C.1+C.2 endpoints with
+    no new params; only A6 needs the new endpoint.
 
 CONTRACT GUARDED:
     1. The four route functions exist in app/api/v1/admin_forensics.py
@@ -115,6 +128,7 @@ _ROUTE_FUNCTION_NAMES = (
     "list_admin_audit_logs_forensic_step29c",
     "get_luciel_instance_forensic_step29c",
     "list_messages_forensic_step29c",
+    "get_user_forensic_step29c",
 )
 
 _RESPONSE_MODEL_NAMES = (
@@ -126,6 +140,7 @@ _RESPONSE_MODEL_NAMES = (
     "LucielInstanceForensic",
     "MessageForensic",
     "MessagesForensic",
+    "UserForensic",
 )
 
 
@@ -505,6 +520,93 @@ def test_list_admin_audit_logs_route_accepts_actor_key_prefix() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 14 (C.4): UserForensic projection MUST NOT include `email` or
+# `display_name`. Both are PII; the forensic surface is the worst
+# possible place for them to leak. P14 A6 only needs `active` (and
+# transitively `id`) to assert User identity persistence across
+# tenant departure, so the projection has no legitimate reason to
+# carry PII.
+# ---------------------------------------------------------------------------
+
+def test_user_forensic_projection_excludes_pii() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    cls = _find_classdef(tree, "UserForensic")
+    assert cls is not None, "UserForensic class missing"
+    fields = _annotated_field_names(cls)
+    for forbidden in ("email", "display_name"):
+        assert forbidden not in fields, (
+            f"UserForensic must NOT expose {forbidden!r}. Both "
+            f"`email` and `display_name` are PII; surfacing them "
+            f"on a forensic endpoint defeats the strict-projection "
+            f"rationale and creates a regulatory disclosure surface "
+            f"that this module deliberately does not have."
+        )
+    # Positive guard: A6's actual assertion needs `active` (and `id`
+    # for caller-side correlation).
+    for required in ("id", "active"):
+        assert required in fields, (
+            f"UserForensic must expose {required!r} (Step 29 "
+            f"Commit C.4). P14 A6 reads `active` to assert User "
+            f"identity persistence across departure; `id` is the "
+            f"caller-side correlation handle."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 15 (C.4): UserForensic projection DOES include `synthetic`.
+# Inverse-shape contract -- `synthetic` is a non-PII boolean flag
+# distinguishing Option-B-onboarding-auto-created users from real
+# users. P14 does not currently read it but future forensic flows
+# (PIPEDA access/erasure paths filter on it) need it surfaced. If
+# a future maintainer mistakenly classifies it as "too sensitive"
+# and drops it from the projection, this test catches that --
+# `synthetic` is metadata, NOT PII (it carries no information
+# about the underlying person).
+# ---------------------------------------------------------------------------
+
+def test_user_forensic_projection_includes_synthetic() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    cls = _find_classdef(tree, "UserForensic")
+    assert cls is not None, "UserForensic class missing"
+    fields = _annotated_field_names(cls)
+    assert "synthetic" in fields, (
+        "UserForensic must include `synthetic` (Step 29 Commit "
+        "C.4). It is a non-PII boolean distinguishing "
+        "Option-B-onboarding-auto-created users from real users; "
+        "PIPEDA access/erasure flows filter on it. Dropping it "
+        "from the projection silently degrades any future "
+        "forensic path that relies on the distinction."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 16 (C.4): get_user_forensic_step29c exists and accepts
+# user_id as a path parameter. The function-existence assertion is
+# already covered by test 1 via _ROUTE_FUNCTION_NAMES; this test
+# pins the path-parameter signature so a future refactor cannot
+# accidentally turn it into an unscoped list endpoint.
+# ---------------------------------------------------------------------------
+
+def test_get_user_route_accepts_user_id_path_param() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    func = _find_function(tree, "get_user_forensic_step29c")
+    assert func is not None, (
+        "get_user_forensic_step29c missing (Step 29 Commit C.4)"
+    )
+    arg_names = {a.arg for a in func.args.args}
+    arg_names.update({a.arg for a in func.args.kwonlyargs})
+    assert "user_id" in arg_names, (
+        "get_user_forensic_step29c must accept user_id as a "
+        "parameter. The route is pinned to "
+        "/users_step29c/{user_id} -- a path parameter, not a "
+        "list endpoint -- because there is no legitimate "
+        "forensic use case for enumerating all users; that "
+        "would be a PII-disclosure surface even with the "
+        "strict projection."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Manual runner so the suite works without pytest installed.
 # ---------------------------------------------------------------------------
 
@@ -523,6 +625,9 @@ def _run_all() -> int:
         test_list_messages_route_accepts_session_id,
         test_list_memory_items_route_accepts_c3_filters,
         test_list_admin_audit_logs_route_accepts_actor_key_prefix,
+        test_user_forensic_projection_excludes_pii,
+        test_user_forensic_projection_includes_synthetic,
+        test_get_user_route_accepts_user_id_path_param,
     ]
     failed = 0
     for t in tests:

@@ -9,10 +9,14 @@ one new endpoint `messages_step29c` for setup-message-id lookup,
 extends `memory_items_step29c` with `message_id` (exact) and
 `content_contains` (substring) filters, and extends
 `admin_audit_logs_step29c` with `actor_key_prefix` (exact) filter.
-C.4 extends further for P14 reads. C.5 adds one POST for the P11
-F10 `luciel_instances.active` toggle. C.6 cross-pillar cleanup
-drops `from app.db.session import SessionLocal` from the four
-pillar files.
+C.4 (P14 reads) adds one new endpoint `users_step29c/{user_id}`
+for the User.active assertion (A6 — User persists across
+departure); the two ApiKey reads (A1/A2) reuse C.1's
+`api_keys_step29c?id=` and the two MemoryItem reads (A5/A7)
+reuse C.2's `memory_items_step29c?tenant_id=&actor_user_id=`.
+C.5 adds one POST for the P11 F10 `luciel_instances.active`
+toggle. C.6 cross-pillar cleanup drops `from app.db.session
+import SessionLocal` from the four pillar files.
 
 Routes
 ------
@@ -38,8 +42,9 @@ Routes
     GET /api/v1/admin/forensics/messages_step29c
         ?session_id=<str>               # P13 setup-message lookup
         &limit=<int=100>
+    GET /api/v1/admin/forensics/users_step29c/{user_id}    # P14, C.4
 
-All routes (4 in C.1, +1 in C.3 = 5 today):
+All routes (4 in C.1, +1 in C.3, +1 in C.4 = 6 today):
   - require platform_admin via ScopePolicy.is_platform_admin
   - are rate-limited via ADMIN_RATE_LIMIT
   - are SELECT-only against tables the API process's luciel_admin
@@ -124,6 +129,7 @@ from app.models.api_key import ApiKey
 from app.models.luciel_instance import LucielInstance
 from app.models.memory import MemoryItem
 from app.models.message import MessageModel
+from app.models.user import User
 from app.policy.scope import ScopePolicy
 
 
@@ -233,6 +239,26 @@ class MessageForensic(BaseModel):
 
 class MessagesForensic(BaseModel):
     items: list[MessageForensic]
+
+
+class UserForensic(BaseModel):
+    """Strict-projection of `users` for forensic read.
+
+    Step 29 Commit C.4. Backs P14 A6 (`User.active` after departure
+    -- the foundational Q6 claim that a User leaving one tenant
+    keeps their platform identity). Projection EXCLUDES `email` and
+    `display_name` -- both are PII and the forensic surface has no
+    business returning them. `synthetic` is included as useful
+    metadata (it is a boolean flag distinguishing
+    Option-B-onboarding-auto-created users from real users; not
+    PII). `id` is returned as a string because the column is a
+    Postgres UUID and the API serialization is consistent across
+    the rest of the forensics surface.
+    """
+
+    id: str
+    active: bool
+    synthetic: bool
 
 
 class LucielInstanceForensic(BaseModel):
@@ -528,6 +554,54 @@ def get_luciel_instance_forensic_step29c(
         scope_owner_agent_id=row.scope_owner_agent_id,
         active=row.active,
         created_at=row.created_at,
+    )
+
+
+@router.get(
+    "/users_step29c/{user_id}",
+    response_model=UserForensic,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def get_user_forensic_step29c(
+    request: Request,
+    db: DbSession,
+    user_id: str,
+) -> UserForensic:
+    """Forensic read of one users row by UUID. platform_admin only.
+
+    Step 29 Commit C.4. Backs P14 A6's `db.get(User, user_id)`
+    assertion at pillar_14_departure_semantics.py L490 -- the
+    foundational Q6 claim that a User leaving one tenant does
+    NOT lose their platform identity (`active` stays True).
+    Returns the strict UserForensic projection (no email, no
+    display_name -- both are PII and have no place on a
+    forensic surface). 404 if the row does not exist.
+
+    The `user_id` path param is the UUID string form of the
+    primary key; it is parsed via uuid.UUID() to reject
+    malformed inputs early (a 400 is friendlier than letting
+    Postgres raise on the SELECT).
+    """
+    _require_platform_admin_step29c(request)
+
+    try:
+        parsed_id = uuid.UUID(user_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"user_id={user_id!r} is not a valid UUID.",
+        )
+
+    row = db.get(User, parsed_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"users row id={user_id} not found.",
+        )
+    return UserForensic(
+        id=str(row.id),
+        active=row.active,
+        synthetic=row.synthetic,
     )
 
 
