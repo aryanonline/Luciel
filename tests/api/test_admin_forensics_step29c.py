@@ -1,9 +1,15 @@
 """
-Contract test for Step 29 Commit C.1:
+Contract test for Step 29 Commits C.1 and C.2:
     GET /api/v1/admin/forensics/api_keys_step29c
     GET /api/v1/admin/forensics/memory_items_step29c
     GET /api/v1/admin/forensics/admin_audit_logs_step29c
     GET /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}
+
+C.2 EXTENDS:
+    memory_items_step29c gains two query params (actor_user_id,
+    agent_id) and one projection field (actor_user_id) so P12 can
+    perform identity-stability assertions over HTTP. Tests 8 and 9
+    pin those additions in place.
 
 CONTRACT GUARDED:
     1. The four route functions exist in app/api/v1/admin_forensics.py
@@ -315,6 +321,62 @@ def test_router_includes_admin_forensics() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 8 (C.2): MemoryItemForensic projection MUST include actor_user_id.
+# P12 A1 / A3 / A4 / A5 assert identity continuity by comparing each
+# memory row's actor_user_id against the platform User UUID held across
+# the promotion. If the projection drops actor_user_id, every P12
+# memory-row assertion silently degrades to "None != user_id" and the
+# pillar fails for the wrong reason. This is the inverse-shape contract
+# for C.2 (mirrors test 5 for after_json on AdminAuditLogForensic).
+#
+# Rationale for surfacing actor_user_id over HTTP: it is a platform
+# User UUID FK to users.id (Step 24.5b made it NOT NULL on every
+# memory row), not user-supplied content. content / extracted_text
+# remain excluded; actor_user_id is metadata, not message body.
+# ---------------------------------------------------------------------------
+
+def test_memory_item_forensic_projection_includes_actor_user_id() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    cls = _find_classdef(tree, "MemoryItemForensic")
+    assert cls is not None, "MemoryItemForensic class missing"
+    fields = _annotated_field_names(cls)
+    assert "actor_user_id" in fields, (
+        "MemoryItemForensic MUST include actor_user_id (Step 29 "
+        "Commit C.2). P12 A1 / A3 / A4 / A5 assert identity "
+        "continuity by comparing each memory row's actor_user_id to "
+        "the platform User UUID held across promotion. Without this "
+        "field every P12 memory assertion compares None against a "
+        "UUID and the pillar fails for the wrong reason."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 9 (C.2): list_memory_items_forensic_step29c accepts the two
+# filter parameters added in C.2 (actor_user_id and agent_id).
+# Without these query params the four P12 callsites cannot scope their
+# reads server-side, and A5 (cross-agent scope isolation) loses its
+# WHERE-clause coverage entirely.
+# ---------------------------------------------------------------------------
+
+def test_list_memory_items_route_accepts_c2_filters() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    func = _find_function(tree, "list_memory_items_forensic_step29c")
+    assert func is not None, (
+        "list_memory_items_forensic_step29c missing"
+    )
+    arg_names = {a.arg for a in func.args.args}
+    arg_names.update({a.arg for a in func.args.kwonlyargs})
+    for required in ("actor_user_id", "agent_id"):
+        assert required in arg_names, (
+            f"list_memory_items_forensic_step29c must accept "
+            f"{required!r} as a query parameter (added in Step 29 "
+            f"Commit C.2 for P12 identity-stability reads). Removing "
+            f"it forces the harness to filter client-side, which "
+            f"defeats A5's server-side scope-isolation contract."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Manual runner so the suite works without pytest installed.
 # ---------------------------------------------------------------------------
 
@@ -327,6 +389,8 @@ def _run_all() -> int:
         test_admin_audit_log_forensic_projection_includes_after_json,
         test_admin_forensics_response_models_defined,
         test_router_includes_admin_forensics,
+        test_memory_item_forensic_projection_includes_actor_user_id,
+        test_list_memory_items_route_accepts_c2_filters,
     ]
     failed = 0
     for t in tests:

@@ -1,4 +1,4 @@
-﻿"""Pillar 12 - Identity stability under role change (Step 24.5b Q6).
+"""Pillar 12 - Identity stability under role change (Step 24.5b Q6).
 
 Q6 resolution proof: when an Agent's role changes, the platform User
 identity persists and remains attributable across the change, while
@@ -6,8 +6,16 @@ the OLD Agent's API keys stop working immediately (mandatory key
 rotation, hard, no grace period).
 
 Self-contained. Mixed entry-point doctrine (Step 24.5b decision A):
-HTTP for setup, direct service call for promote(), direct DB for
-inspection.
+HTTP for setup, HTTP for promote(), HTTP for forensic inspection.
+
+Step 29 Commit C.2: forensic reads (5 callsites) migrated from
+direct SessionLocal/select(MemoryItem)/db.get(ApiKey) to the
+platform-admin-gated GET endpoints under /api/v1/admin/forensics/.
+The MemoryItem reads use `memory_items_step29c?actor_user_id=...&
+agent_id=...` (filters added in C.2). The ApiKey read uses
+`api_keys_step29c?id=...` (added in C.1). Producer-side exemption
+rule (B.3) is N/A for P12 -- this pillar has no producer-side
+calls; every assertion is HTTP + HTTP-forensic.
 
 Drift D18 accommodation: local memory extractor produces 0 rows for
 some test message shapes. Memory-row assertions are conditional --
@@ -22,15 +30,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from sqlalchemy import select
-
-from app.db.session import SessionLocal
-from app.models.api_key import ApiKey
-from app.models.memory import MemoryItem
 from app.models.scope_assignment import EndReason
-from app.repositories.admin_audit_repository import AuditContext
-from app.schemas.scope_assignment import ScopeAssignmentCreate
-from app.services.scope_assignment_service import ScopeAssignmentService
 from app.verification.fixtures import RunState
 from app.verification.http_client import call, pooled_client
 from app.verification.runner import Pillar
@@ -197,34 +197,38 @@ class IdentityStabilityPillar(Pillar):
             time.sleep(15)
 
             # ---------- A1: row1 attribution (conditional) ----------
-            db = SessionLocal()
-            try:
-                row1 = db.scalars(
-                    select(MemoryItem)
-                    .where(
-                        MemoryItem.tenant_id == tid,
-                        MemoryItem.actor_user_id == user_id,
-                        MemoryItem.agent_id == agent_a1_slug,
+            # Step 29 C.2: forensic GET via memory_items_step29c with
+            # actor_user_id + agent_id filters (added in C.2).
+            r = call(
+                "GET",
+                "/api/v1/admin/forensics/memory_items_step29c",
+                pa,
+                params={
+                    "tenant_id": tid,
+                    "actor_user_id": str(user_id),
+                    "agent_id": agent_a1_slug,
+                    "limit": 1,
+                },
+                expect=200,
+                client=c,
+            )
+            row1_items = r.json().get("items") or []
+            if not row1_items:
+                memory_skipped = True
+            else:
+                row1 = row1_items[0]
+                row1_actor_str = row1.get("actor_user_id")
+                if row1_actor_str is None or uuid.UUID(row1_actor_str) != user_id:
+                    raise AssertionError(
+                        f"A1 FAIL: row1.actor_user_id={row1_actor_str} "
+                        f"!= U.id={user_id}"
                     )
-                    .order_by(MemoryItem.id.desc())
-                    .limit(1)
-                ).first()
-                if row1 is None:
-                    memory_skipped = True
-                else:
-                    if row1.actor_user_id != user_id:
-                        raise AssertionError(
-                            f"A1 FAIL: row1.actor_user_id={row1.actor_user_id} "
-                            f"!= U.id={user_id}"
-                        )
-                    if row1.agent_id != agent_a1_slug:
-                        raise AssertionError(
-                            f"A1 FAIL: row1.agent_id={row1.agent_id!r} "
-                            f"!= A1.agent_id={agent_a1_slug!r}"
-                        )
-                    row1_id = row1.id
-            finally:
-                db.close()
+                if row1.get("agent_id") != agent_a1_slug:
+                    raise AssertionError(
+                        f"A1 FAIL: row1.agent_id={row1.get('agent_id')!r} "
+                        f"!= A1.agent_id={agent_a1_slug!r}"
+                    )
+                row1_id = row1.get("id")
 
             # ---------- 7. Promote A1 -> A2 ----------
             agent_a2_slug = f"p12-a2-{uuid.uuid4().hex[:6]}"
@@ -283,18 +287,23 @@ class IdentityStabilityPillar(Pillar):
                 )
 
             # ---------- A2: K1.active is False ----------
-            db = SessionLocal()
-            try:
-                k1_after = db.get(ApiKey, k1_id)
-                if k1_after is None:
-                    raise AssertionError(f"A2 FAIL: K1 (id={k1_id}) disappeared")
-                if k1_after.active:
-                    raise AssertionError(
-                        f"A2 FAIL (Q6 cascade did not fire): K1 still active=True "
-                        f"after promote(). Mandatory key rotation broken."
-                    )
-            finally:
-                db.close()
+            # Step 29 C.2: forensic GET via api_keys_step29c (added in C.1).
+            r = call(
+                "GET",
+                "/api/v1/admin/forensics/api_keys_step29c",
+                pa,
+                params={"id": k1_id},
+                expect=200,
+                client=c,
+            )
+            k1_after = r.json()
+            if not k1_after or k1_after.get("id") != k1_id:
+                raise AssertionError(f"A2 FAIL: K1 (id={k1_id}) not returned")
+            if k1_after.get("active") is True:
+                raise AssertionError(
+                    f"A2 FAIL (Q6 cascade did not fire): K1 still active=True "
+                    f"after promote(). Mandatory key rotation broken."
+                )
 
             # ---------- 9. Mint K2 + second turn under K2 ----------
             r = call(
@@ -344,73 +353,96 @@ class IdentityStabilityPillar(Pillar):
             time.sleep(15)
 
             # ---------- A3: row2 attribution (conditional) ----------
-            db = SessionLocal()
-            try:
-                row2 = db.scalars(
-                    select(MemoryItem)
-                    .where(
-                        MemoryItem.tenant_id == tid,
-                        MemoryItem.actor_user_id == user_id,
-                        MemoryItem.agent_id == agent_a2_slug,
+            # Step 29 C.2: forensic GET via memory_items_step29c with
+            # actor_user_id + agent_id filters.
+            r = call(
+                "GET",
+                "/api/v1/admin/forensics/memory_items_step29c",
+                pa,
+                params={
+                    "tenant_id": tid,
+                    "actor_user_id": str(user_id),
+                    "agent_id": agent_a2_slug,
+                    "limit": 1,
+                },
+                expect=200,
+                client=c,
+            )
+            row2_items = r.json().get("items") or []
+            if not row2_items:
+                memory_skipped = True
+            else:
+                row2 = row2_items[0]
+                row2_actor_str = row2.get("actor_user_id")
+                if row2_actor_str is None or uuid.UUID(row2_actor_str) != user_id:
+                    raise AssertionError(
+                        f"A3 FAIL: row2.actor_user_id={row2_actor_str} "
+                        f"!= U.id={user_id}"
                     )
-                    .order_by(MemoryItem.id.desc())
-                    .limit(1)
-                ).first()
-                if row2 is None:
-                    memory_skipped = True
-                else:
-                    if row2.actor_user_id != user_id:
-                        raise AssertionError(
-                            f"A3 FAIL: row2.actor_user_id={row2.actor_user_id} "
-                            f"!= U.id={user_id}"
-                        )
-                    if row2.agent_id != agent_a2_slug:
-                        raise AssertionError(
-                            f"A3 FAIL: row2.agent_id={row2.agent_id!r} "
-                            f"!= A2.agent_id={agent_a2_slug!r}"
-                        )
-                    row2_id = row2.id
+                if row2.get("agent_id") != agent_a2_slug:
+                    raise AssertionError(
+                        f"A3 FAIL: row2.agent_id={row2.get('agent_id')!r} "
+                        f"!= A2.agent_id={agent_a2_slug!r}"
+                    )
+                row2_id = row2.get("id")
 
-                # ---------- A4: both rows visible by user_id (conditional) ----------
-                if not memory_skipped and row1_id is not None and row2_id is not None:
-                    rows_by_user = list(db.scalars(
-                        select(MemoryItem).where(
-                            MemoryItem.tenant_id == tid,
-                            MemoryItem.actor_user_id == user_id,
-                        )
-                    ).all())
-                    row_ids_by_user = {r.id for r in rows_by_user}
-                    if row1_id not in row_ids_by_user:
-                        raise AssertionError(
-                            f"A4 FAIL: row1 (id={row1_id}) not visible by "
-                            f"actor_user_id={user_id}. identity continuity broken."
-                        )
-                    if row2_id not in row_ids_by_user:
-                        raise AssertionError(
-                            f"A4 FAIL: row2 (id={row2_id}) not visible by "
-                            f"actor_user_id={user_id}."
-                        )
+            # ---------- A4: both rows visible by user_id (conditional) ----------
+            # Step 29 C.2: forensic GET via memory_items_step29c with
+            # actor_user_id only (no agent_id) so both A1 and A2 rows return.
+            if not memory_skipped and row1_id is not None and row2_id is not None:
+                r = call(
+                    "GET",
+                    "/api/v1/admin/forensics/memory_items_step29c",
+                    pa,
+                    params={
+                        "tenant_id": tid,
+                        "actor_user_id": str(user_id),
+                        "limit": 1000,
+                    },
+                    expect=200,
+                    client=c,
+                )
+                rows_by_user = r.json().get("items") or []
+                row_ids_by_user = {item.get("id") for item in rows_by_user}
+                if row1_id not in row_ids_by_user:
+                    raise AssertionError(
+                        f"A4 FAIL: row1 (id={row1_id}) not visible by "
+                        f"actor_user_id={user_id}. identity continuity broken."
+                    )
+                if row2_id not in row_ids_by_user:
+                    raise AssertionError(
+                        f"A4 FAIL: row2 (id={row2_id}) not visible by "
+                        f"actor_user_id={user_id}."
+                    )
 
-                    # ---------- A5: scope isolation ----------
-                    rows_by_a1 = list(db.scalars(
-                        select(MemoryItem).where(
-                            MemoryItem.tenant_id == tid,
-                            MemoryItem.actor_user_id == user_id,
-                            MemoryItem.agent_id == agent_a1_slug,
-                        )
-                    ).all())
-                    rows_by_a1_ids = {r.id for r in rows_by_a1}
-                    if row1_id not in rows_by_a1_ids:
-                        raise AssertionError(
-                            f"A5 FAIL: row1 missing from A1-scoped query."
-                        )
-                    if row2_id in rows_by_a1_ids:
-                        raise AssertionError(
-                            f"A5 FAIL: row2 leaked into A1-scoped query. "
-                            f"scope isolation broken across promotion."
-                        )
-            finally:
-                db.close()
+                # ---------- A5: scope isolation ----------
+                # Step 29 C.2: forensic GET filtered by A1's agent_id.
+                # Server-side WHERE clause exercises the SQL filter; A5's
+                # leak-check re-expressed as "row2 NOT in returned ids".
+                r = call(
+                    "GET",
+                    "/api/v1/admin/forensics/memory_items_step29c",
+                    pa,
+                    params={
+                        "tenant_id": tid,
+                        "actor_user_id": str(user_id),
+                        "agent_id": agent_a1_slug,
+                        "limit": 1000,
+                    },
+                    expect=200,
+                    client=c,
+                )
+                rows_by_a1 = r.json().get("items") or []
+                rows_by_a1_ids = {item.get("id") for item in rows_by_a1}
+                if row1_id not in rows_by_a1_ids:
+                    raise AssertionError(
+                        f"A5 FAIL: row1 missing from A1-scoped query."
+                    )
+                if row2_id in rows_by_a1_ids:
+                    raise AssertionError(
+                        f"A5 FAIL: row2 leaked into A1-scoped query. "
+                        f"scope isolation broken across promotion."
+                    )
 
             # ---------- A6: K1 returns 401 ----------
             call(

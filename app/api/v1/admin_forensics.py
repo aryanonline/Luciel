@@ -1,10 +1,13 @@
 """Admin forensic-read endpoints for the verify harness.
 
-Step 29 Commit C.1 (P11 reads) lands the first four endpoints. C.2-C.4
-extend this module with additional GETs for P12/P13/P14 reads. C.5 adds
-one POST for the P11 F10 luciel_instances.active toggle. C.6 cross-
-pillar cleanup drops `from app.db.session import SessionLocal` from
-the four pillar files.
+Step 29 Commit C.1 (P11 reads) lands the first four endpoints. C.2
+(P12 reads) extends `memory_items_step29c` with `actor_user_id` and
+`agent_id` filters and adds `actor_user_id` to the
+`MemoryItemForensic` projection -- no new endpoint needed (api_keys
+lookup reuses `api_keys_step29c?id=` from C.1). C.3-C.4 extend
+further for P13/P14 reads. C.5 adds one POST for the P11 F10
+`luciel_instances.active` toggle. C.6 cross-pillar cleanup drops
+`from app.db.session import SessionLocal` from the four pillar files.
 
 Routes
 ------
@@ -13,7 +16,9 @@ Routes
         ?id=<int>
     GET /api/v1/admin/forensics/memory_items_step29c
         ?tenant_id=<str>
-        &user_id=<str>
+        &user_id=<str>                  # chat-end-user string (P11)
+        &actor_user_id=<uuid>           # platform User UUID (P12, C.2)
+        &agent_id=<str>                 # agent slug (P12, C.2)
         &message_id_not_null=<bool>
         &limit=<int=100>
     GET /api/v1/admin/forensics/admin_audit_logs_step29c
@@ -31,7 +36,12 @@ All four routes:
   - return strict-projection Pydantic models (key_hash NEVER returned;
     memory_items.content NEVER returned; admin_audit_log.after_json IS
     returned because the harness's F5/F6/F8 hygiene assertions require
-    it -- production code already guarantees no PII in after_json)
+    it -- production code already guarantees no PII in after_json;
+    memory_items.actor_user_id IS returned because P12 A1/A3/A4/A5
+    assert identity-stability across role changes by reading it.
+    actor_user_id is a platform User UUID, not user-supplied content,
+    and is the canonical attribution handle Step 24.5b makes
+    NOT NULL on every memory row.)
 
 No-read-audit decision (Step 29 Commit C.1, 2026-05-06)
 -------------------------------------------------------
@@ -84,6 +94,7 @@ Authored: Aryan Singh <aryans.www@gmail.com>, Step 29 Commit C.1.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -135,12 +146,20 @@ class MemoryItemForensic(BaseModel):
     """Strict-projection of `memory_items` for forensic read.
 
     `content` is NEVER included. The harness only reads ids and
-    metadata for idempotency probes and cross-tenant leak checks;
-    it never asserts on memory text content.
+    metadata for idempotency probes, cross-tenant leak checks, and
+    Step 24.5b actor-attribution assertions; it never asserts on
+    memory text content.
+
+    `actor_user_id` IS included (Step 29 Commit C.2): P12 A1/A3/A4/A5
+    require it to verify that platform User identity persists across
+    Agent role changes. It is the platform User UUID (FK to users.id),
+    NOT user-supplied content, and is the canonical attribution
+    handle Step 24.5b made NOT NULL on every memory row.
     """
 
     id: int
     user_id: str
+    actor_user_id: uuid.UUID | None
     tenant_id: str
     agent_id: str | None
     category: str
@@ -279,21 +298,45 @@ def list_memory_items_forensic_step29c(
     db: DbSession,
     tenant_id: str = Query(..., max_length=100),
     user_id: str | None = Query(default=None, max_length=100),
+    actor_user_id: uuid.UUID | None = Query(default=None),
+    agent_id: str | None = Query(default=None, max_length=100),
     message_id_not_null: bool = Query(default=False),
     limit: int = Query(default=_LIMIT_DEFAULT, ge=1, le=_LIMIT_MAX),
 ) -> MemoryItemsForensic:
     """Forensic read of memory_items rows. platform_admin only.
 
-    Step 29 Commit C.1. Backs P11 F2 line 238 (idempotency probe
-    target lookup) and P13/P14 cross-tenant leak checks (later
-    sub-commits will reuse this endpoint). Returns the strict
-    MemoryItemForensic projection (no content). Hard limit 1000.
+    Step 29 Commit C.1 backs P11 F2 line 238 (idempotency probe target
+    lookup). Step 29 Commit C.2 extends the filter set with
+    `actor_user_id` (platform User UUID) and `agent_id` (agent slug)
+    so P12 A1/A3/A4/A5 identity-stability assertions can read
+    actor-attributed memory rows over HTTP. P13/P14 cross-tenant leak
+    checks reuse this endpoint in later sub-commits.
+
+    Filter combination semantics (all AND-joined; omit a param to
+    leave its dimension unconstrained):
+      - tenant_id is required (per-tenant isolation, no
+        cross-tenant scans even for platform_admin)
+      - user_id is the chat-end-user string
+        (memory_items.user_id, e.g. "pillar11-user")
+      - actor_user_id is the platform User UUID
+        (memory_items.actor_user_id FK -> users.id)
+      - agent_id is the agent slug
+        (memory_items.agent_id, e.g. "p12-a1-abc123")
+      - message_id_not_null narrows to rows where message_id is set
+        (Step 27b idempotency probe shape)
+
+    Returns the strict MemoryItemForensic projection (no content;
+    actor_user_id IS returned). Hard limit 1000.
     """
     _require_platform_admin_step29c(request)
 
     stmt = select(MemoryItem).where(MemoryItem.tenant_id == tenant_id)
     if user_id is not None:
         stmt = stmt.where(MemoryItem.user_id == user_id)
+    if actor_user_id is not None:
+        stmt = stmt.where(MemoryItem.actor_user_id == actor_user_id)
+    if agent_id is not None:
+        stmt = stmt.where(MemoryItem.agent_id == agent_id)
     if message_id_not_null:
         stmt = stmt.where(MemoryItem.message_id.is_not(None))
     stmt = stmt.order_by(MemoryItem.id.desc()).limit(limit)
@@ -304,6 +347,7 @@ def list_memory_items_forensic_step29c(
             MemoryItemForensic(
                 id=r.id,
                 user_id=r.user_id,
+                actor_user_id=r.actor_user_id,
                 tenant_id=r.tenant_id,
                 agent_id=r.agent_id,
                 category=r.category,
