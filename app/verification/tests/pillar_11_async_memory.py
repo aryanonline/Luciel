@@ -25,6 +25,36 @@ Pre-conditions:
     for the round-trip turn that triggers extraction).
   - Pillar 2 has populated state.instance_agent for the audit-row scope
     assertion.
+
+Step 29 Commit C.1: forensic reads migrated to HTTP
+---------------------------------------------------
+
+The 7 forensic reads in `_run_full_checks` (api_keys lookup at F1;
+memory_items idempotency probe at F2; admin_audit_logs polls at F3,
+F4, F9, F10; luciel_instances reads at F10) now go through the
+platform_admin-gated HTTP endpoints under
+`/api/v1/admin/forensics/*_step29c` (see app/api/v1/admin_forensics.py).
+
+Producer-side exemption (Step 29 Commit B.3, drift
+D-step29-audit-undercounts-verify-debt-2026-05-06): the four
+producer-side calls in this pillar -- F1 `MemoryService.enqueue_extraction`,
+F2 `MemoryRepository.upsert_by_message_id`, F4
+`extract_memory_from_turn.apply_async`, and F10 the second
+`extract_memory_from_turn.apply_async` -- intentionally remain direct
+because the assertion under test IS a property of the producer-side path
+itself (latency budget, idempotency contract, malformed-payload Gate-1
+behavior, deactivated-instance Gate-4 behavior). Migrating these would
+not test the contract; the HTTP layer can never reach them. See
+docs/STEP_29_AUDIT.md Section 6 for the full rule.
+
+The F10 `inst.active = False` ORM write is OUT of scope for C.1; it is
+the only forensic *write* in this pillar and migrates separately in
+Step 29 Commit C.5 to a dedicated platform_admin POST endpoint.
+
+The `from app.db.session import SessionLocal` import remains until Step
+29 Commit C.6 because the F10 ORM write still uses it; that import gets
+removed at C.6 once the toggle is migrated to HTTP and the ORM session
+is no longer needed in this pillar.
 """
 
 from __future__ import annotations
@@ -33,13 +63,8 @@ import os
 import time
 from typing import Any
 
-from sqlalchemy import func, select
-
-from app.db.session import SessionLocal
-from app.models.admin_audit_log import AdminAuditLog
-from app.models.api_key import ApiKey
-from app.models.luciel_instance import LucielInstance
-from app.models.memory import MemoryItem
+from app.db.session import SessionLocal  # Retained until Step 29 Commit C.6
+from app.models.luciel_instance import LucielInstance  # Retained for F10 ORM write (migrates in C.5)
 from app.verification.fixtures import RunState
 from app.verification.http_client import BASE_URL, call, h, pooled_client
 from app.verification.runner import Pillar
@@ -171,11 +196,25 @@ class AsyncMemoryPillar(Pillar):
 
         Each sub-assertion is wrapped to surface its failure cleanly in
         the matrix detail string.
+
+        Producer-side exemption (Step 29 Commit B.3): F1, F2, F4, and the
+        F10 second .apply_async are direct producer-side calls --
+        the assertion under test is a property of the producer path
+        itself (latency, idempotency, malformed-payload Gate 1,
+        deactivated-instance Gate 4). The forensic READS those
+        producers depend on now go through HTTP.
+
+        F10 ORM write (`inst.active = False`) remains direct in C.1; it
+        migrates to a platform_admin POST in Commit C.5.
         """
         agent_ck = state.chat_key_for(state.instance_agent) if state.instance_agent else None
         if agent_ck is None:
             raise AssertionError(
                 "F0 full mode needs agent-bound chat key from pillar 4"
+            )
+        if not state.platform_admin_key:
+            raise AssertionError(
+                "F0 full mode needs platform_admin_key for forensic reads"
             )
 
         results: list[str] = []
@@ -184,6 +223,10 @@ class AsyncMemoryPillar(Pillar):
         # We don't flip the env flag here (would race with running app);
         # we assert that the enqueue PATH itself returns <100ms when
         # invoked directly. Real chat-turn timing is covered in pillar 5.
+        #
+        # Producer-side: MemoryService.enqueue_extraction is intentionally
+        # called directly (per producer-side exemption rule). The
+        # api_keys lookup that supplies real_key_prefix goes through HTTP.
         from app.memory.service import MemoryService
         from app.repositories.memory_repository import MemoryRepository
         from app.integrations.llm.router import ModelRouter
@@ -191,18 +234,27 @@ class AsyncMemoryPillar(Pillar):
         db = SessionLocal()
         try:
             svc = MemoryService(MemoryRepository(db), ModelRouter())
-            t0 = time.perf_counter()
-            # Look up the real key_prefix from the agent chat key id
-            # (mirrors how middleware populates request.state.key_prefix).
-            agent_key_row = db.scalars(
-                select(ApiKey).where(ApiKey.id == agent_ck["id"]).limit(1)
-            ).first()
-            if agent_key_row is None:
-                raise AssertionError(
-                    f"F1 agent chat key id={agent_ck['id']} missing from DB"
-                )
-            real_key_prefix = agent_key_row.key_prefix
 
+            # Look up the real key_prefix from the agent chat key id
+            # via the platform_admin forensic-read endpoint (mirrors how
+            # middleware populates request.state.key_prefix).
+            with pooled_client() as c:
+                r = call(
+                    "GET",
+                    "/api/v1/admin/forensics/api_keys_step29c",
+                    state.platform_admin_key,
+                    params={"id": agent_ck["id"]},
+                    expect=200,
+                    client=c,
+                )
+            real_key_prefix = r.json().get("key_prefix")
+            if not isinstance(real_key_prefix, str) or not real_key_prefix:
+                raise AssertionError(
+                    f"F1 forensic api_keys read returned no key_prefix: "
+                    f"{r.json()}"
+                )
+
+            t0 = time.perf_counter()
             try:
                 task_id = svc.enqueue_extraction(
                     user_id="pillar11-user",
@@ -233,22 +285,35 @@ class AsyncMemoryPillar(Pillar):
             # Assert the repository upsert returns False on second call
             # using a real message_id and a row pre-inserted to model
             # the replay scenario.
-            from app.models.memory import MemoryItem
-            real_msg_id = -1  # we'll fill in below
-            existing = db.scalars(
-                select(MemoryItem.message_id).where(
-                    MemoryItem.tenant_id == state.tenant_id,
-                    MemoryItem.message_id.is_not(None),
-                ).limit(1)
-            ).first()
-            if existing is not None:
+            #
+            # Forensic: existing-row lookup goes through HTTP.
+            # Producer-side: MemoryRepository.upsert_by_message_id stays
+            # direct (per producer-side exemption rule).
+            with pooled_client() as c:
+                r = call(
+                    "GET",
+                    "/api/v1/admin/forensics/memory_items_step29c",
+                    state.platform_admin_key,
+                    params={
+                        "tenant_id": state.tenant_id,
+                        "message_id_not_null": "true",
+                        "limit": 1,
+                    },
+                    expect=200,
+                    client=c,
+                )
+            existing_items = r.json().get("items") or []
+            existing_message_id = (
+                existing_items[0].get("message_id") if existing_items else None
+            )
+            if existing_message_id is not None:
                 # Use an existing row's message_id to test idempotent re-upsert.
                 ok = MemoryRepository(db).upsert_by_message_id(
                     user_id="pillar11-user",
                     tenant_id=state.tenant_id,
                     category="preference",
                     content="pillar 11 idempotency probe",
-                    message_id=existing,
+                    message_id=existing_message_id,
                     luciel_instance_id=state.instance_agent,
                 )
                 if ok is True:
@@ -265,24 +330,29 @@ class AsyncMemoryPillar(Pillar):
             # F3. Cross-tenant rejection: the synthetic enqueue in F1
             # used a non-existent session_id, which the worker rejects
             # at Gate 3 (session lookup fails -> WORKER_CROSS_TENANT_REJECT).
-            # Poll admin_audit_logs for that rejection row, with a 10s
-            # SLA budget (worker prefetch=1 + visibility=30s, but normal
-            # local round-trip is ~1-3s).
+            # Poll admin_audit_logs (via HTTP) for that rejection row,
+            # with a 10s SLA budget (worker prefetch=1 + visibility=30s,
+            # but normal local round-trip is ~1-3s).
             deadline = time.time() + 10.0
-            reject_row = None
+            reject_row: dict[str, Any] | None = None
             while time.time() < deadline:
-                reject_row = db.scalars(
-                    select(AdminAuditLog)
-                    .where(
-                        AdminAuditLog.action == "worker_cross_tenant_reject",
-                        AdminAuditLog.tenant_id == state.tenant_id,
+                with pooled_client() as c:
+                    r = call(
+                        "GET",
+                        "/api/v1/admin/forensics/admin_audit_logs_step29c",
+                        state.platform_admin_key,
+                        params={
+                            "tenant_id": state.tenant_id,
+                            "action": "worker_cross_tenant_reject",
+                            "limit": 1,
+                        },
+                        expect=200,
+                        client=c,
                     )
-                    .order_by(AdminAuditLog.id.desc())
-                    .limit(1)
-                ).first()
-                if reject_row is not None:
+                rows = r.json().get("rows") or []
+                if rows:
+                    reject_row = rows[0]
                     break
-                db.expire_all()
                 time.sleep(0.5)
             if reject_row is None:
                 raise AssertionError(
@@ -290,12 +360,17 @@ class AsyncMemoryPillar(Pillar):
                     "from synthetic enqueue within 10s; none found"
                 )
             results.append(
-                f"F3 cross-tenant rejection ok (audit_id={reject_row.id})"
+                f"F3 cross-tenant rejection ok (audit_id={reject_row['id']})"
             )
 
             # F4. Malformed-payload rejection. Enqueue a payload with
             # message_id of the wrong type via .apply_async(kwargs=...).
             # Gate 1 should reject with WORKER_MALFORMED_PAYLOAD.
+            #
+            # Producer-side: extract_memory_from_turn.apply_async stays
+            # direct (per producer-side exemption rule -- Gate 1 only
+            # fires if the broker-side payload contract is exercised
+            # exactly as the worker sees it).
             from app.worker.tasks.memory_extraction import extract_memory_from_turn
             extract_memory_from_turn.apply_async(
                 kwargs={
@@ -307,47 +382,52 @@ class AsyncMemoryPillar(Pillar):
                 },
             )
             deadline = time.time() + 10.0
-            malformed_row = None
+            malformed_row: dict[str, Any] | None = None
             while time.time() < deadline:
-                malformed_row = db.scalars(
-                    select(AdminAuditLog)
-                    .where(
-                        AdminAuditLog.action == "worker_malformed_payload",
-                        AdminAuditLog.tenant_id == state.tenant_id,
+                with pooled_client() as c:
+                    r = call(
+                        "GET",
+                        "/api/v1/admin/forensics/admin_audit_logs_step29c",
+                        state.platform_admin_key,
+                        params={
+                            "tenant_id": state.tenant_id,
+                            "action": "worker_malformed_payload",
+                            "limit": 1,
+                        },
+                        expect=200,
+                        client=c,
                     )
-                    .order_by(AdminAuditLog.id.desc())
-                    .limit(1)
-                ).first()
-                if malformed_row is not None:
+                rows = r.json().get("rows") or []
+                if rows:
+                    malformed_row = rows[0]
                     break
-                db.expire_all()
                 time.sleep(0.5)
             if malformed_row is None:
                 raise AssertionError(
                     "F4 expected WORKER_MALFORMED_PAYLOAD audit row within 10s"
                 )
             results.append(
-                f"F4 malformed payload rejection ok (audit_id={malformed_row.id})"
+                f"F4 malformed payload rejection ok (audit_id={malformed_row['id']})"
             )
 
             # F5. Audit-row content hygiene: rejection rows must NOT
             # contain raw user content. Spot-check the two rows we just
             # caught -- their after_json should only have opaque ids.
             for row in (reject_row, malformed_row):
-                after = row.after_json or {}
+                after = row.get("after_json") or {}
                 forbidden_keys = {"messages", "content", "user_message",
                                   "assistant_reply", "raw_content"}
                 leaked = forbidden_keys & set(after.keys())
                 if leaked:
                     raise AssertionError(
-                        f"F5 audit row {row.id} leaked content keys: {leaked}"
+                        f"F5 audit row {row['id']} leaked content keys: {leaked}"
                     )
             results.append("F5 audit-row content hygiene ok")
 
             # F6. actor_key_prefix preserved through enqueue -> worker ->
-            # audit. The synthetic F1 enqueue used agent_ck['key'][:10]
-            # as the prefix; the rejection audit row should carry it.
-            recorded_prefix = (reject_row.after_json or {}).get(
+            # audit. The synthetic F1 enqueue used real_key_prefix as the
+            # prefix; the rejection audit row should carry it.
+            recorded_prefix = (reject_row.get("after_json") or {}).get(
                 "actor_key_prefix"
             )
             if recorded_prefix != real_key_prefix:
@@ -383,7 +463,7 @@ class AsyncMemoryPillar(Pillar):
             # F8. Trace-id propagation. The F1 enqueue passed
             # trace_id='pillar11-trace'; assert the rejection audit row
             # echoes it in after_json.
-            recorded_trace = (reject_row.after_json or {}).get("trace_id")
+            recorded_trace = (reject_row.get("after_json") or {}).get("trace_id")
             if recorded_trace != "pillar11-trace":
                 raise AssertionError(
                     "F8 trace_id not propagated; "
@@ -395,33 +475,68 @@ class AsyncMemoryPillar(Pillar):
             # In prod the worker uses a separate Postgres role with limited
             # grants. Locally we share the role; we just assert the worker
             # did NOT touch retention/deletion/consent rows during these
-            # tests by counting audit rows for those resource_types.
-            forbidden_actions_count = db.scalar(
-                select(func.count())
-                .select_from(AdminAuditLog)
-                .where(
-                    AdminAuditLog.action.in_(
-                        ["cascade_deactivate", "knowledge_delete"]
-                    ),
-                    AdminAuditLog.actor_label.like("worker:%"),
-                )
-            )
-            if forbidden_actions_count and forbidden_actions_count > 0:
+            # tests.
+            #
+            # Migrated SQL `WHERE action IN ('cascade_deactivate',
+            # 'knowledge_delete')` to two HTTP probes (one per action),
+            # each with `actor_label_like='worker:'`. The original
+            # `func.count()` aggregate becomes len() on the returned
+            # row lists. limit=1 is enough -- we only need to detect
+            # "any" worker-actored row of either action.
+            forbidden_total = 0
+            for forbidden_action in ("cascade_deactivate", "knowledge_delete"):
+                with pooled_client() as c:
+                    r = call(
+                        "GET",
+                        "/api/v1/admin/forensics/admin_audit_logs_step29c",
+                        state.platform_admin_key,
+                        params={
+                            "tenant_id": state.tenant_id,
+                            "action": forbidden_action,
+                            "actor_label_like": "worker:",
+                            "limit": 1,
+                        },
+                        expect=200,
+                        client=c,
+                    )
+                forbidden_total += len(r.json().get("rows") or [])
+            if forbidden_total > 0:
                 raise AssertionError(
                     "F9 worker should never write retention/consent audit "
-                    f"rows; found {forbidden_actions_count}"
+                    f"rows; found {forbidden_total}"
                 )
             results.append("F9 worker scope guardrail ok")
 
             # F10. luciel_instance liveness gate (sub-assertion). Deactivate
             # the agent instance and re-enqueue; expect WORKER_INSTANCE_DEACTIVATED.
             # We restore active=True at the end so teardown isn't surprised.
-            inst = db.get(LucielInstance, state.instance_agent)
-            if inst is None:
+            #
+            # Forensic READ of luciel_instances goes through HTTP.
+            # ORM WRITE (`inst.active = False`) remains direct in C.1;
+            # it migrates to a platform_admin POST in Commit C.5.
+            # Producer-side .apply_async also stays direct.
+            with pooled_client() as c:
+                r = call(
+                    "GET",
+                    f"/api/v1/admin/forensics/luciel_instances_step29c/{state.instance_agent}",
+                    state.platform_admin_key,
+                    expect=(200, 404),
+                    client=c,
+                )
+            if r.status_code == 404:
                 raise AssertionError(
                     f"F10 instance_agent={state.instance_agent} missing"
                 )
-            previous_active = inst.active
+            inst_body = r.json()
+            previous_active = bool(inst_body.get("active"))
+
+            # ORM-side write: still required because C.1 doesn't migrate
+            # the toggle. The corresponding POST endpoint lands in C.5.
+            inst = db.get(LucielInstance, state.instance_agent)
+            if inst is None:
+                raise AssertionError(
+                    f"F10 instance_agent={state.instance_agent} missing (orm)"
+                )
             inst.active = False
             db.commit()
             # F10 needs a REAL session whose tenant matches, so Gate 3 passes
@@ -449,16 +564,9 @@ class AsyncMemoryPillar(Pillar):
                         f"F10 could not create probe session: {r.json()}"
                     )
 
-            # Now deactivate the instance and enqueue the probe.
-            inst = db.get(LucielInstance, state.instance_agent)
-            if inst is None:
-                raise AssertionError(
-                    f"F10 instance_agent={state.instance_agent} missing"
-                )
-            previous_active = inst.active
-            inst.active = False
-            db.commit()
             try:
+                # Producer-side: extract_memory_from_turn.apply_async
+                # stays direct (per producer-side exemption rule).
                 extract_memory_from_turn.apply_async(
                     kwargs={
                         "session_id": f10_session_id,
@@ -471,20 +579,25 @@ class AsyncMemoryPillar(Pillar):
                     },
                 )
                 deadline = time.time() + 10.0
-                deact_row = None
+                deact_row: dict[str, Any] | None = None
                 while time.time() < deadline:
-                    deact_row = db.scalars(
-                        select(AdminAuditLog)
-                        .where(
-                            AdminAuditLog.action == "worker_instance_deactivated",
-                            AdminAuditLog.tenant_id == state.tenant_id,
+                    with pooled_client() as c:
+                        r = call(
+                            "GET",
+                            "/api/v1/admin/forensics/admin_audit_logs_step29c",
+                            state.platform_admin_key,
+                            params={
+                                "tenant_id": state.tenant_id,
+                                "action": "worker_instance_deactivated",
+                                "limit": 1,
+                            },
+                            expect=200,
+                            client=c,
                         )
-                        .order_by(AdminAuditLog.id.desc())
-                        .limit(1)
-                    ).first()
-                    if deact_row is not None:
+                    rows = r.json().get("rows") or []
+                    if rows:
+                        deact_row = rows[0]
                         break
-                    db.expire_all()
                     time.sleep(0.5)
                 if deact_row is None:
                     raise AssertionError(
@@ -492,10 +605,12 @@ class AsyncMemoryPillar(Pillar):
                         "within 10s of deactivated-probe enqueue"
                     )
                 results.append(
-                    f"F10 instance liveness gate ok (audit_id={deact_row.id})"
+                    f"F10 instance liveness gate ok (audit_id={deact_row['id']})"
                 )
             finally:
                 # Restore active state regardless of assertion outcome.
+                # ORM write retained (C.5 will move this to the same
+                # POST endpoint as the deactivate write above).
                 inst.active = previous_active
                 db.commit()
 
