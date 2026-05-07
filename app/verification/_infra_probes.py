@@ -49,26 +49,77 @@ from __future__ import annotations
 import os
 
 
-def _broker_reachable() -> bool:
-    """Best-effort Redis ping. ``False`` on any failure (import, conn, auth).
+# Default queue name matches app/worker/celery_app.py task_default_queue.
+# Hardcoded here rather than imported so this probe stays cheap and stays
+# usable from CI environments where the celery_app import would fail.
+_BROKER_DEFAULT_QUEUE = "luciel-memory-tasks"
 
-    Local dev uses Redis broker. Prod uses SQS (Step 27c-final). A healthy
-    broker means tasks can be enqueued -- it does NOT prove a worker is
-    subscribed and consuming. Pair with ``_worker_reachable()`` for the
-    full mode-gate decision.
+
+def _broker_reachable() -> bool:
+    """Best-effort broker liveness. ``False`` on any failure.
+
+    Mode gate. Returns True iff this process can reach the broker that
+    Celery is configured against. The probe transport-switches on the
+    URL scheme:
+
+      - ``sqs://``  : ``boto3.get_queue_url(QueueName=...)`` against the
+        default task queue. Strict per-queue read; does NOT require
+        ``sqs:ListQueues`` -- safe to run from a least-privilege backend
+        role that only has GetQueueUrl + SendMessage on the one queue.
+      - ``redis://``, ``rediss://`` : ``redis.from_url(...).ping()`` (the
+        original Step 27b path; preserved for local dev and any
+        environment that still uses the Redis transport).
+      - anything else : False (no probe path defined).
+
+    History.
+        Originally redis-only (Step 27b). After the prod SQS migration
+        (Step 27c-final) the probe still pinged Redis, which silently
+        DEGRADED Pillar 11 in prod for the entire SQS rollout because
+        the redis ping always succeeded against the local-dev default
+        URL. Step 29.y (Pillar 25 root-cause investigation) discovered
+        that P11 had been DEGRADED-mode for weeks and the actual SQS
+        producer path was never exercised by verify until P25 landed.
+        This patch makes the probe SQS-aware so P11 can run in FULL
+        mode in prod.
+
+    A healthy broker means tasks can be enqueued -- it does NOT prove a
+    worker is subscribed and consuming. Pair with ``_worker_reachable()``
+    for the full mode-gate decision.
     """
-    try:
-        import redis  # noqa: WPS433 (intentional lazy import)
-    except ImportError:
-        return False
-    url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    try:
-        client = redis.Redis.from_url(
-            url, socket_connect_timeout=1.0, socket_timeout=1.0,
-        )
-        return bool(client.ping())
-    except Exception:
-        return False
+    broker_url = os.environ.get(
+        "CELERY_BROKER_URL",
+        os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+    )
+    if broker_url.startswith("sqs://"):
+        try:
+            import boto3  # noqa: WPS433 (intentional lazy import)
+        except ImportError:
+            return False
+        try:
+            region = os.environ.get("AWS_REGION", "ca-central-1")
+            client = boto3.client("sqs", region_name=region)
+            # GetQueueUrl is the cheapest auth+reach probe SQS exposes.
+            # It is one request that returns the queue URL or raises
+            # AWS.SimpleQueueService.NonExistentQueue / a permissions
+            # error. It does NOT require ListQueues.
+            client.get_queue_url(QueueName=_BROKER_DEFAULT_QUEUE)
+            return True
+        except Exception:
+            return False
+    if broker_url.startswith("redis://") or broker_url.startswith("rediss://"):
+        try:
+            import redis  # noqa: WPS433 (intentional lazy import)
+        except ImportError:
+            return False
+        try:
+            client = redis.Redis.from_url(
+                broker_url, socket_connect_timeout=1.0, socket_timeout=1.0,
+            )
+            return bool(client.ping())
+        except Exception:
+            return False
+    # Unknown scheme -- fail closed.
+    return False
 
 
 def _worker_reachable() -> bool:
