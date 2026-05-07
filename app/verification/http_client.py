@@ -17,6 +17,15 @@ Contract preserved from landed:
     truncated to 400 chars for log readability
   - Bearer header built via `h(key)` helper -- rejects non-str keys
     loudly (TypeError), matching landed behavior
+
+Step 29 Commit B (closes D-call-helper-missing-params-kwarg-2026-05-05):
+  - `params=` kwarg added. Forwarded to `httpx.Client.request(...)` which
+    URL-encodes safely. Prior callers that needed query parameters were
+    forced to inline `?key=value` into the path, which silently corrupts
+    URL parse on the server side if any value contains `&`, `=`, `?`, or
+    whitespace. P14 line ~349 (Phase 2 Commit 14, `42e95d1`) was the only
+    such inlined caller; this commit also migrates that callsite back to
+    `params=` form.
 """
 
 from __future__ import annotations
@@ -53,6 +62,7 @@ def call(
     json: Any = None,
     files: Any = None,
     data: Any = None,
+    params: dict[str, Any] | list[tuple[str, Any]] | None = None,
     expect: int | tuple[int, ...] = 200,
     client: httpx.Client | None = None,
 ) -> httpx.Response:
@@ -61,11 +71,18 @@ def call(
     If `client` is provided, it is reused (caller owns lifecycle). Otherwise
     an ephemeral client is opened for this single call.
 
+    `params=` is forwarded to httpx, which URL-encodes safely. Use this for
+    any query parameter; never inline `?k=v` into `path` because httpx will
+    NOT re-encode an already-formed querystring, so values containing `&`,
+    `=`, `?`, or whitespace silently corrupt URL parsing on the server.
+
     Returns the httpx.Response on success. Raises AssertionError on status
     mismatch, including method+path+expected+got and a truncated body.
     """
     def _do(c: httpx.Client) -> httpx.Response:
-        r = c.request(method, path, headers=h(key), json=json, files=files, data=data)
+        r = c.request(
+            method, path, headers=h(key), json=json, files=files, data=data, params=params
+        )
         allowed = (expect,) if isinstance(expect, int) else tuple(expect)
         if r.status_code not in allowed:
             raise AssertionError(

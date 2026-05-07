@@ -343,19 +343,23 @@ class DepartureSemanticsPillar(Pillar):
             # production -- rotates keys bound to A1's (tenant=T1) pair
             # only. K2 in T2 must remain untouched.
             #
-            # Phase 2 Commit 14: audit_label is a Query param on the route
-            # (not a body field). The verify call() helper has no params=
-            # kwarg, so we encode it inline. The label is a controlled
-            # f-string (alnum + colon + hyphen) -- safe to embed without
-            # urlencoding.
+            # Step 29 Commit B (closes D-call-helper-missing-params-kwarg-
+            # 2026-05-05): audit_label is a Query param on the route (not a
+            # body field). The Phase 2 Commit 14 workaround was to inline
+            # ?audit_label=... into the path because the verify call() helper
+            # had no params= kwarg. That worked because the label is a
+            # controlled f-string (alnum + colon + hyphen), but it was
+            # fragile: any future label containing `&`, `=`, `?`, or
+            # whitespace would silently corrupt URL parsing on the server.
+            # Step 29 Commit B extends call() with a params= kwarg that
+            # forwards to httpx (which URL-encodes safely), and migrates
+            # this callsite back to the kwarg form.
             audit_label_p14 = f"pillar_14:{t1_id}:departure"
             r = call(
                 "POST",
-                (
-                    f"/api/v1/admin/scope-assignments/{sa1_id}/end"
-                    f"?audit_label={audit_label_p14}"
-                ),
+                f"/api/v1/admin/scope-assignments/{sa1_id}/end",
                 pa,
+                params={"audit_label": audit_label_p14},
                 json={
                     "reason": EndReason.DEPARTED.value,
                     "note": f"P14: U departed T1 ({t1_id})",
