@@ -100,6 +100,37 @@ ACTION_EXTRACTOR_SAVE_FAIL = "extractor_save_fail"
 # fingerprints can filter on this exact action.
 ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE = "luciel_instance_forensic_toggle"
 
+# Step 29.y Cluster 1 (G-3 resolution): consent grant/withdraw/status are
+# PIPEDA-significant mutations. Every state change must leave an audit row
+# so a regulator can reconstruct who consented to what and when. Distinct
+# verbs (rather than reusing ACTION_CREATE/ACTION_DEACTIVATE) keep the
+# audit log searchable by the actual user-facing semantic ("the user
+# granted/withdrew consent to memory persistence"), not the implementation
+# detail ("a row was created/updated in user_consents"). Status reads do
+# NOT audit -- they are read-only and the volume would noise the trail,
+# matching the same convention applied to GET /admin/verification.
+ACTION_CONSENT_GRANT = "consent_grant"
+ACTION_CONSENT_WITHDRAW = "consent_withdraw"
+
+# Step 29.y Cluster 1 (G-4 resolution): a platform_admin key creating a
+# session under a tenant other than its own (or with no tenant binding
+# of its own) is a privileged cross-tenant operation. It is rare and
+# legitimate (verify suite, support tooling), but it must always leave
+# an audit row so the privileged use is auditable. Tenant-scoped callers
+# never trigger this -- their session creation is constrained to their
+# own tenant by the same scope check that guards every other write route.
+ACTION_SESSION_CREATE_CROSS_TENANT = "session_create_cross_tenant"
+
+# Step 29.y Cluster 1 (G-5 resolution): retention policies are PIPEDA
+# legal-compliance artifacts. Mutations to them MUST leave an audit row;
+# enforcement runs (the periodic delete-aged-rows job) ALSO leave one
+# per policy applied. ACTION_CREATE/ACTION_UPDATE/ACTION_DELETE_HARD are
+# reused for the CRUD verbs against RESOURCE_RETENTION_POLICY -- only
+# the enforcement and manual-purge verbs need new constants because
+# they are operationally distinct from "a human edited a policy."
+ACTION_RETENTION_ENFORCE = "retention_enforce"
+ACTION_RETENTION_MANUAL_PURGE = "retention_manual_purge"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -126,6 +157,12 @@ ALLOWED_ACTIONS = (
     ACTION_EXTRACTOR_SAVE_FAIL,
     # Step 29 Commit C.5: forensic-only toggle of luciel_instances.active.
     ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE,
+    # Step 29.y Cluster 1
+    ACTION_CONSENT_GRANT,
+    ACTION_CONSENT_WITHDRAW,
+    ACTION_SESSION_CREATE_CROSS_TENANT,
+    ACTION_RETENTION_ENFORCE,
+    ACTION_RETENTION_MANUAL_PURGE,
 )
 
 
@@ -142,6 +179,15 @@ RESOURCE_LUCIEL_INSTANCE = "luciel_instance"
 RESOURCE_API_KEY = "api_key"
 RESOURCE_KNOWLEDGE = "knowledge_embedding"  # Step 25
 RESOURCE_RETENTION_POLICY = "retention_policy"
+# Step 29.y Cluster 1: user_consents row is the auditable resource for
+# consent grant/withdraw. Distinct from RESOURCE_USER (which is the
+# platform User identity row, not the per-feature consent record).
+RESOURCE_CONSENT = "consent"
+# Step 29.y Cluster 1: sessions table -- scoped audit trail for the
+# privileged cross-tenant creation case (G-4). The session itself is
+# not normally audited (ordinary chat traffic is not an admin action),
+# only the cross-tenant creation by a platform_admin key is.
+RESOURCE_SESSION = "session"
 # Step 27b: async memory extraction worker writes to memory_items
 RESOURCE_MEMORY = "memory"
 # Step 24.5b: User identity layer (Q6 resolution)
@@ -167,6 +213,9 @@ ALLOWED_RESOURCE_TYPES = (
     # Step 24.5b
     RESOURCE_USER,
     RESOURCE_SCOPE_ASSIGNMENT,
+    # Step 29.y Cluster 1
+    RESOURCE_CONSENT,
+    RESOURCE_SESSION,
 )
 
 
