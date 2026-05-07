@@ -94,15 +94,22 @@ def pre_teardown_pillars(*, include_migration: bool = True) -> list[Pillar]:
     from app.verification.tests.pillar_22_db_grants_audit_log_append_only import PILLAR as P22
     from app.verification.tests.pillar_23_audit_log_hash_chain import PILLAR as P23
     from app.verification.tests.pillar_24_luciel_instance_forensic_toggle import PILLAR as P24
+    from app.verification.tests.pillar_25_worker_pipeline_liveness import PILLAR as P25
 
     # Order matches the landed list at __main__.py prior to D, with P9 placed at
     # the end of the pre-teardown segment so a slow schema-introspection failure
     # does not block the live-API pillars (1-8, 11-24) from reporting first.
     # Step 29.x: P24 appended after P23 to close the C.5 toggle-route
     # verify-debt thesis (G1 authz, G2 audit emission, G3 no-op idempotency).
+    # Step 29.y: P25 appended after P24 to close the worker-pipeline-
+    # liveness verify-debt found by diag15 (zero memory_extracted rows
+    # ever in production, P11 F4 dark since the SQS migration). P25
+    # asserts a worker-emitted audit row materializes in response to a
+    # backend-side enqueue on every verify run, regardless of whether
+    # the verify ECS task itself has broker network access.
     pillars: list[Pillar] = [
         P1, P2, P3, P4, P5, P6, P7, P8,
-        P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, P23, P24,
+        P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, P23, P24, P25,
     ]
     if include_migration:
         pillars.append(P9)
