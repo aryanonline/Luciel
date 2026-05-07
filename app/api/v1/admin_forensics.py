@@ -1005,46 +1005,6 @@ def worker_pipeline_probe_step29y(
     ).scalar_one_or_none() or 0
 
     started = time.monotonic()
-    # ---- Step 29.y diag v2: PURE-OBSERVATION variant. ----
-    # Difference from v1: we no longer touch `app.amqp.producer_pool` or
-    # call `app.connection_for_write()`. Both of those construct a kombu
-    # Connection and would mask the bug if the bug is "lazy pool init in
-    # the route's thread fails to inherit transport_options."
-    #
-    # We only read `conf.broker_transport_options` and `conf.broker_url`,
-    # which are dict reads on the Settings object and have no producer-
-    # pool side effects. This isolates whether the previously-failing
-    # task was healed by the redeploy alone, OR whether v1's eager pool
-    # access was effectively the fix. apply_async runs through its native
-    # lazy path with no warmup.
-    try:
-        import json as _json_diag
-        import logging as _log_diag
-        import threading as _thr_diag
-        from app.worker.celery_app import celery_app as _capp_diag
-        _diag_logger = _log_diag.getLogger("luciel.step29y.diag")
-        _diag_logger.error(
-            "STEP29Y_DIAGV2 conf.broker_transport_options=%s",
-            _json_diag.dumps(_capp_diag.conf.broker_transport_options, default=str),
-        )
-        _diag_logger.error(
-            "STEP29Y_DIAGV2 conf.broker_url=%s",
-            str(_capp_diag.conf.broker_url)[:80],
-        )
-        _diag_logger.error(
-            "STEP29Y_DIAGV2 thread.name=%s thread.ident=%s",
-            _thr_diag.current_thread().name,
-            _thr_diag.current_thread().ident,
-        )
-        _diag_logger.error(
-            "STEP29Y_DIAGV2 pre_publish_no_pool_warmup=true"
-        )
-    except Exception as _diag_err:
-        import logging as _log_diag2
-        _log_diag2.getLogger("luciel.step29y.diag").error(
-            "STEP29Y_DIAGV2 outer_error=%r", _diag_err
-        )
-    # ---- end Step 29.y diag v2 ----
     extract_memory_from_turn.apply_async(kwargs=kwargs)
 
     deadline = started + _PROBE_DEADLINE_SECONDS
