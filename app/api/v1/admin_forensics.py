@@ -123,9 +123,10 @@ Authored: Aryan Singh <aryans.www@gmail.com>, Step 29 Commit C.1.
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
@@ -139,6 +140,8 @@ from app.middleware.rate_limit import (
 )
 from app.models.admin_audit_log import (
     ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE,
+    ACTION_MEMORY_EXTRACTED,
+    ACTION_WORKER_MALFORMED_PAYLOAD,
     AdminAuditLog,
     RESOURCE_LUCIEL_INSTANCE,
 )
@@ -806,4 +809,251 @@ def toggle_luciel_instance_active_step29c(
         scope_owner_agent_id=inst.scope_owner_agent_id,
         active=inst.active,
         created_at=inst.created_at,
+    )
+
+
+# =====================================================================
+# Step 29.y -- Worker pipeline liveness probe (Pillar 25 backing route)
+#
+# Why this route exists
+# ---------------------
+#
+# Step 29.x diag15 found that production has had ZERO `memory_extracted`
+# audit rows ever, ZERO `worker_*` audit rows in the last 7 days, and
+# ZERO non-verify tenant messages in 7 days. That is consistent with
+# "no real customer traffic yet" but it ALSO means we have never
+# observed the Celery worker pipeline emit a single audit row in
+# production. Before REMAX Tier-3 onboarding (Step 30b) we MUST be
+# able to assert, on every verify run, that the worker pipeline is
+# alive and emitting audit rows -- otherwise the first real customer
+# message would be the first time we discover the pipeline is dead.
+#
+# The blocker for asserting this from the verify ECS task itself is
+# that the verify task does NOT have broker network access in prod
+# (Pillar 11 falls into MODE=degraded for the same reason; its broker
+# probe checks REDIS_URL which prod does not set -- prod uses SQS).
+# The backend container DOES have broker network access (it is the
+# Celery producer for every chat turn). So the verify task asks the
+# backend, over HTTP, to do a producer-side enqueue + audit-row poll,
+# and asserts on the result. That keeps verify pure-HTTP while still
+# exercising the real broker plane.
+#
+# Two modes
+# ---------
+#
+#   - mode=malformed (DEFAULT). Enqueues a payload with `message_id`
+#     of the wrong type. The worker's Gate 1 rejects it and writes
+#     ACTION_WORKER_MALFORMED_PAYLOAD. This proves: broker connection
+#     up, worker process up, worker accepting tasks, worker writing
+#     audit rows, DB write path live. NO LLM call, NO real memory row,
+#     fast (typically < 2s end-to-end). This is what Pillar 25 calls
+#     on every verify run.
+#
+#   - mode=full. Enqueues a real well-formed payload that exercises
+#     extract_memory_from_turn end-to-end through the LLM. Polls for
+#     ACTION_MEMORY_EXTRACTED. Slower (10-20s) and consumes LLM
+#     credits. NEVER fires from CI -- only callable manually with
+#     ?mode=full and a real `message_id` query param. Used pre-REMAX
+#     onboarding and after any worker-pipeline change to prove the
+#     happy path.
+#
+# What this route does NOT do
+# ---------------------------
+#
+# The probe does NOT write its OWN admin_audit_log row. The contract
+# we assert is "the WORKER emits an audit row in response to our
+# enqueue." Adding a probe-emitted audit row would (a) require a new
+# ACTION_* constant, a new ALLOWED_ACTIONS migration, and a new
+# RESOURCE_* type -- all of which are net-new compliance surface
+# for a route whose only job is observation; and (b) muddy the
+# audit-log-as-evidence story: a forensic auditor scanning for
+# worker-emitted rows should not have to filter out probe-emitted
+# ones. The route is platform_admin gated and rate-limited, so the
+# observability requirement is met by the regular access log.
+#
+# Cleanup
+# -------
+#
+# The malformed-payload mode is fire-and-forget on the broker side
+# -- there is no scheduled task to clean up because Gate 1 rejects
+# before any DB row is created (no MemoryItem, no Message). The
+# audit row IS persisted (that is what we polled for); it is left
+# in place as evidence the probe ran. The verify-task tenant teardown
+# (Pillar 10) reaps tenant-scoped audit rows, which is where probe-
+# emitted rows from the verify run end up.
+#
+# In full-mode (manual only), the resulting MemoryItem is owned by
+# whatever tenant the caller specifies; it is the caller's
+# responsibility to clean it up (manual probe = manual cleanup).
+# =====================================================================
+
+
+class WorkerPipelineProbeRequest(BaseModel):
+    """Body for the worker-pipeline-probe route.
+
+    All fields except `tenant_id` and `actor_key_prefix` are optional
+    in the malformed-mode default path; the malformed payload is
+    constructed by the route. In full-mode the caller MUST supply a
+    real `message_id` (int) and `user_id` (str) so the worker can
+    actually extract memory from a turn.
+    """
+
+    tenant_id: str = Field(..., min_length=1, max_length=128)
+    actor_key_prefix: str = Field(..., min_length=12, max_length=12)
+    # full-mode only:
+    user_id: str | None = Field(default=None, max_length=128)
+    message_id: int | None = Field(default=None)
+    session_id: str | None = Field(default=None, max_length=128)
+
+
+class WorkerPipelineProbeResponse(BaseModel):
+    """Probe outcome.
+
+    `audit_id` is the id of the worker-emitted audit row that the
+    probe polled for. `elapsed_ms` is wall-clock time from enqueue
+    to audit-row visibility. `polled_for_action` echoes which action
+    constant the probe was looking for so a 504 caller can see what
+    we expected.
+    """
+
+    mode: Literal["malformed", "full"]
+    audit_id: int
+    polled_for_action: str
+    elapsed_ms: int
+
+
+class WorkerPipelineProbeTimeout(BaseModel):
+    mode: Literal["malformed", "full"]
+    polled_for_action: str
+    elapsed_ms: int
+    detail: str
+
+
+_PROBE_DEADLINE_SECONDS = 30.0
+_PROBE_POLL_INTERVAL = 0.5
+
+
+@router.post(
+    "/worker_pipeline_probe_step29y",
+    response_model=WorkerPipelineProbeResponse,
+    responses={504: {"model": WorkerPipelineProbeTimeout}},
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def worker_pipeline_probe_step29y(
+    request: Request,
+    db: DbSession,
+    payload: WorkerPipelineProbeRequest,
+    mode: Literal["malformed", "full"] = Query(default="malformed"),
+) -> WorkerPipelineProbeResponse:
+    """Backend-side worker pipeline liveness probe (Step 29.y / Pillar 25).
+
+    Enqueues a Celery task and polls admin_audit_logs for the worker-
+    emitted row that proves the pipeline is alive. Returns 200 with
+    timing on success, 504 with structured detail on timeout.
+
+    platform_admin gated. See the module-level Step 29.y comment block
+    above for the full design rationale (modes, no-self-audit, cleanup).
+    """
+    _require_platform_admin_step29c(request)
+
+    # Producer-side import: the backend container is the Celery producer
+    # for every chat turn, so this import is the same one that runs in
+    # production every time a user sends a message.
+    from app.worker.tasks.memory_extraction import extract_memory_from_turn
+
+    if mode == "full":
+        if payload.message_id is None or payload.user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "mode=full requires message_id (int) and user_id (str) "
+                    "in the request body so the worker can extract memory "
+                    "from a real turn."
+                ),
+            )
+        polled_action = ACTION_MEMORY_EXTRACTED
+        kwargs = {
+            "session_id": payload.session_id or f"worker-probe-{uuid.uuid4().hex[:12]}",
+            "user_id": payload.user_id,
+            "tenant_id": payload.tenant_id,
+            "message_id": int(payload.message_id),
+            "actor_key_prefix": payload.actor_key_prefix,
+        }
+    else:
+        # Default: malformed payload. message_id deliberately wrong type so
+        # the worker's Gate 1 rejects with WORKER_MALFORMED_PAYLOAD.
+        polled_action = ACTION_WORKER_MALFORMED_PAYLOAD
+        kwargs = {
+            "session_id": f"worker-probe-{uuid.uuid4().hex[:12]}",
+            "user_id": "worker-probe-user",
+            "tenant_id": payload.tenant_id,
+            "message_id": "not-an-int",  # type violation -> Gate 1 rejection
+            "actor_key_prefix": payload.actor_key_prefix,
+        }
+
+    # Snapshot the current max audit id so we only count rows that
+    # land AFTER our enqueue. Without this, a recently-enqueued
+    # malformed payload from another caller could falsely satisfy
+    # the poll. The id column is monotonic (bigserial), so MAX(id)
+    # is a valid high-water mark.
+    high_water = db.execute(
+        select(AdminAuditLog.id)
+        .where(AdminAuditLog.tenant_id == payload.tenant_id)
+        .where(AdminAuditLog.action == polled_action)
+        .order_by(AdminAuditLog.id.desc())
+        .limit(1)
+    ).scalar_one_or_none() or 0
+
+    started = time.monotonic()
+    extract_memory_from_turn.apply_async(kwargs=kwargs)
+
+    deadline = started + _PROBE_DEADLINE_SECONDS
+    found: AdminAuditLog | None = None
+    while time.monotonic() < deadline:
+        # Each poll is a fresh SELECT -- we deliberately do NOT hold a
+        # transaction open across sleeps because a long-held read
+        # transaction would block worker INSERTs on the same table
+        # under MVCC at the highest isolation levels.
+        db.expire_all()
+        row = db.execute(
+            select(AdminAuditLog)
+            .where(AdminAuditLog.tenant_id == payload.tenant_id)
+            .where(AdminAuditLog.action == polled_action)
+            .where(AdminAuditLog.id > high_water)
+            .order_by(AdminAuditLog.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if row is not None:
+            found = row
+            break
+        time.sleep(_PROBE_POLL_INTERVAL)
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    if found is None:
+        # Structured 504 -- caller (Pillar 25) can format a meaningful
+        # failure message without re-implementing the polling contract.
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "mode": mode,
+                "polled_for_action": polled_action,
+                "elapsed_ms": elapsed_ms,
+                "detail": (
+                    f"worker_pipeline_probe_step29y did not observe a new "
+                    f"{polled_action!r} audit row for tenant_id="
+                    f"{payload.tenant_id!r} within "
+                    f"{int(_PROBE_DEADLINE_SECONDS)}s of enqueue. The "
+                    f"worker may be down, the broker may be unreachable, "
+                    f"or the worker DSN may have lost INSERT privilege "
+                    f"on admin_audit_logs."
+                ),
+            },
+        )
+
+    return WorkerPipelineProbeResponse(
+        mode=mode,
+        audit_id=found.id,
+        polled_for_action=polled_action,
+        elapsed_ms=elapsed_ms,
     )
