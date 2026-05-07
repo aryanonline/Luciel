@@ -93,7 +93,7 @@ import uuid
 from app.verification._infra_probes import _broker_reachable, _worker_reachable
 from app.verification.fixtures import RunState
 from app.verification.http_client import call, pooled_client
-from app.verification.runner import Pillar
+from app.verification.runner import Outcome, Pillar, PillarOutcome
 
 
 P13_TENANT_PREFIX = "step24-5b-p13-"
@@ -385,9 +385,13 @@ class CrossTenantIdentityPillar(Pillar):
                     t1_message_id=t1_message_id,
                 )
                 self._teardown(c, pa, user_id, t1_id, t2_id)
-                return (
+                # Step 29.y Cluster 8: surface DEGRADED via tri-state so the
+                # matrix gate fails by default rather than green-badging a
+                # known-skipped spoof-guard path.
+                return PillarOutcome(
+                    Outcome.DEGRADED,
                     f"MODE=degraded :: spoof guard not exercised "
-                    f"(worker unreachable) | {degraded_summary}"
+                    f"(worker unreachable) | {degraded_summary}",
                 )
 
             # ---------- MODE=full assertions ----------
@@ -407,7 +411,13 @@ class CrossTenantIdentityPillar(Pillar):
 
             self._teardown(c, pa, user_id, t1_id, t2_id)
 
-            return f"MODE=full :: {full_summary}"
+            # FULL path wrapped for symmetry with DEGRADED. The runner
+            # would coerce a bare str to FULL anyway, but explicit is
+            # better than implicit when the contract is the audit point.
+            return PillarOutcome(
+                Outcome.FULL,
+                f"MODE=full :: {full_summary}",
+            )
 
     def _run_full_assertions(
         self,
