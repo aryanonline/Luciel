@@ -34,12 +34,19 @@ a future regression:
       transaction so a failed audit insert prevents the mutation." If
       a future commit moves `audit_repo.record(..., autocommit=False)`
       AFTER the mutation, or skips it on the no-op branch, the route
-      still returns 200 and P11 F10 still passes (P11 F10 only watches
-      for the WORKER_INSTANCE_DEACTIVATED row, which is emitted by the
-      celery worker, NOT by this route). The route's own audit row
+      still returns 200 but the route's own audit row
       (action=`luciel_instance_forensic_toggle`) would silently vanish.
-      We assert it is present after P11 F10 ran, with the correct
-      payload shape (after_json.active matches the toggle direction).
+
+      P24 self-provisions this assertion: it issues two toggle calls
+      itself (deactivate + restore) BEFORE running the GET poll. This
+      decouples G2 from P11 F10, which only runs its toggle calls in
+      `MODE=full` (when the celery broker AND worker are reachable
+      from the verify task). In production today, P11 runs in
+      `MODE=degraded` (broker/worker not reachable from the verify
+      ECS task), so relying on P11's toggles silently disabled G2's
+      coverage. Self-provisioning makes the audit-emission contract
+      hold on every verify run regardless of broker/worker state --
+      exactly what a security/compliance contract requires.
 
   G3. NO-OP IDEMPOTENCY: The route deliberately writes an audit row
       EVERY call but skips the SQL UPDATE when requested == previous.
@@ -56,16 +63,19 @@ a future regression:
 
 # Scope and ordering
 
-Soft order dependency on Pillar 11. Reads:
+Reads:
   - state.tenant_id           (set by P1)
   - state.tenant_admin_key    (set by P1) -- G1 negative test
-  - state.instance_agent      (set by P2; P11 F10 left active=True)
+  - state.instance_agent      (set by P2)
   - state.platform_admin_key  (env-loaded)
 
-Runs read-only on the API surface for G1; writes 2 no-op audit rows for
-G3 (both with active=current_value, so semantically a noop write pair).
-Teardown handles audit-log cleanup at the tenant level -- no per-pillar
-sweep needed.
+P24 is self-contained: it makes its own toggle calls for G2 and G3 so
+the audit-emission and idempotency contracts are exercised on every
+verify run regardless of P11's mode (full vs degraded). The pillar
+makes 2 toggle calls for G2 (deactivate -> restore, leaving instance
+active state unchanged) and 2 more for G3 (no-op pair, also state-
+preserving). Teardown handles audit-log cleanup at the tenant level --
+no per-pillar sweep needed.
 
 # Why a direct DB read for updated_at
 
@@ -157,16 +167,87 @@ class LucielInstanceForensicTogglePillar(Pillar):
         results.append("G1 tenant-admin key got 403 from toggle route")
 
         # ----------------------------------------------------------------
-        # G2. AUDIT EMISSION: P11 F10 has already toggled this instance
-        # twice (deactivate, then restore in finally). Both calls MUST
-        # have produced an `luciel_instance_forensic_toggle` audit row
-        # with after_json.active matching the requested direction.
+        # G2. AUDIT EMISSION: self-provisioned. P24 itself issues two
+        # toggle calls -- deactivate then restore -- so the audit-emission
+        # contract is exercised every verify run regardless of whether
+        # P11 ran in MODE=full (which would have produced toggle rows as
+        # a side effect of F10) or MODE=degraded (which short-circuits
+        # F10 because broker/worker are unreachable from the verify task).
         #
-        # Filter by (tenant_id, action) and limit=10 to be resilient to
-        # any future pillar that also exercises this route in the same
-        # tenant. We then narrow to rows whose luciel_instance_id ==
-        # our instance_agent and assert >= 2 such rows.
+        # The pair is state-preserving (deactivate -> restore brings the
+        # instance back to its prior `active`), so the rest of the suite
+        # sees the instance unchanged. Each call MUST emit an audit row
+        # with after_json.active matching the requested direction; G2
+        # asserts >=2 such rows for this instance.
+        #
+        # We snapshot the row count BEFORE the pair so that if a prior
+        # verify pass left toggle rows for the same instance in a later
+        # tenant scope, our delta assertion is still tight. limit=100 on
+        # the GET is the route's default cap and is plenty for a single
+        # tenant's toggle history within one verify run.
         # ----------------------------------------------------------------
+
+        # Snapshot the audit count BEFORE the self-provisioned pair.
+        g2_count_before = self._count_toggle_rows(
+            tenant_id=state.tenant_id,
+            instance_id=instance_id,
+            platform_admin_key=state.platform_admin_key,
+        )
+
+        # Read current `active` so the pair can restore it. We use the
+        # forensic GET on luciel_instances rather than direct DB read --
+        # G2 is an API-surface contract test, so we exercise the API.
+        with pooled_client() as c:
+            r = call(
+                "GET",
+                _instance_get_path(instance_id),
+                state.platform_admin_key,
+                expect=200,
+                client=c,
+            )
+        g2_previous_active = bool(r.json().get("active"))
+
+        # Two toggle calls: flip then restore. The first call may be a
+        # real mutation (active flips); the second always restores the
+        # prior state. Both are required to emit an audit row.
+        g2_target_first = not g2_previous_active
+        with pooled_client() as c:
+            r1 = call(
+                "POST",
+                _toggle_path(instance_id),
+                state.platform_admin_key,
+                json={"active": g2_target_first},
+                expect=200,
+                client=c,
+            )
+            if bool(r1.json().get("active")) is not g2_target_first:
+                raise AssertionError(
+                    f"G2 first toggle returned active="
+                    f"{r1.json().get('active')!r}, expected "
+                    f"{g2_target_first!r} (route did not flip the "
+                    f"flag on the wire)"
+                )
+            # Restore prior state. We do this in the same client/turn
+            # so a transient failure raises before the GET poll below.
+            r2 = call(
+                "POST",
+                _toggle_path(instance_id),
+                state.platform_admin_key,
+                json={"active": g2_previous_active},
+                expect=200,
+                client=c,
+            )
+            if bool(r2.json().get("active")) is not g2_previous_active:
+                raise AssertionError(
+                    f"G2 restore toggle returned active="
+                    f"{r2.json().get('active')!r}, expected "
+                    f"{g2_previous_active!r} (instance left in wrong "
+                    f"state; downstream pillars may misbehave)"
+                )
+
+        # Now query the forensic audit log for this instance and assert
+        # the two rows landed. Filter narrowly: tenant + action +
+        # luciel_instance_id implicitly (we filter on the client side).
         with pooled_client() as c:
             r = call(
                 "GET",
@@ -175,7 +256,7 @@ class LucielInstanceForensicTogglePillar(Pillar):
                 params={
                     "tenant_id": state.tenant_id,
                     "action": _TOGGLE_ACTION,
-                    "limit": 10,
+                    "limit": 100,
                 },
                 expect=200,
                 client=c,
@@ -185,16 +266,30 @@ class LucielInstanceForensicTogglePillar(Pillar):
             row for row in all_rows
             if row.get("luciel_instance_id") == instance_id
         ]
+        # Audit count must have grown by exactly 2 for this instance.
+        # >2 is also acceptable (could mean P11 F10 ran in full mode and
+        # added its own pair); <2 is a real failure.
+        new_rows_for_instance = len(rows) - g2_count_before
         if len(rows) < 2:
             raise AssertionError(
                 f"G2 expected >=2 {_TOGGLE_ACTION} audit rows for "
-                f"instance_agent={instance_id} after P11 F10; got "
-                f"{len(rows)} (total rows for tenant: {len(all_rows)})"
+                f"instance_agent={instance_id} after self-provisioned "
+                f"toggle pair; got {len(rows)} (total rows for tenant: "
+                f"{len(all_rows)}; count before pair: {g2_count_before}). "
+                f"Route may have stopped emitting audit rows."
+            )
+        if new_rows_for_instance < 2:
+            raise AssertionError(
+                f"G2 audit count for instance_agent={instance_id} grew "
+                f"by only {new_rows_for_instance} after two toggle "
+                f"calls (before={g2_count_before}, after={len(rows)}); "
+                f"each toggle call must emit one audit row."
             )
         # Audit rows come back ordered by created_at DESC at the route
-        # (standard pattern for admin_audit_logs_step29c). The OLDEST
-        # P11-F10 entry (deactivate -> active=False) is rows[-1]; the
-        # NEWEST (restore -> active=True) is rows[0]. We assert payload
+        # (standard pattern for admin_audit_logs_step29c). For the two
+        # toggles we just issued: rows[0] is the NEWEST (restore call,
+        # active=g2_previous_active); rows[1] is older (first call,
+        # active=not g2_previous_active). We assert payload
         # SHAPE (after_json carries an `active` bool), not the specific
         # direction, because a future P11 F10 reorder must not silently
         # break this pillar -- the contract being guarded here is "the
