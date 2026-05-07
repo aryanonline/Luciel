@@ -76,3 +76,7 @@ inspect_db.py
 inject_orphan.py
 verify_dryrun.py
 msg.txt
+
+# Step 28/29 local diagnostic artifacts (audit residue, not part of source)
+_step28_artifacts/
+_step29_artifacts/
