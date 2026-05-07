@@ -234,10 +234,14 @@ class AdminAuditLog(Base, TimestampMixin):
     # -----------------------------------------------------------------
 
     action: Mapped[str] = mapped_column(
-        String(30),
+        String(64),
         nullable=False,
         index=True,
-        comment="See ALLOWED_ACTIONS.",
+        comment=(
+            "See ALLOWED_ACTIONS. Widened from 30 to 64 in step29x "
+            "(migration a1f29c7e4b08) after Pillar 24 caught a "
+            "StringDataRightTruncation on the 31-char forensic toggle action."
+        ),
     )
     resource_type: Mapped[str] = mapped_column(
         String(50),
