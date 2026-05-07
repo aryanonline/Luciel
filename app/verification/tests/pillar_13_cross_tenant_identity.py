@@ -1,4 +1,4 @@
-﻿"""Pillar 13 - Cross-tenant identity-spoof guard (Step 24.5b Q6).
+"""Pillar 13 - Cross-tenant identity-spoof guard (Step 24.5b Q6).
 
 Worker-side defense-in-depth proof: a malicious enqueue-side payload
 that claims (user_id=U, tenant_id=T1, agent_id=A2_under_T2) MUST land
@@ -42,6 +42,47 @@ Self-contained: builds its own tenant pair `step24-5b-p13-t1-<u8>`
 + `step24-5b-p13-t2-<u8>`, User, two Agents (one in each tenant),
 chat key, session, runs the test, tears down at the end. Does NOT
 read pillar 1's tenant_admin_key. Teardown is in-pillar.
+
+Step 29 Commit C.3 -- forensic-read migration to HTTP
+-----------------------------------------------------
+
+All nine ORM-level forensic reads in this pillar (setup-message
+lookup, A1 spoof-row absence probe, A2 audit-row poll, A3 legit-row
+poll, A5 T2 leak probe, A6 K1.active check, plus the three degraded-
+path mirrors) are migrated to the platform-admin-gated forensic
+endpoints under /api/v1/admin/forensics/*_step29c. The new
+`messages_step29c` endpoint replaces the L346-L361 MessageModel
+lookup; the extended `memory_items_step29c?message_id=`/
+`?content_contains=` query params replace the four MemoryItem
+selects; the extended `admin_audit_logs_step29c?actor_key_prefix=`
+replaces the A2 audit poll; and `api_keys_step29c?id=` from C.1
+replaces the K1.active check.
+
+PRODUCER-SIDE EXEMPTION (B.3 architectural rule)
+-------------------------------------------------
+
+There is exactly one direct producer-side call in this pillar:
+`extract_memory_from_turn.delay(...)` at the spoof-payload enqueue
+in `_run_full_assertions`. This call is INTENTIONALLY direct, not
+HTTP-routed, because the assertion under test (A1 + A2) is the
+worker's response to a payload the legitimate HTTP API contract
+cannot construct -- specifically, an `agent_id` slug from one tenant
+under a `tenant_id` from another tenant. Routing this through the
+chat HTTP path would let the auth/session middleware reject it
+before it ever reached Celery, which would prove only that the
+HTTP layer is correct -- a property already covered elsewhere
+(P12, P14). The whole point of P13 is to test Gate 6 itself, which
+fires inside the worker task body and therefore needs the harness
+to act as a malicious in-process producer. This is the canonical
+shape of B.3's producer-side exemption rule and is documented
+inline at the callsite.
+
+Security boundary unchanged by this exemption: the harness uses the
+same `app.worker.tasks.memory_extraction.extract_memory_from_turn`
+production code already exposes; no privilege the verify task does
+not already have is exercised; the `luciel_worker` Postgres role's
+zero-INSERT/UPDATE on `scope_assignments`/`users` (migration
+f392a842f885) is intact.
 """
 
 from __future__ import annotations
@@ -49,24 +90,18 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from typing import Any
 
-from sqlalchemy import select
-
-from app.db.session import SessionLocal
-from app.models.admin_audit_log import (
-    ACTION_WORKER_IDENTITY_SPOOF_REJECT,
-    AdminAuditLog,
-)
-from app.models.api_key import ApiKey
-from app.models.memory import MemoryItem
-from app.models.message import MessageModel
 from app.verification.fixtures import RunState
 from app.verification.http_client import call, pooled_client
 from app.verification.runner import Pillar
 
 
 P13_TENANT_PREFIX = "step24-5b-p13-"
+
+# Audit action constant copied from app.models.admin_audit_log so the
+# pillar can stay free of model imports after the C.3 migration.
+# Source of truth: app/models/admin_audit_log.py
+ACTION_WORKER_IDENTITY_SPOOF_REJECT = "WORKER_IDENTITY_SPOOF_REJECT"
 
 
 def _broker_reachable() -> bool:
@@ -149,7 +184,7 @@ class CrossTenantIdentityPillar(Pillar):
         domain_id = "general"
 
         # SENTINEL_LEGIT is woven into a user-fact-shaped statement
-        # below ("My account verification token is …") so the memory
+        # below ("My account verification token is ...") so the memory
         # extractor recognizes it as a durable fact (`fact` category,
         # per app/memory/extractor.py EXTRACTION_PROMPT). Older P13
         # revisions wrapped the sentinel in instructional text
@@ -158,7 +193,7 @@ class CrossTenantIdentityPillar(Pillar):
         # vacuously-failing A3. The fix is on the test-setup side,
         # not on extraction logic.
         #
-        # SENTINEL_SPOOF stays as-is — A1 asserts ABSENCE of any row
+        # SENTINEL_SPOOF stays as-is - A1 asserts ABSENCE of any row
         # containing it, so its message text doesn't need to look
         # like a user fact (and shouldn't, to keep the spoof payload
         # clearly distinguishable from the legit baseline).
@@ -252,7 +287,7 @@ class CrossTenantIdentityPillar(Pillar):
             # enforces the "one active Agent per (user, tenant)" invariant
             # at the service layer, so this is functionally equivalent to
             # the prior raw write but no longer requires admin DB grants on
-            # the harness side. Two calls (one per tenant) — A1 lives in T1,
+            # the harness side. Two calls (one per tenant) - A1 lives in T1,
             # A2 lives in T2; the invariant is per-tenant so both succeed.
             call(
                 "POST",
@@ -325,7 +360,7 @@ class CrossTenantIdentityPillar(Pillar):
             # MemoryItem row. The sentinel rides inside the fact text
             # as a debug aid, but A3's primary lookup keys on
             # MemoryItem.message_id (deterministic, paraphrase-proof)
-            # rather than content.contains(sentinel) — see A3 below.
+            # rather than content.contains(sentinel) - see A3 below.
             r = call(
                 "POST", "/api/v1/chat", k1_raw,
                 json={
@@ -343,22 +378,26 @@ class CrossTenantIdentityPillar(Pillar):
 
             # Look up the assistant message_id from this T1 session so
             # the spoof payload can reference a real, valid message.
-            db = SessionLocal()
-            try:
-                t1_msg_row = db.scalars(
-                    select(MessageModel)
-                    .where(MessageModel.session_id == t1_session_id)
-                    .order_by(MessageModel.id.desc())
-                    .limit(1)
-                ).first()
-                if t1_msg_row is None:
-                    raise AssertionError(
-                        f"P13 setup: no MessageModel row for session "
-                        f"{t1_session_id} after first chat turn"
-                    )
-                t1_message_id = t1_msg_row.id
-            finally:
-                db.close()
+            #
+            # Step 29 C.3: forensic GET via messages_step29c (new in C.3).
+            # Returns DESC-ordered rows; limit=1 yields the most recent
+            # message in the session, which mirrors the prior
+            # ORDER BY id DESC LIMIT 1 ORM query verbatim.
+            r = call(
+                "GET",
+                "/api/v1/admin/forensics/messages_step29c",
+                pa,
+                params={"session_id": t1_session_id, "limit": 1},
+                expect=200,
+                client=c,
+            )
+            msg_items = r.json().get("items") or []
+            if not msg_items:
+                raise AssertionError(
+                    f"P13 setup: no MessageModel row for session "
+                    f"{t1_session_id} after first chat turn"
+                )
+            t1_message_id = msg_items[0]["id"]
 
             # ---------- Mode gate ----------
             # Pillar 13's core assertions (A1, A2) require the worker to
@@ -374,6 +413,8 @@ class CrossTenantIdentityPillar(Pillar):
                 # works correctly." But we skip A1/A2 (the spoof guard
                 # itself) and document mode=degraded.
                 degraded_summary = self._run_degraded_sanity(
+                    c=c,
+                    pa=pa,
                     user_id=user_id,
                     t1_id=t1_id, t2_id=t2_id,
                     sentinel_legit=SENTINEL_LEGIT,
@@ -404,6 +445,7 @@ class CrossTenantIdentityPillar(Pillar):
             self._teardown(c, pa, user_id, t1_id, t2_id)
 
             return f"MODE=full :: {full_summary}"
+
     def _run_full_assertions(
         self,
         *,
@@ -428,15 +470,30 @@ class CrossTenantIdentityPillar(Pillar):
         Sequence:
           1. Construct the malicious payload claiming
              (user_id=U, tenant_id=T1, agent_id=A2_slug from T2).
-          2. Enqueue via extract_memory_from_turn.delay().
+          2. Enqueue via extract_memory_from_turn.delay() -- DIRECT
+             producer-side call, B.3 producer-side exemption applies.
           3. Wait for worker to consume + reject to DLQ via Gate 6.
           4. Assert A1 (no memory row) and A2 (audit row exists).
           5. Issue a fresh legitimate chat turn through K1 in T1.
           6. Assert A3 (legit row attributed to U), A4 (tenant=T1),
              A5 (no leak to T2), A6 (K1 still active).
         """
-        # Lazy import -- mirrors MemoryService.enqueue_extraction's pattern.
-        # FastAPI verification process never loads Celery until enqueue fires.
+        # PRODUCER-SIDE EXEMPTION (B.3): the spoof payload below is
+        # constructed and enqueued in-process via Celery's `.delay()`,
+        # bypassing the HTTP API. This is intentional: A1 and A2 test
+        # the worker's response to a payload the legitimate HTTP API
+        # contract cannot construct (cross-tenant agent_id slug under
+        # a tenant where that agent does not exist). Routing this
+        # through the chat HTTP path would let auth/session middleware
+        # reject it before it ever reached Celery, which would only
+        # prove the HTTP layer is correct -- a property already covered
+        # by P12/P14. The whole point of P13 is to test Gate 6 itself,
+        # which fires inside the worker task body and therefore needs
+        # the harness to act as a malicious in-process producer.
+        #
+        # Lazy import -- mirrors MemoryService.enqueue_extraction's
+        # pattern. FastAPI verification process never loads Celery
+        # until enqueue fires.
         from app.worker.tasks.memory_extraction import extract_memory_from_turn
 
         # ---------- 1. Construct + enqueue malicious payload ----------
@@ -471,65 +528,50 @@ class CrossTenantIdentityPillar(Pillar):
         time.sleep(60)
 
         # ---------- 3. ASSERTION A1: no memory row landed for spoof ----------
-        # The spoof payload referenced t1_message_id, which already has
-        # a legitimate memory row from the setup turn (with sentinel_legit).
-        # Gate 6 rejects BEFORE the worker reaches the upsert, so the
-        # spoof_message content (sentinel_spoof) should never appear in
-        # any memory row.
-        db = SessionLocal()
-        try:
-            spoof_rows = list(db.scalars(
-                select(MemoryItem).where(
-                    MemoryItem.tenant_id == t1_id,
-                    MemoryItem.content.contains(sentinel_spoof),
-                )
-            ).all())
-            if spoof_rows:
-                raise AssertionError(
-                    f"A1 FAIL: spoof payload produced {len(spoof_rows)} "
-                    f"memory row(s) in T1. Gate 6 did not fire. "
-                    f"row_ids={[r.id for r in spoof_rows]}"
-                )
-        finally:
-            db.close()
+        # Step 29 C.3: forensic GET via memory_items_step29c with
+        # content_contains filter (added in C.3). Projection still
+        # excludes content; we learn only "did any rows match?" not
+        # what their content holds.
+        r = call(
+            "GET",
+            "/api/v1/admin/forensics/memory_items_step29c",
+            pa,
+            params={
+                "tenant_id": t1_id,
+                "content_contains": sentinel_spoof,
+                "limit": 100,
+            },
+            expect=200,
+            client=c,
+        )
+        spoof_items = r.json().get("items") or []
+        if spoof_items:
+            raise AssertionError(
+                f"A1 FAIL: spoof payload produced {len(spoof_items)} "
+                f"memory row(s) in T1. Gate 6 did not fire. "
+                f"row_ids={[item.get('id') for item in spoof_items]}"
+            )
 
         # ---------- 4. ASSERTION A2: IDENTITY_SPOOF audit row exists ----------
-        db = SessionLocal()
-        try:
-            spoof_audit = db.scalars(
-                select(AdminAuditLog)
-                .where(
-                    AdminAuditLog.action == ACTION_WORKER_IDENTITY_SPOOF_REJECT,
-                    AdminAuditLog.tenant_id == t1_id,
-                    AdminAuditLog.actor_key_prefix == k1_prefix,
-                )
-                .order_by(AdminAuditLog.id.desc())
-                .limit(1)
-            ).first()
-            if spoof_audit is None:
-                # The audit row might lag the rejection by a few ms.
-                # One more retry with a short delay before failing.
-                time.sleep(5)
-                spoof_audit = db.scalars(
-                    select(AdminAuditLog)
-                    .where(
-                        AdminAuditLog.action == ACTION_WORKER_IDENTITY_SPOOF_REJECT,
-                        AdminAuditLog.tenant_id == t1_id,
-                        AdminAuditLog.actor_key_prefix == k1_prefix,
-                    )
-                    .order_by(AdminAuditLog.id.desc())
-                    .limit(1)
-                ).first()
-            if spoof_audit is None:
-                raise AssertionError(
-                    f"A2 FAIL: no ACTION_WORKER_IDENTITY_SPOOF_REJECT "
-                    f"audit row found for tenant={t1_id} "
-                    f"actor_key_prefix={k1_prefix}. Gate 6 did not "
-                    f"emit a rejection audit row."
-                )
-            audit_id = spoof_audit.id
-        finally:
-            db.close()
+        # Step 29 C.3: forensic GET via admin_audit_logs_step29c with
+        # action + actor_key_prefix filters (actor_key_prefix added
+        # in C.3). One short retry to absorb worker-to-audit lag.
+        spoof_audit = self._fetch_spoof_audit(
+            c=c, pa=pa, t1_id=t1_id, k1_prefix=k1_prefix,
+        )
+        if spoof_audit is None:
+            time.sleep(5)
+            spoof_audit = self._fetch_spoof_audit(
+                c=c, pa=pa, t1_id=t1_id, k1_prefix=k1_prefix,
+            )
+        if spoof_audit is None:
+            raise AssertionError(
+                f"A2 FAIL: no ACTION_WORKER_IDENTITY_SPOOF_REJECT "
+                f"audit row found for tenant={t1_id} "
+                f"actor_key_prefix={k1_prefix}. Gate 6 did not "
+                f"emit a rejection audit row."
+            )
+        audit_id = spoof_audit["id"]
 
         # ---------- 5. Locate the legit memory row from the setup turn ----------
         # The setup turn (issued before the spoof) produced a chat
@@ -540,9 +582,9 @@ class CrossTenantIdentityPillar(Pillar):
         # which depended on the LLM preserving the sentinel verbatim
         # in the extracted memory text. Even with low temperature,
         # extractor paraphrasing made the assertion flaky and the
-        # FAIL message ("sentinel not found") was misleading — the
+        # FAIL message ("sentinel not found") was misleading - the
         # real failure was usually "extractor produced no row at all
-        # because the message wasn't user-fact-shaped" (Phase 1 → 2
+        # because the message wasn't user-fact-shaped" (Phase 1 -> 2
         # carry-over). Switching the lookup to message_id (FK to the
         # specific message that triggered the extraction) is
         # deterministic and paraphrase-proof.
@@ -550,23 +592,29 @@ class CrossTenantIdentityPillar(Pillar):
         # We poll briefly because extraction is async; if the worker
         # is slow under load, the row may still be in flight when A3
         # first fires.
+        #
+        # Step 29 C.3: forensic GET via memory_items_step29c with
+        # message_id filter (added in C.3). Projection excludes
+        # content but A3 only needs id + actor_user_id + tenant_id,
+        # all of which the projection includes.
         legit_row = None
-        legit_poll_attempts = 6   # 6 attempts × 5s = 30s budget
+        legit_poll_attempts = 6   # 6 attempts x 5s = 30s budget
         for _attempt in range(legit_poll_attempts):
-            db = SessionLocal()
-            try:
-                legit_row = db.scalars(
-                    select(MemoryItem)
-                    .where(
-                        MemoryItem.tenant_id == t1_id,
-                        MemoryItem.message_id == t1_message_id,
-                    )
-                    .order_by(MemoryItem.id.desc())
-                    .limit(1)
-                ).first()
-            finally:
-                db.close()
-            if legit_row is not None:
+            r = call(
+                "GET",
+                "/api/v1/admin/forensics/memory_items_step29c",
+                pa,
+                params={
+                    "tenant_id": t1_id,
+                    "message_id": t1_message_id,
+                    "limit": 1,
+                },
+                expect=200,
+                client=c,
+            )
+            legit_items = r.json().get("items") or []
+            if legit_items:
+                legit_row = legit_items[0]
                 break
             time.sleep(5)
 
@@ -582,69 +630,75 @@ class CrossTenantIdentityPillar(Pillar):
                 f"(3) MemoryRepository.upsert_by_message_id is wiring "
                 f"message_id through to the new row."
             )
-        if legit_row.actor_user_id != user_id:
+        legit_actor_str = legit_row.get("actor_user_id")
+        legit_actor = uuid.UUID(legit_actor_str) if legit_actor_str else None
+        if legit_actor != user_id:
             raise AssertionError(
-                f"A3 FAIL: legit row (id={legit_row.id}) "
-                f"actor_user_id={legit_row.actor_user_id} != "
+                f"A3 FAIL: legit row (id={legit_row.get('id')}) "
+                f"actor_user_id={legit_actor} != "
                 f"U.id={user_id}"
             )
-        legit_row_id = legit_row.id
+        legit_row_id = legit_row.get("id")
 
-        # Soft check: log if sentinel is missing from the extracted
-        # content. Not a failure — extractor may paraphrase — but a
-        # signal that the user-fact framing in the setup turn could
-        # be tightened if it stops appearing.
-        if sentinel_legit not in (legit_row.content or ""):
-            print(
-                f"  pillar 13 note: sentinel {sentinel_legit!r} not "
-                f"present verbatim in extracted memory "
-                f"(content[:120]={legit_row.content[:120]!r}). "
-                f"Likely LLM paraphrase. A3 still passed via message_id "
-                f"key."
-            )
+        # Soft check: sentinel verbatim is no longer reachable via the
+        # forensic projection (content is excluded by design). The note
+        # below is preserved as a doc reminder; if a future debugging
+        # need ever requires sentinel inspection it should be done via
+        # a one-off platform_admin probe with a temporary content
+        # surface, not by widening the forensic projection.
 
         # ---------- ASSERTION A4: legit row tenant_id == T1 ----------
-        if legit_row.tenant_id != t1_id:
+        if legit_row.get("tenant_id") != t1_id:
             raise AssertionError(
-                f"A4 FAIL: legit row tenant_id={legit_row.tenant_id!r} "
+                f"A4 FAIL: legit row tenant_id={legit_row.get('tenant_id')!r} "
                 f"!= T1={t1_id!r}"
             )
 
         # ---------- ASSERTION A5: T2 has no rows for U from this test ----------
-        db = SessionLocal()
-        try:
-            t2_leak_rows = list(db.scalars(
-                select(MemoryItem).where(
-                    MemoryItem.tenant_id == t2_id,
-                    MemoryItem.actor_user_id == user_id,
-                )
-            ).all())
-            if t2_leak_rows:
-                raise AssertionError(
-                    f"A5 FAIL: T2 has {len(t2_leak_rows)} memory row(s) "
-                    f"for U={user_id}. Spoof rejection path leaked "
-                    f"into T2. row_ids={[r.id for r in t2_leak_rows]}"
-                )
-        finally:
-            db.close()
+        # Step 29 C.3: forensic GET via memory_items_step29c with
+        # actor_user_id filter (from C.2). T2 leak probe.
+        r = call(
+            "GET",
+            "/api/v1/admin/forensics/memory_items_step29c",
+            pa,
+            params={
+                "tenant_id": t2_id,
+                "actor_user_id": str(user_id),
+                "limit": 100,
+            },
+            expect=200,
+            client=c,
+        )
+        t2_leak_items = r.json().get("items") or []
+        if t2_leak_items:
+            raise AssertionError(
+                f"A5 FAIL: T2 has {len(t2_leak_items)} memory row(s) "
+                f"for U={user_id}. Spoof rejection path leaked "
+                f"into T2. row_ids={[item.get('id') for item in t2_leak_items]}"
+            )
 
         # ---------- ASSERTION A6: K1 still active ----------
-        db = SessionLocal()
-        try:
-            k1_after = db.get(ApiKey, k1_id)
-            if k1_after is None:
-                raise AssertionError(
-                    f"A6 FAIL: K1 (id={k1_id}) disappeared during P13"
-                )
-            if not k1_after.active:
-                raise AssertionError(
-                    f"A6 FAIL: K1 (id={k1_id}) was deactivated by spoof "
-                    f"rejection. Spoof should not trigger collateral "
-                    f"key rotation -- only ScopeAssignment.end_assignment "
-                    f"rotates keys."
-                )
-        finally:
-            db.close()
+        # Step 29 C.3: forensic GET via api_keys_step29c?id= (from C.1).
+        r = call(
+            "GET",
+            "/api/v1/admin/forensics/api_keys_step29c",
+            pa,
+            params={"id": k1_id},
+            expect=200,
+            client=c,
+        )
+        k1_after = r.json()
+        if not k1_after or k1_after.get("id") != k1_id:
+            raise AssertionError(
+                f"A6 FAIL: K1 (id={k1_id}) disappeared during P13"
+            )
+        if not k1_after.get("active"):
+            raise AssertionError(
+                f"A6 FAIL: K1 (id={k1_id}) was deactivated by spoof "
+                f"rejection. Spoof should not trigger collateral "
+                f"key rotation -- only ScopeAssignment.end_assignment "
+                f"rotates keys."
+            )
 
         return (
             f"spoof_rejected audit_id={audit_id} "
@@ -652,9 +706,41 @@ class CrossTenantIdentityPillar(Pillar):
             f"T2_no_leak K1_still_active"
         )
 
+    def _fetch_spoof_audit(
+        self,
+        *,
+        c,
+        pa: str,
+        t1_id: str,
+        k1_prefix: str,
+    ) -> dict | None:
+        """Fetch the most recent IDENTITY_SPOOF audit row, or None.
+
+        Step 29 C.3: forensic GET via admin_audit_logs_step29c with
+        action + actor_key_prefix filters (actor_key_prefix added
+        in C.3 to replace the prior direct ORM equality clause).
+        """
+        r = call(
+            "GET",
+            "/api/v1/admin/forensics/admin_audit_logs_step29c",
+            pa,
+            params={
+                "tenant_id": t1_id,
+                "action": ACTION_WORKER_IDENTITY_SPOOF_REJECT,
+                "actor_key_prefix": k1_prefix,
+                "limit": 1,
+            },
+            expect=200,
+            client=c,
+        )
+        rows = r.json().get("rows") or []
+        return rows[0] if rows else None
+
     def _run_degraded_sanity(
         self,
         *,
+        c,
+        pa: str,
         user_id: uuid.UUID,
         t1_id: str,
         t2_id: str,
@@ -669,42 +755,69 @@ class CrossTenantIdentityPillar(Pillar):
         Mirrors the A3 fix in _run_full_assertions: keys on
         MemoryItem.message_id rather than content.contains(sentinel) so
         the assertion is robust to LLM paraphrase. sentinel_legit is
-        retained as a soft debug signal in the summary only.
+        retained as a debug signal in the function signature for
+        callsite parity but is no longer probed here (forensic
+        projection excludes content by design).
+
+        Step 29 C.3: all three reads migrated to HTTP.
         """
-        db = SessionLocal()
-        try:
-            legit_row = db.scalars(
-                select(MemoryItem).where(
-                    MemoryItem.tenant_id == t1_id,
-                    MemoryItem.message_id == t1_message_id,
-                ).order_by(MemoryItem.id.desc()).limit(1)
-            ).first()
-            legit_ok = (
-                legit_row is not None
-                and legit_row.actor_user_id == user_id
-            )
-            sentinel_in_content = bool(
-                legit_row and sentinel_legit in (legit_row.content or "")
-            )
+        # legit-row probe by message_id
+        r = call(
+            "GET",
+            "/api/v1/admin/forensics/memory_items_step29c",
+            pa,
+            params={
+                "tenant_id": t1_id,
+                "message_id": t1_message_id,
+                "limit": 1,
+            },
+            expect=200,
+            client=c,
+        )
+        legit_items = r.json().get("items") or []
+        legit_row = legit_items[0] if legit_items else None
+        legit_ok = False
+        if legit_row is not None:
+            legit_actor_str = legit_row.get("actor_user_id")
+            if legit_actor_str:
+                try:
+                    legit_ok = uuid.UUID(legit_actor_str) == user_id
+                except (ValueError, TypeError):
+                    legit_ok = False
 
-            t2_leak_rows = list(db.scalars(
-                select(MemoryItem).where(
-                    MemoryItem.tenant_id == t2_id,
-                    MemoryItem.actor_user_id == user_id,
-                )
-            ).all())
+        # T2 leak probe
+        r = call(
+            "GET",
+            "/api/v1/admin/forensics/memory_items_step29c",
+            pa,
+            params={
+                "tenant_id": t2_id,
+                "actor_user_id": str(user_id),
+                "limit": 100,
+            },
+            expect=200,
+            client=c,
+        )
+        t2_leak_items = r.json().get("items") or []
 
-            k1_row = db.get(ApiKey, k1_id)
-            k1_active = k1_row is not None and k1_row.active
+        # K1 active probe
+        r = call(
+            "GET",
+            "/api/v1/admin/forensics/api_keys_step29c",
+            pa,
+            params={"id": k1_id},
+            expect=200,
+            client=c,
+        )
+        k1_body = r.json()
+        k1_active = bool(k1_body and k1_body.get("id") == k1_id and k1_body.get("active"))
 
-            return (
-                f"setup_legit_ok={legit_ok} "
-                f"sentinel_in_content={sentinel_in_content} "
-                f"T2_leak_rows={len(t2_leak_rows)} "
-                f"K1_active={k1_active}"
-            )
-        finally:
-            db.close()
+        return (
+            f"setup_legit_ok={legit_ok} "
+            f"sentinel_in_content=skipped(projection_excludes_content) "
+            f"T2_leak_rows={len(t2_leak_items)} "
+            f"K1_active={k1_active}"
+        )
 
     def _teardown(
         self,
@@ -762,4 +875,3 @@ class CrossTenantIdentityPillar(Pillar):
 
 
 PILLAR = CrossTenantIdentityPillar()
-                    

@@ -1,15 +1,32 @@
 """
-Contract test for Step 29 Commits C.1 and C.2:
+Contract test for Step 29 Commits C.1, C.2, and C.3:
     GET /api/v1/admin/forensics/api_keys_step29c
     GET /api/v1/admin/forensics/memory_items_step29c
     GET /api/v1/admin/forensics/admin_audit_logs_step29c
     GET /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}
+    GET /api/v1/admin/forensics/messages_step29c               (C.3)
 
 C.2 EXTENDS:
     memory_items_step29c gains two query params (actor_user_id,
     agent_id) and one projection field (actor_user_id) so P12 can
     perform identity-stability assertions over HTTP. Tests 8 and 9
     pin those additions in place.
+
+C.3 EXTENDS:
+    1. Adds a fifth route, list_messages_forensic_step29c, with a
+       strict projection that EXCLUDES `content` (chat content is the
+       most sensitive field after memory content). Tests 10 and 11
+       pin the route's existence and content-exclusion contract.
+    2. memory_items_step29c gains two more query params (message_id,
+       content_contains) so P13 can poll for the spoof memory row by
+       message_id and probe for cross-tenant content leak via a
+       server-side substring filter (the projection still excludes
+       content; caller learns only "row matches?", never the text).
+       Test 12 pins those filters.
+    3. admin_audit_logs_step29c gains one query param
+       (actor_key_prefix) so P13 can scope the SPOOF_REJECT audit-row
+       poll to the exact tenant-A platform_admin key without scanning
+       the global audit log. Test 13 pins that filter.
 
 CONTRACT GUARDED:
     1. The four route functions exist in app/api/v1/admin_forensics.py
@@ -97,6 +114,7 @@ _ROUTE_FUNCTION_NAMES = (
     "list_memory_items_forensic_step29c",
     "list_admin_audit_logs_forensic_step29c",
     "get_luciel_instance_forensic_step29c",
+    "list_messages_forensic_step29c",
 )
 
 _RESPONSE_MODEL_NAMES = (
@@ -106,6 +124,8 @@ _RESPONSE_MODEL_NAMES = (
     "AdminAuditLogForensic",
     "AdminAuditLogsForensic",
     "LucielInstanceForensic",
+    "MessageForensic",
+    "MessagesForensic",
 )
 
 
@@ -377,6 +397,114 @@ def test_list_memory_items_route_accepts_c2_filters() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 10 (C.3): MessageForensic projection MUST NOT include content.
+# This is the parallel of test 4 for the new chat-message projection.
+# A future maintainer who adds `content` to the response model leaks
+# every chat turn ever stored to anyone holding a platform_admin key.
+# Chat content is the single most sensitive field on `messages` after
+# attachments; this test fails loud the moment the projection grows.
+# ---------------------------------------------------------------------------
+
+def test_message_forensic_projection_excludes_content() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    cls = _find_classdef(tree, "MessageForensic")
+    assert cls is not None, "MessageForensic class missing"
+    fields = _annotated_field_names(cls)
+    assert "content" not in fields, (
+        "MessageForensic must NOT expose chat-message content. P13 "
+        "only reads metadata (id, session_id, role, trace_id, "
+        "created_at) for spoof-rejection and cross-tenant leak "
+        "probes; surfacing chat text over the platform_admin HTTP "
+        "boundary defeats the strict-projection rationale."
+    )
+    # Positive guard: the metadata fields P13 actually needs are present.
+    for required in ("id", "session_id", "role"):
+        assert required in fields, (
+            f"MessageForensic must expose {required!r} (Step 29 "
+            f"Commit C.3). P13 reads it to correlate the spoofed "
+            f"message turn against the spoof-rejection audit row."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 11 (C.3): list_messages_forensic_step29c exists and is registered
+# under that canonical name. The function-existence assertion is already
+# covered by test 1 via _ROUTE_FUNCTION_NAMES; this test pins the
+# additional contract that the route accepts session_id as a required
+# query parameter (P13 always scopes its message reads by session).
+# ---------------------------------------------------------------------------
+
+def test_list_messages_route_accepts_session_id() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    func = _find_function(tree, "list_messages_forensic_step29c")
+    assert func is not None, (
+        "list_messages_forensic_step29c missing (Step 29 Commit C.3)"
+    )
+    arg_names = {a.arg for a in func.args.args}
+    arg_names.update({a.arg for a in func.args.kwonlyargs})
+    assert "session_id" in arg_names, (
+        "list_messages_forensic_step29c must accept session_id as a "
+        "query parameter. P13 always scopes its message reads by "
+        "session; an unscoped messages endpoint would let a "
+        "platform_admin caller dump the global messages table."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 12 (C.3): list_memory_items_forensic_step29c accepts the two
+# additional filter parameters added in C.3 (message_id and
+# content_contains). Without message_id, P13's six-attempt poll for
+# the spoof memory row would have to scan the global memory_items
+# table client-side; without content_contains, P13's cross-tenant
+# content-leak probe loses its server-side WHERE clause and falls
+# back to fetching every row in tenant A's memory.
+# ---------------------------------------------------------------------------
+
+def test_list_memory_items_route_accepts_c3_filters() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    func = _find_function(tree, "list_memory_items_forensic_step29c")
+    assert func is not None, (
+        "list_memory_items_forensic_step29c missing"
+    )
+    arg_names = {a.arg for a in func.args.args}
+    arg_names.update({a.arg for a in func.args.kwonlyargs})
+    for required in ("message_id", "content_contains"):
+        assert required in arg_names, (
+            f"list_memory_items_forensic_step29c must accept "
+            f"{required!r} as a query parameter (added in Step 29 "
+            f"Commit C.3 for P13 cross-tenant identity reads). "
+            f"Removing it forces P13 to scan global memory "
+            f"client-side, breaking the strict-projection contract."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 13 (C.3): list_admin_audit_logs_forensic_step29c accepts the
+# actor_key_prefix filter added in C.3. P13's SPOOF_REJECT audit-row
+# poll must scope to the exact tenant-A platform_admin key prefix;
+# without this filter the poll matches any spoof-rejection audit row
+# in the global audit log, which racy CI runs would falsely satisfy.
+# ---------------------------------------------------------------------------
+
+def test_list_admin_audit_logs_route_accepts_actor_key_prefix() -> None:
+    tree = _parse(_ADMIN_FORENSICS_PATH)
+    func = _find_function(tree, "list_admin_audit_logs_forensic_step29c")
+    assert func is not None, (
+        "list_admin_audit_logs_forensic_step29c missing"
+    )
+    arg_names = {a.arg for a in func.args.args}
+    arg_names.update({a.arg for a in func.args.kwonlyargs})
+    assert "actor_key_prefix" in arg_names, (
+        "list_admin_audit_logs_forensic_step29c must accept "
+        "actor_key_prefix as a query parameter (added in Step 29 "
+        "Commit C.3 for P13 spoof-rejection audit poll). Without "
+        "this filter the poll cannot scope to a single tenant's "
+        "platform_admin key and any racy SPOOF_REJECT audit row in "
+        "the global log can falsely satisfy A2."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Manual runner so the suite works without pytest installed.
 # ---------------------------------------------------------------------------
 
@@ -391,6 +519,10 @@ def _run_all() -> int:
         test_router_includes_admin_forensics,
         test_memory_item_forensic_projection_includes_actor_user_id,
         test_list_memory_items_route_accepts_c2_filters,
+        test_message_forensic_projection_excludes_content,
+        test_list_messages_route_accepts_session_id,
+        test_list_memory_items_route_accepts_c3_filters,
+        test_list_admin_audit_logs_route_accepts_actor_key_prefix,
     ]
     failed = 0
     for t in tests:

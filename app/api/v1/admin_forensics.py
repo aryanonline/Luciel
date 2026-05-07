@@ -4,10 +4,15 @@ Step 29 Commit C.1 (P11 reads) lands the first four endpoints. C.2
 (P12 reads) extends `memory_items_step29c` with `actor_user_id` and
 `agent_id` filters and adds `actor_user_id` to the
 `MemoryItemForensic` projection -- no new endpoint needed (api_keys
-lookup reuses `api_keys_step29c?id=` from C.1). C.3-C.4 extend
-further for P13/P14 reads. C.5 adds one POST for the P11 F10
-`luciel_instances.active` toggle. C.6 cross-pillar cleanup drops
-`from app.db.session import SessionLocal` from the four pillar files.
+lookup reuses `api_keys_step29c?id=` from C.1). C.3 (P13 reads) adds
+one new endpoint `messages_step29c` for setup-message-id lookup,
+extends `memory_items_step29c` with `message_id` (exact) and
+`content_contains` (substring) filters, and extends
+`admin_audit_logs_step29c` with `actor_key_prefix` (exact) filter.
+C.4 extends further for P14 reads. C.5 adds one POST for the P11
+F10 `luciel_instances.active` toggle. C.6 cross-pillar cleanup
+drops `from app.db.session import SessionLocal` from the four
+pillar files.
 
 Routes
 ------
@@ -20,15 +25,21 @@ Routes
         &actor_user_id=<uuid>           # platform User UUID (P12, C.2)
         &agent_id=<str>                 # agent slug (P12, C.2)
         &message_id_not_null=<bool>
+        &message_id=<int>               # exact match (P13, C.3)
+        &content_contains=<str>         # substring probe (P13, C.3)
         &limit=<int=100>
     GET /api/v1/admin/forensics/admin_audit_logs_step29c
         ?tenant_id=<str>
         &action=<str>
         &actor_label_like=<str>
+        &actor_key_prefix=<str>         # exact 12-char handle (P13, C.3)
         &limit=<int=100>
     GET /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}
+    GET /api/v1/admin/forensics/messages_step29c
+        ?session_id=<str>               # P13 setup-message lookup
+        &limit=<int=100>
 
-All four routes:
+All routes (4 in C.1, +1 in C.3 = 5 today):
   - require platform_admin via ScopePolicy.is_platform_admin
   - are rate-limited via ADMIN_RATE_LIMIT
   - are SELECT-only against tables the API process's luciel_admin
@@ -112,6 +123,7 @@ from app.models.admin_audit_log import AdminAuditLog
 from app.models.api_key import ApiKey
 from app.models.luciel_instance import LucielInstance
 from app.models.memory import MemoryItem
+from app.models.message import MessageModel
 from app.policy.scope import ScopePolicy
 
 
@@ -198,6 +210,29 @@ class AdminAuditLogForensic(BaseModel):
 
 class AdminAuditLogsForensic(BaseModel):
     rows: list[AdminAuditLogForensic]
+
+
+class MessageForensic(BaseModel):
+    """Strict-projection of `messages` for forensic read.
+
+    `content` is NEVER included. Chat content is the most sensitive
+    field after `memory_items.content`; the harness only needs `id`
+    (the message_id used to construct/probe spoof payloads in P13)
+    plus `session_id` and `role` for context. `trace_id` is included
+    because it lets future cross-pillar tests correlate a message
+    with the Celery task it kicked off without dragging audit-log
+    rows into the loop.
+    """
+
+    id: int
+    session_id: str
+    role: str
+    trace_id: str | None
+    created_at: datetime
+
+
+class MessagesForensic(BaseModel):
+    items: list[MessageForensic]
 
 
 class LucielInstanceForensic(BaseModel):
@@ -301,6 +336,8 @@ def list_memory_items_forensic_step29c(
     actor_user_id: uuid.UUID | None = Query(default=None),
     agent_id: str | None = Query(default=None, max_length=100),
     message_id_not_null: bool = Query(default=False),
+    message_id: int | None = Query(default=None, ge=1),
+    content_contains: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=_LIMIT_DEFAULT, ge=1, le=_LIMIT_MAX),
 ) -> MemoryItemsForensic:
     """Forensic read of memory_items rows. platform_admin only.
@@ -311,6 +348,14 @@ def list_memory_items_forensic_step29c(
     so P12 A1/A3/A4/A5 identity-stability assertions can read
     actor-attributed memory rows over HTTP. P13/P14 cross-tenant leak
     checks reuse this endpoint in later sub-commits.
+
+    Step 29 Commit C.3 adds `message_id` (exact match) and
+    `content_contains` (substring probe) for P13 A1/A3/A5/degraded
+    reads. The projection is unchanged -- `content_contains` lets
+    the caller test for substring presence without ever returning
+    the substring or the surrounding content text. The probe is
+    locked behind platform_admin + ADMIN_RATE_LIMIT and is the
+    minimum primitive needed for P13 A1's spoof-absence assertion.
 
     Filter combination semantics (all AND-joined; omit a param to
     leave its dimension unconstrained):
@@ -324,6 +369,11 @@ def list_memory_items_forensic_step29c(
         (memory_items.agent_id, e.g. "p12-a1-abc123")
       - message_id_not_null narrows to rows where message_id is set
         (Step 27b idempotency probe shape)
+      - message_id is exact match on the FK to messages.id (P13 C.3)
+      - content_contains is a substring probe over memory text
+        (P13 A1 spoof-absence; projection still excludes content,
+        so callers can only learn whether matching rows exist, not
+        what the content is)
 
     Returns the strict MemoryItemForensic projection (no content;
     actor_user_id IS returned). Hard limit 1000.
@@ -339,6 +389,14 @@ def list_memory_items_forensic_step29c(
         stmt = stmt.where(MemoryItem.agent_id == agent_id)
     if message_id_not_null:
         stmt = stmt.where(MemoryItem.message_id.is_not(None))
+    if message_id is not None:
+        stmt = stmt.where(MemoryItem.message_id == message_id)
+    if content_contains is not None:
+        # Substring probe. Projection still excludes content, so the
+        # caller learns only "row id N matches", not what content[N]
+        # holds. Used by P13 A1 to assert ABSENCE of a sentinel,
+        # which is the safest possible shape for this filter.
+        stmt = stmt.where(MemoryItem.content.contains(content_contains))
     stmt = stmt.order_by(MemoryItem.id.desc()).limit(limit)
 
     rows = list(db.scalars(stmt))
@@ -372,6 +430,7 @@ def list_admin_audit_logs_forensic_step29c(
     tenant_id: str = Query(..., max_length=100),
     action: str | None = Query(default=None, max_length=100),
     actor_label_like: str | None = Query(default=None, max_length=100),
+    actor_key_prefix: str | None = Query(default=None, max_length=32),
     limit: int = Query(default=_LIMIT_DEFAULT, ge=1, le=_LIMIT_MAX),
 ) -> AdminAuditLogsForensic:
     """Forensic read of admin_audit_logs rows. platform_admin only.
@@ -387,7 +446,12 @@ def list_admin_audit_logs_forensic_step29c(
     `actor_label_like` is a substring filter using SQL LIKE (the
     harness's F9 query uses `actor_label LIKE 'worker:%'` which we
     encode by passing `actor_label_like='worker:'` and matching it
-    as a prefix). Action filter is exact-match.
+    as a prefix). `action` and `actor_key_prefix` are exact-match.
+    `actor_key_prefix` (Step 29 Commit C.3) is the 12-char public
+    correlation handle stamped on every audit row at write time;
+    P13 A2 uses it to confirm Gate 6's IDENTITY_SPOOF audit row
+    was emitted by the legitimate K1 key, not by some bystander
+    key in the same tenant.
 
     after_json is included in the projection; production code
     already guarantees no PII there (P11 F5 verifies this every
@@ -403,6 +467,8 @@ def list_admin_audit_logs_forensic_step29c(
         # '%' here rather than asking the caller to do it, so the
         # harness side stays simple.
         stmt = stmt.where(AdminAuditLog.actor_label.like(actor_label_like + "%"))
+    if actor_key_prefix is not None:
+        stmt = stmt.where(AdminAuditLog.actor_key_prefix == actor_key_prefix)
     stmt = stmt.order_by(AdminAuditLog.id.desc()).limit(limit)
 
     rows = list(db.scalars(stmt))
@@ -462,4 +528,52 @@ def get_luciel_instance_forensic_step29c(
         scope_owner_agent_id=row.scope_owner_agent_id,
         active=row.active,
         created_at=row.created_at,
+    )
+
+
+@router.get(
+    "/messages_step29c",
+    response_model=MessagesForensic,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def list_messages_forensic_step29c(
+    request: Request,
+    db: DbSession,
+    session_id: str = Query(..., max_length=100),
+    limit: int = Query(default=_LIMIT_DEFAULT, ge=1, le=_LIMIT_MAX),
+) -> MessagesForensic:
+    """Forensic read of messages rows for a session. platform_admin only.
+
+    Step 29 Commit C.3. Backs P13 setup-message-id lookup at
+    pillar_13_cross_tenant_identity.py L346-L361 -- the spoof
+    payload referenced in P13 A1/A2 needs a real message_id from
+    the legitimate setup turn (Gate 1 rejects malformed message_id
+    integers, so without a real one the spoof never reaches Gate 6).
+
+    Returns the strict MessageForensic projection (no content; chat
+    content is the most sensitive field after memory content). Rows
+    are ordered DESC by id, so callers requesting `limit=1` get the
+    most recent message in the session, which is the shape P13's
+    setup lookup uses. Hard limit 1000.
+    """
+    _require_platform_admin_step29c(request)
+
+    stmt = (
+        select(MessageModel)
+        .where(MessageModel.session_id == session_id)
+        .order_by(MessageModel.id.desc())
+        .limit(limit)
+    )
+    rows = list(db.scalars(stmt))
+    return MessagesForensic(
+        items=[
+            MessageForensic(
+                id=r.id,
+                session_id=r.session_id,
+                role=r.role,
+                trace_id=r.trace_id,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
     )
