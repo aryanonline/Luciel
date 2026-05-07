@@ -5,6 +5,7 @@ Handles synchronous and streaming chat endpoints.
 """
 
 import json
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -16,6 +17,12 @@ from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import ChatService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+# Step 29.y Cluster 6 (G-1 fix): module logger for the
+# chat_stream sanitized-error path. The exception is logged
+# server-side at ERROR with full traceback via logger.exception()
+# while the SSE client receives a hard-coded user-facing message.
+logger = logging.getLogger(__name__)
 
 
 @router.post(
@@ -90,8 +97,23 @@ def chat_stream(
                 yield f"data: {json.dumps({'token': token})}\n\n"
 
             yield f"data: {json.dumps({'done': True, 'session_id': payload.session_id, 'full_reply': full_reply})}\n\n"
-        except Exception as exc:
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+        except Exception:
+            # Step 29.y Cluster 6 (G-1 fix): do NOT leak str(exc) to
+            # the client. Pre-29.y any in-stream exception (DB
+            # connection error, LLM provider 401/429, JSONB
+            # serialization failure, cross-tenant memory rejection,
+            # etc.) was serialized to data: {"error": "<internal
+            # message>"} and streamed verbatim. An attacker probing
+            # /chat/stream could fingerprint internal state by
+            # observing different error strings (tenant existence,
+            # provider keys, scope-policy verbiage). See
+            # findings_phase1g.md G-1 for the documented attack.
+            #
+            # We log the full exception server-side at ERROR (with
+            # traceback via logger.exception) and stream a fixed,
+            # generic message to the client.
+            logger.exception("chat_stream: unhandled exception")
+            yield f"data: {json.dumps({'error': 'Stream interrupted. Please retry.'})}\n\n"
 
     return StreamingResponse(
         event_stream(),
