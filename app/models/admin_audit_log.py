@@ -346,15 +346,21 @@ class AdminAuditLog(Base, TimestampMixin):
     # added them (8ddf0be96f44) deliberately did NOT grant UPDATE on
     # admin_audit_logs to luciel_worker, so a compromised worker
     # cannot rewrite the chain.
-    row_hash: Mapped[str | None] = mapped_column(
-        CHAR(64), nullable=True, unique=True,
+    # Step 29.y Cluster 3 (D-8): both columns are NOT NULL at the
+    # DB layer post-migration c5d8a1e7b3f9. Pillar 23 probes column
+    # nullability and switches to STRICT mode (zero NULL tolerance)
+    # when it sees the schema flip. The Mapped type drops Optional
+    # to match.
+    row_hash: Mapped[str] = mapped_column(
+        CHAR(64), nullable=False, unique=True,
         comment="sha256 hex of canonical_content + prev_row_hash; "
-                "NULLABLE for deploy-window tolerance.",
+                "NOT NULL post Step 29.y Cluster 3 (D-8).",
     )
-    prev_row_hash: Mapped[str | None] = mapped_column(
-        CHAR(64), nullable=True,
+    prev_row_hash: Mapped[str] = mapped_column(
+        CHAR(64), nullable=False,
         comment="row_hash of the prior row in id ASC order; "
-                "genesis = '0'*64.",
+                "genesis = '0'*64. NOT NULL post Step 29.y "
+                "Cluster 3 (D-8).",
     )
 
     __table_args__ = (
