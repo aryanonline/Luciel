@@ -155,6 +155,7 @@ from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
 )
+from app.services.admin_service import AdminService
 
 
 router = APIRouter(prefix="/admin/forensics", tags=["admin", "forensics"])
@@ -791,6 +792,40 @@ def toggle_luciel_instance_active_step29c(
         note="step29-c5-forensic-toggle",
         autocommit=False,
     )
+
+    # Step 29.y Cluster 2 (G-2 fix): cascade memory deactivation BEFORE
+    # flipping active. Pre-29.y, the forensic toggle deactivated the
+    # luciel_instance row but left memory_items rows with active=True
+    # underneath. When an agent slot was later reassigned, the new
+    # occupant inherited the prior occupant's memory rows because:
+    #   - D-1 in memory_repository does not filter on luciel_instance_id
+    #     when reading user memories
+    #   - F-1 confirms the FK is ON DELETE SET NULL, not RESTRICT
+    #   - The forensic-toggle path (this route) did not cascade
+    # That is the exact PIPEDA P5 hole findings_phase1g.md G-2 calls
+    # out, with a working production reach path through any
+    # platform_admin key.
+    #
+    # The cascade only fires on a real True->False transition, so
+    # P11 F10's deactivate-then-restore harness flow still works:
+    # the deactivate leg cascades memory rows (active=False), the
+    # restore leg (False->True) is a no-op for memory cascade. We
+    # do NOT auto-reactivate memory rows on True<-False because
+    # forensic restore is a fixture-lever, not an operational
+    # un-deactivate -- operational reactivation would go through a
+    # dedicated route with explicit memory-reactivation policy.
+    #
+    # autocommit=False keeps the audit row + cascade UPDATE +
+    # active-flag flip atomic in a single db.commit() at the end of
+    # this function. If any leg fails the whole batch rolls back.
+    if requested_active is False and previous_active is True:
+        AdminService(db).bulk_soft_deactivate_memory_items_for_luciel_instance(
+            tenant_id=inst.scope_owner_tenant_id,
+            luciel_instance_id=inst.id,
+            audit_ctx=audit_ctx,
+            updated_by=getattr(request.state, "actor_label", None),
+            autocommit=False,
+        )
 
     # Mutate only if the requested value differs from current. No-op
     # writes still audit (above) but do not bump updated_at.
