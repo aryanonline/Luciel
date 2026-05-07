@@ -46,6 +46,17 @@ earliest divergence.
      both sides indicates code-path drift (some code path is
      bypassing the session event) and FAILs hard.
 
+     STEP 29.y CLUSTER 8 (C-3): once the post-Cluster-3 migration
+     drops admin_audit_logs.row_hash to NOT NULL, the deploy-window
+     tolerance is no longer compatible with the column constraint --
+     the DB itself rejects new NULLs, so the only NULLs that can
+     exist are pre-migration leftovers. P23 now probes the live
+     column nullability and, when it sees row_hash IS NOT NULL at
+     the schema level, switches to STRICT mode: zero trailing NULLs,
+     zero unbackfilled prefix. This makes the pillar self-adapting
+     across the Cluster-3 deploy: lenient before, strict after, with
+     no manual flag flip.
+
   4. CHAIN HEAD: the genesis row (lowest id with a non-NULL row_hash)
      MUST have prev_row_hash = '0'*64. Anything else means the chain
      was forked or an out-of-order backfill occurred.
@@ -128,6 +139,12 @@ class AuditLogHashChainPillar(Pillar):
 
     def _run_with_engine(self, engine) -> str:
         with engine.connect() as conn:
+            # Probe the live column-nullability constraint. After
+            # Cluster 3 lands, admin_audit_logs.row_hash is NOT NULL
+            # and any leftover NULL is a chain hole, not a deploy-
+            # window remnant. Pre-Cluster-3 the column is nullable
+            # and we keep the legacy lenient mode.
+            row_hash_strict_not_null = self._probe_row_hash_not_null(conn)
             rows = conn.execute(text(_ROWS_SQL)).mappings().all()
 
         total = len(rows)
@@ -175,16 +192,29 @@ class AuditLogHashChainPillar(Pillar):
                 f"is called from app.main and app.worker.celery_app."
             )
 
-        # Soft note (not fail) for unbackfilled prefix rows.
+        # Soft note (not fail) for unbackfilled prefix rows in lenient
+        # mode; HARD FAIL in strict mode (post-Cluster-3 NOT NULL).
         unbackfilled_prefix = head_idx
         soft_notes: list[str] = []
         if unbackfilled_prefix > 0:
-            soft_notes.append(
+            msg = (
                 f"{unbackfilled_prefix} row(s) before chain head have "
                 f"NULL row_hash (unexpected: migration 8ddf0be96f44 "
                 f"should have backfilled all rows). First chained "
                 f"id={rows[head_idx]['id']}."
             )
+            if row_hash_strict_not_null:
+                # Schema says NOT NULL but rows exist anyway: that
+                # would mean a bug in the Cluster-3 migration's
+                # backfill step OR a NULL row landed via a path that
+                # bypassed the constraint (impossible at the engine
+                # layer, but worth surfacing if it ever happens).
+                raise AssertionError(
+                    "audit chain (strict mode): " + msg
+                    + " Schema is NOT NULL post-Cluster-3 yet NULL prefix "
+                    "rows exist; investigate the Cluster-3 backfill."
+                )
+            soft_notes.append(msg)
 
         # Validate chain head's prev_row_hash points at GENESIS.
         head_row = rows[head_idx]
@@ -269,15 +299,56 @@ class AuditLogHashChainPillar(Pillar):
             prev_hash = row_hash
             chained_rows += 1
 
+        # Strict NULL gate: post-Cluster-3 the column is NOT NULL, so
+        # any trailing NULL is a chain hole, not a deploy-window remnant.
+        if row_hash_strict_not_null and trailing_null_rows > 0:
+            raise AssertionError(
+                f"audit chain (strict mode): {trailing_null_rows} trailing "
+                f"NULL row_hash row(s) but admin_audit_logs.row_hash is "
+                f"NOT NULL at the schema layer. This is structurally "
+                f"impossible -- if this fires, either the schema probe "
+                f"misread the constraint or a NULL slipped past the DB. "
+                f"Investigate before trusting the chain."
+            )
+
+        mode_token = "strict" if row_hash_strict_not_null else "lenient"
         verdict = (
-            f"audit chain: {chained_rows} row(s) verified clean from "
-            f"id={head_row['id']} to id={rows[-1]['id']}; "
-            f"{trailing_null_rows} trailing NULL (deploy-window "
-            f"tolerance); chain head prev_row_hash=GENESIS"
+            f"audit chain ({mode_token} mode): {chained_rows} row(s) "
+            f"verified clean from id={head_row['id']} to id={rows[-1]['id']}; "
+            f"{trailing_null_rows} trailing NULL "
+            f"({'forbidden by NOT NULL' if row_hash_strict_not_null else 'deploy-window tolerance'}); "
+            f"chain head prev_row_hash=GENESIS"
         )
         if soft_notes:
             verdict = verdict + " ; soft notes: " + " | ".join(soft_notes)
         return verdict
+
+    @staticmethod
+    def _probe_row_hash_not_null(conn) -> bool:
+        """Return True iff admin_audit_logs.row_hash is NOT NULL at the schema layer.
+
+        The Cluster-3 migration drops the column to NOT NULL after
+        backfilling any pre-existing NULLs. Before that migration runs,
+        the column is nullable and P23 stays in lenient mode (legacy
+        deploy-window tolerance). After it runs, P23 switches to strict
+        mode automatically. No flag flip needed.
+
+        Defensive: any exception (DB driver hiccup, permission edge
+        case) collapses to False (lenient) so a probe failure cannot
+        flip the gate state inadvertently.
+        """
+        try:
+            row = conn.execute(text(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'admin_audit_logs' "
+                "AND column_name = 'row_hash'"
+            )).first()
+        except Exception:
+            return False
+        if row is None:
+            return False
+        return str(row[0]).upper() == "NO"
 
     @staticmethod
     def _load_database_url_from_dotenv() -> str | None:
