@@ -66,6 +66,31 @@ C.5 EXTENDS:
         on every C.5 POST -- the route 500s in production. This
         test catches the half-applied refactor at AST time.
 
+C.6 EXTENDS:
+    Adds three AST tests covering the verification-harness consolidation
+    that landed in C.6 (no new admin_forensics routes, no new projections;
+    pure cleanup commit on the harness side). The tests live in this file
+    rather than a new tests/verification/ file because the doctrine flip
+    at 87e4068 explicitly anticipated each of C.4/C.5/C.6/D shipping AST
+    tests in this same file (D is the only one that gets a separate
+    harness-equivalent file).
+      - Test 19 (infra-probes module exists with both helpers):
+        app/verification/_infra_probes.py defines _broker_reachable AND
+        _worker_reachable as module-level FunctionDefs. P11 and P13
+        both import them by name, so a deleted module or renamed
+        helper breaks both pillars at import time. Surface that
+        regression at the source level rather than at verify time.
+      - Test 20 (no re-inlined helpers in P11/P13): the consolidation
+        invariant -- neither pillar may define _broker_reachable or
+        _worker_reachable as a module-level FunctionDef. The original
+        B.1 mode-gate honesty bug came from the inline copies drifting
+        apart; this test prevents the recurrence at AST time.
+      - Test 21 (forensics_get allowlist contract): the wrapper added
+        in C.6 invokes call() with expect=(200, 404) literally. A
+        maintainer who drops 404 defeats the wrapper (callers branch
+        on status 404); a maintainer who broadens the allowlist masks
+        forensic-plane failures. Pin the exact two-element tuple.
+
 CONTRACT GUARDED:
     1. The four route functions exist in app/api/v1/admin_forensics.py
        under the canonical names get_api_key_forensic_step29c,
@@ -146,6 +171,26 @@ _ADMIN_FORENSICS_PATH = (
     _PROJECT_ROOT / "app" / "api" / "v1" / "admin_forensics.py"
 )
 _ROUTER_PATH = _PROJECT_ROOT / "app" / "api" / "router.py"
+
+# ---- Step 29 Commit C.6 paths (verification harness consolidation) -------
+# C.6 pulled `_broker_reachable` / `_worker_reachable` out of P11 + P13 into
+# `_infra_probes.py`, and added `forensics_get` to `http_client.py`. The C.6
+# tests below pin those moves at the source level so a future refactor that
+# re-inlines the helpers, deletes the shared module, or broadens the
+# `forensics_get` status-code allowlist surfaces here rather than at the
+# next verify run.
+_INFRA_PROBES_PATH = (
+    _PROJECT_ROOT / "app" / "verification" / "_infra_probes.py"
+)
+_HTTP_CLIENT_PATH = (
+    _PROJECT_ROOT / "app" / "verification" / "http_client.py"
+)
+_PILLAR_11_PATH = (
+    _PROJECT_ROOT / "app" / "verification" / "tests" / "pillar_11_async_memory.py"
+)
+_PILLAR_13_PATH = (
+    _PROJECT_ROOT / "app" / "verification" / "tests" / "pillar_13_cross_tenant_identity.py"
+)
 
 _ROUTE_FUNCTION_NAMES = (
     "get_api_key_forensic_step29c",
@@ -787,6 +832,153 @@ def test_action_luciel_instance_forensic_toggle_in_allowed_actions() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 29 Commit C.6: verification-harness consolidation contracts.
+# ---------------------------------------------------------------------------
+
+def test_infra_probes_module_defines_broker_and_worker_reachable() -> None:
+    """C.6 invariant: shared infra-probe module exists with both helpers.
+
+    `_broker_reachable` / `_worker_reachable` were originally inlined in
+    Pillar 11 and (since B.1) duplicated verbatim in Pillar 13. C.6
+    consolidated them into `app/verification/_infra_probes.py`. If a
+    future refactor deletes the module or renames either function, both
+    P11 and P13 fail to import (and therefore fail to load) -- this test
+    surfaces that source-level regression before any verify run.
+    """
+    if not _INFRA_PROBES_PATH.exists():
+        raise AssertionError(
+            f"C.6: {_INFRA_PROBES_PATH} does not exist. The shared infra "
+            "probe module was deleted; restore it (or relocate the helpers "
+            "and update P11/P13/the test below to match)."
+        )
+    tree = ast.parse(_INFRA_PROBES_PATH.read_text())
+    fn_names = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    missing = {"_broker_reachable", "_worker_reachable"} - fn_names
+    if missing:
+        raise AssertionError(
+            f"C.6: {_INFRA_PROBES_PATH.name} missing helpers {sorted(missing)}. "
+            f"Found module-level FunctionDefs: {sorted(fn_names)}. Both "
+            "_broker_reachable and _worker_reachable must be defined here "
+            "(P11 and P13 import them by name)."
+        )
+
+
+def test_pillars_11_and_13_dont_redefine_infra_probes() -> None:
+    """C.6 invariant: P11 and P13 must not re-inline the infra probes.
+
+    The whole point of C.6 was to eliminate the duplicate inline copies
+    that caused the B.1 mode-gate honesty bug (P13's _broker_reachable
+    drifted out of sync with P11's). If a future maintainer re-adds an
+    inline definition in either pillar -- even with the same body --
+    the duplication risk returns. This test pins the cleanup at the
+    source level: zero module-level FunctionDefs named _broker_reachable
+    or _worker_reachable in either pillar file.
+    """
+    forbidden_names = {"_broker_reachable", "_worker_reachable"}
+    for path in (_PILLAR_11_PATH, _PILLAR_13_PATH):
+        tree = ast.parse(path.read_text())
+        offenders = sorted(
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in forbidden_names
+        )
+        if offenders:
+            raise AssertionError(
+                f"C.6: {path.name} re-defines {offenders} as module-level "
+                "functions. These helpers must be imported from "
+                "app.verification._infra_probes (the C.6 consolidation), "
+                "not inlined. Re-inlining recreates the B.1 drift risk."
+            )
+
+
+def test_forensics_get_admits_200_and_404_only() -> None:
+    """C.6 invariant: `forensics_get` allowlists exactly (200, 404).
+
+    The wrapper exists to name the GET-and-expect-(200,404) pattern. A
+    maintainer who drops 404 from the allowlist defeats the wrapper's
+    purpose (callers branch on r.status_code == 404 for the
+    teardown-race / never-created case); a maintainer who broadens the
+    allowlist (e.g. adds 500) silently masks forensic-plane failures
+    that should surface as hard AssertionErrors. Either drift breaks
+    the contract that callers rely on. This test parses the wrapper
+    body, finds the inner call(...) invocation, and asserts the
+    expect= kwarg is a Tuple of exactly the two literal ints {200, 404}.
+    """
+    tree = ast.parse(_HTTP_CLIENT_PATH.read_text())
+    fn = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "forensics_get"
+        ),
+        None,
+    )
+    if fn is None:
+        raise AssertionError(
+            f"C.6: {_HTTP_CLIENT_PATH.name} does not define forensics_get. "
+            "Restore the wrapper (introduced in C.6) or relocate it and "
+            "update this test to match."
+        )
+
+    # Walk the function body and find the first Call whose func is a Name
+    # 'call' (the inner call() invocation that forensics_get is a thin
+    # wrapper around). The wrapper has exactly one such call.
+    inner_call = None
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "call"
+        ):
+            inner_call = node
+            break
+    if inner_call is None:
+        raise AssertionError(
+            "C.6: forensics_get does not invoke call(). The wrapper must "
+            "delegate to call() to preserve auth + assertion semantics."
+        )
+
+    expect_kw = next(
+        (kw for kw in inner_call.keywords if kw.arg == "expect"),
+        None,
+    )
+    if expect_kw is None:
+        raise AssertionError(
+            "C.6: forensics_get's inner call() invocation has no expect= "
+            "kwarg. The wrapper must pin expect=(200, 404) explicitly so "
+            "the contract is visible at the source level."
+        )
+    if not isinstance(expect_kw.value, ast.Tuple):
+        raise AssertionError(
+            f"C.6: forensics_get's expect= kwarg must be a Tuple literal; "
+            f"got {type(expect_kw.value).__name__}. A non-tuple value "
+            "could be a variable that drifts at runtime."
+        )
+
+    constants: list[int] = []
+    for elt in expect_kw.value.elts:
+        if not isinstance(elt, ast.Constant) or not isinstance(elt.value, int):
+            raise AssertionError(
+                "C.6: forensics_get's expect= tuple must contain only "
+                f"literal int Constants; got element of type "
+                f"{type(elt).__name__}."
+            )
+        constants.append(elt.value)
+
+    if sorted(constants) != [200, 404]:
+        raise AssertionError(
+            f"C.6: forensics_get expect= allowlist must be exactly "
+            f"(200, 404); got {tuple(constants)}. Dropping 404 defeats "
+            "the wrapper; broadening the allowlist (e.g. +500) masks "
+            "forensic-plane failures."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Manual runner so the suite works without pytest installed.
 # ---------------------------------------------------------------------------
 
@@ -810,6 +1002,9 @@ def _run_all() -> int:
         test_get_user_route_accepts_user_id_path_param,
         test_toggle_route_audits_before_mutating,
         test_action_luciel_instance_forensic_toggle_in_allowed_actions,
+        test_infra_probes_module_defines_broker_and_worker_reachable,
+        test_pillars_11_and_13_dont_redefine_infra_probes,
+        test_forensics_get_admits_200_and_404_only,
     ]
     failed = 0
     for t in tests:

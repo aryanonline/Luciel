@@ -51,7 +51,7 @@ import uuid
 
 from app.models.scope_assignment import EndReason
 from app.verification.fixtures import RunState
-from app.verification.http_client import call, pooled_client
+from app.verification.http_client import call, forensics_get, pooled_client
 from app.verification.runner import Pillar
 
 # Step 29 Commit C.4: P14 forensic reads migrated to platform-admin HTTP.
@@ -389,12 +389,14 @@ class DepartureSemanticsPillar(Pillar):
             # there is no DB session to close.
 
             # ---------- A1: K1.active is False (T1 key rotated) ----------
-            r = call(
-                "GET",
+            # Step 29 Commit C.6: forensics_get() wrapper. (200, 404) is
+            # the right allowlist because K1 was created by P14's setup
+            # and a 404 here would indicate the row vanished -- which IS
+            # an A1 assertion failure (caught by the explicit 404 check).
+            r = forensics_get(
                 "/api/v1/admin/forensics/api_keys_step29c",
                 pa,
                 params={"id": k1_id},
-                expect=(200, 404),
                 client=c,
             )
             if r.status_code == 404:
@@ -413,12 +415,11 @@ class DepartureSemanticsPillar(Pillar):
             # The bounded-cascade assertion. If A2 fails, the cascade
             # over-fired and a User leaving brokerage A would lose
             # access at brokerage B.
-            r = call(
-                "GET",
+            # Step 29 Commit C.6: forensics_get() wrapper.
+            r = forensics_get(
                 "/api/v1/admin/forensics/api_keys_step29c",
                 pa,
                 params={"id": k2_id},
-                expect=(200, 404),
                 client=c,
             )
             if r.status_code == 404:
@@ -533,11 +534,10 @@ class DepartureSemanticsPillar(Pillar):
             # synthetic) with email + display_name explicitly excluded
             # because they are PII and have no place on a forensic
             # surface.
-            r = call(
-                "GET",
+            # Step 29 Commit C.6: forensics_get() wrapper.
+            r = forensics_get(
                 f"/api/v1/admin/forensics/users_step29c/{user_id}",
                 pa,
-                expect=(200, 404),
                 client=c,
             )
             if r.status_code == 404:

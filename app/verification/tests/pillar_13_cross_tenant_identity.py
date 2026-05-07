@@ -87,10 +87,10 @@ f392a842f885) is intact.
 
 from __future__ import annotations
 
-import os
 import time
 import uuid
 
+from app.verification._infra_probes import _broker_reachable, _worker_reachable
 from app.verification.fixtures import RunState
 from app.verification.http_client import call, pooled_client
 from app.verification.runner import Pillar
@@ -103,53 +103,16 @@ P13_TENANT_PREFIX = "step24-5b-p13-"
 # Source of truth: app/models/admin_audit_log.py
 ACTION_WORKER_IDENTITY_SPOOF_REJECT = "WORKER_IDENTITY_SPOOF_REJECT"
 
-
-def _broker_reachable() -> bool:
-    """Best-effort Redis ping (mirrors Pillar 11). False on any failure.
-
-    Local dev uses Redis broker. Prod uses SQS (Step 27c-final). A healthy
-    broker means tasks can be enqueued -- it does NOT prove a worker is
-    subscribed and consuming. For full MODE detection we also require
-    _worker_reachable(); see drift D-pillar-13-mode-gate-broker-only-2026-05-06
-    in CANONICAL_RECAP for why this matters (silent FAIL of A2 when broker
-    is up but no worker is running locally).
-    """
-    try:
-        import redis  # noqa: WPS433
-    except ImportError:
-        return False
-    url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    try:
-        client = redis.Redis.from_url(
-            url, socket_connect_timeout=1.0, socket_timeout=1.0,
-        )
-        return bool(client.ping())
-    except Exception:
-        return False
-
-
-def _worker_reachable() -> bool:
-    """Inspect Celery worker liveness via control.ping(). Empty list = none.
-
-    Mirrors Pillar 11's helper verbatim. Required because P13's full-mode
-    assertions (A1, A2) depend on a worker actually consuming the spoof
-    payload and routing it through Gate 6. Without a live worker, the
-    payload sits in the broker queue forever and A2 silently FAILs as if
-    Gate 6 itself were broken -- a misleading signal.
-
-    Will be deduplicated with Pillar 11's copy in Commit D (pytest harness
-    + shared verification infra module). Kept inline here to keep this
-    commit's scope tight to the mode-gate honesty fix.
-    """
-    try:
-        from app.worker.celery_app import celery_app
-    except ImportError:
-        return False
-    try:
-        replies = celery_app.control.ping(timeout=1.0)
-        return bool(replies)
-    except Exception:
-        return False
+# Mode detection helpers (_broker_reachable / _worker_reachable) live in
+# app.verification._infra_probes since Step 29 Commit C.6. Originally these
+# were duplicated verbatim from Pillar 11 (the duplication was deliberate at
+# B.1 time -- the B.1 commit's scope was constrained to the P13 mode-gate
+# honesty fix and explicitly deferred deduplication, see drift
+# D-pillar-13-mode-gate-broker-only-2026-05-06 in CANONICAL_RECAP). C.6
+# completes that deferred consolidation: both pillars now import from a
+# single source of truth in _infra_probes, preserving the same fail-closed
+# behavior on import/connection/auth/timeout failures and ensuring P11 and
+# P13 cannot drift apart in a future refactor.
 
 
 def _new_p13_tenant_id(suffix: str) -> str:

@@ -94,3 +94,50 @@ def call(
         return _do(client)
     with httpx.Client(base_url=BASE_URL, timeout=REQUEST_TIMEOUT) as ephemeral:
         return _do(ephemeral)
+
+
+def forensics_get(
+    path: str,
+    key: str,
+    *,
+    params: dict[str, Any] | list[tuple[str, Any]] | None = None,
+    client: httpx.Client | None = None,
+) -> httpx.Response:
+    """GET a Step 29 forensic endpoint, expecting (200, 404).
+
+    Step 29 Commit C.6 introduced this wrapper to name the recurring
+    "GET-and-expect-(200,404)" pattern that pillars 11, 12, 13, and 14
+    reproduce inline at every cross-pillar forensic lookup. The (200, 404)
+    allowlist is correct for forensic GETs because:
+
+      - 200 means the row exists; the caller inspects `r.json()`.
+      - 404 means the row was teardown-raced or never created; the caller
+        decides whether that is an assertion failure (e.g. P11 F10's
+        instance_agent disappearing) or expected behavior (e.g. P14's A1
+        K1 key existing post-departure).
+      - Any other status (401/403/500/etc.) is a HARD failure of the
+        forensic plane itself -- platform_admin gate failure, missing
+        endpoint, server crash -- and `call()` raises AssertionError on it.
+
+    The wrapper does NOT swallow 404; it simply admits 404 to the allowlist
+    and returns the response so the caller can branch on `r.status_code`.
+    This preserves every existing 404-handling block at the callsite (no
+    assertion behavior changes); only the `"GET" + expect=(200, 404)` ritual
+    is hoisted into a named function.
+
+    Why not retrofit the strict `expect=200` forensic GETs too? Because
+    those callsites are the much more common case where 404 IS itself a
+    failure (e.g. P11 F1's `api_keys_step29c?id=` lookup of a key the
+    pillar JUST created -- a 404 there means the create silently failed
+    and the pillar should fail loudly). Wrapping those in a helper that
+    admits 404 would mask exactly the failure mode they need to surface.
+    Keep the strict-200 callers as `call("GET", ..., expect=200)`.
+    """
+    return call(
+        "GET",
+        path,
+        key,
+        params=params,
+        expect=(200, 404),
+        client=client,
+    )

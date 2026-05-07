@@ -73,7 +73,6 @@ docs/STEP_29_AUDIT.md Section 6 for the full rule.
 
 from __future__ import annotations
 
-import os
 import time
 from typing import Any
 
@@ -89,38 +88,27 @@ from typing import Any
 # and cannot be exercised over HTTP without defeating the contract.
 from app.db.session import SessionLocal
 from app.verification.fixtures import RunState
-from app.verification.http_client import BASE_URL, call, h, pooled_client
+from app.verification._infra_probes import _broker_reachable, _worker_reachable
+from app.verification.http_client import (
+    BASE_URL,
+    call,
+    forensics_get,
+    h,
+    pooled_client,
+)
 from app.verification.runner import Pillar
 
 
-# ---------- mode detection helpers ----------
-
-def _broker_reachable() -> bool:
-    """Best-effort Redis ping. False on any failure (import, conn, auth)."""
-    try:
-        import redis  # noqa: WPS433 (intentional lazy import)
-    except ImportError:
-        return False
-    url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    try:
-        client = redis.Redis.from_url(url, socket_connect_timeout=1.0,
-                                      socket_timeout=1.0)
-        return bool(client.ping())
-    except Exception:
-        return False
-
-
-def _worker_reachable() -> bool:
-    """Inspect Celery worker liveness via control.ping(). Empty list = none."""
-    try:
-        from app.worker.celery_app import celery_app
-    except ImportError:
-        return False
-    try:
-        replies = celery_app.control.ping(timeout=1.0)
-        return bool(replies)
-    except Exception:
-        return False
+# Mode detection helpers (_broker_reachable / _worker_reachable) live in
+# app.verification._infra_probes since Step 29 Commit C.6. Previously they
+# were inlined here AND duplicated verbatim in P13; the duplication was
+# called out at the time as deferred cleanup (see B.1 commit message and
+# the P13 docstring annotation prior to C.6). Consolidating both into a
+# shared module preserves the same observable behavior -- both helpers
+# return False on any failure (import, connection, auth, timeout) so the
+# pillar gracefully drops to MODE=degraded -- while making the seam
+# obvious to a future reader: any pillar that needs the same gate
+# imports from _infra_probes; no further inline copies should be added.
 
 
 # ---------- pillar ----------
@@ -546,12 +534,18 @@ class AsyncMemoryPillar(Pillar):
             # which emits an ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE audit
             # row before mutating active. Producer-side .apply_async stays
             # direct under the B.3 producer-side exemption.
+            # Step 29 Commit C.6: forensics_get() wrapper hides the
+            # GET-and-expect-(200,404) ritual; the (200, 404) allowlist
+            # is correct here because a 404 means the instance row was
+            # teardown-raced or never created -- which IS an assertion
+            # failure for F10 (we just looked it up by state.instance_agent
+            # which the pillar's own setup populated). The 4-line check
+            # below preserves that semantic exactly; only the call shape
+            # is hoisted.
             with pooled_client() as c:
-                r = call(
-                    "GET",
+                r = forensics_get(
                     f"/api/v1/admin/forensics/luciel_instances_step29c/{state.instance_agent}",
                     state.platform_admin_key,
-                    expect=(200, 404),
                     client=c,
                 )
             if r.status_code == 404:
