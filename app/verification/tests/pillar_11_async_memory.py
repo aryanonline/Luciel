@@ -96,7 +96,7 @@ from app.verification.http_client import (
     h,
     pooled_client,
 )
-from app.verification.runner import Pillar
+from app.verification.runner import Outcome, Pillar, PillarOutcome
 
 
 # Mode detection helpers (_broker_reachable / _worker_reachable) live in
@@ -118,16 +118,30 @@ class AsyncMemoryPillar(Pillar):
     name = "async memory extraction (Step 27b)"
 
     # ---------------- entry point ----------------
-    def run(self, state: RunState) -> str:
+    def run(self, state: RunState):
+        # Step 29.y Cluster 8: tri-state outcome.
+        # Pre-29.y this method returned a bare string with the mode
+        # baked into the prefix ("MODE=full :: ..." / "MODE=degraded ::
+        # ..."), and the matrix reported PASS for both cases. That made
+        # a degraded run indistinguishable from a full run in the green
+        # badge. Now we return PillarOutcome(Outcome.FULL/DEGRADED, ...)
+        # so the runner can enforce the strict-full gate by default and
+        # still let --allow-degraded callers inspect the detail.
         # Always-on degraded checks first; they have no infra dependency
         # and act as a smoke test for the import surface itself.
         degraded_summary = self._run_degraded_checks(state)
 
         if _broker_reachable() and _worker_reachable():
             full_summary = self._run_full_checks(state)
-            return f"MODE=full :: {full_summary} | {degraded_summary}"
+            return PillarOutcome(
+                Outcome.FULL,
+                f"MODE=full :: {full_summary} | {degraded_summary}",
+            )
 
-        return f"MODE=degraded :: {degraded_summary} (worker/broker unreachable)"
+        return PillarOutcome(
+            Outcome.DEGRADED,
+            f"MODE=degraded :: {degraded_summary} (worker/broker unreachable)",
+        )
 
     # ---------------- degraded mode (always run) ----------------
     def _run_degraded_checks(self, state: RunState) -> str:
