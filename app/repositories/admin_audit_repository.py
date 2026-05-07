@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.models.admin_audit_log import (
     ALLOWED_ACTIONS,
@@ -144,7 +145,8 @@ class AdminAuditRepository:
         after: dict[str, Any] | None = None,
         note: str | None = None,
         autocommit: bool = False,
-    ) -> AdminAuditLog:
+        skip_on_conflict: bool = False,
+    ) -> AdminAuditLog | None:
         """Append a single audit row.
 
         Defaults to autocommit=False so the caller's mutation and its
@@ -185,11 +187,33 @@ class AdminAuditRepository:
             note=note,
         )
         self.db.add(row)
-        if autocommit:
-            self.db.commit()
-            self.db.refresh(row)
-        else:
-            self.db.flush()
+        try:
+            if autocommit:
+                self.db.commit()
+                self.db.refresh(row)
+            else:
+                self.db.flush()
+        except IntegrityError as exc:
+            # Step 29.y Cluster 4 (E-2): skip_on_conflict=True means
+            # the caller is writing a worker-rejection-class row
+            # protected by the
+            # ux_admin_audit_logs_worker_reject_idem partial unique
+            # index on (action, tenant_id, resource_natural_id). A
+            # concurrent worker that already wrote the same triple
+            # makes our INSERT raise IntegrityError -- which is the
+            # exact idempotency outcome we want. Swallow it, roll
+            # back, and return None to signal "no new row written".
+            # See findings_phase1e.md E-2 and the migration
+            # d8e2c4b1a0f3 docstring.
+            if skip_on_conflict:
+                self.db.rollback()
+                logger.info(
+                    "AUDIT idempotent-skip tenant=%s action=%s nat=%s "
+                    "(rejection already recorded)",
+                    tenant_id, action, resource_natural_id,
+                )
+                return None
+            raise
 
         logger.info(
             "AUDIT tenant=%s action=%s resource=%s pk=%s nat=%s "
