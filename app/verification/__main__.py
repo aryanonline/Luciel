@@ -41,33 +41,22 @@ import httpx
 
 from app.verification.fixtures import RunState, sweep_residue_tenants
 from app.verification.http_client import BASE_URL, REQUEST_TIMEOUT, h
+from app.verification.registry import (
+    pre_teardown_pillars,
+    teardown_integrity_pillar,
+)
 from app.verification.runner import MatrixReport, PillarResult, SuiteRunner
-from app.verification.tests.pillar_01_onboarding import PILLAR as P1
-from app.verification.tests.pillar_02_scope_hierarchy import PILLAR as P2
-from app.verification.tests.pillar_03_ingestion import PILLAR as P3
-from app.verification.tests.pillar_04_chat_key_binding import PILLAR as P4
-from app.verification.tests.pillar_05_chat_resolution import PILLAR as P5
-from app.verification.tests.pillar_06_retention import PILLAR as P6
-from app.verification.tests.pillar_07_cascade import PILLAR as P7
-from app.verification.tests.pillar_08_scope_negatives import PILLAR as P8
-from app.verification.tests.pillar_09_migration_integrity import PILLAR as P9
-from app.verification.tests.pillar_10_teardown_integrity import PILLAR as P10
-from app.verification.tests.pillar_11_async_memory import PILLAR as P11
-from app.verification.tests.pillar_12_identity_stability import PILLAR as P12
-from app.verification.tests.pillar_13_cross_tenant_identity import PILLAR as P13
-from app.verification.tests.pillar_14_departure_semantics import PILLAR as P14
-from app.verification.tests.pillar_15_consent_route_no_double_prefix import PILLAR as P15
-from app.verification.tests.pillar_16_memory_items_actor_user_id_not_null import PILLAR as P16
-from app.verification.tests.pillar_17_api_key_deactivate_audit import PILLAR as P17
-from app.verification.tests.pillar_18_tenant_cascade import PILLAR as P18
-from app.verification.tests.pillar_19_audit_log_api_mount import PILLAR as P19
-from app.verification.tests.pillar_20_onboarding_audit import PILLAR as P20
-from app.verification.tests.pillar_21_cross_tenant_scope_leak import PILLAR as P21
-from app.verification.tests.pillar_22_db_grants_audit_log_append_only import PILLAR as P22
-from app.verification.tests.pillar_23_audit_log_hash_chain import PILLAR as P23
 
-
-PRE_TEARDOWN_PILLARS = [P1, P2, P3, P4, P5, P6, P7, P8, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, P23]
+# Step 29 Commit D: pillar registration moved to app.verification.registry
+# so the new pytest harness (tests/verification/test_pillars.py) and this
+# CLI entry point share one source of truth. The previous explicit imports
+# of P1..P23 are now resolved inside registry.pre_teardown_pillars() and
+# registry.teardown_integrity_pillar() with the same ordering. The verify
+# matrix shape (pillar order, P9 placement, P10 deferred to post-teardown)
+# is preserved bit-for-bit -- this is a pure extraction, not a behavior
+# change, so luciel-verify:13 (the in-prod TD) will produce an identical
+# report when run against the post-D code at E(iv) once luciel-verify:14
+# ships.
 
 
 def _thorough_teardown(state: RunState) -> list[str]:
@@ -201,12 +190,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  tenant: {state.tenant_id}")
     print()
 
-    # ---- pre-teardown pillars 1..8 (+ 9 if not skipped) ----
+    # ---- pre-teardown pillars 1..8, 11..23 (+ 9 if not skipped) ----
+    # registry.pre_teardown_pillars(include_migration=) returns the same
+    # list the legacy PRE_TEARDOWN_PILLARS literal produced, with P9
+    # appended iff include_migration=True. Caller-side --skip-migration
+    # maps to include_migration=False.
     runner = SuiteRunner()
-    for pillar in PRE_TEARDOWN_PILLARS:
+    for pillar in pre_teardown_pillars(include_migration=not args.skip_migration):
         runner.register(pillar)
-    if not args.skip_migration:
-        runner.register(P9)
     pre_report = runner.run(state=state)
 
     print(pre_report.render_human())
@@ -229,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_teardown_integrity:
         print()
         print("--- post-teardown integrity ---")
-        post_runner = SuiteRunner().register(P10)
+        post_runner = SuiteRunner().register(teardown_integrity_pillar())
         post_report = post_runner.run(state=state)
         print(post_report.render_human())
         # ---- merge pre + post into single matrix, emit JSON artifact ----

@@ -192,6 +192,17 @@ _PILLAR_13_PATH = (
     _PROJECT_ROOT / "app" / "verification" / "tests" / "pillar_13_cross_tenant_identity.py"
 )
 
+# ---- Step 29 Commit D paths (pillar registry as single source of truth) --
+# D extracted the pre-teardown pillar list from app/verification/__main__.py
+# into a new app/verification/registry.py module so the CLI entry point and
+# the pytest harness in tests/verification/test_pillars.py reference the
+# SAME ordered list. The three D tests below pin: registry exposes the two
+# expected functions; __main__.py no longer carries the literal; the pytest
+# harness imports from registry, not from __main__.
+_REGISTRY_PATH = _PROJECT_ROOT / "app" / "verification" / "registry.py"
+_VERIFICATION_MAIN_PATH = _PROJECT_ROOT / "app" / "verification" / "__main__.py"
+_TEST_PILLARS_PATH = _PROJECT_ROOT / "tests" / "verification" / "test_pillars.py"
+
 _ROUTE_FUNCTION_NAMES = (
     "get_api_key_forensic_step29c",
     "list_memory_items_forensic_step29c",
@@ -979,6 +990,110 @@ def test_forensics_get_admits_200_and_404_only() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 29 Commit D: pillar-registry single source of truth
+# ---------------------------------------------------------------------------
+#
+# These three tests pin the D refactor at the source level. They run without
+# importing the registry (which would require DATABASE_URL) -- pure AST + raw
+# source-substring inspection. A future contributor who reverts D by:
+#   - deleting registry.py,
+#   - copying the pillar list back into __main__.py,
+#   - or having the pytest harness import pillars from __main__.py,
+# will see one of these three tests fail and the cause will be obvious from
+# the assertion message.
+
+
+def test_registry_module_defines_pre_teardown_and_integrity_functions() -> None:
+    """app/verification/registry.py defines both registry functions at module scope.
+
+    Both must be top-level FunctionDefs (not nested, not class methods)
+    because callers do `from app.verification.registry import
+    pre_teardown_pillars, teardown_integrity_pillar`. A regression that
+    moves either symbol into a class, renames it, or deletes it breaks
+    the import in __main__.py and in tests/verification/test_pillars.py;
+    this AST-level pin catches it before runtime.
+    """
+    tree = _parse(_REGISTRY_PATH)
+    top_level_func_names = {
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    assert "pre_teardown_pillars" in top_level_func_names, (
+        f"app/verification/registry.py missing top-level FunctionDef "
+        f"`pre_teardown_pillars`; found top-level functions: "
+        f"{sorted(top_level_func_names)!r}"
+    )
+    assert "teardown_integrity_pillar" in top_level_func_names, (
+        f"app/verification/registry.py missing top-level FunctionDef "
+        f"`teardown_integrity_pillar`; found top-level functions: "
+        f"{sorted(top_level_func_names)!r}"
+    )
+
+
+def test_main_no_longer_carries_pre_teardown_pillars_literal() -> None:
+    """app/verification/__main__.py no longer contains the inline pillar list.
+
+    Pre-D, __main__.py opened with `from ... import PILLAR as P1` (x23)
+    followed by `PRE_TEARDOWN_PILLARS = [P1, P2, ...]`. D moved that
+    entirely into registry.py. If a future contributor copies the list
+    back into __main__.py (perhaps as a "local override") this test
+    fails -- preserving the single-source-of-truth invariant.
+
+    Substring check is intentional: the only legitimate reason for
+    `PRE_TEARDOWN_PILLARS = [` to appear in __main__.py is the
+    re-introduction of the literal. Comments referencing the symbol
+    are allowed (and expected -- the file's commentary explains the
+    extraction).
+    """
+    src = _VERIFICATION_MAIN_PATH.read_text(encoding="utf-8")
+    assert "PRE_TEARDOWN_PILLARS = [" not in src, (
+        "app/verification/__main__.py contains `PRE_TEARDOWN_PILLARS = [` "
+        "-- the inline pillar literal that D extracted into "
+        "app/verification/registry.py. Restore the registry-only "
+        "source-of-truth pattern."
+    )
+
+
+def test_test_pillars_imports_from_registry_not_main() -> None:
+    """tests/verification/test_pillars.py imports pillars from the registry.
+
+    Pins the architectural intent of D: the pytest harness MUST share
+    the registry with __main__.py. If the harness is rewritten to import
+    pillars directly from app.verification.__main__ or to inline its own
+    P1..P23 import list, the two entry points can drift -- which is
+    exactly the failure mode the registry was created to prevent.
+
+    The harness wraps its registry import in a module-level try/except
+    so collection succeeds in CI without DATABASE_URL; that try/except
+    still contains the `from app.verification.registry import` line, so
+    an AST walk over the whole module body picks it up.
+    """
+    tree = _parse(_TEST_PILLARS_PATH)
+    has_registry_import = False
+    has_main_pillar_import = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "app.verification.registry":
+                has_registry_import = True
+            if node.module == "app.verification.__main__":
+                # Importing anything from __main__ would be a smell; if
+                # someone reaches in there for the pillar list, we want
+                # a loud failure here.
+                has_main_pillar_import = True
+    assert has_registry_import, (
+        "tests/verification/test_pillars.py is missing "
+        "`from app.verification.registry import ...`. The harness must "
+        "share the pillar registry with __main__.py."
+    )
+    assert not has_main_pillar_import, (
+        "tests/verification/test_pillars.py imports from "
+        "app.verification.__main__. The harness must NOT reach into "
+        "the CLI entry-point module for the pillar list -- that would "
+        "reintroduce the drift risk D was built to prevent. Import "
+        "from app.verification.registry instead."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Manual runner so the suite works without pytest installed.
 # ---------------------------------------------------------------------------
 
@@ -1005,6 +1120,9 @@ def _run_all() -> int:
         test_infra_probes_module_defines_broker_and_worker_reachable,
         test_pillars_11_and_13_dont_redefine_infra_probes,
         test_forensics_get_admits_200_and_404_only,
+        test_registry_module_defines_pre_teardown_and_integrity_functions,
+        test_main_no_longer_carries_pre_teardown_pillars_literal,
+        test_test_pillars_imports_from_registry_not_main,
     ]
     failed = 0
     for t in tests:
