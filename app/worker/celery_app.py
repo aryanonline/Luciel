@@ -211,3 +211,83 @@ celery_app.conf.update(
 from app.repositories.audit_chain import install_audit_chain_event  # noqa: E402
 
 install_audit_chain_event()
+
+
+# ---------------------------------------------------------------------
+# Step 29.y: defensive producer-pool warmup at module import.
+# ---------------------------------------------------------------------
+#
+# Background.
+#   During step-29.y rollout, the previously-running backend task
+#   (luciel-backend:30, taskId c6225b8776ac, alive ~hour-plus) was
+#   observed to fail extract_memory_from_turn.apply_async() with
+#   `botocore.exceptions.ClientError: AccessDenied` on
+#   `sqs:ListQueues`. The traceback originated inside
+#   `kombu/transport/SQS.py:_update_queue_cache`, which only calls
+#   `list_queues` when `Channel.predefined_queues` is empty -- and
+#   `Channel.predefined_queues` reads from
+#   `connection.client.transport_options['predefined_queues']`. So
+#   the producer pool's cached Connection had EMPTY transport_options
+#   despite `app.conf.broker_transport_options` being correct (verified
+#   in-process via diagnostic instrumentation: app.conf had the right
+#   value, but apply_async constructed a Channel that didn't see it).
+#
+#   On a freshly-redeployed task we could not reproduce the failure:
+#   apply_async published cleanly, predefined_queues was populated on
+#   the publish-time Channel, no ListQueues call happened. Mechanism
+#   for the original drift (long-running task -> producer Connection
+#   loses transport_options) is not characterized.
+#
+# What this guard does.
+#   At module import, after `conf.update(...)` has installed
+#   `broker_transport_options`, we read
+#   `celery_app.amqp.producer_pool.connections.connection.transport_options`
+#   exactly once. This forces eager construction of the producer
+#   Connection from the just-set conf, BEFORE any FastAPI thread
+#   pool worker can race a lazy init. Subsequent apply_async calls
+#   reuse the same Connection through the producer pool, so the
+#   Channel they build sees `predefined_queues` and skips ListQueues.
+#
+#   The eager warmup was the ONLY structural difference between v1
+#   of the diag (in admin_forensics.py) which made the route start
+#   passing immediately, and v2 (pure read-only) which we used to
+#   confirm a fresh redeploy alone was also sufficient. Both observed
+#   green; we ship the warmup permanently because it is the cheapest
+#   defense against the observed failure mode and protects EVERY
+#   producer site (chat path, verify probe, future async producers),
+#   not just the verify route.
+#
+# What this guard does NOT do.
+#   It does not explain why the prior task drifted. It is a defensive
+#   eager-init, not a root-cause fix. The investigation is documented
+#   in docs/CANONICAL_RECAP.md (recap v3.5) as open verify-debt:
+#   "Producer-pool transport_options drift on aged uvicorn tasks --
+#   mechanism unknown; warmup guard added; if drift recurs the
+#   warning log below will fire on the next probe call."
+#
+# Detection on recurrence.
+#   If the warmup itself reads back a Connection whose transport_options
+#   are missing predefined_queues, we log a structured WARNING. Verify
+#   would then catch the broken state via Pillar 25.
+import logging as _step29y_log  # noqa: E402
+
+_step29y_logger = _step29y_log.getLogger("luciel.celery.step29y")
+try:
+    _pp_conn = celery_app.amqp.producer_pool.connections.connection
+    _pp_to = getattr(_pp_conn, "transport_options", {}) or {}
+    if BROKER_URL.startswith("sqs://") and "predefined_queues" not in _pp_to:
+        _step29y_logger.warning(
+            "STEP29Y_PRODUCER_DRIFT producer Connection transport_options "
+            "lacks 'predefined_queues' at module import; apply_async will "
+            "hit SQS ListQueues. transport_options=%s",
+            _pp_to,
+        )
+    else:
+        _step29y_logger.info(
+            "step29y producer-pool warmup OK (predefined_queues present=%s)",
+            "predefined_queues" in _pp_to,
+        )
+except Exception as _exc:
+    _step29y_logger.warning(
+        "STEP29Y_PRODUCER_WARMUP_FAILED at import: %r", _exc,
+    )
