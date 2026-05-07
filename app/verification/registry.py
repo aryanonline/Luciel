@@ -93,13 +93,16 @@ def pre_teardown_pillars(*, include_migration: bool = True) -> list[Pillar]:
     from app.verification.tests.pillar_21_cross_tenant_scope_leak import PILLAR as P21
     from app.verification.tests.pillar_22_db_grants_audit_log_append_only import PILLAR as P22
     from app.verification.tests.pillar_23_audit_log_hash_chain import PILLAR as P23
+    from app.verification.tests.pillar_24_luciel_instance_forensic_toggle import PILLAR as P24
 
     # Order matches the landed list at __main__.py prior to D, with P9 placed at
     # the end of the pre-teardown segment so a slow schema-introspection failure
-    # does not block the live-API pillars (1-8, 11-23) from reporting first.
+    # does not block the live-API pillars (1-8, 11-24) from reporting first.
+    # Step 29.x: P24 appended after P23 to close the C.5 toggle-route
+    # verify-debt thesis (G1 authz, G2 audit emission, G3 no-op idempotency).
     pillars: list[Pillar] = [
         P1, P2, P3, P4, P5, P6, P7, P8,
-        P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, P23,
+        P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, P23, P24,
     ]
     if include_migration:
         pillars.append(P9)
