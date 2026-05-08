@@ -1,0 +1,143 @@
+# Step 29 Commit D: continuous integration gate.
+#
+# Scope (intentional, doctrine "honest long term fixes -- not shortcuts"):
+#
+#   This workflow runs the BACKEND-FREE checks: AST tests for the
+#   admin-forensics endpoints (Step 29 Commits C.1-C.6 + D), the
+#   verification http_client unit tests (Step 29 Commit B), the
+#   /healthz smoke test, and the pytest-collection / registry-shape
+#   guard from tests/verification/test_pillars.py.
+#
+#   The pillar suite itself (the 22 live-API pillars) is NOT run here.
+#   Doing so would require provisioning a Postgres service, a Redis
+#   service, running Alembic migrations, booting uvicorn, and exporting
+#   a platform-admin key into the runner -- a multi-minute job per push.
+#   The pillar suite is run instead via 'python -m app.verification' in
+#   the luciel-verify ECS task definition against the production-or-
+#   staging backend, which is the verify gate of record (see
+#   docs/CANONICAL_RECAP.md section 4.4 "Step 29 verification doctrine").
+#
+#   The pytest harness in tests/verification/test_pillars.py is built
+#   so that, when DATABASE_URL is unset (the case in this workflow),
+#   pillar tests collect with an empty parametrize list and skip
+#   cleanly. The one test that DOES run is the registry-shape guard
+#   (test_registry_returns_nonempty_pillar_list, which is gated on
+#   _registry_loaded and so also skips here). This is intentional:
+#   shape regressions are caught locally where DATABASE_URL is set.
+#
+#   When/if we add a CI job that does stand up the backend (deferred
+#   follow-up step), it will be a separate job in this workflow with
+#   the 'services:' block populated; the existing jobs below stay
+#   backend-free so they keep providing their fast-feedback signal.
+
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - "step-*"
+  pull_request:
+    branches:
+      - main
+
+# Don't waste runner minutes on superseded pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ast-and-unit-tests:
+    name: AST + unit tests (backend-free)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: install pytest + httpx (no app deps needed for AST tests)
+        # The Step 29 AST tests only need the stdlib's `ast` module. The
+        # http_client_params tests need httpx. test_health.py needs
+        # FastAPI + the app surface; we install the package in non-editable
+        # mode so import paths work the same as locally.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest httpx
+
+      - name: run admin-forensics AST tests (Step 29 C.1-C.6 + D guards)
+        # This is the ONLY check that pins the cross-pillar architectural
+        # invariants we landed in Commits C.4 / C.5 / C.6 / D. A break here
+        # means a future refactor regressed one of:
+        #   - C.4: P14 forensic reads route through admin endpoints
+        #   - C.5: P11 F10 ORM-write goes through platform-admin POST,
+        #          audit-row-before-mutation
+        #   - C.6: _broker_reachable / _worker_reachable single-source +
+        #          forensics_get(200,404) wrapper
+        #   - D:   pillar registry as single source of truth + harness
+        #          imports from registry not from __main__
+        run: python tests/api/test_admin_forensics_step29c.py
+
+      - name: run http_client params + health pytest tests
+        run: python -m pytest tests/verification/test_http_client_params.py tests/api/test_health.py -v
+
+      - name: run pillar harness collection (skips cleanly without DB)
+        # Even though every pillar test will SKIP here (no DATABASE_URL,
+        # no backend), this step exercises the collection path and the
+        # _REGISTRY_IMPORT_ERROR guard. A regression that broke the
+        # try/except at the top of test_pillars.py would surface as a
+        # collection error here.
+        run: python -m pytest tests/verification/test_pillars.py -v
+
+  # ---------------------------------------------------------------------------
+  # Future job (intentionally not enabled now): full pillar verify suite.
+  # Uncomment + flesh out when we're ready to pay the per-push minutes for
+  # spinning up Postgres, Redis, running migrations, booting uvicorn, and
+  # piping LUCIEL_PLATFORM_ADMIN_KEY in via secrets. Until then, the verify
+  # gate of record stays luciel-verify:N against prod (Step 29 E(iv)).
+  #
+  # verify-suite:
+  #   name: pillar verification suite (full backend stack)
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 30
+  #   services:
+  #     postgres:
+  #       image: postgres:15
+  #       env:
+  #         POSTGRES_USER: luciel
+  #         POSTGRES_PASSWORD: luciel
+  #         POSTGRES_DB: luciel
+  #       ports: ["5432:5432"]
+  #       options: >-
+  #         --health-cmd pg_isready
+  #         --health-interval 10s
+  #         --health-timeout 5s
+  #         --health-retries 5
+  #     redis:
+  #       image: redis:7
+  #       ports: ["6379:6379"]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with: { python-version: "3.12", cache: pip }
+  #     - run: python -m pip install -e .
+  #     - run: alembic upgrade head
+  #       env:
+  #         DATABASE_URL: postgresql+psycopg2://luciel:luciel@localhost:5432/luciel
+  #     - run: |
+  #         uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+  #         sleep 5
+  #     - run: python -m app.verification --json-report verify_ci.json
+  #       env:
+  #         DATABASE_URL: postgresql+psycopg2://luciel:luciel@localhost:5432/luciel
+  #         LUCIEL_PLATFORM_ADMIN_KEY: ${{ secrets.LUCIEL_PLATFORM_ADMIN_KEY }}
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: verify_ci.json
+  #         path: verify_ci.json

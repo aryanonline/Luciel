@@ -33,6 +33,9 @@ from sqlalchemy.orm import Session
 from app.models.api_key import ApiKey
 
 from app.models.admin_audit_log import (
+    ACTION_CASCADE_DEACTIVATE,
+    ACTION_CREATE,
+    ACTION_DEACTIVATE,
     ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
     RESOURCE_API_KEY,
 )
@@ -78,6 +81,14 @@ def _write_key_to_ssm(*, key_id: int, raw_key: str, region: str,  ssm_path: str 
     When ssm_path is None (default), behavior is identical to 27a:
     SSM_BOOTSTRAP_PATH.format(key_id=key_id) is used.
 
+    Step 29.y C24: Overwrite=True so rotation is a single atomic SSM call.
+    Previously Overwrite=False with a comment 'caller deletes stale params
+    first' — but no caller and no IAM role actually performed that delete,
+    making the production path stable-but-unrotatable. The DB hash-chained
+    audit log already provides full key-history attribution; SSM does not
+    need its own version guard. Tags are written via a second AddTagsToResource
+    call because put_parameter rejects Tags + Overwrite=True in one call.
+
     boto3 is imported lazily so dev/test paths that never hit this branch
     do not need boto3 installed.
     """
@@ -85,22 +96,49 @@ def _write_key_to_ssm(*, key_id: int, raw_key: str, region: str,  ssm_path: str 
 
     path = ssm_path if ssm_path is not None else SSM_BOOTSTRAP_PATH.format(key_id=key_id)
     ssm = boto3.client("ssm", region_name=region)
-    ssm.put_parameter(
+    is_rotation = ssm_path is not None  # production path is stable across re-mints
+
+    # Step 29.y C24: rotation-friendly (Overwrite=True) for the durable
+    # production path; first-write-only (Overwrite=False) for bootstrap
+    # path which carries key_id and is unique per mint.
+    put_kwargs = dict(
         Name=path,
         Value=raw_key,
         Type="SecureString",
-        Overwrite=False,  # refuse to clobber; caller deletes stale params first
+        Overwrite=is_rotation,
         Description=(
             f"Luciel platform-admin key id={key_id} at {path}. "
             f"Read by operator or task role; managed via SSM."
         ),
-        Tags=[
-            {"Key": "luciel:purpose", "Value": (
-                "platform-admin-key" if ssm_path is not None else "bootstrap-admin-key"
-            )},
-            {"Key": "luciel:key_id", "Value": str(key_id)},
-        ],
     )
+    tags = [
+        {"Key": "luciel:purpose", "Value": (
+            "platform-admin-key" if is_rotation else "bootstrap-admin-key"
+        )},
+        {"Key": "luciel:key_id", "Value": str(key_id)},
+    ]
+    if not is_rotation:
+        # Bootstrap path: tags can be set inline because Overwrite=False.
+        put_kwargs["Tags"] = tags
+
+    ssm.put_parameter(**put_kwargs)
+
+    if is_rotation:
+        # Production path: AWS rejects Tags + Overwrite=True in one call,
+        # so apply tags via a follow-up AddTagsToResource. Failures here
+        # should NOT roll back the DB — the key is already in SSM and the
+        # DB row exists; tags are metadata. We log and continue.
+        try:
+            ssm.add_tags_to_resource(
+                ResourceType="Parameter",
+                ResourceId=path,
+                Tags=tags,
+            )
+        except Exception as tag_err:  # noqa: BLE001
+            logger.warning(
+                "SSM tag write failed (non-fatal) path=%s key_id=%d err=%s",
+                path, key_id, tag_err,
+            )
     logger.info(
         "SSM bootstrap key written: path=%s key_id=%d region=%s",
         path, key_id, region,
@@ -128,6 +166,7 @@ class ApiKeyService:
         ssm_write: bool = False,                    # Step 27a
         ssm_region: str | None = None,              # Step 27a
         ssm_path: str | None = None,
+        audit_ctx: AuditContext | None = None,
     ) -> tuple[ApiKey, str | None]:
         """
         Create a new API key.
@@ -154,6 +193,24 @@ class ApiKeyService:
         If SSM write fails, the DB transaction is rolled back (when
         auto_commit=True) to keep DB and SSM in sync. No orphan row lands
         in api_keys.
+
+        Step 28 P3-B (Phase 3, Commit 3): emits an ACTION_CREATE audit
+        row in the same transaction as the api_keys INSERT, upholding
+        Invariant 4 (audit-before-commit). Previously the audit row was
+        emitted at the API endpoint layer (app/api/v1/admin.py
+        create_api_key) AFTER service.create_key() had already auto-
+        committed -- two transactions, with a window where the key
+        existed in the DB without an audit row. Now any caller of
+        create_key (admin endpoint, scripts, future internal callers)
+        automatically lands an audit row atomically with the key.
+
+        ``audit_ctx`` is keyword-only and optional for backward
+        compatibility. When omitted (legacy callers, system-internal
+        flows like SSM bootstrap scripts), an
+        AuditContext.system(label="create_key") actor is used so the
+        audit row is always attributable. New callers (admin endpoints,
+        operator scripts) MUST thread the request-scoped AuditContext
+        through.
         """
         raw_key = generate_raw_key()
         hashed = hash_key(raw_key)
@@ -196,6 +253,35 @@ class ApiKeyService:
                     self.db.rollback()
                 raise
 
+        # --- Step 28 P3-B: audit-before-commit (Invariant 4) ----------
+        # Emit the ACTION_CREATE audit row in the same transaction as the
+        # api_keys INSERT, BEFORE the commit. autocommit=False so the
+        # audit row rides our commit boundary -- if the commit fails or
+        # is rolled back by a later step (e.g. ssm_write retry path),
+        # the audit row is rolled back with it.
+        AdminAuditRepository(self.db).record(
+            ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
+                label="create_key"
+            ),
+            tenant_id=tenant_id or SYSTEM_ACTOR_TENANT,
+            action=ACTION_CREATE,
+            resource_type=RESOURCE_API_KEY,
+            resource_pk=key_id,
+            resource_natural_id=api_key.key_prefix,
+            domain_id=domain_id,
+            agent_id=agent_id,
+            luciel_instance_id=luciel_instance_id,
+            after={
+                "display_name": display_name,
+                "permissions": api_key.permissions,
+                "rate_limit": rate_limit,
+                "bound_to_luciel_instance": luciel_instance_id is not None,
+                "ssm_write": ssm_write,
+            },
+            note=None,
+            autocommit=False,
+        )
+
         if auto_commit:
             self.db.commit()
             self.db.refresh(api_key)
@@ -228,12 +314,54 @@ class ApiKeyService:
             stmt = stmt.where(ApiKey.tenant_id == tenant_id)
         return list(self.db.scalars(stmt).all())
 
-    def deactivate_key(self, key_id: int) -> bool:
-        """Deactivate an API key."""
+    def deactivate_key(
+        self,
+        key_id: int,
+        *,
+        audit_ctx: AuditContext | None = None,
+    ) -> bool:
+        """Deactivate an API key.
+
+        Step 28 D5 (Phase 1, Commit 6): emits an ACTION_DEACTIVATE
+        audit row in the same transaction as the active=False UPDATE,
+        upholding Invariant 4 (audit-before-commit). This brings the
+        single-key admin DELETE path in line with the cascade path
+        in rotate_keys_for_agent, which has emitted audit rows since
+        Step 24.5b.
+
+        ``audit_ctx`` is keyword-only and optional for backward
+        compatibility. When omitted (legacy callers, system-internal
+        flows), an AuditContext.system(label="deactivate_key") actor
+        is used so the audit row is always attributable. New callers
+        (admin endpoints, scripts) MUST thread the request-scoped
+        AuditContext through.
+        """
         api_key = self.db.get(ApiKey, key_id)
         if not api_key:
             return False
+
+        was_active = api_key.active
         api_key.active = False
+
+        audit_repo = AdminAuditRepository(self.db)
+        audit_repo.record(
+            ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
+                label="deactivate_key"
+            ),
+            tenant_id=api_key.tenant_id or SYSTEM_ACTOR_TENANT,
+            action=ACTION_DEACTIVATE,
+            resource_type=RESOURCE_API_KEY,
+            resource_pk=api_key.id,
+            resource_natural_id=api_key.key_prefix,
+            domain_id=api_key.domain_id,
+            agent_id=api_key.agent_id,
+            luciel_instance_id=api_key.luciel_instance_id,
+            before={"active": was_active},
+            after={"active": False},
+            note=None,
+            autocommit=False,
+        )
+
         self.db.commit()
         logger.info("Deactivated API key id=%d", key_id)
         return True
@@ -286,11 +414,13 @@ class ApiKeyService:
         owns the txn boundary. The cascade contract is: assignment
         end + key rotation in same txn, single commit at end.
 
-        Drift D5 note: this method is the canonical audit-emitting
-        deactivation path for ApiKey. The legacy deactivate_key()
-        method does NOT emit audit rows -- Step 28 cleanup will
-        retrofit it. Until then, all role-change-induced rotations
-        MUST go through here, never through deactivate_key().
+        Step 28 D5 note (closed): deactivate_key() now also emits
+        ACTION_DEACTIVATE audit rows via AdminAuditRepository.record
+        in the same txn as the active=False UPDATE. This method
+        remains the cascade entry point for role-change rotations
+        because it walks both scope dimensions (direct ApiKey.agent_id
+        binding + indirect LucielInstance ownership); single-key
+        admin DELETEs go through deactivate_key().
         """
         # Look up the Agent so we can resolve both scope dimensions:
         # the Agent's natural agent_id slug (for direct ApiKey matches)
@@ -392,3 +522,72 @@ class ApiKeyService:
             reason[:80],
         )
         return rotated_count
+
+
+    def deactivate_all_for_tenant(
+        self,
+        *,
+        tenant_id: str,
+        audit_ctx: AuditContext | None = None,
+        autocommit: bool = True,
+    ) -> int:
+        """Cascade: deactivate every active ApiKey for a tenant.
+
+        Used by AdminService.deactivate_tenant_with_cascade. Returns
+        the number of rows updated. Writes one cascade audit row
+        (only when updated > 0, matching LucielInstanceRepository's
+        per-tenant cascade pattern).
+
+        autocommit=True by default for standalone callers. The tenant-
+        cascade spine passes autocommit=False so the whole cascade
+        commits in a single transaction.
+        """
+        affected = (
+            self.db.query(ApiKey.id, ApiKey.key_prefix)
+            .filter(
+                ApiKey.tenant_id == tenant_id,
+                ApiKey.active.is_(True),
+            )
+            .all()
+        )
+        affected_pks = [pk for pk, _ in affected]
+        affected_prefixes = [prefix for _, prefix in affected]
+
+        updated = (
+            self.db.query(ApiKey)
+            .filter(
+                ApiKey.tenant_id == tenant_id,
+                ApiKey.active.is_(True),
+            )
+            .update(
+                {ApiKey.active: False},
+                synchronize_session=False,
+            )
+        )
+
+        if audit_ctx is not None and updated:
+            AdminAuditRepository(self.db).record(
+                ctx=audit_ctx,
+                tenant_id=tenant_id,
+                action=ACTION_CASCADE_DEACTIVATE,
+                resource_type=RESOURCE_API_KEY,
+                resource_pk=None,
+                resource_natural_id=None,
+                after={
+                    "count": int(updated),
+                    "affected_pks": affected_pks,
+                    "affected_key_prefixes": affected_prefixes,
+                    "trigger": "tenant_deactivate",
+                },
+                note=f"Cascade from tenant {tenant_id} deactivation",
+                autocommit=False,
+            )
+
+        if autocommit:
+            self.db.commit()
+        logger.info(
+            "ApiKey cascade-deactivated count=%d tenant=%s",
+            updated,
+            tenant_id,
+        )
+        return int(updated)

@@ -10,6 +10,7 @@ tenant-ID branches.
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -65,6 +66,37 @@ class AgentCreate(BaseModel):
 # Update (PATCH semantics — all fields optional)
 # ---------------------------------------------------------------------
 
+# ---------------------------------------------------------------------
+# Bind-user payload (Step 28 Phase 2 - Commit 9)
+#
+# Dedicated platform-admin-only payload for the
+# POST /admin/agents/{tenant_id}/{agent_id}/bind-user route. Carved out
+# from AgentUpdate so user_id binding is explicit at the API surface
+# (cannot be smuggled in via a tenant-admin display_name PATCH).
+# ---------------------------------------------------------------------
+
+class AgentBindUserPayload(BaseModel):
+    """Bind an Agent to a User identity.
+
+    Platform-admin only. Used by Step 24.5b user-rebind workflows and
+    by the Step 28 Phase 2 verification harness (Pillars 12, 13, 14)
+    which previously reached around the API to mutate agents.user_id
+    via a raw SQLAlchemy session — a path that is correctly refused
+    when the harness runs from a least-privilege Pattern N task with
+    the worker DSN.
+
+    Invariant (enforced at service layer): a User holds at most one
+    active Agent per tenant. Attempting to bind a User who already
+    has an active Agent in the same tenant returns 409.
+    """
+
+    user_id: uuid.UUID = Field(
+        ...,
+        description="User identity to bind this Agent to. Must reference an active User row.",
+    )
+    updated_by: str | None = Field(default=None, max_length=100)
+
+
 class AgentUpdate(BaseModel):
     """Payload for PATCH /admin/agents/{tenant_id}/{agent_id}.
 
@@ -98,6 +130,11 @@ class AgentRead(BaseModel):
     description: str | None = None
     contact_email: str | None = None
     active: bool
+    # Step 28 Phase 2 - Commit 9: surface user_id so the bind-user route
+    # response and the verification harness (P12/13/14) can confirm the
+    # bind landed. Existing list/get callers gain visibility too — useful
+    # for tenant-admin UIs that need to show who an Agent maps to.
+    user_id: uuid.UUID | None = None
     created_by: str | None = None
     updated_by: str | None = None
     created_at: datetime

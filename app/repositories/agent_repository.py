@@ -18,6 +18,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import (
+    ACTION_CASCADE_DEACTIVATE,
     ACTION_CREATE,
     ACTION_DEACTIVATE,
     ACTION_UPDATE,
@@ -186,6 +187,17 @@ class AgentRepository:
     # Whitelist — identity columns are deliberately not updatable.
     # Promotion / demotion across domains = deactivate + recreate,
     # per the Step 24.5 decision on preserving audit trails.
+    # Step 28 Phase 2 - Commit 9: user_id is updatable via the dedicated
+    # POST /admin/agents/{tenant_id}/{agent_id}/bind-user route ONLY.
+    # The general PATCH /admin/agents/{tenant_id}/{agent_id} route still
+    # silently ignores user_id (handlers do not pass it through), so this
+    # widening does not expose tenant-admin re-binding via display-name
+    # PATCH. The bind-user route is platform-admin gated.
+    #
+    # Why widen here vs. a separate code path: keeps audit-row generation
+    # in one place (repo.update) — the before/after diff captures the
+    # user_id transition exactly the same way it captures display_name
+    # changes. One audit-row schema, no parallel write path to drift.
     _UPDATABLE_FIELDS = frozenset(
         {
             "display_name",
@@ -193,8 +205,42 @@ class AgentRepository:
             "contact_email",
             "active",
             "updated_by",
+            "user_id",  # Step 28 Phase 2 - Commit 9 (bind-user only)
         }
     )
+    @staticmethod
+    def _audit_safe(value: object) -> object:
+        """Coerce non-JSON-serialisable values to a JSON-safe form for the
+        audit-row before/after snapshots.
+
+        Step 28 Phase 2 - Commit 11: agents.user_id is a uuid.UUID once
+        the row is loaded by SQLAlchemy (PG_UUID(as_uuid=True)). The
+        AdminAuditRepository writes before_diff / after_diff into JSONB
+        columns via psycopg's default JSON adapter, which calls plain
+        json.dumps() and does not know how to encode uuid.UUID — that
+        path raised TypeError("Object of type UUID is not JSON
+        serializable") for every bind-user POST in the v1.0 of Commit 9,
+        producing a 500 from the route and tripping pillars 12, 13, 14.
+
+        diff_updated_fields' docstring already documents the convention:
+        "Values must be JSON-serialisable. For non-serialisable fields
+        (e.g. datetime objects), cast at the call site." Agent is the
+        first repo whose updatable-fields set contains a UUID-typed
+        column, so the cast lands here. Confined to one helper so the
+        next non-string column type added to _UPDATABLE_FIELDS extends
+        this same path rather than re-introducing the bug.
+
+        A future global fix (registering a psycopg JSON dumper that
+        understands UUID/datetime/Decimal) would obsolete this helper
+        but is intentionally out of scope for the Phase 2 close --
+        global JSON-encoder changes touch every JSONB write in the app
+        and need their own verification pass. Logged as drift
+        D-audit-json-uuid-encoder-2026-05-05 for Step 29.
+        """
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        return value
+
     def update(
         self,
         agent: Agent,
@@ -208,8 +254,11 @@ class AgentRepository:
         audit row containing only the fields that actually changed.
         """
         # Snapshot before so the audit diff only reflects real changes.
+        # _audit_safe coerces uuid.UUID -> str so the JSONB write the
+        # audit repo issues at flush() does not fail (Commit 11).
         before_snapshot = {
-            key: getattr(agent, key) for key in self._UPDATABLE_FIELDS
+            key: self._audit_safe(getattr(agent, key))
+            for key in self._UPDATABLE_FIELDS
         }
 
         applied: dict[str, object] = {}
@@ -219,7 +268,8 @@ class AgentRepository:
                 applied[key] = value
 
         after_snapshot = {
-            key: getattr(agent, key) for key in self._UPDATABLE_FIELDS
+            key: self._audit_safe(getattr(agent, key))
+            for key in self._UPDATABLE_FIELDS
         }
 
         if audit_ctx is not None and applied:
@@ -302,6 +352,85 @@ class AgentRepository:
             agent_id,
         )
         return agent
+    
+    
+    def deactivate_all_for_tenant(
+        self,
+        *,
+        tenant_id: str,
+        updated_by: str | None = None,
+        audit_ctx: AuditContext | None = None,
+        autocommit: bool = True,
+    ) -> int:
+        """Cascade: deactivate every active Agent for a tenant.
+
+        Used by AdminService.deactivate_tenant_with_cascade. Returns
+        the number of rows updated. Writes one cascade audit row
+        (only when updated > 0, matching the per-tenant cascade
+        pattern in LucielInstanceRepository).
+
+        Does NOT cascade to LucielInstance rows -- that cascade is
+        handled separately by the spine via
+        LucielInstanceRepository.deactivate_all_for_tenant.
+
+        autocommit=True by default for standalone callers. The tenant-
+        cascade spine passes autocommit=False so the whole cascade
+        commits in a single transaction.
+        """
+        # Snapshot affected ids + agent_id slugs for forensic audit.
+        affected = (
+            self.db.query(Agent.id, Agent.agent_id)
+            .filter(
+                Agent.tenant_id == tenant_id,
+                Agent.active.is_(True),
+            )
+            .all()
+        )
+        affected_pks = [pk for pk, _ in affected]
+        affected_ids = [nid for _, nid in affected]
+
+        updated = (
+            self.db.query(Agent)
+            .filter(
+                Agent.tenant_id == tenant_id,
+                Agent.active.is_(True),
+            )
+            .update(
+                {
+                    Agent.active: False,
+                    Agent.updated_by: updated_by,
+                },
+                synchronize_session=False,
+            )
+        )
+
+        if audit_ctx is not None and updated:
+            AdminAuditRepository(self.db).record(
+                ctx=audit_ctx,
+                tenant_id=tenant_id,
+                action=ACTION_CASCADE_DEACTIVATE,
+                resource_type=RESOURCE_AGENT,
+                resource_pk=None,
+                resource_natural_id=None,
+                after={
+                    "count": int(updated),
+                    "affected_pks": affected_pks,
+                    "affected_agent_ids": affected_ids,
+                    "trigger": "tenant_deactivate",
+                },
+                note=f"Cascade from tenant {tenant_id} deactivation",
+                autocommit=False,
+            )
+
+        if autocommit:
+            self.db.commit()
+        logger.info(
+            "Agent cascade-deactivated count=%d tenant=%s",
+            updated,
+            tenant_id,
+        )
+        return int(updated)
+    
     # ---------------------------------------------------------------
     # Step 24.5b -- User identity layer lookups
     # ---------------------------------------------------------------

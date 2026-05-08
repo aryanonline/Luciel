@@ -6,9 +6,13 @@ Usage:
     python -m app.verification --skip-migration
     python -m app.verification --json-report step26_report.json
     python -m app.verification --sweep-residue
+    python -m app.verification --allow-degraded   (local dev only; never CI)
 
-Exit code 0 iff every registered pillar passed. Exit code 0 + the
-JSON report artifact is the Step 26b production-redeploy gate.
+Exit code 0 iff every registered pillar ran at FULL mode. A pillar
+that ran at DEGRADED mode (broker/worker unreachable, fallback path
+taken) flips the exit to 1 unless ``--allow-degraded`` is passed.
+A pillar that raised flips the exit to 1 regardless. Exit code 0 +
+the JSON report artifact is the Step 26b production-redeploy gate.
 
 Flags:
   --keep                      Skip teardown (leaves the throwaway tenant
@@ -23,6 +27,11 @@ Flags:
   --sweep-residue             Before starting, sweep prior-run residue
                               tenants (step26-verify-* older than 1h,
                               active=True). Non-destructive of fresh runs.
+  --allow-degraded            Treat DEGRADED pillars as passing. Intended
+                              for local dev where Redis/SQS/Celery may be
+                              intentionally absent. CI must never set
+                              this -- the prod-redeploy gate requires
+                              every pillar at FULL mode.
 
 Prereqs:
   - uvicorn app.main:app --reload  (separate terminal)
@@ -41,24 +50,26 @@ import httpx
 
 from app.verification.fixtures import RunState, sweep_residue_tenants
 from app.verification.http_client import BASE_URL, REQUEST_TIMEOUT, h
-from app.verification.runner import MatrixReport, PillarResult, SuiteRunner
-from app.verification.tests.pillar_01_onboarding import PILLAR as P1
-from app.verification.tests.pillar_02_scope_hierarchy import PILLAR as P2
-from app.verification.tests.pillar_03_ingestion import PILLAR as P3
-from app.verification.tests.pillar_04_chat_key_binding import PILLAR as P4
-from app.verification.tests.pillar_05_chat_resolution import PILLAR as P5
-from app.verification.tests.pillar_06_retention import PILLAR as P6
-from app.verification.tests.pillar_07_cascade import PILLAR as P7
-from app.verification.tests.pillar_08_scope_negatives import PILLAR as P8
-from app.verification.tests.pillar_09_migration_integrity import PILLAR as P9
-from app.verification.tests.pillar_10_teardown_integrity import PILLAR as P10
-from app.verification.tests.pillar_11_async_memory import PILLAR as P11
-from app.verification.tests.pillar_12_identity_stability import PILLAR as P12
-from app.verification.tests.pillar_13_cross_tenant_identity import PILLAR as P13
-from app.verification.tests.pillar_14_departure_semantics import PILLAR as P14
+from app.verification.registry import (
+    pre_teardown_pillars,
+    teardown_integrity_pillar,
+)
+from app.verification.runner import MatrixReport, Outcome, PillarResult, SuiteRunner
 
-
-PRE_TEARDOWN_PILLARS = [P1, P2, P3, P4, P5, P6, P7, P8, P11, P12, P13, P14]
+# Step 29 Commit D: pillar registration moved to app.verification.registry
+# so the new pytest harness (tests/verification/test_pillars.py) and this
+# CLI entry point share one source of truth. The previous explicit imports
+# of P1..P23 are now resolved inside registry.pre_teardown_pillars() and
+# registry.teardown_integrity_pillar() with the same ordering. The verify
+# matrix shape (pillar order, P9 placement, P10 deferred to post-teardown)
+# is preserved bit-for-bit -- this is a pure extraction, not a behavior
+# change, so luciel-verify:13 (the in-prod TD) will produce an identical
+# report when run against the post-D code at E(iv) once luciel-verify:14
+# ships.
+#
+# Step 29.y Cluster 8: tri-state runner contract. The CLI gains
+# --allow-degraded and the FINAL banner gains a mode column so an
+# operator can see at a glance which pillars ran at FULL vs DEGRADED.
 
 
 def _thorough_teardown(state: RunState) -> list[str]:
@@ -169,6 +180,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="write JSON matrix report to PATH (Step 26b gate artifact)")
     p.add_argument("--sweep-residue", action="store_true",
                    help="before starting, sweep prior step26-verify-* residue (>1h old, active)")
+    p.add_argument("--allow-degraded", action="store_true",
+                   help=("treat DEGRADED pillars as passing (local dev only; "
+                         "CI must never pass this -- prod gate requires FULL)"))
     args = p.parse_args(argv)
 
     if args.keep:
@@ -190,14 +204,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Step 26 Verification")
     print(f"  base: {BASE_URL}")
     print(f"  tenant: {state.tenant_id}")
+    if args.allow_degraded:
+        print(f"  mode: --allow-degraded (DEGRADED pillars will not fail the run)")
     print()
 
-    # ---- pre-teardown pillars 1..8 (+ 9 if not skipped) ----
+    # ---- pre-teardown pillars 1..8, 11..23 (+ 9 if not skipped) ----
+    # registry.pre_teardown_pillars(include_migration=) returns the same
+    # list the legacy PRE_TEARDOWN_PILLARS literal produced, with P9
+    # appended iff include_migration=True. Caller-side --skip-migration
+    # maps to include_migration=False.
     runner = SuiteRunner()
-    for pillar in PRE_TEARDOWN_PILLARS:
+    for pillar in pre_teardown_pillars(include_migration=not args.skip_migration):
         runner.register(pillar)
-    if not args.skip_migration:
-        runner.register(P9)
     pre_report = runner.run(state=state)
 
     print(pre_report.render_human())
@@ -220,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_teardown_integrity:
         print()
         print("--- post-teardown integrity ---")
-        post_runner = SuiteRunner().register(P10)
+        post_runner = SuiteRunner().register(teardown_integrity_pillar())
         post_report = post_runner.run(state=state)
         print(post_report.render_human())
         # ---- merge pre + post into single matrix, emit JSON artifact ----
@@ -231,10 +249,26 @@ def main(argv: list[str] | None = None) -> int:
     print("FINAL STEP 26 MATRIX")
     print("=" * 72)
     for r in final.results:
-        mark = "PASS" if r.passed else "FAIL"
-        print(f"  [{mark}] {r.number:2d}. {r.name:<50s} {r.elapsed_s:6.2f}s")
+        # Tri-state column: FULL / DEGRADED / FAIL. The legacy banner
+        # used PASS/FAIL; we keep the column width identical so existing
+        # log-parsing regexes that key on the bracketed token still match.
+        mark = r.outcome.value
+        print(f"  [{mark:<8s}] {r.number:2d}. {r.name:<50s} {r.elapsed_s:6.2f}s")
+        if r.outcome == Outcome.DEGRADED:
+            print(f"             reason: {r.detail}")
     print("=" * 72)
-    print(f"RESULT: {final.passed_count}/{final.total_count} pillars green")
+    print(
+        f"RESULT: {final.full_count} FULL, "
+        f"{final.degraded_count} DEGRADED, "
+        f"{final.fail_count} FAIL "
+        f"(of {final.total_count})"
+    )
+    if final.degraded_count and not args.allow_degraded:
+        print(
+            "GATE: failing run because DEGRADED pillars are present and "
+            "--allow-degraded was not set. The prod-redeploy gate requires "
+            "every pillar at FULL mode -- see Cluster 8 of Step 29.y."
+        )
     print("=" * 72)
 
     if args.json_report:
@@ -245,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"json report write FAILED: {exc}", file=sys.stderr)
             return 2
 
-    return final.exit_code()
+    return final.exit_code(allow_degraded=args.allow_degraded)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Luciel Step 28 Phase 2 verification gate task role. Provisions
+  luciel-ecs-verify-role for the Pattern N one-shot Fargate task that
+  runs python -m app.verification against the prod ALB
+  (https://api.vantagemind.ai). Least-privilege scoping: read-only on
+  exactly two SSM SecureString parameters
+  (/luciel/production/platform-admin-key and
+  /luciel/production/worker_database_url), KMS Decrypt only via the SSM
+  service principal, and no write/list/describe surface beyond what the
+  harness imports require. CloudWatch Logs writes are handled by the
+  pre-existing luciel-ecs-execution-role (shared with mint and worker
+  TDs).
+
+  Region: ca-central-1
+  Account: 729005488042
+  Reference: docs/runbooks/step-28-phase-2-deploy.md sect 8
+
+Resources:
+  LucielEcsVerifyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: luciel-ecs-verify-role
+      Description: >
+        Task role for the one-shot Pattern N verification harness. Read
+        scope is exactly two SSM SecureStrings: the platform admin API
+        key (used by HTTP pillars 1-8, 10-19) and the worker DSN (used
+        by pillar 9 schema-introspection subprocess). No write surface.
+        No describe/list surface. KMS Decrypt is constrained to the SSM
+        service principal so the role cannot decrypt arbitrary KMS keys.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:*"
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Tags:
+        - Key: luciel:purpose
+          Value: verification-harness
+        - Key: luciel:scope
+          Value: production
+        - Key: luciel:step
+          Value: step-28-phase-2-commit-8
+
+  LucielEcsVerifyRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: luciel-ecs-verify-role-permissions
+      Roles:
+        - !Ref LucielEcsVerifyRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadPlatformAdminKeyForHttpPillars
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/luciel/production/platform-admin-key"
+          - Sid: ReadWorkerDsnForPillar09Subprocess
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/luciel/production/worker_database_url"
+          - Sid: DecryptSsmSecureStringsViaSsm
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
+
+Outputs:
+  VerifyRoleArn:
+    Description: ARN of the verification harness task role
+    Value: !GetAtt LucielEcsVerifyRole.Arn
+    Export:
+      Name: luciel-ecs-verify-role-arn
+  VerifyRoleName:
+    Description: Name of the verification harness task role
+    Value: !Ref LucielEcsVerifyRole

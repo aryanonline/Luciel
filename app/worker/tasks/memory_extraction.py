@@ -59,7 +59,19 @@ import logging
 import uuid
 
 from celery import shared_task
-from celery.exceptions import Reject
+from celery.exceptions import Reject, Retry
+
+# Step 29.y Cluster 4 (E-3): the canonical set of transient
+# exception classes that should trigger a retry. Anything not in
+# this tuple is permanent and routes through _reject_with_audit
+# to DLQ deterministically. See findings_phase1e.md E-3 for the
+# rationale -- pre-29.y autoretry_for=(Exception,) caught Reject
+# itself in some Celery versions, producing 3-4 audit rows per
+# rejection instead of 1.
+import redis.exceptions as _redis_exc
+from sqlalchemy.exc import OperationalError as _SAOperationalError
+
+_TRANSIENT_EXC = (_SAOperationalError, _redis_exc.ConnectionError)
 from sqlalchemy import select
 
 from app.db.session import SessionLocal
@@ -68,6 +80,7 @@ from app.memory.service import MemoryService
 from app.models.admin_audit_log import (
     ACTION_WORKER_USER_INACTIVE,
     ACTION_WORKER_IDENTITY_SPOOF_REJECT,
+    ACTION_WORKER_PERMANENT_FAILURE,
 )
 from app.models.agent import Agent
 from app.models.api_key import ApiKey
@@ -75,6 +88,10 @@ from app.models.luciel_instance import LucielInstance
 from app.models.message import MessageModel
 from app.models.session import SessionModel
 from app.models.user import User
+from app.worker.audit_failure_counter import (
+    WORKER_AUDIT_WRITE_FAILED,
+    record_audit_write_failure,
+)
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
@@ -119,7 +136,7 @@ def _reject_with_audit(
     Never retries; rejection path is terminal.
     """
     try:
-        ctx = AuditContext.system(label=f"worker:memory_extraction:{task_id}")
+        ctx = AuditContext.worker(task_id=f"memory_extraction:{task_id}", actor_key_prefix=actor_key_prefix)
         audit = AdminAuditRepository(db)
         audit.record(
             ctx=ctx,
@@ -141,12 +158,33 @@ def _reject_with_audit(
             },
             note=note,
             autocommit=True,
+            # Step 29.y Cluster 4 (E-2 fix): a worker killed between
+            # this audit.record() commit and the Reject() raise below
+            # leaves the SQS message visible after timeout. The
+            # redelivery would otherwise rewrite this same audit row
+            # (resource_natural_id is deterministic on session/message
+            # ids). The DB-level partial unique index
+            # ux_admin_audit_logs_worker_reject_idem (migration
+            # d8e2c4b1a0f3) catches the duplicate; skip_on_conflict
+            # tells the repo to swallow the IntegrityError and
+            # return None instead of crashing the rejection path.
+            skip_on_conflict=True,
         )
     except Exception:
-        # Never let audit-write failure mask the original rejection.
+        # Step 29.y gap-fix C4
+        # (D-worker-audit-write-failure-not-alerted-2026-05-07):
+        # never let audit-write failure mask the original rejection,
+        # but make the failure structured and countable. The
+        # WORKER_AUDIT_WRITE_FAILED marker is the stable string an
+        # operability layer (CloudWatch metric filter / Prom exporter)
+        # pins on. record_audit_write_failure() ticks a process-local
+        # counter so a future health endpoint or test can observe
+        # "this worker has seen N audit-write failures since boot."
+        failure_count = record_audit_write_failure()
         logger.exception(
-            "audit-write failed during rejection (action=%s task=%s)",
-            action, task_id,
+            "%s audit-write failed during rejection "
+            "action=%s task=%s process_failure_count=%d",
+            WORKER_AUDIT_WRITE_FAILED, action, task_id, failure_count,
         )
 
     raise Reject(note, requeue=False)
@@ -158,7 +196,14 @@ def _reject_with_audit(
     bind=True,
     max_retries=3,
     default_retry_delay=2,
-    autoretry_for=(Exception,),
+    # Step 29.y Cluster 4 (E-3): autoretry_for is empty here.
+    # Retries are dispatched manually via self.retry() inside the
+    # task body, only for the narrow _TRANSIENT_EXC tuple defined
+    # above. Permanent exceptions route through
+    # _reject_with_audit to DLQ. autoretry_for=(Exception,) caught
+    # Reject in some Celery 5.x versions producing duplicate
+    # rejection audit rows.
+    autoretry_for=(),
     retry_backoff=True,
     retry_backoff_max=8,
     retry_jitter=True,
@@ -413,8 +458,9 @@ def extract_memory_from_turn(
         content_digest = _content_sha256(
             "\n".join(f"{m['role']}:{m['content']}" for m in messages_payload)
         )
-        ctx = AuditContext.system(
-            label=f"worker:memory_extraction:{task_id}"
+        ctx = AuditContext.worker(
+            task_id=f"memory_extraction:{task_id}",
+            actor_key_prefix=actor_key_prefix,
         )
         AdminAuditRepository(db).record(
             ctx=ctx,
@@ -455,9 +501,16 @@ def extract_memory_from_turn(
     except Reject:
         # Rejection path already wrote its own audit row; do not retry.
         raise
-    except Exception as exc:
-        # Transient failure — let autoretry_for=(Exception,) handle retry.
-        # Log exception CLASS only; never str(exc) which may echo payload.
+    except Retry:
+        # self.retry() raises Retry; let Celery handle the redelivery.
+        raise
+    except _TRANSIENT_EXC as exc:
+        # Step 29.y Cluster 4 (E-3): transient-class failures are
+        # explicitly retried via self.retry(). Anything outside
+        # _TRANSIENT_EXC is treated as permanent and routes through
+        # the rejection path below so the message lands in DLQ
+        # immediately instead of cycling through 3 retries that
+        # cannot succeed.
         db.rollback()
         logger.warning(
             "transient failure task=%s type=%s attempt=%d/%d",
@@ -466,6 +519,31 @@ def extract_memory_from_turn(
             self.request.retries + 1,
             self.max_retries + 1,
         )
-        raise
+        raise self.retry(exc=exc)
+    except Exception as exc:
+        # Step 29.y Cluster 4 (E-3): permanent failure. Do NOT retry.
+        # Route to DLQ via the same audit-then-reject path that
+        # malformed-payload rejections use. The
+        # ACTION_WORKER_PERMANENT_FAILURE action lands a single
+        # audit row keyed on (action, tenant_id, resource_natural_id)
+        # so a worker-crash redelivery is idempotent (E-2 partial
+        # unique index).
+        db.rollback()
+        logger.exception(
+            "permanent failure task=%s type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+        _reject_with_audit(
+            db=db,
+            action=ACTION_WORKER_PERMANENT_FAILURE,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            message_id=message_id,
+            actor_key_prefix=actor_key_prefix,
+            note=f"permanent failure: {type(exc).__name__}",
+            task_id=task_id,
+            trace_id=trace_id,
+        )
     finally:
         db.close()

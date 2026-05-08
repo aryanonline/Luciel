@@ -1,0 +1,163 @@
+{
+  "tenant_id": "step26-verify-658a5bb4",
+  "base_url": "http://127.0.0.1:8000",
+  "started_at": 1777917801.6991627,
+  "finished_at": 1777917994.4336386,
+  "passed": 19,
+  "total": 19,
+  "all_green": true,
+  "results": [
+    {
+      "name": "onboarding (Option B)",
+      "number": 1,
+      "passed": true,
+      "detail": "tenant=step26-verify-658a5bb4 admin=***SdZwkw keys=['admin_api_key', 'default_domain', 'message', 'retention_policies', 'tenant']",
+      "elapsed_s": 0.8210854530334473,
+      "traceback_text": null
+    },
+    {
+      "name": "scope hierarchy + agent admin key",
+      "number": 2,
+      "passed": true,
+      "detail": "domain=sales agent=sarah-listings T=354 D=355 A=356 agent_admin=***P7RxNU (pre-cascade)",
+      "elapsed_s": 0.8870875835418701,
+      "traceback_text": null
+    },
+    {
+      "name": "multi-format ingestion + versioning",
+      "number": 3,
+      "passed": true,
+      "detail": "pdf_v2 active src=src-f9d8a58e... md src=src-638f8827... csv src=src-05ac8c55... chunks_returned=1",
+      "elapsed_s": 11.856882333755493,
+      "traceback_text": null
+    },
+    {
+      "name": "chat-key binding + blast radius",
+      "number": 4,
+      "passed": true,
+      "detail": "minted 3 chat keys (T=***TZ2E D=***UoIQ A=***jAOA), all 403 on admin routes",
+      "elapsed_s": 0.792992115020752,
+      "traceback_text": null
+    },
+    {
+      "name": "chat resolution (scope-correct LLM round-trip)",
+      "number": 5,
+      "passed": true,
+      "detail": "agent->PDF_SENTINEL_V2 OK (17ch); domain->MD_SENTINEL OK (13ch)",
+      "elapsed_s": 8.928863763809204,
+      "traceback_text": null
+    },
+    {
+      "name": "retention round-trip (category isolation)",
+      "number": 6,
+      "passed": true,
+      "detail": "kfp before=5 after_traces=5 (isolation OK); traces: action=anonymize rows=0; knowledge: action=skipped rows=0",
+      "elapsed_s": 0.8741178512573242,
+      "traceback_text": null
+    },
+    {
+      "name": "cascade deactivation (all four levels)",
+      "number": 7,
+      "passed": true,
+      "detail": "domain+agent+domain-luciel+agent-luciel all inactive; tenant-luciel still active; audit cascade_rows=3 rows (agent-bulk, luciel-bulk, memory)",
+      "elapsed_s": 0.792945146560669,
+      "traceback_text": null
+    },
+    {
+      "name": "scope-policy negatives",
+      "number": 8,
+      "passed": true,
+      "detail": "cross-tenant status=200 items=1 remax_leaks=0; above-scope rejected with 403",
+      "elapsed_s": 0.6908383369445801,
+      "traceback_text": null
+    },
+    {
+      "name": "async memory extraction (Step 27b)",
+      "number": 11,
+      "passed": true,
+      "detail": "MODE=full :: F1 enqueue ok (168ms, task=a92bc2e7...) | F2 idempotent upsert ok (no rows; skipped real replay) | F3 cross-tenant rejection ok (audit_id=4413) | F4 malformed payload rejection ok (audit_id=4415) | F5 audit-row content hygiene ok | F6 actor_key_prefix linkage ok | F7 queue-depth ok (main=0, dlq=1) | F8 trace_id propagation ok | F9 worker scope guardrail ok | F10 instance liveness gate ok (audit_id=4421) | D1 imports/signatures ok; D2 feature flag ok (async=False); D3 ChatService fail-open contract preserved; D4 queue-depth endpoint reachable (200)",
+      "elapsed_s": 11.432714939117432,
+      "traceback_text": null
+    },
+    {
+      "name": "identity stability under role change (Q6)",
+      "number": 12,
+      "passed": true,
+      "detail": "identity stable across promotion: U=965222dc-b54a-46cf-a986-442e86be5bd8 A1=p12-a1-21a22d A2=p12-a2-8b6a55 K1_rotated K2_active K1_returns_401 rows_attributed=2 row1=224 row2=225 A1_scope_iso=ok",
+      "elapsed_s": 42.08506417274475,
+      "traceback_text": null
+    },
+    {
+      "name": "cross-tenant identity-spoof guard (Q6)",
+      "number": 13,
+      "passed": true,
+      "detail": "MODE=full :: spoof_rejected audit_id=4450 legit_row_id=226 attributed_to_user T2_no_leak K1_still_active",
+      "elapsed_s": 72.3431327342987,
+      "traceback_text": null
+    },
+    {
+      "name": "departure semantics (Q6 bounded cascade)",
+      "number": 14,
+      "passed": true,
+      "detail": "departure_bounded: K1_rotated K2_active SA1_ended=DEPARTED SA2_active T1_memory_id=227 T2_memory_id=228 User.active=True",
+      "elapsed_s": 33.0813205242157,
+      "traceback_text": null
+    },
+    {
+      "name": "consent route no double prefix (D16)",
+      "number": 15,
+      "passed": true,
+      "detail": "correct=/api/v1/consent/grant -> 200 (resolved), double=/api/v1/api/v1/consent/grant -> 404 (guarded)",
+      "elapsed_s": 0.8774199485778809,
+      "traceback_text": null
+    },
+    {
+      "name": "memory_items.actor_user_id NOT NULL (D11)",
+      "number": 16,
+      "passed": true,
+      "detail": "schema is_nullable=NO; INSERT (..., actor_user_id=NULL) raised IntegrityError as expected",
+      "elapsed_s": 0.07284927368164062,
+      "traceback_text": null
+    },
+    {
+      "name": "api_key deactivate emits ACTION_DEACTIVATE audit row (D5)",
+      "number": 17,
+      "passed": true,
+      "detail": "key_id=1142 mint=201 delete=204; audit rows: 1 create + 1 deactivate (D5 holds)",
+      "elapsed_s": 0.7892539501190186,
+      "traceback_text": null
+    },
+    {
+      "name": "tenant cascade in code (Step 28; PIPEDA P5)",
+      "number": 18,
+      "passed": true,
+      "detail": "tenant=step28-p18-cascade-15768207 cascade=ok integrity_passed=true idempotent=ok audit: tenant_dr=1 mem=1 key=1 agent=1 dom=1",
+      "elapsed_s": 1.3026657104492188,
+      "traceback_text": null
+    },
+    {
+      "name": "audit-log API mount + tenant scope (Phase 2 commit 2)",
+      "number": 19,
+      "passed": true,
+      "detail": "audit-log mounted, tenant_admin sees 32 rows scoped to tenant=step26-verify-658a5bb4, cross-tenant leak guard passes against real secondary=step26-verify-p19sec-324fcb, mutation methods 404/405, actor sub-path platform_admin-gated",
+      "elapsed_s": 1.4634153842926025,
+      "traceback_text": null
+    },
+    {
+      "name": "migration integrity (bidirectional + per-column)",
+      "number": 9,
+      "passed": true,
+      "detail": "db_tables=18 model_tables=17 shared=17 no drift (bidirectional + per-column clean)",
+      "elapsed_s": 1.784059762954712,
+      "traceback_text": null
+    },
+    {
+      "name": "teardown integrity (zero residue for this tenant)",
+      "number": 10,
+      "passed": true,
+      "detail": "tenant=step26-verify-658a5bb4: tenant_configs total=1 live=0; luciel_instances live=0; api_keys live=0; zero residue",
+      "elapsed_s": 0.7689683437347412,
+      "traceback_text": null
+    }
+  ]
+}

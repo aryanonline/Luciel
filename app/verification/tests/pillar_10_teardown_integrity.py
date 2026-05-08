@@ -54,10 +54,27 @@ class TeardownIntegrityPillar(Pillar):
                 f"teardown integrity violation: body={json.dumps(rpt)[:1500]}"
             )
 
-        # PASS -- return concise summary matching prior format
-        tc = observations.get("tenant_configs", {}) or {}
-        ak = observations.get("api_keys", {}) or {}
-        li = observations.get("luciel_instances", {}) or {}
+        # PASS -- return concise summary matching prior format.
+        #
+        # Step 28 Phase 2 - Commit 10: defensive parsing.
+        #
+        # The server-side teardown-integrity endpoint emits per-table
+        # observations as a dict for tables that participate in the
+        # tenant-scoped probe (e.g. {"total": 0, "live": 0, "orphans": [...]}),
+        # but for tables that have no tenant_id column or are intentionally
+        # excluded from the probe it emits a string sentinel like
+        # "missing_table" or "no_tenant_scope". The earlier `obs.get(name)
+        # or {}` pattern coerced None / falsy values to {} but left truthy
+        # strings in place, causing `'str' object has no attribute 'get'`
+        # at .get('total') on the next line. Coerce non-dict values to {}
+        # so the summary line degrades gracefully (total/live render as
+        # 'None') rather than blowing up the assertion path.
+        def _as_dict(value: object) -> dict:
+            return value if isinstance(value, dict) else {}
+
+        tc = _as_dict(observations.get("tenant_configs"))
+        ak = _as_dict(observations.get("api_keys"))
+        li = _as_dict(observations.get("luciel_instances"))
 
         return (
             f"tenant={rpt.get('target_tenant')}: "

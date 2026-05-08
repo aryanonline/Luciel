@@ -1,0 +1,8 @@
+{
+    "deploymentCircuitBreaker": {
+        "enable": true,
+        "rollback": true
+    },
+    "maximumPercent": 200,
+    "minimumHealthyPercent": 100
+}

@@ -24,11 +24,17 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.models.admin_audit_log import (
     ALLOWED_ACTIONS,
     ALLOWED_RESOURCE_TYPES,
+    MAX_NOTE_LENGTH,
     AdminAuditLog,
+)
+from app.repositories.actor_permissions_format import (
+    parse_actor_permissions,
+    serialize_actor_permissions,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,9 +76,15 @@ class AuditContext:
         if state is None:
             return cls.system()
 
+        # Step 29.y Cluster gap-fix C1
+        # (D-actor-permissions-comma-fragility-2026-05-07): the
+        # defensive string-input branch now uses parse_actor_permissions
+        # so it handles BOTH legacy comma form and the new JSON form
+        # uniformly. Token-level validation also rejects forbidden
+        # characters at the boundary.
         perms = getattr(state, "permissions", None) or ()
         if isinstance(perms, str):  # defensive
-            perms = tuple(p.strip() for p in perms.split(",") if p.strip())
+            perms = parse_actor_permissions(perms)
         else:
             perms = tuple(perms)
 
@@ -111,9 +123,17 @@ class AuditContext:
 
     @property
     def permissions_str(self) -> str | None:
-        if not self.actor_permissions:
-            return None
-        return ",".join(self.actor_permissions)
+        """Return the on-disk serialized form for this audit context.
+
+        Step 29.y Cluster gap-fix C1
+        (D-actor-permissions-comma-fragility-2026-05-07): canonical form
+        is JSON of a sorted list of perm tokens, e.g. '["admin","worker"]'.
+        Old comma-form rows on disk are still parseable via
+        parse_actor_permissions(). The audit hash chain is preserved
+        because historical row column values are NOT rewritten -- only
+        rows written after this commit use the JSON form.
+        """
+        return serialize_actor_permissions(self.actor_permissions)
 
 
 # ---------------------------------------------------------------------
@@ -144,7 +164,8 @@ class AdminAuditRepository:
         after: dict[str, Any] | None = None,
         note: str | None = None,
         autocommit: bool = False,
-    ) -> AdminAuditLog:
+        skip_on_conflict: bool = False,
+    ) -> AdminAuditLog | None:
         """Append a single audit row.
 
         Defaults to autocommit=False so the caller's mutation and its
@@ -168,6 +189,25 @@ class AdminAuditRepository:
                 f"extend ALLOWED_RESOURCE_TYPES in app.models.admin_audit_log."
             )
 
+        # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
+        # cap note at MAX_NOTE_LENGTH at the single repository
+        # chokepoint. Truncate rather than raise -- audit writes must
+        # never block a mutation, and an over-long note is a caller
+        # bug we want to surface in logs while still recording the
+        # mutation. The truncated-marker suffix makes truncation
+        # visible to forensic readers without making the row
+        # unreadable. before_json/after_json are the right place for
+        # large structured payloads.
+        if note is not None and len(note) > MAX_NOTE_LENGTH:
+            _TRUNC_MARKER = "...[truncated]"
+            keep = MAX_NOTE_LENGTH - len(_TRUNC_MARKER)
+            logger.warning(
+                "AUDIT note truncated tenant=%s action=%s "
+                "original_len=%d cap=%d",
+                tenant_id, action, len(note), MAX_NOTE_LENGTH,
+            )
+            note = note[:keep] + _TRUNC_MARKER
+
         row = AdminAuditLog(
             actor_key_prefix=ctx.actor_key_prefix,
             actor_permissions=ctx.permissions_str,
@@ -185,11 +225,33 @@ class AdminAuditRepository:
             note=note,
         )
         self.db.add(row)
-        if autocommit:
-            self.db.commit()
-            self.db.refresh(row)
-        else:
-            self.db.flush()
+        try:
+            if autocommit:
+                self.db.commit()
+                self.db.refresh(row)
+            else:
+                self.db.flush()
+        except IntegrityError as exc:
+            # Step 29.y Cluster 4 (E-2): skip_on_conflict=True means
+            # the caller is writing a worker-rejection-class row
+            # protected by the
+            # ux_admin_audit_logs_worker_reject_idem partial unique
+            # index on (action, tenant_id, resource_natural_id). A
+            # concurrent worker that already wrote the same triple
+            # makes our INSERT raise IntegrityError -- which is the
+            # exact idempotency outcome we want. Swallow it, roll
+            # back, and return None to signal "no new row written".
+            # See findings_phase1e.md E-2 and the migration
+            # d8e2c4b1a0f3 docstring.
+            if skip_on_conflict:
+                self.db.rollback()
+                logger.info(
+                    "AUDIT idempotent-skip tenant=%s action=%s nat=%s "
+                    "(rejection already recorded)",
+                    tenant_id, action, resource_natural_id,
+                )
+                return None
+            raise
 
         logger.info(
             "AUDIT tenant=%s action=%s resource=%s pk=%s nat=%s "

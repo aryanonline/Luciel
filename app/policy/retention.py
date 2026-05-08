@@ -24,11 +24,13 @@ Strategy is enforced for every effective_tenant; no silent fallthrough.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.retention import DeletionLog, RetentionPolicy
 from app.models.session import SessionModel  # noqa: F401 — kept for migration compat
 from app.models.message import MessageModel  # noqa: F401
@@ -125,7 +127,15 @@ class RetentionService:
                 )
                 results.append(result)
             except Exception as exc:
-                self.db.rollback()
+                # Step 28 Phase 2 Commit 8: NO db.rollback() here.
+                # _enforce_single now commits per batch and writes its
+                # own DeletionLog (auto-committing) before re-raising on
+                # partial failure. A rollback at this layer would only
+                # discard uncommitted work that doesn't exist — and if a
+                # future change ever stages pre-commit state in this
+                # session, a rollback could silently undo the
+                # partial-failure audit trail. Loop continues to the
+                # next policy; the failure is captured below.
                 logger.error("Policy %d (%s) failed: %s", policy_id, category, exc)
                 results.append({
                     "policy_id": policy_id,
@@ -191,6 +201,28 @@ class RetentionService:
         scope_tenant_id: str | None = None,
         reason: str | None = None,
     ) -> dict:
+        """Apply a single retention policy in batched chunks.
+
+        Step 28 Phase 2 Commit 8 — the actual DELETE/UPDATE is done
+        in bounded batches via _batched_delete / _batched_anonymize
+        rather than one unbounded statement. See app.core.config for
+        the batching knobs (retention_batch_size,
+        retention_batch_sleep_seconds, retention_max_batches_per_run).
+
+        Public return shape is preserved — callers get the same
+        {policy_id, data_category, action, rows_affected,
+         cutoff_date, tenant_id} dict as before. rows_affected is now
+        the SUM across all batches.
+
+        Failure semantics: if a batch raises, batches that already
+        committed are durable. We still write a DeletionLog row
+        capturing the partial total before re-raising, so the audit
+        trail reflects what actually happened. Pre-Commit-8 behavior
+        was atomic-or-nothing; post-Commit-8 it's batched-with-audit.
+        For tenant-scope purges this is a strict improvement — a
+        partial purge is closer to the PIPEDA goal than a full
+        rollback when the user requested deletion.
+        """
         category = policy.data_category
         action = policy.action
         days = policy.retention_days
@@ -237,50 +269,72 @@ class RetentionService:
 
         where = " AND ".join(conditions)
 
-        # Execute action
-        if action == "delete":
-            sql = f"DELETE FROM {table} WHERE {where}"
-            result = self.db.execute(text(sql), params)
-            rows = result.rowcount
-
-        elif action == "anonymize":
-            anon_cols = config["anon_cols"]
-            if not anon_cols:
-                # No anon columns declared → anonymize degenerates to delete
-                # (e.g. knowledge_embeddings: no PII surface to redact, row
-                # is the data, so we hard-delete expired rows).
-                sql = f"DELETE FROM {table} WHERE {where}"
-                result = self.db.execute(text(sql), params)
-                rows = result.rowcount
-            else:
-                set_clauses = ", ".join(
-                    f"{col} = :anon_{col}" for col in anon_cols
+        # ----- Batched execution -----
+        rows = 0
+        partial_failure: Exception | None = None
+        try:
+            if action == "delete":
+                rows = self._batched_delete(
+                    table=table, where=where, params=params,
                 )
-                for col, val in anon_cols.items():
-                    params[f"anon_{col}"] = val
+            elif action == "anonymize":
+                anon_cols = config["anon_cols"]
+                if not anon_cols:
+                    # No anon columns declared → anonymize degenerates
+                    # to delete (e.g. knowledge_embeddings: no PII
+                    # surface to redact, row is the data, so we
+                    # hard-delete expired rows).
+                    rows = self._batched_delete(
+                        table=table, where=where, params=params,
+                    )
+                else:
+                    rows = self._batched_anonymize(
+                        table=table, where=where, params=params,
+                        anon_cols=anon_cols,
+                    )
+            else:
+                raise ValueError(f"Unknown action: {action}")
+        except Exception as exc:
+            # Batches that already committed are durable. Capture so
+            # the audit log row records the partial total, then
+            # re-raise after logging.
+            partial_failure = exc
 
-                sql = f"UPDATE {table} SET {set_clauses} WHERE {where}"
-                result = self.db.execute(text(sql), params)
-                rows = result.rowcount
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        # ----- Audit log (always, even on partial failure) -----
+        # Run in its own transaction so a failure here doesn't mask
+        # the partial-failure exception path.
+        try:
+            log = DeletionLog(
+                tenant_id=effective_tenant,
+                data_category=category,
+                action_taken=action + "d",
+                rows_affected=rows,
+                cutoff_date=cutoff_str,
+                triggered_by=triggered_by,
+                reason=(
+                    reason if partial_failure is None
+                    else f"{reason or ''} | PARTIAL: "
+                         f"{type(partial_failure).__name__}: "
+                         f"{partial_failure}"[:500]
+                ),
+            )
+            self.repository.log_deletion(log)
+        except Exception as audit_exc:
+            logger.error(
+                "Retention: failed to write DeletionLog row for "
+                "category=%s tenant=%s rows=%d: %s",
+                category, effective_tenant, rows, audit_exc,
+            )
 
-        self.db.commit()
-
-        # Log the action
-        log = DeletionLog(
-            tenant_id=effective_tenant,
-            data_category=category,
-            action_taken=action + "d",
-            rows_affected=rows,
-            cutoff_date=cutoff_str,
-            triggered_by=triggered_by,
-            reason=reason,
-        )
-        self.repository.log_deletion(log)
+        if partial_failure is not None:
+            logger.error(
+                "Retention: %s on %s for tenant=%s FAILED after %d rows: %s",
+                action, table, effective_tenant, rows, partial_failure,
+            )
+            raise partial_failure
 
         logger.info(
-            "Retention: %s %d rows from %s (cutoff=%s, tenant=%s)",
+            "Retention: %s %d rows from %s (cutoff=%s, tenant=%s, batched)",
             action, rows, table, cutoff_str, effective_tenant,
         )
 
@@ -292,3 +346,124 @@ class RetentionService:
             "cutoff_date": cutoff_str,
             "tenant_id": effective_tenant,
         }
+
+    # ------------------------------------------------------------------
+    # Batched executors (Step 28 Phase 2 Commit 8)
+    # ------------------------------------------------------------------
+    #
+    # Both helpers commit AFTER each batch. FOR UPDATE SKIP LOCKED on
+    # the inner SELECT lets the purge run alongside live chat traffic
+    # without blocking writers — if a row is locked by an active
+    # transaction (e.g. a chat handler reading messages), this run
+    # skips it and picks it up on the next batch.
+    #
+    # PK column assumption: every retention table uses `id` as the
+    # primary key (verified for sessions, messages, memory_items,
+    # traces, knowledge_embeddings). New categories must follow this
+    # convention; if not, the inner SELECT below will raise loudly at
+    # first batch attempt rather than silently corrupt.
+
+    def _batched_delete(
+        self,
+        *,
+        table: str,
+        where: str,
+        params: dict,
+    ) -> int:
+        """DELETE WHERE <where> in chunks. Returns total rows deleted."""
+        batch_size = settings.retention_batch_size
+        max_batches = settings.retention_max_batches_per_run
+        sleep_s = settings.retention_batch_sleep_seconds
+
+        total = 0
+        # Each batch needs the static params (cutoff, tenant_id, …)
+        # plus the dynamic :batch_size. Build a fresh dict per batch
+        # to avoid mutation surprises if the caller's params escape.
+        sql = (
+            f"DELETE FROM {table} "
+            f"WHERE id IN ("
+            f"  SELECT id FROM {table} "
+            f"  WHERE {where} "
+            f"  ORDER BY id "
+            f"  LIMIT :batch_size "
+            f"  FOR UPDATE SKIP LOCKED"
+            f")"
+        )
+        for batch_num in range(max_batches):
+            batch_params = dict(params)
+            batch_params["batch_size"] = batch_size
+            result = self.db.execute(text(sql), batch_params)
+            affected = result.rowcount
+            self.db.commit()
+            total += affected
+            if affected < batch_size:
+                # Last batch: caught up to the date+tenant horizon.
+                return total
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+        logger.warning(
+            "Retention: %s _batched_delete hit max_batches=%d cap "
+            "(total=%d). Either lower retention_days or raise the cap.",
+            table, max_batches, total,
+        )
+        return total
+
+    def _batched_anonymize(
+        self,
+        *,
+        table: str,
+        where: str,
+        params: dict,
+        anon_cols: dict,
+    ) -> int:
+        """UPDATE SET ...anon_vals WHERE <where> in chunks.
+
+        Returns total rows anonymized. Mirrors _batched_delete's
+        chunking pattern — inner SELECT FOR UPDATE SKIP LOCKED bounds
+        each batch's lock footprint.
+        """
+        batch_size = settings.retention_batch_size
+        max_batches = settings.retention_max_batches_per_run
+        sleep_s = settings.retention_batch_sleep_seconds
+
+        # Defense: empty anon_cols would produce a malformed SET clause.
+        if not anon_cols:
+            raise ValueError(
+                "_batched_anonymize requires anon_cols; caller should "
+                "have routed to _batched_delete instead."
+            )
+
+        set_clauses = ", ".join(
+            f"{col} = :anon_{col}" for col in anon_cols
+        )
+        sql = (
+            f"UPDATE {table} SET {set_clauses} "
+            f"WHERE id IN ("
+            f"  SELECT id FROM {table} "
+            f"  WHERE {where} "
+            f"  ORDER BY id "
+            f"  LIMIT :batch_size "
+            f"  FOR UPDATE SKIP LOCKED"
+            f")"
+        )
+
+        total = 0
+        for batch_num in range(max_batches):
+            batch_params = dict(params)
+            batch_params["batch_size"] = batch_size
+            for col, val in anon_cols.items():
+                batch_params[f"anon_{col}"] = val
+            result = self.db.execute(text(sql), batch_params)
+            affected = result.rowcount
+            self.db.commit()
+            total += affected
+            if affected < batch_size:
+                return total
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+        logger.warning(
+            "Retention: %s _batched_anonymize hit max_batches=%d cap "
+            "(total=%d). Either lower retention_days or raise the cap.",
+            table, max_batches, total,
+        )
+        return total

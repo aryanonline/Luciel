@@ -1,0 +1,61 @@
+{
+    "family": "luciel-verify",
+    "taskRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-verify-role",
+    "executionRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-execution-role",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "512",
+    "memory": "1024",
+    "containerDefinitions": [
+        {
+            "name": "luciel-verify",
+            "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:22b2a029d4e7b363fb0b71ea91aa2972dd5459dbb767f952eef8e923be280adb",
+            "essential": true,
+            "command": [
+                "python",
+                "-m",
+                "app.verification",
+                "--json-report",
+                "/tmp/report.json"
+            ],
+            "environment": [
+                {
+                    "name": "LUCIEL_BASE_URL",
+                    "value": "https://api.vantagemind.ai"
+                },
+                {
+                    "name": "AWS_REGION",
+                    "value": "ca-central-1"
+                },
+                {
+                    "name": "CELERY_BROKER_URL",
+                    "value": "sqs://"
+                },
+                {
+                    "name": "MEMORY_EXTRACTION_ASYNC",
+                    "value": "true"
+                }
+            ],
+            "secrets": [
+                {
+                    "name": "LUCIEL_PLATFORM_ADMIN_KEY",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/platform-admin-key"
+                },
+                {
+                    "name": "DATABASE_URL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/luciel-backend",
+                    "awslogs-region": "ca-central-1",
+                    "awslogs-stream-prefix": "verify"
+                }
+            }
+        }
+    ]
+}

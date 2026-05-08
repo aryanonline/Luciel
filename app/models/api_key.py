@@ -38,7 +38,7 @@ class ApiKey(Base, TimestampMixin):
     tenant_id: Mapped[str | None] = mapped_column(
         String(100), index=True, nullable=True
     )
-    """Which tenant this key belongs to. NULL for platform-admin keys (cross-tenant bypass via 'platformadmin' permission per Invariant 5)."""
+    """Which tenant this key belongs to. NULL for platform-admin keys (cross-tenant bypass via 'platform_admin' permission per Invariant 5; canonical constant defined as PLATFORM_ADMIN in app/policy/scope.py)."""
 
     domain_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     """If null, the key works for any domain in the tenant's allowed_domains."""

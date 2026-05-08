@@ -1,0 +1,41 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAdminDsnFromSsm",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter"
+      ],
+      "Resource": [
+        "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url"
+      ]
+    },
+    {
+      "Sid": "DescribeAdminDsnParameter",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:DescribeParameters"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ssm:ResourceTag/luciel:role": "mint-operator"
+        }
+      }
+    },
+    {
+      "Sid": "DecryptAdminDsnViaSsm",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ssm.ca-central-1.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

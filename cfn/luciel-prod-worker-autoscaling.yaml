@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Luciel Step 28 Phase 2 Commit 6 - Application Auto Scaling for luciel-worker-service. CPU TargetTracking at 60 percent, capacity 1-4. Backlog policy deferred (broker not yet verified).
+
+Parameters:
+  WorkerClusterName:
+    Type: String
+    Default: luciel-cluster
+    Description: ECS cluster hosting luciel-worker-service.
+  WorkerServiceName:
+    Type: String
+    Default: luciel-worker-service
+    Description: ECS service running the celery worker.
+  MinCapacity:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: Minimum desired count (always-on floor).
+  MaxCapacity:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    Description: Maximum desired count (RDS-bounded ceiling).
+  CpuTargetPercent:
+    Type: Number
+    Default: 60
+    MinValue: 10
+    MaxValue: 90
+    Description: Target average CPU utilization percent for the worker service.
+  ScaleOutCooldownSeconds:
+    Type: Number
+    Default: 60
+    MinValue: 0
+    Description: Seconds to wait after scale-out before another scale-out.
+  ScaleInCooldownSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 0
+    Description: Seconds to wait after scale-in before another scale-in.
+
+Resources:
+
+  WorkerScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub "service/${WorkerClusterName}/${WorkerServiceName}"
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+
+  WorkerCpuTargetTrackingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: luciel-worker-cpu-target-tracking
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref WorkerScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: !Ref CpuTargetPercent
+        ScaleOutCooldown: !Ref ScaleOutCooldownSeconds
+        ScaleInCooldown: !Ref ScaleInCooldownSeconds
+        DisableScaleIn: false
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+Outputs:
+  ScalableTargetResourceId:
+    Description: Application Auto Scaling resource ID for the worker service.
+    Value: !Sub "service/${WorkerClusterName}/${WorkerServiceName}"
+  CpuPolicyArn:
+    Description: ARN of the CPU TargetTracking scaling policy.
+    Value: !Ref WorkerCpuTargetTrackingPolicy
+  MinCapacityApplied:
+    Description: Effective minimum desired count.
+    Value: !Ref MinCapacity
+  MaxCapacityApplied:
+    Description: Effective maximum desired count.
+    Value: !Ref MaxCapacity
+  CpuTargetApplied:
+    Description: Effective CPU utilization target (percent).
+    Value: !Ref CpuTargetPercent

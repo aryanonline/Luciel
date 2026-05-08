@@ -10,7 +10,12 @@ silently skipped agent-scope instances, landed would not have caught it.
 Redo closes gap 4 by re-fetching ALL FOUR affected entities post-PATCH
 and asserting each is active=False, then reading the audit log and
 asserting exactly 3 cascade_deactivate rows exist for this tenant
-(one per cascaded child: agent, domain-luciel, agent-luciel).
+(one bulk row for the agent cascade, one bulk row for the
+domain+agent LucielInstance cascade, and one bulk row for the
+memory-items cascade). Per Step 24.5 design (luciel_instance_repository
+.deactivate_all_for_domain) the domain-scope and agent-scope Luciels
+are cascaded together via a single UPDATE and emit ONE summary audit
+row, not two.
 
 The tenant-level LucielInstance is NOT expected to cascade -- it is
 above the domain in scope and should remain active. This is an
@@ -165,10 +170,26 @@ class CascadePillar(Pillar):
                 if len(cascade_rows) != 3:
                     raise AssertionError(
                         f"expected exactly 3 cascade_deactivate audit rows "
-                        f"(agent, domain-luciel, agent-luciel), got {len(cascade_rows)}. "
+                        f"(agent-bulk, luciel-bulk [covers both domain+agent "
+                        f"scope], memory-bulk), got {len(cascade_rows)}. "
                         f"rows={[{'action': r.get('action'), 'resource_type': r.get('resource_type')} for r in cascade_rows]}"
                     )
-                audit_note = f"{len(cascade_rows)} rows"
+                # New 2026-05-02: domain deactivation now cascades memory_items.
+                # Assert the memory cascade row exists explicitly so future
+                # regressions of Wiring B (deactivate_domain memory cascade)
+                # surface as a specific failure.
+                memory_cascade_rows = [
+                    row for row in cascade_rows
+                    if (row.get("resource_type") or "").lower() == "memory"
+                ]
+                if len(memory_cascade_rows) != 1:
+                    raise AssertionError(
+                        f"expected exactly 1 memory cascade row from domain "
+                        f"deactivation (Wiring B), got {len(memory_cascade_rows)}. "
+                        f"deactivate_domain may have stopped calling "
+                        f"bulk_soft_deactivate_memory_items_for_domain."
+                    )
+                audit_note = f"{len(cascade_rows)} rows (agent-bulk, luciel-bulk, memory)"
 
         return (
             f"domain+agent+domain-luciel+agent-luciel all inactive; "

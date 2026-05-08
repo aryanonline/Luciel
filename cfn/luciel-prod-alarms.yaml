@@ -1,0 +1,319 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Luciel production CloudWatch alarm pack for Step 28 Phase 2 Commit 5.
+  Deploys an SNS topic + email subscription, three CloudWatch Logs
+  MetricFilters scoped to /ecs/luciel-worker, and seven CloudWatch
+  alarms covering worker liveness (heartbeat from Commit 7 rev 11),
+  worker task health, worker error rate, RDS connection count, RDS CPU,
+  RDS free storage, and SSM GetParameter access failures.
+
+  Region: ca-central-1
+  Account: 729005488042
+  Worker service: luciel-worker-service (cluster luciel-cluster)
+  Worker log group: /ecs/luciel-worker
+  RDS instance: luciel-db (db.t3.micro, max_connections derived = ~112)
+
+  Connection-count threshold derivation:
+    max_connections = LEAST(DBInstanceClassMemory / 9531392, 5000)
+    db.t3.micro RAM = 1 GiB = 1073741824 bytes
+    max_connections approximately 112
+    80% threshold = 90 (rounded down)
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Default: aryans.www@gmail.com
+    Description: >
+      Email address for alarm notifications. After stack create the
+      address will receive an SNS confirmation email - the subscription
+      stays in PendingConfirmation until that link is clicked.
+  WorkerLogGroupName:
+    Type: String
+    Default: /ecs/luciel-worker
+    Description: CloudWatch Logs group for the worker service.
+  WorkerClusterName:
+    Type: String
+    Default: luciel-cluster
+    Description: ECS cluster hosting luciel-worker-service.
+  WorkerServiceName:
+    Type: String
+    Default: luciel-worker-service
+    Description: ECS service running the celery worker.
+  RdsInstanceIdentifier:
+    Type: String
+    Default: luciel-db
+    Description: RDS DBInstanceIdentifier (verified via describe-db-instances 2026-05-05).
+  RdsConnectionThreshold:
+    Type: Number
+    Default: 90
+    Description: 80% of max_connections (~112) on db.t3.micro.
+  RdsCpuThresholdPercent:
+    Type: Number
+    Default: 85
+    Description: CPU utilization percent that triggers the alarm.
+  RdsFreeStorageThresholdBytes:
+    Type: Number
+    Default: 4294967296
+    Description: 4 GiB free space floor on the 20 GiB RDS volume.
+  WorkerErrorThreshold:
+    Type: Number
+    Default: 5
+    Description: ERROR log lines per 5 min that trigger the alarm.
+
+Resources:
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: luciel-prod-alerts
+      DisplayName: Luciel Prod Alerts
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ------------------------------------------------------------------
+  # Log MetricFilters on /ecs/luciel-worker
+  # ------------------------------------------------------------------
+
+  HeartbeatMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref WorkerLogGroupName
+      FilterName: luciel-worker-heartbeat-touched
+      FilterPattern: '"healthcheck heartbeat: touched"'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Worker
+          MetricName: HeartbeatTouchCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  WorkerErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref WorkerLogGroupName
+      FilterName: luciel-worker-error-lines
+      FilterPattern: '?ERROR ?Error ?error'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Worker
+          MetricName: ErrorLogLineCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  SsmAccessDeniedMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref WorkerLogGroupName
+      FilterName: luciel-worker-ssm-access-denied
+      FilterPattern: '?AccessDeniedException ?"is not authorized to perform: ssm:" ?ParameterNotFound'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Worker
+          MetricName: SsmAccessFailureCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  # ------------------------------------------------------------------
+  # Alarms
+  # ------------------------------------------------------------------
+
+  WorkerNoHeartbeatAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: HeartbeatMetricFilter
+    Properties:
+      AlarmName: luciel-worker-no-heartbeat
+      AlarmDescription: >
+        Worker producer-heartbeat (Commit 7 rev 11) emits
+        "healthcheck heartbeat: touched" every 15s, so a healthy
+        worker produces ~4 events per 60s window. Alarm fires when
+        4 of 5 consecutive 60s windows have fewer than 1 heartbeat
+        (i.e. ~4-5min outage tolerated for one transient ingestion
+        glitch). CloudWatch alarm Period must be 10/20/30 or a
+        multiple of 60; 60 is the smallest legal value that gives
+        sub-1min granularity. Strongest worker-liveness signal in
+        the system.
+      Namespace: Luciel/Worker
+      MetricName: HeartbeatTouchCount
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 4
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  WorkerUnhealthyTaskCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: luciel-worker-unhealthy-task-count
+      AlarmDescription: >
+        ECS worker service running task count drops below 1 for two
+        consecutive 1-minute periods. Catches the case where the
+        service is down even before the heartbeat alarm sees missed
+        windows.
+      Namespace: AWS/ECS
+      MetricName: RunningTaskCount
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref WorkerClusterName
+        - Name: ServiceName
+          Value: !Ref WorkerServiceName
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  WorkerErrorLogRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: WorkerErrorMetricFilter
+    Properties:
+      AlarmName: luciel-worker-error-log-rate
+      AlarmDescription: >
+        More than 5 ERROR log lines in two consecutive 5-minute windows.
+        Surfaces sustained worker failure modes (DB pool exhaustion,
+        broker churn, retention purge errors, etc.) without paging on
+        a single transient blip.
+      Namespace: Luciel/Worker
+      MetricName: ErrorLogLineCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: !Ref WorkerErrorThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  RdsConnectionCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: luciel-rds-connection-count
+      AlarmDescription: >
+        RDS DatabaseConnections sustained above 80% of max_connections
+        (~90 of ~112) for 5 minutes. Pre-revenue load profile should
+        keep this near zero - any sustained breach is a leak signal.
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstanceIdentifier
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: !Ref RdsConnectionThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  RdsCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: luciel-rds-cpu
+      AlarmDescription: >
+        RDS CPU above 85% for 10 minutes. db.t3.micro is burstable
+        (20% baseline) so sustained breach signals either credit
+        exhaustion or actual workload pressure - either deserves paging
+        before queries start timing out.
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstanceIdentifier
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: !Ref RdsCpuThresholdPercent
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  RdsFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: luciel-rds-free-storage
+      AlarmDescription: >
+        RDS FreeStorageSpace falls below 4 GiB on the 20 GiB volume
+        (i.e. 80% used). Page well before RDS auto-scales storage so
+        we have time to investigate audit-log growth or unexpected
+        retention regressions.
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstanceIdentifier
+      Statistic: Average
+      Period: 900
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: !Ref RdsFreeStorageThresholdBytes
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  SsmAccessFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: SsmAccessDeniedMetricFilter
+    Properties:
+      AlarmName: luciel-ssm-getparameter-failures
+      AlarmDescription: >
+        Any SSM GetParameter access failure (AccessDeniedException,
+        ParameterNotFound, or "is not authorized to perform: ssm:")
+        on /ecs/luciel-worker over a 5-minute window. Catches IAM
+        drift and parameter-deletion regressions before they cascade
+        into worker-down.
+      Namespace: Luciel/Worker
+      MetricName: SsmAccessFailureCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+Outputs:
+  AlertTopicArn:
+    Description: ARN of the SNS topic for alarm notifications.
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-AlertTopicArn"
+  HeartbeatMetricNamespace:
+    Description: Custom metric namespace used by Luciel worker filters.
+    Value: Luciel/Worker
+  AlarmsCreated:
+    Description: Number of CloudWatch alarms in this stack.
+    Value: "7"

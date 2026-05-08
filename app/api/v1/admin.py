@@ -12,7 +12,6 @@ from app.api.deps import (
     get_luciel_instance_service,
 )
 from app.models.admin_audit_log import (
-    ACTION_CREATE,
     ACTION_DEACTIVATE,
     ACTION_UPDATE,
     RESOURCE_AGENT,
@@ -37,7 +36,7 @@ from app.services.luciel_instance_service import (
 )
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.repositories.agent_repository import AgentRepository
-from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
+from app.schemas.agent import AgentBindUserPayload, AgentCreate, AgentRead, AgentUpdate
 from app.schemas.luciel_instance import (
     LucielInstanceCreate,
     LucielInstanceRead,
@@ -89,6 +88,8 @@ from app.schemas.admin import (
 from app.schemas.api_key import ApiKeyCreate, ApiKeyCreateResponse, ApiKeyRead
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService
+from app.services.memory_admin_service import MemoryAdminService
+from app.schemas.memory import MemoryRead
 from app.policy.scope import ScopePolicy
 from app.models.luciel_instance import LucielInstance
 
@@ -148,6 +149,12 @@ def onboard_tenant(
     """
     service = OnboardingService(db)
 
+    # P3-A: capture caller identity once at the request boundary so
+    # the four audit rows OnboardingService emits are attributed to
+    # the platform_admin who actually performed the onboarding, not
+    # to AuditContext.system().
+    audit_ctx = AuditContext.from_request(request)
+
     try:
         result = service.onboard_tenant(
             tenant_id=payload.tenant_id,
@@ -167,6 +174,7 @@ def onboard_tenant(
             retention_days_traces=payload.retention_days_traces,
             retention_days_knowledge=payload.retention_days_knowledge,
             created_by=payload.created_by,
+            audit_ctx=audit_ctx,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -268,18 +276,38 @@ def update_tenant(
     tenant_id: str,
     payload: TenantConfigUpdate,
     db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+    luciel_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    agent_repo: Annotated[AgentRepository, Depends(get_agent_repository)],
 ) -> TenantConfigRead:
     ScopePolicy.enforce_tenant_scope(request, tenant_id)
     service = AdminService(db)
-    config = service.update_tenant_config(
-        tenant_id,
-        **payload.model_dump(exclude_unset=True),
-    )
-    if not config:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Tenant not found",
+    payload_data = payload.model_dump(exclude_unset=True)
+
+    # Tenant deactivation routes through the cascade-aware spine.
+    # All other updates use the generic update_tenant_config path.
+    if payload_data.get("active") is False:
+        deactivated = service.deactivate_tenant_with_cascade(
+            tenant_id,
+            audit_ctx=audit_ctx,
+            luciel_instance_service=luciel_service,
+            agent_repo=agent_repo,
+            updated_by=getattr(request.state, "actor_label", None),
         )
+        if not deactivated:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tenant not found",
+            )
+        config = service.get_tenant_config(tenant_id)
+    else:
+        config = service.update_tenant_config(tenant_id, **payload_data)
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tenant not found",
+            )
+
     return TenantConfigRead.model_validate(config)
 
 
@@ -553,7 +581,11 @@ def create_api_key(
                 ),
             )
 
-    # --- Mint the key ----------------------------------------------
+    # --- Mint the key + audit (Step 28 P3-B) ------------------------
+    # ApiKeyService.create_key now emits the ACTION_CREATE audit row in
+    # the same transaction as the api_keys INSERT (Invariant 4: audit-
+    # before-commit). The endpoint just threads audit_ctx through; no
+    # post-mint audit emission needed.
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
         tenant_id=payload.tenant_id,
@@ -564,28 +596,7 @@ def create_api_key(
         permissions=payload.permissions,
         rate_limit=payload.rate_limit,
         created_by=payload.created_by,
-    )
-
-    # --- Step 24.5: audit the mint ----------------------------------
-    from app.models.admin_audit_log import ACTION_CREATE, RESOURCE_API_KEY
-    from app.repositories.admin_audit_repository import AdminAuditRepository
-    AdminAuditRepository(db).record(
-        ctx=audit_ctx,
-        tenant_id=payload.tenant_id,
-        action=ACTION_CREATE,
-        resource_type=RESOURCE_API_KEY,
-        resource_pk=api_key.id,
-        resource_natural_id=api_key.key_prefix,
-        domain_id=payload.domain_id,
-        agent_id=payload.agent_id,
-        luciel_instance_id=payload.luciel_instance_id,
-        after={
-            "display_name": payload.display_name,
-            "permissions": payload.permissions,
-            "rate_limit": payload.rate_limit,
-            "bound_to_luciel_instance": payload.luciel_instance_id is not None,
-        },
-        autocommit=True,
+        audit_ctx=audit_ctx,
     )
 
     return ApiKeyCreateResponse(
@@ -625,28 +636,115 @@ def deactivate_api_key(
     request: Request,
     key_id: int,
     db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> None:
     service = ApiKeyService(db)
     # Fetch first so we can enforce scope on the target.
     target = service.get_key_by_id(key_id) if hasattr(service, "get_key_by_id") else None
-    if target is None:
+
+    # Step 28 Phase 2 HOTFIX: previously the happy path (target found) was
+    # dead code -- it returned 204 without ever calling deactivate_key,
+    # so Pillar 17 D5 saw zero deactivate audit rows. Now we always run
+    # the deactivate path, with scope enforcement when the target is
+    # known. The fallback (target unknown) preserves the legacy 404
+    # behavior for buggy/legacy ApiKeyService implementations missing
+    # get_key_by_id.
+    if target is not None:
+        # Enforce scope: a tenant-scoped caller cannot deactivate keys
+        # belonging to other tenants; a domain-scoped caller cannot
+        # touch keys outside their domain; same for agent.
+        if not ScopePolicy.is_platform_admin(request):
+            caller_tenant = getattr(request.state, "tenant_id", None)
+            caller_domain = getattr(request.state, "domain_id", None)
+            caller_agent = getattr(request.state, "agent_id", None)
+            if caller_tenant and target.tenant_id != caller_tenant:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cannot deactivate API key outside your tenant",
+                )
+            if caller_domain and target.domain_id and target.domain_id != caller_domain:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cannot deactivate API key outside your domain",
+                )
+            if caller_agent and target.agent_id and target.agent_id != caller_agent:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cannot deactivate API key outside your agent",
+                )
+        success = service.deactivate_key(key_id, audit_ctx=audit_ctx)
+        if not success:
+            # Race: target existed at fetch but vanished before deactivate.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="API key not found",
+            )
+    else:
         # Fall back: just try deactivate; 404 if not found.
-        success = service.deactivate_key(key_id)
+        success = service.deactivate_key(key_id, audit_ctx=audit_ctx)
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="API key not found",
             )
-        return
 
-    ScopePolicy.enforce_agent_scope(
-        request, target.tenant_id, target.domain_id, target.agent_id,
+
+# =====================================================================
+# Step 28 - Commit 8b-prereq-data-cascade-fix
+# Memory item admin endpoints (platform_admin only).
+# Powers the Pattern S walker's memory_items leaf step.
+# =====================================================================
+
+@router.get("/memory-items", response_model=list[MemoryRead])
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def list_memory_items(
+    request: Request,
+    db: DbSession,
+    tenant_id: str = Query(
+        ...,
+        min_length=2,
+        max_length=100,
+        description="Tenant whose memory_items to list. Required.",
+    ),
+    active_only: bool = Query(
+        default=False,
+        description="If true, return only rows with active=True.",
+    ),
+) -> list[MemoryRead]:
+    permissions = getattr(request.state, "permissions", []) or []
+    if "platform_admin" not in permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may list memory_items",
+        )
+    service = MemoryAdminService(db)
+    items = service.list_memories_for_tenant(
+        tenant_id=tenant_id,
+        active_only=active_only,
     )
-    success = service.deactivate_key(key_id)
+    return [MemoryRead.model_validate(i) for i in items]
+
+
+@router.delete("/memory-items/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def deactivate_memory_item(
+    request: Request,
+    memory_id: int,
+    db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> None:
+    permissions = getattr(request.state, "permissions", []) or []
+    if "platform_admin" not in permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may deactivate memory_items",
+        )
+    service = MemoryAdminService(db)
+    success = service.deactivate_memory(memory_id, audit_ctx=audit_ctx)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="API key not found",
+            detail="Memory item not found",
         )
 # =====================================================================
 # Step 24.5 — LucielInstance management routes
@@ -790,11 +888,33 @@ def deactivate_luciel_instance(
     pk: int,
     service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+    db: DbSession,
 ) -> LucielInstanceRead:
     instance = service.get_by_pk(pk)
     if instance is None:
         raise HTTPException(status_code=404, detail=f"LucielInstance pk={pk} not found.")
     ScopePolicy.enforce_luciel_instance_scope(request, instance)
+
+    # Memory cascade: soft-deactivate this instance's memory_items first.
+    # Wired at route level because LucielInstanceService doesn't depend on
+    # AdminService (would be a circular import).
+    # autocommit=True is fine here -- service.deactivate_instance below
+    # opens its own transaction for the instance row + audit row.
+    #
+    # Step 28 C10 (P3-Q): use scope_owner_tenant_id, not tenant_id. The
+    # LucielInstance ORM model exposes the tenant column as
+    # scope_owner_tenant_id (see app/models/luciel_instance.py line 99).
+    # Pre-fix this line raised AttributeError before the cascade ever
+    # ran, so every DELETE returned 500 in prod even though Pillar 10
+    # zero-residue still passed thanks to the tenant-level cascade
+    # firing later in the verify teardown PATCH.
+    AdminService(db).bulk_soft_deactivate_memory_items_for_luciel_instance(
+        tenant_id=instance.scope_owner_tenant_id,
+        luciel_instance_id=pk,
+        audit_ctx=audit_ctx,
+        updated_by=getattr(request.state, "actor_label", None),
+    )
+
 
     try:
         deactivated = service.deactivate_instance(
@@ -949,6 +1069,90 @@ def update_agent(
     return AgentRead.model_validate(updated)
 
 
+# ---------------------------------------------------------------------
+# Bind-user (Step 28 Phase 2 - Commit 9)
+#
+# Platform-admin only. Binds an Agent row to a User identity row.
+# Replaces the raw-SQL UPDATE that the verification harness Pillars
+# 12/13/14 used to perform via a local SessionLocal() — a path that
+# correctly fails when the harness runs from a least-privilege Pattern
+# N task with the worker DSN (luciel_worker has no UPDATE on agents).
+#
+# Why a dedicated route (not piggybacking on PATCH /agents):
+#   1. Auth: this route requires platform_admin. The general PATCH
+#      route is tenant-admin scoped — binding identity is more
+#      sensitive and should not be reachable via tenant-admin keys.
+#   2. Audit: ACTION_UPDATE on RESOURCE_AGENT with the user_id diff
+#      shows up cleanly in audit-log queries filtered by resource_type
+#      = agent, action = update, before/after.user_id present.
+#   3. Invariant: enforces "one active Agent per (user, tenant)" at
+#      the route layer before delegating to repo.update.
+#
+# Step 24.5b doctrine: re-binding a user to a *different* Agent is
+# deactivate-and-recreate, not in-place UPDATE — audit trail integrity.
+# This route therefore refuses if the target Agent is inactive.
+# ---------------------------------------------------------------------
+@router.post(
+    "/agents/{tenant_id}/{agent_id}/bind-user",
+    response_model=AgentRead,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def bind_agent_to_user(
+    request: Request,
+    tenant_id: str,
+    agent_id: str,
+    payload: AgentBindUserPayload,
+    repo: Annotated[AgentRepository, Depends(get_agent_repository)],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> AgentRead:
+    permissions = getattr(request.state, "permissions", []) or []
+    if "platform_admin" not in permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may bind an Agent to a User identity.",
+        )
+
+    agent = repo.get(tenant_id=tenant_id, agent_id=agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    if not agent.active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Agent is inactive; binding to inactive Agents is refused. "
+                "Per Step 24.5b doctrine, re-binding a user to a different "
+                "Agent is deactivate-and-recreate, not UPDATE in place."
+            ),
+        )
+
+    # Invariant: one active Agent per (user, tenant). Refuse if the
+    # target user already holds an active Agent in this tenant that
+    # is not this one.
+    existing = repo.get_by_user_and_tenant(
+        user_id=payload.user_id,
+        tenant_id=tenant_id,
+        active_only=True,
+    )
+    if existing is not None and existing.id != agent.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"User {payload.user_id} already holds active Agent "
+                f"{existing.agent_id} in tenant {tenant_id}. Per Step 24.5b "
+                f"invariant, a User holds at most one active Agent per tenant."
+            ),
+        )
+
+    updated = repo.update(
+        agent,
+        audit_ctx=audit_ctx,
+        user_id=payload.user_id,
+        updated_by=payload.updated_by
+            or getattr(request.state, "actor_label", None),
+    )
+    return AgentRead.model_validate(updated)
+
+
 @router.delete(
     "/agents/{tenant_id}/{agent_id}",
     response_model=AgentRead,
@@ -961,6 +1165,7 @@ def deactivate_agent(
     repo: Annotated[AgentRepository, Depends(get_agent_repository)],
     service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+    db: DbSession,
 ) -> AgentRead:
     """Soft-deactivate an Agent AND cascade-deactivate every agent-scoped
     LucielInstance owned by that agent. Both writes commit atomically
@@ -983,6 +1188,18 @@ def deactivate_agent(
         agent_id=existing.agent_id,
         updated_by=getattr(request.state, "actor_label", None),
     )
+
+    # 1.5 Memory cascade: soft-deactivate agent-scoped memory_items.
+    # Wired at route level because new-table Agent deactivation
+    # orchestrates at this layer (cascade is not embedded in repo).
+    AdminService(db).bulk_soft_deactivate_memory_items_for_agent(
+        tenant_id=existing.tenant_id,
+        agent_id=existing.agent_id,
+        audit_ctx=audit_ctx,
+        updated_by=getattr(request.state, "actor_label", None),
+        autocommit=False,
+    )
+
 
     # 2. Deactivate the agent row itself.
     deactivated = repo.deactivate(
@@ -1543,3 +1760,324 @@ def get_worker_queue_depth(
             "approximate_messages": dlq_depth,
         },
     }
+
+
+# ================================================================
+# Step 28 Phase 2 Commit 12 -- ScopeAssignment / User-deactivate
+# admin routes for the verify harness.
+#
+# Why these exist:
+#   The verify ECS task runs under the least-privilege luciel_worker
+#   role (per migration f392a842f885). That role intentionally has
+#   ZERO access to the scope_assignments table -- not even SELECT --
+#   because the worker has no production reason to read or write
+#   identity-lifecycle rows. The harness historically called
+#   ScopeAssignmentService and UserService directly with a worker DB
+#   session; once Commit 11 fixed the bind-user UUID encoder, those
+#   direct calls surfaced as InsufficientPrivilege errors in P12/P14.
+#
+#   These thin admin routes give the harness an HTTP path that runs
+#   on the backend (which has full DB privileges) and is gated by
+#   platform_admin permission, mirroring the bind-user route
+#   pattern from Commit 9. No change to the production identity
+#   cascade behaviour -- these routes wrap the same service methods
+#   the production code paths already use.
+#
+# Drift register:
+#   D-verify-task-pure-http-2026-05-05 -- the broader architectural
+#   debt is "verify task should not hold a DB session at all". Logged
+#   for Step 29; out of scope for Phase 2.
+# ================================================================
+
+import uuid as _uuid_p2c12
+
+from app.schemas.scope_assignment import (
+    EndAssignmentRequest as _EndAssignmentRequest_p2c12,
+    ScopeAssignmentCreate as _ScopeAssignmentCreate_p2c12,
+    ScopeAssignmentRead as _ScopeAssignmentRead_p2c12,
+)
+from app.services.scope_assignment_service import (
+    AssignmentNotFoundError as _AssignmentNotFoundError_p2c12,
+    AssignmentUserInactiveError as _AssignmentUserInactiveError_p2c12,
+    AssignmentUserNotFoundError as _AssignmentUserNotFoundError_p2c12,
+    ScopeAssignmentService as _ScopeAssignmentService_p2c12,
+)
+from app.services.user_service import (
+    UserNotFoundError as _UserNotFoundError_p2c12,
+    UserService as _UserService_p2c12,
+)
+from pydantic import BaseModel as _BaseModel_p2c12, Field as _Field_p2c12
+
+
+class _ScopeAssignmentCreatePayload_p2c12(_BaseModel_p2c12):
+    """Wrapper schema: ScopeAssignmentCreate carries (tenant, domain, role)
+    but not user_id (which the existing schema takes from the URL path).
+    For an admin-side create we want user_id in the body, so we wrap."""
+    user_id: _uuid_p2c12.UUID = _Field_p2c12(
+        ...,
+        description="User to which the new ScopeAssignment will be bound.",
+    )
+    payload: _ScopeAssignmentCreate_p2c12 = _Field_p2c12(
+        ...,
+        description="Tenant/domain/role and optional started_at.",
+    )
+    audit_label: str | None = _Field_p2c12(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional caller-provided audit context label. "
+            "Falls back to request actor_label."
+        ),
+    )
+
+
+class _ScopeAssignmentPromotePayload_p2c12(_BaseModel_p2c12):
+    """Compound op: end old + create new in one txn (production path)."""
+    old_assignment_id: _uuid_p2c12.UUID
+    new_payload: _ScopeAssignmentCreate_p2c12
+    end_reason: str = _Field_p2c12(
+        default="PROMOTED",
+        description=(
+            "EndReason enum value: PROMOTED / DEMOTED / REASSIGNED / "
+            "DEPARTED / DEACTIVATED."
+        ),
+    )
+    end_note: str | None = _Field_p2c12(default=None, max_length=500)
+    audit_label: str | None = _Field_p2c12(default=None, max_length=200)
+
+
+class _UserDeactivatePayload_p2c12(_BaseModel_p2c12):
+    reason: str = _Field_p2c12(..., min_length=10, max_length=500)
+    audit_label: str | None = _Field_p2c12(default=None, max_length=200)
+
+
+def _resolve_actor_p2c12(
+    request: Request, audit_label: str | None
+) -> AuditContext:
+    """Build an AuditContext for harness-driven admin ops.
+
+    Falls back to request.state.actor_label (set by the auth
+    middleware), then to a generic system label. Never raises -- a
+    missing actor label is non-fatal.
+    """
+    label = (
+        audit_label
+        or getattr(request.state, "actor_label", None)
+        or "admin:scope-assignment"
+    )
+    return AuditContext.system(label=label)
+
+
+@router.post(
+    "/scope-assignments",
+    response_model=_ScopeAssignmentRead_p2c12,
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def create_scope_assignment_p2c12(
+    request: Request,
+    body: _ScopeAssignmentCreatePayload_p2c12,
+    db: DbSession,
+) -> _ScopeAssignmentRead_p2c12:
+    """Create a ScopeAssignment for an existing User. platform_admin only.
+
+    Phase 2 Commit 12. Thin wrapper over
+    ScopeAssignmentService.create_assignment so the verify task can
+    set up identity-lifecycle preconditions without holding
+    INSERT privileges on scope_assignments at the DB layer.
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only platform_admin may create ScopeAssignments via this "
+                "administrative route."
+            ),
+        )
+
+    actor = _resolve_actor_p2c12(request, body.audit_label)
+    service = _ScopeAssignmentService_p2c12(db)
+    try:
+        sa = service.create_assignment(
+            user_id=body.user_id,
+            payload=body.payload,
+            autocommit=True,
+            audit_ctx=actor,
+        )
+    except _AssignmentUserNotFoundError_p2c12 as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except _AssignmentUserInactiveError_p2c12 as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _ScopeAssignmentRead_p2c12.model_validate(sa)
+
+
+@router.get(
+    "/scope-assignments/{assignment_id}",
+    response_model=_ScopeAssignmentRead_p2c12,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def get_scope_assignment_p2c12(
+    request: Request,
+    assignment_id: _uuid_p2c12.UUID,
+    db: DbSession,
+) -> _ScopeAssignmentRead_p2c12:
+    """Fetch a single ScopeAssignment by id. platform_admin only.
+
+    Phase 2 Commit 12. Used by the verify harness for post-cascade
+    assertions (e.g. P14 A3/A4 reads after end_assignment).
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may read ScopeAssignments here.",
+        )
+    sa = _ScopeAssignmentService_p2c12(db).get_assignment(assignment_id)
+    if sa is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"ScopeAssignment {assignment_id} not found.",
+        )
+    return _ScopeAssignmentRead_p2c12.model_validate(sa)
+
+
+@router.post(
+    "/scope-assignments/{assignment_id}/end",
+    response_model=_ScopeAssignmentRead_p2c12,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def end_scope_assignment_p2c12(
+    request: Request,
+    assignment_id: _uuid_p2c12.UUID,
+    body: _EndAssignmentRequest_p2c12,
+    db: DbSession,
+    audit_label: str | None = Query(default=None, max_length=200),
+) -> _ScopeAssignmentRead_p2c12:
+    """End a ScopeAssignment with mandatory Q6 key-rotation cascade.
+
+    platform_admin only. Phase 2 Commit 12. Thin wrapper over
+    ScopeAssignmentService.end_assignment -- exercises the same
+    cascade path as production. Used by P14 to drive the DEPARTED
+    semantics test.
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may end ScopeAssignments here.",
+        )
+
+    actor = _resolve_actor_p2c12(request, audit_label)
+    service = _ScopeAssignmentService_p2c12(db)
+    ended = service.end_assignment(
+        assignment_id=assignment_id,
+        reason=body.reason,
+        note=body.note,
+        autocommit=True,
+        audit_ctx=actor,
+    )
+    if ended is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"ScopeAssignment {assignment_id} not found.",
+        )
+    return _ScopeAssignmentRead_p2c12.model_validate(ended)
+
+
+@router.post(
+    "/scope-assignments/promote",
+    response_model=dict,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def promote_scope_assignment_p2c12(
+    request: Request,
+    body: _ScopeAssignmentPromotePayload_p2c12,
+    db: DbSession,
+) -> dict:
+    """Atomic role transition: end old + create new in one txn.
+
+    platform_admin only. Phase 2 Commit 12. Thin wrapper over
+    ScopeAssignmentService.promote -- preserves the single-txn
+    invariant that production code relies on. Returns both rows so
+    the harness can assert on both ended_at and new_role without
+    a follow-up GET.
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may promote ScopeAssignments here.",
+        )
+
+    # Late import: EndReason is needed only here, and the admin module
+    # already imports a lot at top level. Keep this scoped.
+    from app.models.scope_assignment import EndReason as _EndReason_p2c12
+
+    try:
+        end_reason = _EndReason_p2c12(body.end_reason)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid end_reason {body.end_reason!r}. "
+                f"Must be one of: "
+                f"{[e.value for e in _EndReason_p2c12]}"
+            ),
+        ) from exc
+
+    actor = _resolve_actor_p2c12(request, body.audit_label)
+    service = _ScopeAssignmentService_p2c12(db)
+    try:
+        ended_old, created_new = service.promote(
+            old_assignment_id=body.old_assignment_id,
+            new_payload=body.new_payload,
+            end_reason=end_reason,
+            end_note=body.end_note,
+            audit_ctx=actor,
+        )
+    except _AssignmentNotFoundError_p2c12 as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except _AssignmentUserInactiveError_p2c12 as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return {
+        "ended_old": _ScopeAssignmentRead_p2c12.model_validate(
+            ended_old
+        ).model_dump(mode="json"),
+        "created_new": _ScopeAssignmentRead_p2c12.model_validate(
+            created_new
+        ).model_dump(mode="json"),
+    }
+
+
+@router.post(
+    "/users/{user_id}/deactivate",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def deactivate_user_p2c12(
+    request: Request,
+    user_id: _uuid_p2c12.UUID,
+    body: _UserDeactivatePayload_p2c12,
+    db: DbSession,
+) -> None:
+    """Soft-deactivate a User and cascade (ends assignments + rotates keys).
+
+    platform_admin only. Phase 2 Commit 12. Thin wrapper over
+    UserService.deactivate_user. Used by P12/P13 teardown so the
+    harness does not need DB write privileges on users or
+    scope_assignments.
+    """
+    if not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only platform_admin may deactivate users here.",
+        )
+
+    actor = _resolve_actor_p2c12(request, body.audit_label)
+    try:
+        _UserService_p2c12(db).deactivate_user(
+            user_id=user_id,
+            reason=body.reason,
+            audit_ctx=actor,
+        )
+    except _UserNotFoundError_p2c12 as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return None

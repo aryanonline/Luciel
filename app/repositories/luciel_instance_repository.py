@@ -566,6 +566,91 @@ class LucielInstanceRepository:
         )
         return int(updated)
 
+
+    def deactivate_all_for_tenant(
+        self,
+        *,
+        tenant_id: str,
+        updated_by: str | None = None,
+        audit_ctx: AuditContext | None = None,
+        autocommit: bool = True,
+    ) -> int:
+        """Cascade: deactivate every instance owned by a tenant,
+        across all scope levels (tenant, domain, agent).
+
+        Used by AdminService.deactivate_tenant_with_cascade. Returns
+        the number of rows updated. Writes one audit row for the
+        cascade event (only when updated > 0, matching the per-agent
+        and per-domain pattern in this repo).
+
+        No scope_level filter -- a tenant deactivation should clear
+        every instance under that tenant regardless of which scope
+        level the instance binds at.
+
+        autocommit=True by default for standalone callers. The tenant-
+        cascade spine passes autocommit=False so the whole cascade
+        commits in a single transaction. The two existing _for_agent /
+        _for_domain methods commit unconditionally; making them
+        autocommit-aware is deferred to a follow-up refactor (drift
+        D-luciel-instance-repo-cascade-not-autocommit-aware-2026-05-02).
+        """
+        affected = (
+            self.db.query(LucielInstance.id, LucielInstance.instance_id)
+            .filter(
+                LucielInstance.scope_owner_tenant_id == tenant_id,
+                LucielInstance.active.is_(True),
+            )
+            .all()
+        )
+        affected_pks = [pk for pk, _ in affected]
+        affected_ids = [nid for _, nid in affected]
+
+        updated = (
+            self.db.query(LucielInstance)
+            .filter(
+                LucielInstance.scope_owner_tenant_id == tenant_id,
+                LucielInstance.active.is_(True),
+            )
+            .update(
+                {
+                    LucielInstance.active: False,
+                    LucielInstance.updated_by: updated_by,
+                },
+                synchronize_session=False,
+            )
+        )
+
+        if audit_ctx is not None and updated:
+            AdminAuditRepository(self.db).record(
+                ctx=audit_ctx,
+                tenant_id=tenant_id,
+                action=ACTION_CASCADE_DEACTIVATE,
+                resource_type=RESOURCE_LUCIEL_INSTANCE,
+                resource_pk=None,
+                resource_natural_id=None,
+                domain_id=None,
+                agent_id=None,
+                luciel_instance_id=None,
+                after={
+                    "count": int(updated),
+                    "affected_pks": affected_pks,
+                    "affected_instance_ids": affected_ids,
+                    "trigger": "tenant_deactivate",
+                },
+                note=f"Cascade from tenant {tenant_id} deactivation",
+                autocommit=False,
+            )
+
+        if autocommit:
+            self.db.commit()
+        logger.info(
+            "LucielInstance cascade-deactivated count=%d tenant=%s "
+            "(all scope levels)",
+            updated,
+            tenant_id,
+        )
+        return int(updated)
+
     # ---------------------------------------------------------------
     # Step 25 hook — knowledge chunk counter maintenance
     # ---------------------------------------------------------------

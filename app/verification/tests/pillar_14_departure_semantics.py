@@ -1,4 +1,4 @@
-"""Pillar 14 - Departure semantics (Step 24.5b Q6).
+﻿"""Pillar 14 - Departure semantics (Step 24.5b Q6).
 
 The most reliability-sensitive operation in the identity layer: ending
 a User's assignment in one tenant must leave every other tenant
@@ -49,19 +49,27 @@ from __future__ import annotations
 import time
 import uuid
 
-from sqlalchemy import select
-
-from app.db.session import SessionLocal
-from app.models.api_key import ApiKey
-from app.models.memory import MemoryItem
-from app.models.scope_assignment import EndReason, ScopeAssignment
-from app.models.user import User
-from app.repositories.admin_audit_repository import AuditContext
-from app.schemas.scope_assignment import ScopeAssignmentCreate
-from app.services.scope_assignment_service import ScopeAssignmentService
+from app.models.scope_assignment import EndReason
 from app.verification.fixtures import RunState
-from app.verification.http_client import call, pooled_client
+from app.verification.http_client import call, forensics_get, pooled_client
 from app.verification.runner import Pillar
+
+# Step 29 Commit C.4: P14 forensic reads migrated to platform-admin HTTP.
+# A1/A2 (ApiKey rotation/untouchedness) reuse C.1's api_keys_step29c?id=,
+# A5/A7 (MemoryItem attribution preservation) reuse C.2's
+# memory_items_step29c?tenant_id=&actor_user_id=, and A6 (User.active
+# persistence -- the foundational Q6 claim) lands on the new C.4
+# users_step29c/{user_id} endpoint. P14 has zero producer-side
+# callsites (no apply_async / delay() / direct service-layer calls) so
+# the B.3 producer-side exemption rule does not bind here.
+#
+# Imports dropped post-migration: sqlalchemy.select, SessionLocal,
+# ApiKey, MemoryItem, ScopeAssignment, User, AuditContext,
+# ScopeAssignmentCreate, ScopeAssignmentService. AuditContext /
+# ScopeAssignmentCreate / ScopeAssignmentService were already
+# vestigial pre-C.4 (left over from the Phase 2 Commit 13
+# scope-assignment-write HTTP migration). EndReason stays -- used at
+# the end_assignment callsite as the canonical reason enum.
 
 
 P14_TENANT_PREFIX = "step24-5b-p14-"
@@ -163,20 +171,31 @@ class DepartureSemanticsPillar(Pillar):
             )
             agent_a2_pk = r.json()["id"]
 
-            db = SessionLocal()
-            try:
-                from app.models.agent import Agent as AgentModel
-                a1 = db.get(AgentModel, agent_a1_pk)
-                a2 = db.get(AgentModel, agent_a2_pk)
-                if a1 is None or a2 is None:
-                    raise AssertionError(
-                        f"P14 Agent disappeared: a1={a1}, a2={a2}"
-                    )
-                a1.user_id = user_id
-                a2.user_id = user_id
-                db.commit()
-            finally:
-                db.close()
+            # Bind A1 (in T1) and A2 (in T2) to U via the platform-admin
+            # bind-user route.
+            #
+            # Step 28 Phase 2 - Commit 10: previously a direct SessionLocal()
+            # write to agents.user_id, which the least-privilege worker DSN
+            # used by the Pattern N verify task correctly refuses. Routed
+            # through the bind-user endpoint shipped in Commit 9 (dddf8cb).
+            # See pillar_12 / pillar_13 Commit 10 notes for the full
+            # rationale.
+            call(
+                "POST",
+                f"/api/v1/admin/agents/{t1_id}/{agent_a1_slug}/bind-user",
+                pa,
+                json={"user_id": str(user_id)},
+                expect=200,
+                client=c,
+            )
+            call(
+                "POST",
+                f"/api/v1/admin/agents/{t2_id}/{agent_a2_slug}/bind-user",
+                pa,
+                json={"user_id": str(user_id)},
+                expect=200,
+                client=c,
+            )
 
             # ---------- 4. Mint chat keys K1 (T1) + K2 (T2) ----------
             r = call(
@@ -210,34 +229,44 @@ class DepartureSemanticsPillar(Pillar):
             k2_id = k2_body["api_key"]["id"]
 
             # ---------- 5. Create ScopeAssignments SA1 (T1) + SA2 (T2) ----------
-            db = SessionLocal()
-            try:
-                sa_service = ScopeAssignmentService(db)
-                actor = AuditContext.system(label=f"pillar_14:{t1_id}+{t2_id}")
-                sa1 = sa_service.create_assignment(
-                    user_id=user_id,
-                    payload=ScopeAssignmentCreate(
-                        tenant_id=t1_id,
-                        domain_id=domain_id,
-                        role="listings_agent",
-                    ),
-                    autocommit=True,
-                    audit_ctx=actor,
-                )
-                sa1_id = sa1.id
-                sa2 = sa_service.create_assignment(
-                    user_id=user_id,
-                    payload=ScopeAssignmentCreate(
-                        tenant_id=t2_id,
-                        domain_id=domain_id,
-                        role="listings_agent",
-                    ),
-                    autocommit=True,
-                    audit_ctx=actor,
-                )
-                sa2_id = sa2.id
-            finally:
-                db.close()
+            # Phase 2 Commit 13: HTTP path via /admin/scope-assignments.
+            # Verify role has zero DB privileges on scope_assignments by
+            # design (migration f392a842f885); the new platform-admin route
+            # wraps the same service call the production path uses.
+            r = call(
+                "POST",
+                "/api/v1/admin/scope-assignments",
+                pa,
+                json={
+                    "user_id": str(user_id),
+                    "payload": {
+                        "tenant_id": t1_id,
+                        "domain_id": domain_id,
+                        "role": "listings_agent",
+                    },
+                    "audit_label": f"pillar_14:{t1_id}+{t2_id}",
+                },
+                expect=(200, 201),
+                client=c,
+            )
+            sa1_id = uuid.UUID(r.json()["id"])
+            r = call(
+                "POST",
+                "/api/v1/admin/scope-assignments",
+                pa,
+                json={
+                    "user_id": str(user_id),
+                    "payload": {
+                        "tenant_id": t2_id,
+                        "domain_id": domain_id,
+                        "role": "listings_agent",
+                    },
+                    "audit_label": f"pillar_14:{t1_id}+{t2_id}",
+                },
+                expect=(200, 201),
+                client=c,
+            )
+            sa2_id = uuid.UUID(r.json()["id"])
 
             # ---------- 6. Issue chat turn through K1 in T1 (writes T1 memory) ----------
             r = call(
@@ -254,7 +283,7 @@ class DepartureSemanticsPillar(Pillar):
 
             call(
                 "POST",
-                "/api/v1/api/v1/consent/grant",
+                "/api/v1/consent/grant",
                 k1_raw,
                 json={
                     "user_id": t1_session.get("user_id"),
@@ -289,10 +318,21 @@ class DepartureSemanticsPillar(Pillar):
             t2_session = r.json()
             t2_session_id = t2_session.get("session_id") or t2_session.get("id")
 
+            # Step 29.y gap-fix C14
+            # (D-pillar14-consent-grant-uses-wrong-tenant-key-2026-05-07):
+            # The T2 consent grant must be issued with K2 (T2's chat key),
+            # not K1 (T1's chat key). Prior revision passed k1_raw here
+            # which is a cross-tenant write (key bound to T1, body says
+            # tenant_id=T2) and consent.py:_resolve_tenant_id correctly
+            # rejects with 403 cross_tenant_denied. The route is right;
+            # the test was wrong. P14 expected 200/201, observed 403, and
+            # surfaced as a P14 FAIL on the gate. Symmetric to the K1/T1
+            # consent grant 27 lines above which already used k1_raw
+            # correctly.
             call(
                 "POST",
-                "/api/v1/api/v1/consent/grant",
-                k1_raw,
+                "/api/v1/consent/grant",
+                k2_raw,
                 json={
                     "user_id": t2_session.get("user_id"),
                     "tenant_id": t2_id,
@@ -317,175 +357,255 @@ class DepartureSemanticsPillar(Pillar):
             time.sleep(20)
 
             # ---------- 8. The departure event ----------
-            # Direct service call: end SA1 with reason=DEPARTED. The Q6
-            # cascade fires and rotates keys bound to A1's (tenant=T1)
-            # pair only. K2 in T2 must remain untouched.
-            db = SessionLocal()
-            try:
-                sa_service = ScopeAssignmentService(db)
-                departure_actor = AuditContext.system(
-                    label=f"pillar_14:{t1_id}:departure"
+            # Phase 2 Commit 13: HTTP path via
+            # /admin/scope-assignments/{id}/end. Same Q6 cascade as
+            # production -- rotates keys bound to A1's (tenant=T1) pair
+            # only. K2 in T2 must remain untouched.
+            #
+            # Step 29 Commit B (closes D-call-helper-missing-params-kwarg-
+            # 2026-05-05): audit_label is a Query param on the route (not a
+            # body field). The Phase 2 Commit 14 workaround was to inline
+            # ?audit_label=... into the path because the verify call() helper
+            # had no params= kwarg. That worked because the label is a
+            # controlled f-string (alnum + colon + hyphen), but it was
+            # fragile: any future label containing `&`, `=`, `?`, or
+            # whitespace would silently corrupt URL parsing on the server.
+            # Step 29 Commit B extends call() with a params= kwarg that
+            # forwards to httpx (which URL-encodes safely), and migrates
+            # this callsite back to the kwarg form.
+            audit_label_p14 = f"pillar_14:{t1_id}:departure"
+            r = call(
+                "POST",
+                f"/api/v1/admin/scope-assignments/{sa1_id}/end",
+                pa,
+                params={"audit_label": audit_label_p14},
+                json={
+                    "reason": EndReason.DEPARTED.value,
+                    "note": f"P14: U departed T1 ({t1_id})",
+                },
+                expect=200,
+                client=c,
+            )
+            ended_sa1_body = r.json()
+            if not ended_sa1_body or not ended_sa1_body.get("id"):
+                raise AssertionError(
+                    f"P14 FAIL: end_assignment(SA1) returned empty body "
+                    f"for assignment_id={sa1_id}"
                 )
-                ended_sa1 = sa_service.end_assignment(
-                    assignment_id=sa1_id,
-                    reason=EndReason.DEPARTED,
-                    note=f"P14: U departed T1 ({t1_id})",
-                    autocommit=True,
-                    audit_ctx=departure_actor,
-                )
-                if ended_sa1 is None:
-                    raise AssertionError(
-                        f"P14 FAIL: end_assignment(SA1) returned None "
-                        f"for assignment_id={sa1_id}"
-                    )
-            finally:
-                db.close()
             
             # ---------- ASSERTIONS A1-A7 (after departure) ----------
-            db = SessionLocal()
-            try:
-                # ---------- A1: K1.active is False (T1 key rotated) ----------
-                k1_after = db.get(ApiKey, k1_id)
-                if k1_after is None:
-                    raise AssertionError(
-                        f"A1 FAIL: K1 (id={k1_id}) disappeared after departure"
-                    )
-                if k1_after.active:
-                    raise AssertionError(
-                        f"A1 FAIL: K1 (id={k1_id}) still active=True after "
-                        f"DEPARTED end_assignment. Q6 cascade did not fire "
-                        f"on T1's key."
-                    )
+            # Step 29 Commit C.4: all six forensic reads on platform-admin
+            # HTTP. No SessionLocal() opens; no direct ORM access. The
+            # try/finally that previously wrapped db.close() is gone --
+            # there is no DB session to close.
 
-                # ---------- A2: K2.active is True (T2 key UNTOUCHED) ----------
-                # The bounded-cascade assertion. If A2 fails, the cascade
-                # over-fired and a User leaving brokerage A would lose
-                # access at brokerage B.
-                k2_after = db.get(ApiKey, k2_id)
-                if k2_after is None:
-                    raise AssertionError(
-                        f"A2 FAIL: K2 (id={k2_id}) disappeared during P14"
-                    )
-                if not k2_after.active:
-                    raise AssertionError(
-                        f"A2 FAIL (CRITICAL): K2 (id={k2_id}, tenant=T2) was "
-                        f"deactivated by departure from T1. Q6 cascade leaked "
-                        f"across tenant boundary. Multi-tenant identity "
-                        f"isolation broken."
-                    )
+            # ---------- A1: K1.active is False (T1 key rotated) ----------
+            # Step 29 Commit C.6: forensics_get() wrapper. (200, 404) is
+            # the right allowlist because K1 was created by P14's setup
+            # and a 404 here would indicate the row vanished -- which IS
+            # an A1 assertion failure (caught by the explicit 404 check).
+            r = forensics_get(
+                "/api/v1/admin/forensics/api_keys_step29c",
+                pa,
+                params={"id": k1_id},
+                client=c,
+            )
+            if r.status_code == 404:
+                raise AssertionError(
+                    f"A1 FAIL: K1 (id={k1_id}) disappeared after departure"
+                )
+            k1_after = r.json()
+            if k1_after.get("active"):
+                raise AssertionError(
+                    f"A1 FAIL: K1 (id={k1_id}) still active=True after "
+                    f"DEPARTED end_assignment. Q6 cascade did not fire "
+                    f"on T1's key."
+                )
 
-                # ---------- A3: SA1.ended_at != None and reason == DEPARTED ----------
-                sa1_after = db.get(ScopeAssignment, sa1_id)
-                if sa1_after is None:
-                    raise AssertionError(
-                        f"A3 FAIL: SA1 (id={sa1_id}) disappeared after "
-                        f"end_assignment"
-                    )
-                if sa1_after.ended_at is None:
-                    raise AssertionError(
-                        f"A3 FAIL: SA1 (id={sa1_id}) ended_at is still NULL "
-                        f"after end_assignment(DEPARTED). Lifecycle column "
-                        f"not written."
-                    )
-                if sa1_after.ended_reason != EndReason.DEPARTED:
-                    raise AssertionError(
-                        f"A3 FAIL: SA1.ended_reason={sa1_after.ended_reason!r} "
-                        f"!= EndReason.DEPARTED. Reason not recorded correctly."
-                    )
+            # ---------- A2: K2.active is True (T2 key UNTOUCHED) ----------
+            # The bounded-cascade assertion. If A2 fails, the cascade
+            # over-fired and a User leaving brokerage A would lose
+            # access at brokerage B.
+            # Step 29 Commit C.6: forensics_get() wrapper.
+            r = forensics_get(
+                "/api/v1/admin/forensics/api_keys_step29c",
+                pa,
+                params={"id": k2_id},
+                client=c,
+            )
+            if r.status_code == 404:
+                raise AssertionError(
+                    f"A2 FAIL: K2 (id={k2_id}) disappeared during P14"
+                )
+            k2_after = r.json()
+            if not k2_after.get("active"):
+                raise AssertionError(
+                    f"A2 FAIL (CRITICAL): K2 (id={k2_id}, tenant=T2) was "
+                    f"deactivated by departure from T1. Q6 cascade leaked "
+                    f"across tenant boundary. Multi-tenant identity "
+                    f"isolation broken."
+                )
 
-                # ---------- A4: SA2.ended_at is None (T2 assignment untouched) ----------
-                sa2_after = db.get(ScopeAssignment, sa2_id)
-                if sa2_after is None:
-                    raise AssertionError(
-                        f"A4 FAIL: SA2 (id={sa2_id}) disappeared during P14"
-                    )
-                if sa2_after.ended_at is not None:
-                    raise AssertionError(
-                        f"A4 FAIL (CRITICAL): SA2 (id={sa2_id}, tenant=T2) "
-                        f"ended_at={sa2_after.ended_at} after departure from "
-                        f"T1. Cascade over-fired across tenant boundary."
-                    )
+            # ---------- A3: SA1.ended_at != None and reason == DEPARTED ----------
+            # Phase 2 Commit 13: HTTP read via
+            # /admin/scope-assignments/{id}. Verify role has no
+            # SELECT on scope_assignments by design.
+            r = call(
+                "GET",
+                f"/api/v1/admin/scope-assignments/{sa1_id}",
+                pa,
+                expect=200,
+                client=c,
+            )
+            sa1_after = r.json()
+            if not sa1_after:
+                raise AssertionError(
+                    f"A3 FAIL: SA1 (id={sa1_id}) disappeared after "
+                    f"end_assignment"
+                )
+            if sa1_after.get("ended_at") is None:
+                raise AssertionError(
+                    f"A3 FAIL: SA1 (id={sa1_id}) ended_at is still NULL "
+                    f"after end_assignment(DEPARTED). Lifecycle column "
+                    f"not written."
+                )
+            if sa1_after.get("ended_reason") != EndReason.DEPARTED.value:
+                raise AssertionError(
+                    f"A3 FAIL: SA1.ended_reason="
+                    f"{sa1_after.get('ended_reason')!r} "
+                    f"!= EndReason.DEPARTED. Reason not recorded correctly."
+                )
 
-                # ---------- A5: T1's memory row queryable IF it exists ----------
-                # Audit preservation: departure soft-deactivates the Agent
-                # but does not delete or hide memory history. PIPEDA
-                # access flows still need to surface T1 rows.
-                #
-                # Drift D18 accommodation: local memory extractor may produce
-                # 0 rows for some test message shapes. We assert by
-                # (tenant_id, actor_user_id) identity attribution (the actual
-                # Step 24.5b claim), not by sentinel content (which depends
-                # on LLM extractor behavior). If no row exists at all,
-                # downgrade to memory_skipped -- the cascade-bounded
-                # assertions (A1-A4, A6, A7) still prove the security claim.
-                memory_skipped = False
-                t1_memory = db.scalars(
-                    select(MemoryItem).where(
-                        MemoryItem.tenant_id == t1_id,
-                        MemoryItem.actor_user_id == user_id,
-                    ).order_by(MemoryItem.id.desc()).limit(1)
-                ).first()
-                if t1_memory is None:
-                    memory_skipped = True
-                    t1_memory_id = None
-                else:
-                    t1_memory_id = t1_memory.id
+            # ---------- A4: SA2.ended_at is None (T2 assignment untouched) ----------
+            r = call(
+                "GET",
+                f"/api/v1/admin/scope-assignments/{sa2_id}",
+                pa,
+                expect=200,
+                client=c,
+            )
+            sa2_after = r.json()
+            if not sa2_after:
+                raise AssertionError(
+                    f"A4 FAIL: SA2 (id={sa2_id}) disappeared during P14"
+                )
+            if sa2_after.get("ended_at") is not None:
+                raise AssertionError(
+                    f"A4 FAIL (CRITICAL): SA2 (id={sa2_id}, tenant=T2) "
+                    f"ended_at={sa2_after.get('ended_at')} after "
+                    f"departure from T1. Cascade over-fired across "
+                    f"tenant boundary."
+                )
 
-                # ---------- A6: User.active is True (User persists) ----------
-                # The foundational Q6 assertion: a User leaving one tenant
-                # does NOT lose their platform identity. This is what
-                # underpins Step 38 bottom-up tenant merge.
-                user_after = db.get(User, user_id)
-                if user_after is None:
-                    raise AssertionError(
-                        f"A6 FAIL: User (id={user_id}) disappeared during P14"
-                    )
-                if not user_after.active:
-                    raise AssertionError(
-                        f"A6 FAIL (CRITICAL): User (id={user_id}) "
-                        f"active=False after departure from T1. User "
-                        f"identity collapsed to single tenancy. Step 38 "
-                        f"bottom-up tenant merge becomes unimplementable."
-                    )
+            # ---------- A5: T1's memory row queryable IF it exists ----------
+            # Audit preservation: departure soft-deactivates the Agent
+            # but does not delete or hide memory history. PIPEDA
+            # access flows still need to surface T1 rows.
+            #
+            # Drift D18 accommodation: local memory extractor may produce
+            # 0 rows for some test message shapes. We assert by
+            # (tenant_id, actor_user_id) identity attribution (the actual
+            # Step 24.5b claim), not by sentinel content (which depends
+            # on LLM extractor behavior). If no row exists at all,
+            # downgrade to memory_skipped -- the cascade-bounded
+            # assertions (A1-A4, A6, A7) still prove the security claim.
+            #
+            # C.4 migration: server-side WHERE on tenant_id +
+            # actor_user_id reuses the C.2 query-param signature; limit=1
+            # + ORDER BY id DESC server-side mirrors the original
+            # .order_by(MemoryItem.id.desc()).limit(1) shape.
+            memory_skipped = False
+            r = call(
+                "GET",
+                "/api/v1/admin/forensics/memory_items_step29c",
+                pa,
+                params={
+                    "tenant_id": t1_id,
+                    "actor_user_id": str(user_id),
+                    "limit": 1,
+                },
+                expect=200,
+                client=c,
+            )
+            t1_memory_items = r.json().get("items") or []
+            if not t1_memory_items:
+                memory_skipped = True
+                t1_memory_id = None
+            else:
+                t1_memory_id = t1_memory_items[0]["id"]
 
-                # ---------- A7: T2's memory row queryable IF it exists ----------
-                # No cross-tenant collateral damage on the data side.
-                # Same conditional shape as A5 -- if T2 row exists we assert
-                # it survived the T1 departure; if no row exists, the
-                # untouchedness claim is still proven by A2 (K2 active),
-                # A4 (SA2 still active), which are the cascade-bounded
-                # claims this pillar primarily tests.
-                t2_memory = db.scalars(
-                    select(MemoryItem).where(
-                        MemoryItem.tenant_id == t2_id,
-                        MemoryItem.actor_user_id == user_id,
-                    ).order_by(MemoryItem.id.desc()).limit(1)
-                ).first()
-                if t2_memory is None:
-                    memory_skipped = True
-                    t2_memory_id = None
-                else:
-                    t2_memory_id = t2_memory.id
-            finally:
-                db.close()
+            # ---------- A6: User.active is True (User persists) ----------
+            # The foundational Q6 assertion: a User leaving one tenant
+            # does NOT lose their platform identity. This is what
+            # underpins Step 38 bottom-up tenant merge.
+            #
+            # C.4 migration: db.get(User, user_id) -> GET
+            # /admin/forensics/users_step29c/{user_id}. The new endpoint
+            # returns a strict UserForensic projection (id, active,
+            # synthetic) with email + display_name explicitly excluded
+            # because they are PII and have no place on a forensic
+            # surface.
+            # Step 29 Commit C.6: forensics_get() wrapper.
+            r = forensics_get(
+                f"/api/v1/admin/forensics/users_step29c/{user_id}",
+                pa,
+                client=c,
+            )
+            if r.status_code == 404:
+                raise AssertionError(
+                    f"A6 FAIL: User (id={user_id}) disappeared during P14"
+                )
+            user_after = r.json()
+            if not user_after.get("active"):
+                raise AssertionError(
+                    f"A6 FAIL (CRITICAL): User (id={user_id}) "
+                    f"active=False after departure from T1. User "
+                    f"identity collapsed to single tenancy. Step 38 "
+                    f"bottom-up tenant merge becomes unimplementable."
+                )
+
+            # ---------- A7: T2's memory row queryable IF it exists ----------
+            # No cross-tenant collateral damage on the data side.
+            # Same conditional shape as A5 -- if T2 row exists we assert
+            # it survived the T1 departure; if no row exists, the
+            # untouchedness claim is still proven by A2 (K2 active),
+            # A4 (SA2 still active), which are the cascade-bounded
+            # claims this pillar primarily tests.
+            r = call(
+                "GET",
+                "/api/v1/admin/forensics/memory_items_step29c",
+                pa,
+                params={
+                    "tenant_id": t2_id,
+                    "actor_user_id": str(user_id),
+                    "limit": 1,
+                },
+                expect=200,
+                client=c,
+            )
+            t2_memory_items = r.json().get("items") or []
+            if not t2_memory_items:
+                memory_skipped = True
+                t2_memory_id = None
+            else:
+                t2_memory_id = t2_memory_items[0]["id"]
 
             # ---------- Self-contained teardown ----------
+            # Phase 2 Commit 13: HTTP path via /admin/users/{id}/deactivate.
             try:
                 # Soft-deactivate U -- cascade ends remaining SA2 and
                 # rotates K2 (which we just asserted is still active).
-                db = SessionLocal()
-                try:
-                    from app.services.user_service import UserService
-                    teardown_actor = AuditContext.system(
-                        label=f"pillar_14:teardown:{t1_id}+{t2_id}"
-                    )
-                    UserService(db).deactivate_user(
-                        user_id=user_id,
-                        reason=f"P14 teardown for tenants {t1_id}, {t2_id}",
-                        audit_ctx=teardown_actor,
-                    )
-                finally:
-                    db.close()
+                call(
+                    "POST",
+                    f"/api/v1/admin/users/{user_id}/deactivate",
+                    pa,
+                    json={
+                        "reason": f"P14 teardown for tenants {t1_id}, {t2_id}",
+                        "audit_label": f"pillar_14:teardown:{t1_id}+{t2_id}",
+                    },
+                    expect=(200, 204),
+                    client=c,
+                )
 
                 # Soft-deactivate both tenants.
                 for tid in (t1_id, t2_id):
