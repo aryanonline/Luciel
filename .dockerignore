@@ -8,3 +8,36 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+# Operational artifacts (Step 29.y) â€” diag scripts, captured AWS responses,
+# stream logs, td-rev*.json snapshots. None of these belong in the image.
+diag*.py
+diag*_log.txt
+diag*_overrides.json
+diag*_raw.json
+backend*.json
+backend*.log
+worker*.json
+verify*.json
+verify*.log
+verify*.txt
+verify*_log.txt
+migrate*.json
+migrate*.txt
+new-*-td-arn.txt
+*-task-arn.txt
+preflight-snapshot-id.txt
+ops-task-rev*-arn.txt
+prod-ops-task-arn.txt
+first-ops-task.json
+ssm-params.json
+sqs-*.json
+dlq-sample.json
+toggle_*.txt
+toggle_*.json
+log_meta.txt
+scan.py
+current-*.json
+td_*.json
+
+# Per-step verification reports never need to ship in the runtime image
+docs/verification-reports/
