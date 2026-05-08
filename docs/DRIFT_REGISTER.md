@@ -33,7 +33,8 @@ Branch: `step-29y-gapfix` (forked from `step-29y-impl`).
 | `D-step29y-impl-no-close-tag-2026-05-07` | _pending C8_ | open | meta | No `step-29y-complete` tag exists; `docs/STEP_29Y_CLOSE.md` will define the verify-then-tag checklist |
 | `D-historical-rate-limit-typo-disclosure-2026-05-07` | _pending C9_ | open | P11 (rate-limit fail-mode) | Disclosure of historical rate-limit fail-mode typo; recap §11.2a entry |
 | `D-canonical-recap-v3.4-omits-step-29x-29y-2026-05-07` | _pending C10_ | open | meta | Canonical recap v3.4 omits Step 29.x and Step 29.y; v3.5 will document 44 commits / ~5300 lines and reference all gap-fix tokens |
-| `D-audit-verification-harness-retry-duplicates-2026-05-07` | _this commit_ | closed | Cluster 4 (E-2) / DISC-2026-003 | 223 verification-harness duplicate `worker_*` audit rows blocked migration `d8e2c4b1a0f3`; 166 deleted (28 test tenants, 0 customer tenants), CSV backup retained, full disclosure in `docs/DISCLOSURES.md` |
+| `D-audit-verification-harness-retry-duplicates-2026-05-07` | C11 (`3798b32`) + C12 _this commit_ | closed | Cluster 4 (E-2) / DISC-2026-003 | 223 verification-harness duplicate `worker_*` audit rows blocked migration `d8e2c4b1a0f3`; first attempt deleted 166 rows but broke 60 hash-chain links (P23 FAIL); reverted via CSV restore and migration redesigned forward-only; full disclosure in `docs/DISCLOSURES.md` |
+| `D-cluster4-e2-rework-as-forward-only-2026-05-07` | _this commit_ | closed | Cluster 4 (E-2) / DISC-2026-003 | Migration `d8e2c4b1a0f3` redesigned to add `AND created_at >= TIMESTAMPTZ '2026-05-08 04:00:00+00'` to its partial UNIQUE index, preserving Pattern E without exception (no historical row mutated, chain unbroken, control enforced from cutoff forward) |
 
 ### Carry-forward (deferred, not in scope this step)
 

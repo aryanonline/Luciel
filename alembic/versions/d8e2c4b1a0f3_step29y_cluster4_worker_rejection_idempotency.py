@@ -49,6 +49,35 @@ idempotent by the message-id semantics of the SQS payload they
 reject. resource_natural_id IS NOT NULL excludes the cascade-style
 worker rows that don't carry a per-message identifier.
 
+Why the index is forward-only (created_at cutoff)
+--------------------------------------------------
+
+A prior verification-harness regime (Pillars 11/13/26 against the
+worker-reject path before this control existed) accumulated 223
+strict-duplicate worker_* audit rows across 57 logical events on
+verification-harness tenants only. Those rows pre-date this
+control and would violate a naive partial UNIQUE constraint if it
+were applied across the full table.
+
+The correct disposition is documented under DISC-2026-003 in
+``docs/DISCLOSURES.md`` (drift token
+``D-audit-verification-harness-retry-duplicates-2026-05-07`` and
+the redesign drift token
+``D-cluster4-e2-rework-as-forward-only-2026-05-07``) and follows
+Pattern E strictly: historical audit rows are NOT mutated,
+including the historical duplicates. The control instead applies
+from a fixed cutoff timestamp going forward, after which the
+worker-reject path provably writes idempotently because the
+partial UNIQUE index will reject any second write with an
+IntegrityError that the repository catches and treats as a
+benign skip-on-conflict.
+
+The cutoff is anchored at 2026-05-08 04:00:00+00 (the wall-clock
+moment immediately after the Step 29.y gap-fix C12 deploy window;
+any row with a created_at strictly less than the cutoff is
+outside the index's scope, including the 223 historical
+duplicates and every legitimate prior worker_* row).
+
 Why this is safe to add now
 ---------------------------
 
@@ -67,7 +96,12 @@ Idempotency
 
 The partial index is named ``ux_admin_audit_logs_worker_reject_idem``
 and uses IF NOT EXISTS on create so re-running this migration is
-a no-op.
+a no-op. The downgrade drops the same index name. An older,
+non-date-bounded variant of this index that briefly existed on
+the operator workstation during the 2026-05-07 gap-fix session
+was dropped manually before this migration was authored; the
+workstation state and the prod state are therefore both reachable
+from the same forward upgrade path.
 """
 
 from __future__ import annotations
@@ -86,6 +120,14 @@ depends_on = None
 
 _INDEX_NAME = "ux_admin_audit_logs_worker_reject_idem"
 
+# Forward-only cutoff. Any admin_audit_logs row with created_at
+# strictly less than this timestamp is outside the partial index
+# scope; this preserves Pattern E by leaving the 223 historical
+# verification-harness duplicate rows (DISC-2026-003) untouched
+# while still enforcing idempotency on every worker-reject write
+# from the deploy moment forward.
+_FORWARD_CUTOFF_UTC = "2026-05-08 04:00:00+00"
+
 
 def upgrade() -> None:
     # We use raw SQL for the partial index because Alembic's
@@ -99,6 +141,7 @@ def upgrade() -> None:
             ON admin_audit_logs (action, tenant_id, resource_natural_id)
             WHERE action LIKE 'worker_%'
               AND resource_natural_id IS NOT NULL
+              AND created_at >= TIMESTAMPTZ '{_FORWARD_CUTOFF_UTC}'
             """
         )
     )

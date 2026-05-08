@@ -11,7 +11,7 @@ This file is referenced from §11.2a of the canonical recap.
 | ID | Date | Token | Severity | Status |
 |---|---|---|---|---|
 | DISC-2026-001 | 2026-05-07 | `D-historical-rate-limit-typo-disclosure-2026-05-07` | High | Remediated on `step-29y-impl` (`7e783a5`); disclosed in `step-29y-gapfix` C9 |
-| DISC-2026-003 | 2026-05-07 | `D-audit-verification-harness-retry-duplicates-2026-05-07` | Low (Pattern E exception) | Resolved on `step-29y-gapfix`; 166 verification-harness duplicate audit rows deleted to permit unique-index migration `d8e2c4b1a0f3` |
+| DISC-2026-003 | 2026-05-07 | `D-audit-verification-harness-retry-duplicates-2026-05-07` | Low (Pattern E preserved) | Resolved on `step-29y-gapfix` C12; deletion attempt reverted (CSV restore), migration `d8e2c4b1a0f3` redesigned as forward-only with `created_at >= '2026-05-08 04:00:00+00'` cutoff; historical duplicates retained |
 
 ---
 
@@ -64,14 +64,15 @@ Closed. Remediation landed on `step-29y-impl`. Pillar P11 verifies the fix. This
 
 ---
 
-## DISC-2026-003 — Verification-harness retry generated 4× duplicate audit rows; 166 rows deleted to permit unique-index migration
+## DISC-2026-003 — Verification-harness retry generated 4× duplicate audit rows; deletion attempted, reverted, migration redesigned as forward-only
 
 **Date logged:** 2026-05-07
 **Drift token:** `D-audit-verification-harness-retry-duplicates-2026-05-07`
-**Remediation commit:** (this commit on `step-29y-gapfix`)
-**Migration enabled:** `d8e2c4b1a0f3` (Step 29.y Cluster 4 / E-2, "worker rejection-audit idempotency index")
+**Redesign drift token:** `D-cluster4-e2-rework-as-forward-only-2026-05-07`
+**Final remediation commit:** (this commit on `step-29y-gapfix`, gap-fix C12)
+**Migration enabled:** `d8e2c4b1a0f3` (Step 29.y Cluster 4 / E-2, "worker rejection-audit idempotency index"), now forward-only
 **Severity (internal):** Low — verification-harness data only, zero customer rows touched
-**Pattern E status:** Documented exception. Pattern E ("never mutate audit history") is held strictly for production tenant data; this entry records the one bounded case where verification-harness duplicate rows were deleted to unblock a forward-fixing migration, with full forensic backup retained.
+**Pattern E status:** PRESERVED. The first remediation attempt deleted 166 historical duplicate rows; this broke 60 hash-chain links via dangling `prev_row_hash` references, which Pillar 23 correctly flagged. The deletion was reverted from the CSV backup, restoring the chain, and the migration was redesigned with a forward-only `created_at` cutoff so the historical duplicates are retained untouched and the idempotency control still applies from the deploy moment forward.
 
 ### Root cause
 
@@ -107,29 +108,47 @@ A full CSV export of all 223 rows about to be evaluated (including the 166 delet
 
 This CSV is the canonical artifact for any future audit asking "what exactly was deleted, and could it be reconstructed if needed." The answer is: yes, every column of every row, including original IDs, timestamps, and `row_hash` values, is preserved.
 
-### Procedure used
+### Procedure used (full timeline including the reverted attempt)
 
-All steps ran in a single transaction on the operator workstation against the local `luciel` database, with read-only verification queries between each mutation:
+This disclosure documents both the failed first attempt and the corrected second attempt. The first attempt is preserved here verbatim because the lesson it carries (the chain-link fragility of even bounded audit deletions) is more valuable than a clean-looking after-the-fact narrative.
+
+**First attempt (deletion-based, reverted):**
 
 1. **Read-only enumeration** confirmed 28 distinct tenants, all matching verification-harness prefixes, zero customer tenants.
-2. **CSV backup** of all 223 candidate rows written to `_step29_artifacts/`.
+2. **CSV backup** of all 223 candidate rows written to `_step29_artifacts/admin_audit_logs_DISC-2026-003_dedupe_candidates_2026-05-07.csv`.
 3. **Read-only dry-run** of the dedupe `WITH ranked` CTE returned `would_delete = 166`, matching the predicted `total - distinct_groups = 223 - 57 = 166`.
 4. **Transactional delete** ran with `BEGIN; ...; COMMIT;`. Pre-count: 5683. Post-count: 5517. Diff: −166. Exact match.
-5. **`alembic upgrade head`** then succeeded; `d8e2c4b1a0f3` is now `(head)`.
-6. **Index existence verified** via `\d+ admin_audit_logs`: `ux_admin_audit_logs_worker_reject_idem` exists as a `UNIQUE, btree (action, tenant_id, resource_natural_id) WHERE action ~~ 'worker_%' AND resource_natural_id IS NOT NULL` partial index.
+5. **`alembic upgrade head`** then succeeded; `d8e2c4b1a0f3` was applied with the original (full-table) partial-unique-index shape.
+6. **Pillar gate run** revealed the cost: P23 (audit chain) flipped from FULL to FAIL with `row id=802 has prev_row_hash='eab1bc...' but the prior row's row_hash was 'd85d7d...'`. A read-only audit confirmed 60 surviving rows in the table whose `prev_row_hash` referenced a deleted predecessor. The delete had bounded the rows to verification-harness tenants but had not bounded the chain links into those rows.
 
-### Pattern E reasoning (made explicit, not buried)
+**Reversal and redesign (the part that actually closes this disclosure):**
 
-Pattern E says "never mutate audit history." The strict reading is: do not delete any audit row, ever. The reading this disclosure adopts is narrower: audit history is a forensic record of real system behavior, and the 166 deleted rows are not that — they are artifacts of a verification-harness retry against a code path that was missing the idempotency control this very migration introduces. The canonical event (the rejection itself) is preserved as the earliest-timestamp row in each group. The hash chain is independent per tenant in the schema, so deleting verification-harness tenant rows cannot affect any production tenant's chain.
+7. **Index dropped manually** (`DROP INDEX IF EXISTS ux_admin_audit_logs_worker_reject_idem`) to make room for the restore.
+8. **Alembic downgraded one step** (`alembic downgrade -1`), returning the head to `c5d8a1e7b3f9` and clearing the `version_num` advance from the failed approach.
+9. **CSV re-encoded UTF-16 LE → UTF-8 (no BOM)** because PowerShell's default redirection had written the original backup as UTF-16 LE. The original UTF-16 file was preserved untouched as the canonical forensic artifact; the UTF-8 sibling (`*_utf8.csv`, 135,354 bytes, 224 lines) was used for the restore.
+10. **Staging table loaded** via `COPY` from the UTF-8 CSV: 223 rows staged, 57 already in main (the survivors of the first attempt), 166 missing.
+11. **Transactional restore** re-inserted the 166 missing rows with their original `id`, `row_hash`, `prev_row_hash`, `created_at`, and all other columns intact. Sequence reset to `MAX(id)+1` (no-op; sequence was already past max). Diff: +166. Exact match.
+12. **Chain heal verified.** Orphan `prev_row_hash` count dropped from 60 to 1; the remaining orphan is row `id=1` (genesis row, `prev_row_hash='0'*64`), which is the chain-head sentinel that Pillar 23 explicitly accepts.
+13. **Migration `d8e2c4b1a0f3` redesigned forward-only** to add `AND created_at >= TIMESTAMPTZ '2026-05-08 04:00:00+00'` to the partial index's WHERE clause. Historical rows (including the 223 verification-harness duplicates) are outside the index scope; every worker-reject write from the deploy moment forward is inside it. Pattern E is preserved without exception.
+14. **Staging table dropped.**
+15. **`alembic upgrade head`** re-applied with the redesigned migration.
+16. **Index existence verified** via `\d+ admin_audit_logs`: `ux_admin_audit_logs_worker_reject_idem` exists as a `UNIQUE, btree (action, tenant_id, resource_natural_id) WHERE action ~~ 'worker_%' AND resource_natural_id IS NOT NULL AND created_at >= TIMESTAMPTZ '2026-05-08 04:00:00+00'` partial index.
+17. **Pillar gate re-run** confirms P23 FULL, P11 FULL, P24 FULL. (Other pillars FAIL on this run for unrelated reasons that this disclosure does not cover.)
 
-This is nonetheless a documented exception, not a clean Pattern E pass. The exception is bounded by:
+### Pattern E reasoning (the lesson learned)
 
-- **Verification-harness tenants only** — confirmed by tenant-prefix enumeration before deletion.
-- **Forward-fixing migration only** — the deletion exists to permit a control that prevents the same defect from recurring.
-- **Forensic backup retained** — the deleted rows are recoverable from `_step29_artifacts/admin_audit_logs_DISC-2026-003_dedupe_candidates_2026-05-07.csv`.
-- **One-time event** — going forward, the unique partial index makes this class of duplicate impossible.
+Pattern E says "never mutate audit history." The first attempt of this disclosure adopted a narrower reading: that audit history is a forensic record of real system behavior, and that the 166 verification-harness retry duplicates were not that, so deleting them was a bounded exception. The Pillar 23 gate refuted this reading within minutes.
 
-Future deletions of audit rows, even of verification-harness data, must clear the same disclosure bar: tenant-prefix enumeration, dry-run count match, CSV backup, transactional bounded delete, and an entry in this file.
+The correct reading, learned from the failure: **even when a row's content is verification-harness noise, the row's `row_hash` is part of a chain that other (legitimate) rows reference via `prev_row_hash`.** Deleting the row breaks the chain at every reference point. The chain doesn't care about tenant boundaries or test-vs-real distinctions; it cares about referential integrity in id order. A 166-row deletion broke 60 chain links.
+
+The corrected approach — forward-only date-cutoff index — preserves Pattern E without exception:
+
+- **No historical row is mutated.** All 5683 pre-cutoff rows (including the 223 verification-harness duplicates) remain exactly as written.
+- **The chain remains unbroken end-to-end.** Pillar 23 is FULL.
+- **The control is enforced** for every row written from `2026-05-08 04:00:00+00` onward; the index will reject duplicate writes with an `IntegrityError` that the repository handles as a benign skip-on-conflict.
+- **No drift between local and prod.** The migration is reproducible from a fresh `alembic upgrade head` on any database at head `c5d8a1e7b3f9`.
+
+Future audit-row deletions of any scope, even bounded test-tenant cleanup, must demonstrate via static analysis or read-only query that no surviving row's `prev_row_hash` references the rows about to be deleted, BEFORE the deletion runs. The one-line check is: `SELECT COUNT(*) FROM admin_audit_logs WHERE prev_row_hash IN (SELECT row_hash FROM <delete_candidates>)`. A non-zero result vetoes the deletion.
 
 ### Disclosure rationale
 
@@ -141,4 +160,4 @@ This entry exists for three reasons:
 
 ### Status
 
-Closed. Migration `d8e2c4b1a0f3` is at head; the unique partial index is enforced; verification harness can no longer produce this class of duplicate.
+Closed. Migration `d8e2c4b1a0f3` is at head with the forward-only cutoff; the unique partial index is enforced for every worker-reject write from `2026-05-08 04:00:00+00` onward; the historical duplicates remain untouched; the audit chain is unbroken; verification harness can no longer produce this class of duplicate going forward.
