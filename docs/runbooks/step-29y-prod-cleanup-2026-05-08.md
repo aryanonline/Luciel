@@ -1,5 +1,7 @@
 # Step 29.y — Prod Cleanup (Cost + Hygiene)
 
+> **⚠ SUPERSEDED 2026-05-08 14:48 EDT — historical reference only.** The actual cleanup that ran today did NOT follow this runbook verbatim. Per `D-cluster-task-def-cleanup-runbook-stale-2026-05-08` in `docs/DRIFT_REGISTER.md`, this file's static revision lists became inaccurate between authoring (~09:40 EDT) and execution (14:39–14:48 EDT) — most notably it directed deregistering `luciel-grant-check:4`, which is the active latest revision and must NOT be touched. The cleanup that actually shipped is recorded in the C29 commit and four drift tokens: `D-task-def-registry-bloat-2026-05-08`, `D-orphaned-apprunner-ecr-role-2026-05-08`, `D-session-summary-asserted-no-autoscaling-cfn-shows-live-2026-05-08`, `D-backend-service-no-autoscaling-2026-05-08`. **Future cleanup waves should compute the "deregister all but latest" set programmatically (`aws ecs list-task-definitions --family-prefix <family> --status ACTIVE --sort DESC | jq -r '.taskDefinitionArns[1:][]'`) rather than read static revision lists out of a stored runbook.** This file remains in-repo as historical context for the planning approach.
+
 **Date:** 2026-05-08
 **Branch:** `step-29y-gapfix`
 **Inventory pinned at:** 2026-05-08 ~09:40 EDT (ad-hoc enumeration this session)
