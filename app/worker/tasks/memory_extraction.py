@@ -88,6 +88,10 @@ from app.models.luciel_instance import LucielInstance
 from app.models.message import MessageModel
 from app.models.session import SessionModel
 from app.models.user import User
+from app.worker.audit_failure_counter import (
+    WORKER_AUDIT_WRITE_FAILED,
+    record_audit_write_failure,
+)
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
@@ -167,10 +171,20 @@ def _reject_with_audit(
             skip_on_conflict=True,
         )
     except Exception:
-        # Never let audit-write failure mask the original rejection.
+        # Step 29.y gap-fix C4
+        # (D-worker-audit-write-failure-not-alerted-2026-05-07):
+        # never let audit-write failure mask the original rejection,
+        # but make the failure structured and countable. The
+        # WORKER_AUDIT_WRITE_FAILED marker is the stable string an
+        # operability layer (CloudWatch metric filter / Prom exporter)
+        # pins on. record_audit_write_failure() ticks a process-local
+        # counter so a future health endpoint or test can observe
+        # "this worker has seen N audit-write failures since boot."
+        failure_count = record_audit_write_failure()
         logger.exception(
-            "audit-write failed during rejection (action=%s task=%s)",
-            action, task_id,
+            "%s audit-write failed during rejection "
+            "action=%s task=%s process_failure_count=%d",
+            WORKER_AUDIT_WRITE_FAILED, action, task_id, failure_count,
         )
 
     raise Reject(note, requeue=False)
