@@ -30,7 +30,7 @@ These are correct, in-use, or already-good. Do not touch.
 - `luciel-backend:32`, `luciel-worker:12` task definitions (current revisions)
 - `luciel-prod-ops:1` (the ECS Exec one-shot we just registered)
 - `luciel-db` RDS instance + automated daily snapshots (within retention)
-- `luciel-redis-0001-001` ElastiCache — both backend and worker have `REDIS_URL` in their secrets contract; treated as in-use
+- `luciel-redis-0001-001` ElastiCache — **load-bearing for distributed rate limiting**, NOT a Celery broker (Celery uses SQS). Backend's SlowAPI middleware uses Redis for shared token-bucket counters across container replicas. Without it, rate limits become per-container instead of per-tenant — a tenant on a 100/min limit hitting 2 replicas effectively gets 200/min. ~$13/mo is correct cost for correctness here. Full rationale in `docs/architecture/broker-and-limiter.md`.
 - `luciel-alb` ALB + `luciel-targets` target group + :80/:443 listeners
 - `luciel-backend` ECR repo (lifecycle policy added in Tier 1)
 - 2 EIPs — these are the ALB's per-AZ public IPs; cannot delete independently

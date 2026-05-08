@@ -48,6 +48,8 @@ from __future__ import annotations
 
 import os
 
+from app.core.config import settings
+
 
 # Default queue name matches app/worker/celery_app.py task_default_queue.
 # Hardcoded here rather than imported so this probe stays cheap and stays
@@ -86,9 +88,14 @@ def _broker_reachable() -> bool:
     worker is subscribed and consuming. Pair with ``_worker_reachable()``
     for the full mode-gate decision.
     """
+    # Step 29.y close (D-redis-url-centralize-via-settings-2026-05-08):
+    # CELERY_BROKER_URL is broker-selection state and stays a direct env
+    # read; the REDIS_URL fallback is read via the central `settings`
+    # source of truth so this probe agrees with what the worker actually
+    # uses (see app/worker/celery_app.py and docs/architecture/broker-and-limiter.md).
     broker_url = os.environ.get(
         "CELERY_BROKER_URL",
-        os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        settings.redis_url,
     )
     if broker_url.startswith("sqs://"):
         try:

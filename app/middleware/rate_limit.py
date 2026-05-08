@@ -8,6 +8,8 @@ from slowapi import Limiter
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app.core.config import settings
+
 logger = logging.getLogger("luciel.ratelimit")
 
 # Step 29.y Cluster 5 (B-1): correct env-var name. Pre-29.y this
@@ -17,7 +19,18 @@ logger = logging.getLogger("luciel.ratelimit")
 # making per-route rate limits per-process instead of shared, and
 # every other component reads REDIS_URL with the underscore. The
 # typo neutered our rate limits for the entire prod lifetime.
-REDIS_URL = os.getenv("REDIS_URL")
+#
+# Step 29.y close (D-redis-url-centralize-via-settings-2026-05-08):
+# Read through `settings.redis_url` so this module shares the single
+# source of truth defined in `app.core.config`. The empty-string
+# fallback below preserves the prior behaviour where an unset
+# REDIS_URL means "no shared backend, use in-memory storage" -- the
+# Settings default is `redis://localhost:6379/0` for dev, but that
+# default is ONLY appropriate when running locally. Prod ALWAYS
+# injects REDIS_URL from SSM via the ECS task-def `secrets:` block,
+# so prod never sees the localhost fallback. To force in-memory
+# (e.g. unit tests), set REDIS_URL="" explicitly.
+REDIS_URL = settings.redis_url or None
 
 # Step 29.y Cluster 5 (B-1): hardened Redis pool. retry_on_timeout
 # rides over single-RTT blips without raising; tight socket

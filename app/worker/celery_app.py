@@ -25,6 +25,8 @@ import threading
 from celery import Celery
 from celery.signals import worker_ready, worker_shutdown
 
+from app.core.config import settings
+
 _log = logging.getLogger(__name__)
 
 # ---------- container HEALTHCHECK heartbeat (rev 11) ----------
@@ -110,22 +112,33 @@ def _stop_heartbeat(sender=None, **kwargs):  # noqa: ARG001
     _log.info("healthcheck heartbeat: shutdown signal sent")
 
 # ---------- broker URL resolution ----------
-# Precedence: explicit REDIS_URL env > default local dev URL.
-# Prod ECS task-def injects REDIS_URL from SSM /luciel/production/REDIS_URL.
-# ---------- broker URL resolution ----------
+# Precedence (highest to lowest):
+#   1. CELERY_BROKER_URL  -- explicit broker, e.g. `sqs://` in prod
+#   2. REDIS_URL          -- shared cache/limit-store URL (dev fallback)
+#   3. "redis://localhost:6379/0" -- local dev default
+#
+# Step 29.y close (D-redis-url-centralize-via-settings-2026-05-08):
+# Read through `settings.redis_url` so this module shares the single
+# source of truth defined in `app.core.config`. CELERY_BROKER_URL is
+# kept as a direct env read because it is broker-selection state
+# (sqs:// vs redis://...) that does NOT belong in `Settings.redis_url`.
+# See `docs/architecture/broker-and-limiter.md` for the full split.
+#
 # Two supported broker modes:
 #   1. SQS (prod):  CELERY_BROKER_URL=sqs://  + AWS creds via task role
 #   2. Redis (dev): CELERY_BROKER_URL=redis://localhost:6379/0
-#                   (or omit entirely; local default below)
+#                   (or omit entirely; falls back to settings.redis_url)
 #
 # We deliberately do NOT use ElastiCache Redis in cluster mode as a broker:
 # Celery's kombu Redis transport uses multi-key MULTI/EXEC pipelines that
 # violate the ClusterCrossSlot constraint. SQS is the right primitive for
 # our prod async-extraction workload anyway (already provisioned in Phase 1
-# of the Step 27b deploy runbook).
+# of the Step 27b deploy runbook). ElastiCache Redis IS used in prod, but
+# only as the rate-limit storage backend (see app/middleware/rate_limit.py
+# and docs/architecture/broker-and-limiter.md).
 BROKER_URL: str = os.environ.get(
     "CELERY_BROKER_URL",
-    os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+    settings.redis_url,
 )
 
 # ---------- broker_transport_options ----------
