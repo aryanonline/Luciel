@@ -65,6 +65,22 @@ Until this is done, the dual-format read path established in Commit 1 is the pro
 
 See `docs/findings/phase1f.md`. The runtime guard in `app/api/v1/sessions.py` is the current containment. Schema-level FK is queued for Step 30b.
 
+## Deferred — Dev Celery worker `--pool=solo` head-of-line blocking
+
+**Drift token:** `D-pillar13-spoof-audit-poll-too-short-2026-05-07` (carry-forward leg only)
+**Established by:** Step 29.y gap-fix C16.
+
+**Why deferred:** The dev Celery worker on Aryan's Windows workstation runs `--pool=solo` because Celery's `prefork` pool is not supported on Win32. Every memory-extraction task runs sequentially, so a slow extraction (P12, ~42s) blocks every subsequent task in the queue. P13's spoof rejection rides this queue and lands 70-150s after enqueue (variance driven by which other tasks happen to be in flight). C15 + C16 widened P13's poll budget to 180s to absorb this; the underlying serialization is unchanged.
+
+Production does not have this constraint: prod Celery workers run as Linux ECS tasks with SQS as the broker and per-task concurrency. Head-of-line blocking is a dev-environment artifact only. There is no production correctness or performance issue to fix here.
+
+**Target step:** Step 30b (dev-tooling cleanup window) or whenever the dev worker is next reconfigured. Options when picked up:
+1. Switch the dev worker to `--pool=threads --concurrency=4` (closer to prod parallelism, simpler).
+2. Switch to `--pool=gevent` (highest throughput, requires extra dependency).
+3. Run two `--pool=solo` workers consuming the same Redis queue (preserves single-process semantics, doubles capacity).
+
+**Rollout artifact:** None required — dev-tooling change only, no prod surface. The dev worker startup command in any local README / runbook is the only thing to update. Once changed, the C15/C16 P13 budget can be tightened back to ~90s in a follow-up commit.
+
 ## Maintenance contract
 
 Every future deferral MUST:
