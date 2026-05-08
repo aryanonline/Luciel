@@ -1,0 +1,34 @@
+{
+  "family": "luciel-prod-ops",
+  "taskRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-prod-ops-role",
+  "executionRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-execution-role",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "containerDefinitions": [
+    {
+      "name": "luciel-prod-ops",
+      "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:370a82442c245284378035292769300b5761a4dcfaa7f2b9f830318dd1614ad5",
+      "essential": true,
+      "command": ["sleep", "3600"],
+      "linuxParameters": {
+        "initProcessEnabled": true
+      },
+      "environment": [
+        { "name": "AWS_REGION", "value": "ca-central-1" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/luciel-backend",
+          "awslogs-region": "ca-central-1",
+          "awslogs-stream-prefix": "prod-ops"
+        }
+      }
+    }
+  ]
+}
