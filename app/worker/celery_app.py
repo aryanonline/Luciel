@@ -160,6 +160,25 @@ celery_app = Celery(
     include=["app.worker.tasks.memory_extraction"],
 )
 
+# Step 29.y gap-fix C17 (D-celery-app-set-default-or-import-order-2026-05-08):
+# Force this Celery instance to be the process-wide default_app, so that
+# `@shared_task`-decorated functions resolve to OUR app (Redis/SQS broker)
+# regardless of which module imports them first. C13's import-on-boot in
+# `app/main.py` is necessary but NOT sufficient: `Celery()`'s constructor
+# only registers itself as default if no default has been set, and under
+# uvicorn another import path can touch `celery.current_app` before our
+# module loads, leaving the default at Celery's stock `Celery()` instance
+# whose broker is `amqp://guest@localhost//`. `set_default()` is
+# unconditional and idempotent -- safe to call at module import.
+#
+# Symptom this fixes: probe (and any chat turn) raises
+#   kombu.exceptions.OperationalError [WinError 10061] amqp/5672
+# on the FIRST `extract_memory_from_turn.apply_async(...)` call, despite
+# `from app.worker.celery_app import celery_app` running on uvicorn boot.
+# A fresh `python -c` shell does not reproduce because import order is
+# different there (no FastAPI/middleware touches current_app first).
+celery_app.set_default()
+
 celery_app.conf.update(
     # ----- serialization -----
     task_serializer="json",
