@@ -262,6 +262,84 @@ class ScopePolicy:
                     detail="This key is scoped to a different agent.",
                 )
 
+    # -----------------------------------------------------------------
+    # Step 29.y gap-fix C3 (D-scope-policy-action-class-gap-2026-05-07)
+    # -----------------------------------------------------------------
+    #
+    # Origin: every existing ScopePolicy method enforces SCOPE
+    # (tenant/domain/agent reach), but action-class enforcement ("this
+    # caller must hold permission P to perform action A on resource R")
+    # was scattered across middleware (auth.py: is_admin_route check)
+    # and ad-hoc per-route asserts. There was no named primitive a new
+    # route author could call. That gap meant a future route added
+    # without going through middleware (e.g. an internal worker entry,
+    # a queued task that pulls a request-like object) had no single
+    # call to make.
+    #
+    # enforce_action() closes the gap. It does NOT replace the middleware
+    # admin-route check (that path stays the primary fast-fail), and it
+    # is intentionally NOT wired into any existing route in this commit.
+    # Wiring it would change behaviour, which is out of scope for this
+    # code-only gap-fix session per binding session rules. Future routes
+    # and any audit of existing routes can adopt it.
+    #
+    # Action labels are free-form strings used in the audit trail when
+    # a permission check fails. They are NOT the same vocabulary as
+    # ALLOWED_ACTIONS in app.models.admin_audit_log (those describe
+    # successful mutations); these describe attempted ones.
+    @classmethod
+    def enforce_action(
+        cls,
+        request: Request,
+        *,
+        required_permission: str,
+        action_label: str,
+    ) -> None:
+        """Verify the caller holds ``required_permission`` for action
+        ``action_label``. Raises HTTPException(403) on miss.
+
+        platform_admin satisfies any required_permission by design --
+        same precedent as enforce_tenant_scope. This keeps the policy
+        layer self-consistent: a platform_admin key is the privileged
+        identity in EVERY enforcement primitive.
+
+        Validation:
+          - required_permission must be a non-empty plain identifier
+            (no comma, no whitespace control). This matches the
+            actor_permissions on-disk format invariant established in
+            gap-fix C1.
+          - action_label must be a non-empty string. Used in the
+            403 detail and the warning log line so an operator can
+            grep for the failing action class.
+        """
+        if not isinstance(required_permission, str) or not required_permission.strip():
+            raise ValueError("required_permission must be a non-empty str")
+        if any(c in required_permission for c in (",", '"', "\\", "\n", "\r", "\t")):
+            raise ValueError(
+                f"required_permission {required_permission!r} contains "
+                "forbidden character; must be a plain identifier"
+            )
+        if not isinstance(action_label, str) or not action_label.strip():
+            raise ValueError("action_label must be a non-empty str")
+
+        _, _, _, perms = cls._caller(request)
+        if PLATFORM_ADMIN in perms:
+            return
+        if required_permission in perms:
+            return
+
+        logger.warning(
+            "Action denied: action=%s required_permission=%s caller_perms=%s",
+            action_label, required_permission, sorted(perms),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"This API key does not have permission "
+                f"{required_permission!r} required for action {action_label!r}."
+            ),
+        )
+
     @classmethod
     def enforce_luciel_instance_scope(
         cls,
