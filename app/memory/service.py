@@ -20,6 +20,18 @@ from app.memory.extractor import extract_memories
 from app.repositories.memory_repository import MemoryRepository
 import uuid  # noqa: F401  (referenced via string annotation in method signatures)
 
+# Step 29.y gap-fix C13 (D-celery-app-not-imported-on-uvicorn-boot-2026-05-07):
+# Defense-in-depth import. `app/main.py` is the canonical boot path for
+# uvicorn and already imports celery_app, but importing here too guarantees
+# that any future entry point that loads MemoryService (scripts, alternate
+# ASGI shims, test harnesses) also gets the configured Celery app registered
+# as `current_app` before `extract_memory_from_turn.apply_async` is called.
+# Without this, `@shared_task` falls back to a default Celery() instance
+# whose default broker is `amqp://guest@localhost//`, causing the producer
+# to attempt the wrong broker protocol on first enqueue.
+# noqa: F401 — import is for side effects only.
+from app.worker.celery_app import celery_app  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 # ApiKeyService mints prefixes as "luc_sk_" + ~5-9 chars from the raw key
