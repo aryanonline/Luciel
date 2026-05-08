@@ -95,13 +95,24 @@ from app.verification.fixtures import RunState
 from app.verification.http_client import call, pooled_client
 from app.verification.runner import Outcome, Pillar, PillarOutcome
 
+# Step 29.y gap-fix C18 (D-pillar13-action-constant-case-divergence-2026-05-08):
+# Import the action constant directly from the model module instead of
+# re-declaring it locally. The previous local copy at this line was
+# `"WORKER_IDENTITY_SPOOF_REJECT"` (uppercase), while the model emits
+# `"worker_identity_spoof_reject"` (lowercase) on the audit row. The
+# admin_audit_logs_step29c forensic endpoint filters with `action == :action`
+# in PostgreSQL, which is case-sensitive on text -- so the test polled for
+# 180s on every run and never found a row that was always present in the DB
+# under the lowercase action name. C15/C16 widened the poll budget; that was
+# a symptom-level fix that could not have helped because the row would never
+# match regardless of how long we waited. Importing from the model makes
+# divergence a compile-time error rather than a silent 180s hang.
+from app.models.admin_audit_log import (  # noqa: E402
+    ACTION_WORKER_IDENTITY_SPOOF_REJECT,
+)
+
 
 P13_TENANT_PREFIX = "step24-5b-p13-"
-
-# Audit action constant copied from app.models.admin_audit_log so the
-# pillar can stay free of model imports after the C.3 migration.
-# Source of truth: app/models/admin_audit_log.py
-ACTION_WORKER_IDENTITY_SPOOF_REJECT = "WORKER_IDENTITY_SPOOF_REJECT"
 
 # Mode detection helpers (_broker_reachable / _worker_reachable) live in
 # app.verification._infra_probes since Step 29 Commit C.6. Originally these
@@ -530,32 +541,29 @@ class CrossTenantIdentityPillar(Pillar):
         # action + actor_key_prefix filters (actor_key_prefix added
         # in C.3).
         #
-        # Step 29.y gap-fix C15 + C16
-        # (D-pillar13-spoof-audit-poll-too-short-2026-05-07): the prior
-        # 60s sleep + single 5s retry was insufficient under worker
-        # contention. The Celery worker runs --pool=solo (Windows dev
-        # constraint -- prefork is not supported on Win32). Tasks are
-        # serialized: P12's 42s legit extraction + P13's setup-turn
-        # legit extraction + leftover tasks from prior test runs that
-        # may not have drained queue ahead of the spoof. Observed Gate
-        # 6 latency from enqueue to audit-row commit: 70-150s end-to-
-        # end. C15 set the budget at 120s and still flaked at 133s.
-        # C16 widens to 180s (60s sleep + 24 x 5s poll) which covers
-        # the worst observed run with a ~30% safety margin. The audit
-        # row IS deterministic once the worker picks up the task; only
-        # the queue-wait duration varies. A real Gate 6 regression
-        # would still surface (worker either fails to consume or emits
-        # a different action), and the structured note in the
-        # AssertionError below points operators directly at
-        # admin_audit_logs to disambiguate.
+        # Step 29.y gap-fix C18 (D-pillar13-action-constant-case-divergence-2026-05-08):
+        # The C15+C16 widenings to 180s were treating a symptom of the
+        # wrong root cause -- the local action constant in this file was
+        # uppercase while the worker writes lowercase, so the forensic
+        # endpoint's exact-match `action == :action` filter never
+        # returned the row regardless of how long we waited. With the
+        # constant now imported from app.models.admin_audit_log (single
+        # source of truth), the row matches on the first poll iteration
+        # and the prior 180s budget became dead waiting. Reverting to a
+        # tighter budget so a real future Gate 6 regression surfaces
+        # quickly instead of grinding out a wide window of false patience.
         #
-        # Long-run cleanup (Step 30b carry-forward): document the
-        # --pool=solo dev-vs-prod gap in STEP_29Y_DEFERRED.md so that
-        # the threadpool migration on the dev worker is tracked. Prod
-        # uses SQS with multiple worker tasks, so head-of-line blocking
-        # is a dev-only constraint, not a production one.
+        # Budget rationale: 60s pre-sleep above gives the worker time
+        # to consume + emit the audit row (P11 happy-path SLA is 30s;
+        # rejection path is faster); 6 x 5s poll = 30s additional
+        # margin handles transient DB-commit-vs-poll race or a brief
+        # worker queue depth bump under solo-pool contention. Total
+        # post-enqueue budget: 90s, comfortably above any observed
+        # legitimate latency. A real Gate 6 regression OR a real
+        # forensic-endpoint regression now fails inside ~90s with the
+        # forensic SQL hint, instead of hiding behind a 180s wait.
         spoof_audit = None
-        spoof_poll_attempts = 24   # 24 x 5s = 120s extra budget; total ~180s
+        spoof_poll_attempts = 6   # 6 x 5s = 30s extra budget; total ~90s post-enqueue
         for _attempt in range(spoof_poll_attempts):
             spoof_audit = self._fetch_spoof_audit(
                 c=c, pa=pa, t1_id=t1_id, k1_prefix=k1_prefix,
@@ -568,7 +576,7 @@ class CrossTenantIdentityPillar(Pillar):
                 f"A2 FAIL: no ACTION_WORKER_IDENTITY_SPOOF_REJECT "
                 f"audit row found for tenant={t1_id} "
                 f"actor_key_prefix={k1_prefix} after "
-                f"{60 + spoof_poll_attempts * 5}s total wait. Either "
+                f"{60 + spoof_poll_attempts * 5}s total wait (post-enqueue). Either "
                 f"Gate 6 did not emit a rejection audit row (real "
                 f"regression -- check worker logs for gate1..gate6 "
                 f"markers), or the worker queue depth exceeded the "
