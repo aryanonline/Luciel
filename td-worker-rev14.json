@@ -9,7 +9,7 @@
   "containerDefinitions": [
     {
       "name": "luciel-worker",
-      "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:370a82442c245284378035292769300b5761a4dcfaa7f2b9f830318dd1614ad5",
+      "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:bf0259387cbf65c9b83dea35339f908754f34c81e9a0a8de564f9790ccdcfc36",
       "cpu": 0,
       "essential": true,
       "command": [
