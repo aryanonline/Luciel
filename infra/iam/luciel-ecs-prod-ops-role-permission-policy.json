@@ -1,0 +1,70 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcsExecChannel",
+      "Effect": "Allow",
+      "Action": [
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadProdSsmParameters",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParameterHistory"
+      ],
+      "Resource": [
+        "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url",
+        "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/REDIS_URL",
+        "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url",
+        "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/platform-admin-key",
+        "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/anthropic-api-key",
+        "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/openai-api-key"
+      ]
+    },
+    {
+      "Sid": "WriteProdPlatformAdminKey",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter"
+      ],
+      "Resource": [
+        "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/platform-admin-key"
+      ]
+    },
+    {
+      "Sid": "KmsForSsmSecureString",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ssm.ca-central-1.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "EcsExecLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": [
+        "arn:aws:logs:ca-central-1:729005488042:log-group:/ecs/luciel-backend:*"
+      ]
+    }
+  ]
+}
