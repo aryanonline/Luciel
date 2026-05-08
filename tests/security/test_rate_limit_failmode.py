@@ -56,14 +56,42 @@ def _read_source() -> str:
 # =====================================================================
 
 def test_b1_reads_correct_env_var_name() -> None:
-    """The module MUST read REDIS_URL, not REDISURL.
+    """The module MUST read the Redis URL via the canonical path, not
+    a typo'd env-var name.
 
-    Pre-29.y the typo silently neutered shared rate limits in prod.
+    Pre-29.y the module called ``os.getenv("REDISURL")`` (no
+    underscore), which silently neutered shared rate limits in
+    prod. After Cluster 5 (B-1) the correct name was restored as
+    ``os.getenv("REDIS_URL")``. After C19
+    (``D-redis-url-centralize-via-settings-2026-05-08``) the module
+    no longer reads the env var directly at all; it reads via
+    ``settings.redis_url`` from ``app.core.config``, which is the
+    single source of truth for every component that needs the
+    Redis URL.
+
+    This test now enforces the C19 architecture rather than the
+    pre-C19 one. The intent (no REDISURL typo regression) is
+    preserved -- and strengthened, because:
+
+      1. Settings is a Pydantic model with a typed ``redis_url``
+         field. A typo would be a Pydantic validation error at
+         boot, not a silent None.
+      2. There is exactly one place to read the Redis URL from
+         (``app.core.config.settings.redis_url``); a future
+         engineer cannot accidentally introduce a second reader
+         site with a different env-var name without first removing
+         the Settings-mediated read here.
+
+    Closed by C30 (``D-c19-tests-not-updated-after-redis-centralize-2026-05-08``).
     """
     src = _read_source()
     tree = ast.parse(src)
-    bad: list[str] = []
-    good: list[str] = []
+
+    # Negative guard: no direct os.getenv / os.environ.get call
+    # against the legacy or canonical env-var names. The Settings-
+    # mediated path is the only valid reader.
+    bad_typo: list[tuple[str, int]] = []
+    direct_canonical: list[tuple[str, int]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -87,18 +115,59 @@ def test_b1_reads_correct_env_var_name() -> None:
             continue
         name = first.value
         if name == "REDISURL":
-            bad.append(name)
+            bad_typo.append((name, node.lineno))
         if name == "REDIS_URL":
-            good.append(name)
-    assert not bad, (
+            direct_canonical.append((name, node.lineno))
+
+    assert not bad_typo, (
         "B-1: rate_limit.py still reads the typo'd env var "
-        "REDISURL. This is the original blocker -- it silently "
-        "resolves to None in prod (where REDIS_URL is the actual "
-        "name) and downgrades rate limiting to per-process memory."
+        "REDISURL. This is the original pre-29.y blocker -- it "
+        "silently resolves to None in prod (where REDIS_URL is "
+        "the actual name) and downgrades rate limiting to "
+        "per-process memory. Found at lines: "
+        f"{[lineno for _, lineno in bad_typo]}"
     )
-    assert good, (
-        "B-1: rate_limit.py must read REDIS_URL via os.getenv / "
-        "os.environ.get."
+    assert not direct_canonical, (
+        "B-1 / C19: rate_limit.py must NOT call os.getenv(\"REDIS_URL\") "
+        "or os.environ.get(\"REDIS_URL\") directly. After C19 "
+        "(D-redis-url-centralize-via-settings-2026-05-08) the only "
+        "valid reader is `settings.redis_url` from "
+        "`app.core.config`. Direct env reads bypass the single "
+        "source of truth and re-open the typo-regression risk "
+        "that landed us here. Found at lines: "
+        f"{[lineno for _, lineno in direct_canonical]}"
+    )
+
+    # Positive guard: the module imports settings and reads
+    # settings.redis_url. Both are required -- import without read
+    # is dead code; read without import is a NameError.
+    has_settings_import = False
+    has_settings_redis_url_read = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            mod_name = node.module or ""
+            if mod_name == "app.core.config":
+                for alias in node.names:
+                    if alias.name == "settings":
+                        has_settings_import = True
+        if isinstance(node, ast.Attribute) and node.attr == "redis_url":
+            inner = node.value
+            if isinstance(inner, ast.Name) and inner.id == "settings":
+                has_settings_redis_url_read = True
+
+    assert has_settings_import, (
+        "B-1 / C19: rate_limit.py must import `settings` from "
+        "`app.core.config` so it shares the single source of truth "
+        "for Redis URL with every other component (worker celery, "
+        "verification probes, etc.). See "
+        "D-redis-url-centralize-via-settings-2026-05-08."
+    )
+    assert has_settings_redis_url_read, (
+        "B-1 / C19: rate_limit.py must read the Redis URL via "
+        "`settings.redis_url` (a typed Pydantic field) so a typo "
+        "is caught at boot as a validation error rather than "
+        "silently resolving to None. See "
+        "D-redis-url-centralize-via-settings-2026-05-08."
     )
 
 
@@ -117,13 +186,32 @@ def test_b1_storage_options_carry_retry_on_timeout_when_redis_set(
     """When REDIS_URL is set the storage_options dict passed to the
     Limiter MUST include retry_on_timeout=True plus tight socket
     timeouts so the limiter fails fast and the fallback middleware
-    can decide what to do."""
+    can decide what to do.
+
+    After C19 (D-redis-url-centralize-via-settings-2026-05-08) the
+    rate-limit module reads through ``settings.redis_url``, so the
+    monkeypatched env var must propagate through a Settings reload
+    (not just a rate_limit reload) for the test to reflect the
+    monkeypatched value. Without this Settings reload the test
+    would observe the cached `.env`-less default of
+    ``redis://localhost:6379/0`` regardless of what env we set.
+
+    Updated by C30 (``D-c19-tests-not-updated-after-redis-centralize-2026-05-08``).
+    """
     monkeypatch.setenv("REDIS_URL", "redis://stub:6379/0")
 
     import importlib
+    import app.core.config as cfg
     import app.middleware.rate_limit as mod
+    cfg = importlib.reload(cfg)
     mod = importlib.reload(mod)
     try:
+        assert cfg.settings.redis_url == "redis://stub:6379/0", (
+            "B-1 / C19: Settings reload must propagate the "
+            "monkeypatched REDIS_URL into settings.redis_url. If "
+            "this fails, the rate_limit module is reading from a "
+            "stale Settings instance."
+        )
         assert mod.REDIS_URL == "redis://stub:6379/0"
         assert mod.storage_uri == "redis://stub:6379/0"
         opts = mod.storage_options
@@ -144,6 +232,7 @@ def test_b1_storage_options_carry_retry_on_timeout_when_redis_set(
         )
     finally:
         monkeypatch.delenv("REDIS_URL", raising=False)
+        importlib.reload(cfg)
         importlib.reload(mod)
 
 
