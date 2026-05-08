@@ -33,7 +33,8 @@
       "Sid": "WriteProdPlatformAdminKey",
       "Effect": "Allow",
       "Action": [
-        "ssm:PutParameter"
+        "ssm:PutParameter",
+        "ssm:AddTagsToResource"
       ],
       "Resource": [
         "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/platform-admin-key"

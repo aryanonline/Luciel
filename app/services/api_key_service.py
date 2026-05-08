@@ -81,6 +81,14 @@ def _write_key_to_ssm(*, key_id: int, raw_key: str, region: str,  ssm_path: str 
     When ssm_path is None (default), behavior is identical to 27a:
     SSM_BOOTSTRAP_PATH.format(key_id=key_id) is used.
 
+    Step 29.y C24: Overwrite=True so rotation is a single atomic SSM call.
+    Previously Overwrite=False with a comment 'caller deletes stale params
+    first' — but no caller and no IAM role actually performed that delete,
+    making the production path stable-but-unrotatable. The DB hash-chained
+    audit log already provides full key-history attribution; SSM does not
+    need its own version guard. Tags are written via a second AddTagsToResource
+    call because put_parameter rejects Tags + Overwrite=True in one call.
+
     boto3 is imported lazily so dev/test paths that never hit this branch
     do not need boto3 installed.
     """
@@ -88,22 +96,49 @@ def _write_key_to_ssm(*, key_id: int, raw_key: str, region: str,  ssm_path: str 
 
     path = ssm_path if ssm_path is not None else SSM_BOOTSTRAP_PATH.format(key_id=key_id)
     ssm = boto3.client("ssm", region_name=region)
-    ssm.put_parameter(
+    is_rotation = ssm_path is not None  # production path is stable across re-mints
+
+    # Step 29.y C24: rotation-friendly (Overwrite=True) for the durable
+    # production path; first-write-only (Overwrite=False) for bootstrap
+    # path which carries key_id and is unique per mint.
+    put_kwargs = dict(
         Name=path,
         Value=raw_key,
         Type="SecureString",
-        Overwrite=False,  # refuse to clobber; caller deletes stale params first
+        Overwrite=is_rotation,
         Description=(
             f"Luciel platform-admin key id={key_id} at {path}. "
             f"Read by operator or task role; managed via SSM."
         ),
-        Tags=[
-            {"Key": "luciel:purpose", "Value": (
-                "platform-admin-key" if ssm_path is not None else "bootstrap-admin-key"
-            )},
-            {"Key": "luciel:key_id", "Value": str(key_id)},
-        ],
     )
+    tags = [
+        {"Key": "luciel:purpose", "Value": (
+            "platform-admin-key" if is_rotation else "bootstrap-admin-key"
+        )},
+        {"Key": "luciel:key_id", "Value": str(key_id)},
+    ]
+    if not is_rotation:
+        # Bootstrap path: tags can be set inline because Overwrite=False.
+        put_kwargs["Tags"] = tags
+
+    ssm.put_parameter(**put_kwargs)
+
+    if is_rotation:
+        # Production path: AWS rejects Tags + Overwrite=True in one call,
+        # so apply tags via a follow-up AddTagsToResource. Failures here
+        # should NOT roll back the DB — the key is already in SSM and the
+        # DB row exists; tags are metadata. We log and continue.
+        try:
+            ssm.add_tags_to_resource(
+                ResourceType="Parameter",
+                ResourceId=path,
+                Tags=tags,
+            )
+        except Exception as tag_err:  # noqa: BLE001
+            logger.warning(
+                "SSM tag write failed (non-fatal) path=%s key_id=%d err=%s",
+                path, key_id, tag_err,
+            )
     logger.info(
         "SSM bootstrap key written: path=%s key_id=%d region=%s",
         path, key_id, region,
