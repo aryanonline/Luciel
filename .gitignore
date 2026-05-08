@@ -80,3 +80,34 @@ msg.txt
 # Step 28/29 local diagnostic artifacts (audit residue, not part of source)
 _step28_artifacts/
 _step29_artifacts/
+
+# Step 29.y C33 (D-untracked-diag-artifacts-no-gitignore-2026-05-08):
+# operator diagnostic and forensic dump artifacts. These are produced
+# during incident response and should not pollute the repo. Canonical
+# forensic record lives in CloudWatch logs, admin_audit_logs, and the
+# DRIFTS.md doc. Anything matching these patterns is per-incident
+# scratch.
+.venv-pytest/
+scripts/dlq_forensic_dump_*.py
+scripts/*_forensic_dump_*.py
+verify_run_*.log
+verify_run_*.json
+verify_*_C*.log
+cloudwatch_dump_*.log
+task_describe_*.json
+td-rev*.json
+*-task-arn.txt
+ssm-params.json
+sqs-*.json
+dlq-sample.json
+dlq-*.json
+current-*.json
+td_*.json
+diag*.py
+diag_*.py
+*_overrides.json
+*_raw.json
+backend_*.log
+worker_*.log
+migrate_*.log
+verify_*.log
