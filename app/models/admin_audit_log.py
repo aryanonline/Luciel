@@ -225,6 +225,30 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_SESSION,
 )
 
+# Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
+# AdminAuditLog.note is a Text column, so the database does not
+# bound its length. An accidental dump (e.g. an exception message,
+# a user-supplied string concatenated into a note, a debug payload)
+# would bloat audit rows and -- because note is part of the hash
+# chain canonical content (audit_chain.py::_CHAIN_FIELDS) -- it
+# also factors into row_hash. Unbounded inputs make the hash input
+# size unpredictable, which makes per-row hash latency unpredictable.
+#
+# This cap is enforced at the AdminAuditRepository.record() boundary
+# (the single chokepoint for all audit writes; the rotate-keys script
+# constructs AdminAuditLog directly and is in scope of the chain
+# event handler but writes a fixed short note). 256 chars matches
+# the existing convention in app/api/v1/admin.py:1845 (end_note=500)
+# scaled down for the more frequent operational note path. Callers
+# that legitimately need to attach a large payload should use the
+# before_json / after_json diff fields, which are JSON-typed and
+# already bounded by Postgres jsonb size limits.
+#
+# We do NOT migrate the column to String(256) in this code-only
+# session: that would require a NULL/length backfill against prod
+# data and is sequenced for Step 30b alongside the recap rewrite.
+MAX_NOTE_LENGTH = 256
+
 
 class AdminAuditLog(Base, TimestampMixin):
     __tablename__ = "admin_audit_logs"
@@ -349,6 +373,12 @@ class AdminAuditLog(Base, TimestampMixin):
 
     # Optional human note -- e.g. "cascade from domain deactivate",
     # "replace by sourceId=foo.pdf v=3", etc.
+    #
+    # Length is capped at MAX_NOTE_LENGTH (256) at the
+    # AdminAuditRepository.record() boundary (Step 29.y gap-fix C2,
+    # D-audit-note-length-unbounded-2026-05-07). The column itself
+    # is Text so historical rows that exceed the cap are still
+    # readable; the cap is forward-only.
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # -----------------------------------------------------------------

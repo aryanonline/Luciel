@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from app.models.admin_audit_log import (
     ALLOWED_ACTIONS,
     ALLOWED_RESOURCE_TYPES,
+    MAX_NOTE_LENGTH,
     AdminAuditLog,
 )
 from app.repositories.actor_permissions_format import (
@@ -187,6 +188,25 @@ class AdminAuditRepository:
                 f"Unknown audit resource_type {resource_type!r}; "
                 f"extend ALLOWED_RESOURCE_TYPES in app.models.admin_audit_log."
             )
+
+        # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
+        # cap note at MAX_NOTE_LENGTH at the single repository
+        # chokepoint. Truncate rather than raise -- audit writes must
+        # never block a mutation, and an over-long note is a caller
+        # bug we want to surface in logs while still recording the
+        # mutation. The truncated-marker suffix makes truncation
+        # visible to forensic readers without making the row
+        # unreadable. before_json/after_json are the right place for
+        # large structured payloads.
+        if note is not None and len(note) > MAX_NOTE_LENGTH:
+            _TRUNC_MARKER = "...[truncated]"
+            keep = MAX_NOTE_LENGTH - len(_TRUNC_MARKER)
+            logger.warning(
+                "AUDIT note truncated tenant=%s action=%s "
+                "original_len=%d cap=%d",
+                tenant_id, action, len(note), MAX_NOTE_LENGTH,
+            )
+            note = note[:keep] + _TRUNC_MARKER
 
         row = AdminAuditLog(
             actor_key_prefix=ctx.actor_key_prefix,
