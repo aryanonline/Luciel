@@ -18,7 +18,7 @@ Why a dedicated table (vs. reusing Trace or CloudWatch logs):
   contact emails qualify.
 
 What gets captured:
-- WHO:   actor_key_prefix + actor_permissions (never the raw key)
+- WHO:   actor_key_prefix + actor_permissions JSON (never the raw key)
 - WHEN:  created_at (TimestampMixin)
 - WHERE: tenant_id / domain_id / agent_id / luciel_instance_id
          (whichever apply to the resource)
@@ -248,13 +248,29 @@ class AdminAuditLog(Base, TimestampMixin):
                 "NULL for system actions.",
     )
 
-    # Comma-separated permission list at the time of the action.
-    # Captured verbatim so an auditor can see 'the caller had admin
-    # at this moment' even if the key is later re-scoped or deleted.
+    # Permission list at the time of the action, captured verbatim so an
+    # auditor can see 'the caller had admin at this moment' even if the
+    # key is later re-scoped or deleted.
+    #
+    # On-disk format (Step 29.y gap-fix C1,
+    # D-actor-permissions-comma-fragility-2026-05-07):
+    #   - NEW rows: JSON of a sorted list of strings,
+    #     e.g. '["admin","worker"]'.
+    #   - OLD rows (pre-29.y gap-fix): legacy comma form,
+    #     e.g. 'admin,worker'. NOT rewritten -- preserves audit hash
+    #     chain (audit_chain.py / Pillar 23).
+    # All read paths MUST go through
+    # app.repositories.actor_permissions_format.parse_actor_permissions
+    # which accepts both formats.
     actor_permissions: Mapped[str | None] = mapped_column(
         String(500),
         nullable=True,
-        comment="Comma-separated permissions held by the actor at action time.",
+        comment=(
+            "Permissions held by the actor at action time. "
+            "New rows: JSON list (e.g. '[\"admin\",\"worker\"]'); "
+            "pre-29.y rows: legacy comma form. "
+            "Read via actor_permissions_format.parse_actor_permissions."
+        ),
     )
 
     # Optional — free-form actor hint. Populated from ApiKey.created_by

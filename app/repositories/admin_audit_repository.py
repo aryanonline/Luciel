@@ -31,6 +31,10 @@ from app.models.admin_audit_log import (
     ALLOWED_RESOURCE_TYPES,
     AdminAuditLog,
 )
+from app.repositories.actor_permissions_format import (
+    parse_actor_permissions,
+    serialize_actor_permissions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +75,15 @@ class AuditContext:
         if state is None:
             return cls.system()
 
+        # Step 29.y Cluster gap-fix C1
+        # (D-actor-permissions-comma-fragility-2026-05-07): the
+        # defensive string-input branch now uses parse_actor_permissions
+        # so it handles BOTH legacy comma form and the new JSON form
+        # uniformly. Token-level validation also rejects forbidden
+        # characters at the boundary.
         perms = getattr(state, "permissions", None) or ()
         if isinstance(perms, str):  # defensive
-            perms = tuple(p.strip() for p in perms.split(",") if p.strip())
+            perms = parse_actor_permissions(perms)
         else:
             perms = tuple(perms)
 
@@ -112,9 +122,17 @@ class AuditContext:
 
     @property
     def permissions_str(self) -> str | None:
-        if not self.actor_permissions:
-            return None
-        return ",".join(self.actor_permissions)
+        """Return the on-disk serialized form for this audit context.
+
+        Step 29.y Cluster gap-fix C1
+        (D-actor-permissions-comma-fragility-2026-05-07): canonical form
+        is JSON of a sorted list of perm tokens, e.g. '["admin","worker"]'.
+        Old comma-form rows on disk are still parseable via
+        parse_actor_permissions(). The audit hash chain is preserved
+        because historical row column values are NOT rewritten -- only
+        rows written after this commit use the JSON form.
+        """
+        return serialize_actor_permissions(self.actor_permissions)
 
 
 # ---------------------------------------------------------------------

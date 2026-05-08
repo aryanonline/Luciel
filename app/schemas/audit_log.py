@@ -16,7 +16,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.repositories.actor_permissions_format import parse_actor_permissions
 
 
 class AdminAuditLogRead(BaseModel):
@@ -35,8 +37,27 @@ class AdminAuditLogRead(BaseModel):
 
     # WHO
     actor_key_prefix: str | None
-    actor_permissions: str | None
+    # Step 29.y gap-fix C1 (D-actor-permissions-comma-fragility-2026-05-07):
+    # API now returns a structured list[str] regardless of on-disk form.
+    # Consumers (dashboards, exports) get a clean list whether the row
+    # was written before or after the format change. Empty/None becomes
+    # an empty list for ergonomic JSON shape.
+    actor_permissions: list[str]
     actor_label: str | None
+
+    @field_validator("actor_permissions", mode="before")
+    @classmethod
+    def _normalize_permissions(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return list(parse_actor_permissions(v))
+        if isinstance(v, (list, tuple)):
+            return [str(x) for x in v]
+        raise ValueError(
+            f"actor_permissions must be str/list/tuple/None, "
+            f"got {type(v).__name__}"
+        )
 
     # WHERE
     tenant_id: str

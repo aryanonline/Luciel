@@ -54,6 +54,9 @@ from sqlalchemy import select
 from app.db.session import SessionLocal
 from app.models.api_key import ApiKey
 from app.models.admin_audit_log import AdminAuditLog
+from app.repositories.actor_permissions_format import (
+    serialize_actor_permissions,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -136,7 +139,14 @@ def main() -> int:
                 agent_id=None,
                 luciel_instance_id=None,
                 actor_key_prefix=None,        # script-initiated, no caller key
-                actor_permissions=["platform_admin"],  # self-declared script authority
+                # Step 29.y gap-fix C1
+                # (D-actor-permissions-comma-fragility-2026-05-07):
+                # actor_permissions is a String column; pass the
+                # serialized canonical form, not a raw list (which
+                # would be coerced to "['platform_admin']" via repr).
+                actor_permissions=serialize_actor_permissions(
+                    ["platform_admin"]
+                ),  # self-declared script authority
                 actor_label=args.actor,
                 action="api_key.rotate_tenant_to_null",
                 resource_type="api_key",
