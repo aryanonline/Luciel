@@ -528,21 +528,41 @@ class CrossTenantIdentityPillar(Pillar):
         # ---------- 4. ASSERTION A2: IDENTITY_SPOOF audit row exists ----------
         # Step 29 C.3: forensic GET via admin_audit_logs_step29c with
         # action + actor_key_prefix filters (actor_key_prefix added
-        # in C.3). One short retry to absorb worker-to-audit lag.
-        spoof_audit = self._fetch_spoof_audit(
-            c=c, pa=pa, t1_id=t1_id, k1_prefix=k1_prefix,
-        )
-        if spoof_audit is None:
-            time.sleep(5)
+        # in C.3).
+        #
+        # Step 29.y gap-fix C15
+        # (D-pillar13-spoof-audit-poll-too-short-2026-05-07): the prior
+        # 60s sleep + single 5s retry was insufficient under worker
+        # contention. The Celery worker runs --pool=solo, so when P12
+        # (42s) and the P13 legit setup turn enqueue tasks immediately
+        # before the spoof, the spoof sits behind them and Gate 6's
+        # audit row can land 70-80s after enqueue. The audit row in
+        # the DB is correct (Gate 6 fired, row written, content matches
+        # the harness filter) but the test gave up before it landed.
+        # Replace the single retry with a deterministic poll loop
+        # mirroring the Pillar 25 contract: poll until the audit row
+        # appears OR a hard deadline passes. Total budget after the
+        # initial 60s sleep: 12 attempts x 5s = 60s, hard cap ~120s
+        # from spoof enqueue, which absorbs the observed worker queue
+        # depth without masking a real Gate 6 regression.
+        spoof_audit = None
+        spoof_poll_attempts = 12   # 12 x 5s = 60s extra budget
+        for _attempt in range(spoof_poll_attempts):
             spoof_audit = self._fetch_spoof_audit(
                 c=c, pa=pa, t1_id=t1_id, k1_prefix=k1_prefix,
             )
+            if spoof_audit is not None:
+                break
+            time.sleep(5)
         if spoof_audit is None:
             raise AssertionError(
                 f"A2 FAIL: no ACTION_WORKER_IDENTITY_SPOOF_REJECT "
                 f"audit row found for tenant={t1_id} "
-                f"actor_key_prefix={k1_prefix}. Gate 6 did not "
-                f"emit a rejection audit row."
+                f"actor_key_prefix={k1_prefix} after "
+                f"{60 + spoof_poll_attempts * 5}s total wait. Gate 6 "
+                f"did not emit a rejection audit row, OR worker queue "
+                f"depth exceeded the budget. Inspect admin_audit_logs "
+                f"directly to disambiguate."
             )
         audit_id = spoof_audit["id"]
 
