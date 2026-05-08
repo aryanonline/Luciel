@@ -318,10 +318,21 @@ class DepartureSemanticsPillar(Pillar):
             t2_session = r.json()
             t2_session_id = t2_session.get("session_id") or t2_session.get("id")
 
+            # Step 29.y gap-fix C14
+            # (D-pillar14-consent-grant-uses-wrong-tenant-key-2026-05-07):
+            # The T2 consent grant must be issued with K2 (T2's chat key),
+            # not K1 (T1's chat key). Prior revision passed k1_raw here
+            # which is a cross-tenant write (key bound to T1, body says
+            # tenant_id=T2) and consent.py:_resolve_tenant_id correctly
+            # rejects with 403 cross_tenant_denied. The route is right;
+            # the test was wrong. P14 expected 200/201, observed 403, and
+            # surfaced as a P14 FAIL on the gate. Symmetric to the K1/T1
+            # consent grant 27 lines above which already used k1_raw
+            # correctly.
             call(
                 "POST",
                 "/api/v1/consent/grant",
-                k1_raw,
+                k2_raw,
                 json={
                     "user_id": t2_session.get("user_id"),
                     "tenant_id": t2_id,
