@@ -244,11 +244,24 @@ def install_audit_chain_event() -> None:
     to sqlalchemy.orm.Session (the class), so every session created
     by SessionLocal() in app.db.session inherits it.
 
-    Called once from app.main module-import time so every code path
-    that uses the ORM (FastAPI requests, Celery tasks, scripts that
-    import from app.*) gets the event. Pure-SQL inserts that bypass
-    the ORM entirely (none in current code, but possible in future
-    scripts) would NOT get hashes -- Pillar 23 would catch the NULL.
+    Step 29.y gap-fix C25 install location:
+    Called from app/db/session.py at module-import time. Every code path
+    that uses the ORM imports SessionLocal (or get_db), so installing
+    there guarantees the listener is registered before any AdminAuditLog
+    is constructed -- including in operator heredocs, one-off scripts,
+    and REPL sessions that don't import app.main. The legacy call sites
+    in app.main and app.worker.celery_app remain as defense-in-depth
+    (idempotent: see event.contains(...) check below).
+
+    Pre-C25 history (kept for forensic context): originally called only
+    from app.main module-import time; an ad-hoc heredoc in the prod-ops
+    container on 2026-05-08 imported SessionLocal without app.main and
+    wrote audit row 3445 with NULL hashes. Backfilled by hand; full
+    detail in docs/postmortems/2026-05-08-platform-admin-consolidation.md.
+
+    Pure-SQL inserts that bypass the ORM entirely (none in current code,
+    but possible in future scripts) would NOT get hashes -- Pillar 23
+    would catch the NULL.
     """
     # event.contains() lets us avoid double-registration if app.main
     # is reloaded (e.g. by uvicorn --reload). SQLAlchemy raises if

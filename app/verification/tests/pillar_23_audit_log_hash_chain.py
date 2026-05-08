@@ -189,7 +189,9 @@ class AuditLogHashChainPillar(Pillar):
                 f"Migration 8ddf0be96f44 did not backfill, or the "
                 f"before_flush event is not installed in the running "
                 f"app/worker images. Verify install_audit_chain_event "
-                f"is called from app.main and app.worker.celery_app."
+                f"is called from app.db.session (Step 29.y C25 install "
+                f"location), with defense-in-depth calls also in "
+                f"app.main and app.worker.celery_app."
             )
 
         # Soft note (not fail) for unbackfilled prefix rows in lenient
