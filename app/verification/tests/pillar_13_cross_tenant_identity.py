@@ -147,7 +147,7 @@ class CrossTenantIdentityPillar(Pillar):
         # consumed" -- under that gate a local run with no worker silently
         # FAILed A2 as if Gate 6's audit emission were broken. See drift
         # D-pillar-13-mode-gate-broker-only-2026-05-06.
-        mode_full = _broker_reachable() and _worker_reachable()
+        mode_full = _broker_reachable() and _worker_reachable(state)
 
         # ---------- Setup (always runs, both modes) ----------
         # Phase 0 builds the tenant pair, User, Agents, key, and session

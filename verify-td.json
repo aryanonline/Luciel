@@ -28,6 +28,14 @@
                 {
                     "name": "AWS_REGION",
                     "value": "ca-central-1"
+                },
+                {
+                    "name": "CELERY_BROKER_URL",
+                    "value": "sqs://"
+                },
+                {
+                    "name": "MEMORY_EXTRACTION_ASYNC",
+                    "value": "true"
                 }
             ],
             "secrets": [

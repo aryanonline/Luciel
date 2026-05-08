@@ -1,0 +1,50 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ReadPlatformAdminKeyForHttpPillars",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter"
+            ],
+            "Resource": [
+                "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/platform-admin-key"
+            ]
+        },
+        {
+            "Sid": "ReadWorkerDsnForPillar09Subprocess",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter"
+            ],
+            "Resource": [
+                "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url"
+            ]
+        },
+        {
+            "Sid": "DecryptSsmSecureStringsViaSsm",
+            "Effect": "Allow",
+            "Action": [
+                "kms:Decrypt"
+            ],
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {
+                    "kms:ViaService": "ssm.ca-central-1.amazonaws.com"
+                }
+            }
+        },
+        {
+            "Sid": "ProducerSendToMemoryTasksQueueStep29yC32",
+            "Effect": "Allow",
+            "Action": [
+                "sqs:GetQueueUrl",
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes"
+            ],
+            "Resource": [
+                "arn:aws:sqs:ca-central-1:729005488042:luciel-memory-tasks"
+            ]
+        }
+    ]
+}

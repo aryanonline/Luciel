@@ -131,7 +131,7 @@ class AsyncMemoryPillar(Pillar):
         # and act as a smoke test for the import surface itself.
         degraded_summary = self._run_degraded_checks(state)
 
-        if _broker_reachable() and _worker_reachable():
+        if _broker_reachable() and _worker_reachable(state):
             full_summary = self._run_full_checks(state)
             return PillarOutcome(
                 Outcome.FULL,
