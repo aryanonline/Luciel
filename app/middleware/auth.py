@@ -15,6 +15,14 @@ so chat_service (File 15) can resolve persona / provider / tools / prompt
 from the bound LucielInstance. None for legacy / unbound keys -> legacy
 fallback path in chat_service.
 
+PATCHED (Step 30b commit (c)): Inject the four widget-related fields
+from api_keys onto request.state for downstream consumption by the
+widget endpoint. The middleware does NOT enforce origin or key_kind
+here -- the existing middleware is shared by every authenticated
+route and admin/server-to-server keys must continue to flow without
+origin checks. Enforcement lives in app/api/widget_deps.py, scoped
+only to the widget endpoint that needs it.
+
 PATCHED (Step 24.5b File 2.4): Inject actor_user_id onto request.state.
 Resolved from the Agent row keyed by (tenant_id, domain_id, agent_id) when
 the key is agent-scoped. None for tenant-admin / platform-admin keys (no
@@ -66,6 +74,15 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
             if path.startswith(skip_path) or path == skip_path:
                 return await call_next(request)
 
+        # Step 30b commit (c): CORS preflight has no Authorization
+        # header by spec; let it pass through to the route handler
+        # which answers with the CORS-allowed headers (origin check
+        # happens against any active embed key's allowlist there).
+        # This applies only to the widget endpoint -- other endpoints
+        # are not browser-callable and never see OPTIONS.
+        if request.method == "OPTIONS" and path == "/api/v1/chat/widget":
+            return await call_next(request)
+
         is_admin_route = any(
             path.startswith(admin_path) for admin_path in ADMIN_AUTH_PATHS
         )
@@ -105,6 +122,16 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
             key_prefix = apikey.key_prefix
             actor_label = apikey.created_by
             luciel_instance_id = apikey.luciel_instance_id
+
+            # Step 30b commit (c): widget-related fields. NOT enforced here;
+            # surfaced for the widget endpoint dependency to consume. Existing
+            # admin keys carry key_kind='admin' (column default) and NULLs for
+            # the other three -- the widget endpoint rejects any non-'embed'
+            # key, so admin keys cannot accidentally drive widget traffic.
+            key_kind = getattr(apikey, "key_kind", "admin") or "admin"
+            allowed_origins = getattr(apikey, "allowed_origins", None)
+            rate_limit_per_minute = getattr(apikey, "rate_limit_per_minute", None)
+            widget_config = getattr(apikey, "widget_config", None)
 
             # Step 24.5b: resolve user_id from the bound Agent row.
             # Only agent-scoped keys carry a meaningful user_id;
@@ -175,5 +202,12 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
         request.state.actor_label = actor_label
         request.state.luciel_instance_id = luciel_instance_id
         request.state.actor_user_id = actor_user_id  # Step 24.5b
+
+        # Step 30b commit (c): widget fields surfaced for the widget
+        # endpoint dependency. Other routes ignore these.
+        request.state.key_kind = key_kind
+        request.state.allowed_origins = allowed_origins
+        request.state.rate_limit_per_minute = rate_limit_per_minute
+        request.state.widget_config = widget_config
 
         return await call_next(request)
