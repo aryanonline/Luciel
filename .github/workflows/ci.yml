@@ -95,6 +95,45 @@ jobs:
         # collection error here.
         run: python -m pytest tests/verification/test_pillars.py -v
 
+  widget-build-and-size:
+    name: Widget bundle build + size gate (Step 30b)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: widget/package-lock.json
+
+      - name: install widget deps
+        # `npm ci` requires a committed package-lock.json. The first
+        # time CI runs this job, the file will not exist yet and we
+        # fall back to `npm install` so the gate produces signal
+        # rather than failing on missing lockfile. Subsequent commits
+        # MUST commit the lockfile -- the size budget is meaningless
+        # without pinned dep versions.
+        working-directory: widget
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::warning::widget/package-lock.json missing -- using npm install. Commit the lockfile."
+            npm install --no-audit --no-fund
+          fi
+
+      - name: build widget
+        working-directory: widget
+        run: npm run build
+
+      - name: enforce <=40 KB gzipped ceiling
+        working-directory: widget
+        run: npm run size
+
   # ---------------------------------------------------------------------------
   # Future job (intentionally not enabled now): full pillar verify suite.
   # Uncomment + flesh out when we're ready to pay the per-push minutes for

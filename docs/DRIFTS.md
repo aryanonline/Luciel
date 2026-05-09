@@ -122,6 +122,18 @@ Every drift below is tagged with the section that raised it. Production-only dri
 **Repo state:** Restored verbatim in commit `2903bc4` (Step 29.y postmerge, recap restore from v3.4) and re-incorporated into the product-philosophy-first rewrite in commit `e56887b`. The canonical recap on `main` at `c3ed8b6` carries the substantive answers.
 **Resolution path:** Self-correction recorded for audit. Moves to Section 5 in this commit (commit (a) of the reconciliation pass).
 
+### D-embed-key-issuance-workflow-missing-2026-05-09
+
+**Status:** OPEN — blocks Step 30b success criterion
+**Raised by:** Step 30b commit (e) end-of-build review.
+**Design claim:** CANONICAL_RECAP §12 Step 30b row: "A company adds a few lines of code to their site, and within an hour their visitors are having real conversations with the company's Luciel." The within-an-hour clause requires an operator-runnable issuance path that produces an embed key with `key_kind='embed'`, `permissions=['chat']`, a non-empty `allowed_origins`, a `rate_limit_per_minute`, and a populated `widget_config`.
+**Repo state:** `app/services/api_key_service.py:create_key` mints rows on the `api_keys` table but does not validate the embed-key invariants (the four columns added in commit (b) are accepted positionally as kwargs and pass through unchecked). No admin endpoint, no CLI, no runbook produces a key in the embed shape today; an operator would have to write the row by hand and read the raw key out of the create_key return value, which is not a workflow we can hand to ourselves let alone a customer.
+**Operational impact:** The widget bundle and the gate are both green, but no one can issue the credential they validate. First paying customer cannot self-serve, and the operator's manual path is fragile (hand-rolled SQL, no audit row, no SSM write).
+**Owning roadmap step:** Step 30b. Closes when the issuance path lands and an operator can mint an embed key in under five minutes against any tenant. Likely shape: extend `app/api/v1/admin.py` with `POST /api/v1/admin/embed-keys` that wraps `create_key` with the embed-shape validation + writes the four widget columns, and a small CLI (`scripts/mint-embed-key.py`) for operator use before the admin UI exists.
+**Pattern E:** New rows only; no mutation of existing keys. Audit emission via the same `AdminAuditRepository.record` path the rest of `api_key_service` uses.
+
+---
+
 ### D-retention-purge-worker-missing-2026-05-09
 
 **Status:** OPEN — load-bearing; needs a roadmap home
@@ -144,6 +156,19 @@ These are claims in `ARCHITECTURE.md` whose verification requires operator-side 
 **Raised by:** Architecture §3.2.1 and §3.6 diagram (WAF in front of ALB)
 **Repo state:** No CFN template in `cfn/` provisions a WAF Web ACL. No infra-as-code claim of a WAF.
 **Resolution path:** Operator confirms whether a WAF Web ACL is associated with the production ALB. If yes, capture its arn and the rule set. If no, mark §3.2.1's WAF claim as 📋 Planned and open a roadmap item.
+
+### D-prod-widget-bundle-cdn-unprovisioned-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B] — blocks Step 30b success criterion
+**Raised by:** Step 30b commit (e) end-of-build review.
+**Design claim:** CANONICAL_RECAP §12 Step 30b row: customers add "a few lines of code to their site" and the widget loads. That requires the bundle to be reachable from any customer origin under a stable, cacheable URL.
+**Repo state:** The widget bundle is built on every push by the `widget-build-and-size` CI job (commit d) and ships at 9.2 KB gzipped, but it is published nowhere. There is no S3 bucket, no CloudFront distribution, no infrastructure-as-code claim of either, and no deploy step in CI that uploads `widget/dist/luciel-chat-widget.js` to a CDN.
+**Resolution path (Phase 2B with operator):**
+  1. Provision an S3 bucket (private, with CloudFront OAC). Bucket name follows the existing `cfn/` naming convention if one exists; otherwise pick `luciel-widget-cdn-prod-<region>`.
+  2. Provision a CloudFront distribution serving from the bucket with a long max-age on the hashed bundle filename and a short max-age on a stable `widget.js` alias if we want versionless URLs.
+  3. Add a CI job (gated to `main`, after the size job passes) that uploads `widget/dist/luciel-chat-widget.js` plus its `.map` to the bucket on every merge.
+  4. Document the public URL in `docs/CANONICAL_RECAP.md` Step 30b row only after the URL is reachable from outside our network.
+**Pattern E:** No row mutations. CDN artifacts are forward-only; old hashed paths stay reachable for any customer that pinned a specific version.
 
 ### D-prod-multi-az-rds-unverified-2026-05-09
 

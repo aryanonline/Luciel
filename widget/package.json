@@ -1,0 +1,24 @@
+{
+  "name": "@luciel/chat-widget",
+  "version": "0.1.0",
+  "description": "Luciel embeddable chat widget. Preact + TypeScript. Single ESM, <=40 KB gzipped.",
+  "type": "module",
+  "private": true,
+  "files": ["dist"],
+  "scripts": {
+    "build": "vite build",
+    "size": "node scripts/check-bundle-size.mjs",
+    "ci": "npm run build && npm run size",
+    "mock-backend": "node scripts/mock-backend.mjs",
+    "test:e2e": "npm run build && node scripts/e2e-smoke.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "preact": "^10.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.10"
+  }
+}
