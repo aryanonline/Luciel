@@ -256,6 +256,15 @@ Closed drifts are kept here permanently with a strikethrough heading. The closin
 **Closing commit:** `bf7dff4` (architecture rewrite, terminology sweep)
 **Resolution:** Operator caught isolation/enforcement claims framed at the tenant level when the actual guarantee is at the scope level (any of tenant, domain, agent, or instance). 7-edit terminology sweep applied: scope language used for isolation guarantees; tenant/domain/agent/instance reserved for cases where the specific scope level genuinely matters (per-tenant DB tier, named memory kinds, hierarchy diagrams).
 
+### Step 29.z — Repo-vs-Design audit (no findings)
+
+**Status:** AUDIT COMPLETE on 2026-05-09; no fix-here drifts surfaced.
+**Audit scope:** Treat `CANONICAL_RECAP.md`, `ARCHITECTURE.md`, and `DRIFTS.md` as ground truth; walk the repo top-down; for any divergence, classify as fix-here, new drift, or doc edit. Sandbox-only, no behavior changes, no AWS, no production touched.
+**What was checked:** repo top-level layout; `app/` mapped to the six-component model (Persona, Runtime, Memory, Tool, Policy, Observability) plus the four cross-cutting concerns (scope isolation, audit chain, Pattern E, retention); 25 verification pillars file presence; alembic migration count and recency; tenant-vs-scope terminology footprint (113 files, ~2000 occurrences); root-level task-definition manifests; runtime stub depth.
+**Result:** Zero material code-vs-doc misalignments that warrant a repo fix in this branch. Every gap that surfaced during the audit was already an open drift in Section 3 (`D-context-assembler-thin`, `D-celery-task-surface-thin`, `D-retention-purge-worker-missing`, `D-confirmation-gate-not-enforced`, `D-channels-only-chat-implemented`, `D-external-integrations-llm-only`) and is owned by an existing roadmap step (30c, 34, 34a). Cosmetic items deliberately not pursued: pillar filename `cross_tenant_*` vs doc concept `scope_leak` (renaming would touch the verification entry points without changing behavior); root-level `td-*.json` task-def manifests (intentionally tracked, referenced by deployment runbooks). The `tenant` term is preserved throughout the codebase as the legitimate top-of-hierarchy scope-level name per the resolution of `D-tenant-language-vs-scope-language-2026-05-09`.
+**Why this entry exists:** A no-findings audit is itself a finding worth recording — it certifies that on this date, with these three docs as ground truth, the repo was aligned. Future drift hunts can anchor against this baseline. The `step-29z-repo-reconciliation` branch was cut and abandoned without commits because there was nothing to ship.
+**Closing commit:** this commit.
+
 ---
 
 ## Section 6 — How drifts are added, closed, or reopened
