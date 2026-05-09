@@ -167,6 +167,19 @@ class ApiKeyService:
         ssm_region: str | None = None,              # Step 27a
         ssm_path: str | None = None,
         audit_ctx: AuditContext | None = None,
+        # ----- Step 30b commit (a) of step-30b-embed-key-issuance -----
+        # Four keyword-only kwargs surfacing the embed-key columns added
+        # by alembic migration a7c1f4e92b85. All default to admin-key
+        # behavior so every existing caller (admin-key endpoint, SSM
+        # bootstrap, rotation cascade, tests) continues to work
+        # unchanged. The new embed-key issuance endpoint passes all
+        # four. ssm_write is incompatible with key_kind='embed' (the
+        # customer must read the raw key out of the response, not
+        # SSM); enforced below.
+        key_kind: str = "admin",
+        allowed_origins: list[str] | None = None,
+        rate_limit_per_minute: int | None = None,
+        widget_config: dict | None = None,
     ) -> tuple[ApiKey, str | None]:
         """
         Create a new API key.
@@ -211,7 +224,38 @@ class ApiKeyService:
         audit row is always attributable. New callers (admin endpoints,
         operator scripts) MUST thread the request-scoped AuditContext
         through.
+
+        Step 30b commit (a) of step-30b-embed-key-issuance: four new
+        keyword-only kwargs surface the embed-key columns added by
+        alembic migration a7c1f4e92b85.
+          - key_kind         : 'admin' (default) or 'embed'
+          - allowed_origins  : NULL (default) for admin keys; non-empty
+                               list for embed keys
+          - rate_limit_per_minute : NULL (default) for admin keys; positive
+                                    int for embed keys
+          - widget_config    : NULL (default) for admin keys; three-knob
+                               JSONB-serializable dict for embed keys
+        Shape invariants for embed keys are NOT enforced here -- the
+        EmbedKeyCreate Pydantic schema and the admin endpoint enforce
+        them upstream. This service intentionally accepts any kwarg
+        combination so unit tests for negative paths can construct
+        invalid rows without monkey-patching. The one rule we DO
+        enforce here is mutual exclusion between embed keys and
+        ssm_write, because that combination has no legitimate use
+        case and would cost real time to debug if it slipped through.
         """
+        if key_kind == "embed" and ssm_write:
+            # Embed keys are customer-facing; the customer needs the
+            # raw value to paste into their HTML, and customers cannot
+            # read SSM parameters owned by Luciel. Refusing this combo
+            # at the service layer prevents a future caller from
+            # accidentally minting an unrecoverable embed key.
+            raise ValueError(
+                "ssm_write=True is incompatible with key_kind='embed'. "
+                "Embed keys must be returned to the customer at issuance "
+                "time so they can paste the value into their site."
+            )
+
         raw_key = generate_raw_key()
         hashed = hash_key(raw_key)
 
@@ -227,6 +271,13 @@ class ApiKeyService:
             rate_limit=rate_limit,
             active=True,
             created_by=created_by,
+            # Step 30b commit (a) of step-30b-embed-key-issuance:
+            # forward the four widget columns. Defaults preserve
+            # admin-key behavior; admin-key endpoint never sets these.
+            key_kind=key_kind,
+            allowed_origins=allowed_origins,
+            rate_limit_per_minute=rate_limit_per_minute,
+            widget_config=widget_config,
         )
         self.db.add(api_key)
 
@@ -259,6 +310,31 @@ class ApiKeyService:
         # audit row rides our commit boundary -- if the commit fails or
         # is rolled back by a later step (e.g. ssm_write retry path),
         # the audit row is rolled back with it.
+        # Step 30b commit (a) of step-30b-embed-key-issuance: extend
+        # the audit-row payload with the four widget columns when
+        # they are non-default, so the audit log captures whether a
+        # row landed as an embed key with which origins/cap/branding.
+        # We do NOT record the widget_config verbatim because greeting
+        # and display_name are customer-facing strings; we record only
+        # the keys that were set, which is enough to prove the row's
+        # shape without leaking content into the audit trail. The
+        # raw branding text is recoverable from api_keys directly.
+        audit_after: dict = {
+            "display_name": display_name,
+            "permissions": api_key.permissions,
+            "rate_limit": rate_limit,
+            "bound_to_luciel_instance": luciel_instance_id is not None,
+            "ssm_write": ssm_write,
+        }
+        if key_kind != "admin":
+            audit_after["key_kind"] = key_kind
+        if allowed_origins:
+            audit_after["allowed_origins_count"] = len(allowed_origins)
+        if rate_limit_per_minute is not None:
+            audit_after["rate_limit_per_minute"] = rate_limit_per_minute
+        if widget_config:
+            audit_after["widget_config_keys"] = sorted(widget_config.keys())
+
         AdminAuditRepository(self.db).record(
             ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
                 label="create_key"
@@ -271,13 +347,7 @@ class ApiKeyService:
             domain_id=domain_id,
             agent_id=agent_id,
             luciel_instance_id=luciel_instance_id,
-            after={
-                "display_name": display_name,
-                "permissions": api_key.permissions,
-                "rate_limit": rate_limit,
-                "bound_to_luciel_instance": luciel_instance_id is not None,
-                "ssm_write": ssm_write,
-            },
+            after=audit_after,
             note=None,
             autocommit=False,
         )

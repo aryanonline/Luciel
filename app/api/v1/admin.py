@@ -85,7 +85,14 @@ from app.schemas.admin import (
     TenantConfigRead,
     TenantConfigUpdate,
 )
-from app.schemas.api_key import ApiKeyCreate, ApiKeyCreateResponse, ApiKeyRead
+from app.schemas.api_key import (
+    ApiKeyCreate,
+    ApiKeyCreateResponse,
+    ApiKeyRead,
+    EmbedKeyCreate,
+    EmbedKeyCreateResponse,
+    EmbedKeyRead,
+)
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService
 from app.services.memory_admin_service import MemoryAdminService
@@ -628,6 +635,158 @@ def list_api_keys(
         keys = [k for k in keys if k.domain_id == caller_domain]
 
     return [ApiKeyRead.model_validate(k) for k in keys]
+
+
+# =====================================================================
+# Step 30b commit (b) of step-30b-embed-key-issuance
+# =====================================================================
+#
+# POST /admin/embed-keys -- mint an embed key for the chat widget.
+#
+# Why this is a sibling endpoint to /admin/api-keys, not an overload:
+#   - The credential class is server-set (key_kind='embed'), not
+#     client-supplied. Operators cannot accidentally mint an admin
+#     key through this URL or vice versa.
+#   - The request body schema (EmbedKeyCreate, extra='forbid')
+#     rejects any field that belongs to the admin-key surface
+#     (key_kind, permissions, agent_id, luciel_instance_id,
+#     ssm_write, etc.) so the URL alone determines what credential
+#     class is being minted.
+#   - The admin-key path is touched ZERO. No conditional branches in
+#     create_api_key, no risk of regressing the admin surface while
+#     building out the embed surface.
+#
+# Scope policy mirrors create_api_key exactly: the caller can mint
+# an embed key only at or below their own scope. A tenant-scoped
+# admin key minted for tenant X cannot mint an embed key for tenant Y;
+# a domain-scoped admin key cannot mint a tenant-wide embed key. We
+# additionally refuse minting embed keys with NULL tenant_id (those
+# would be cross-tenant by definition, which the EmbedKeyCreate schema
+# already rejects, but we restate the rule here so the endpoint is
+# self-contained and a future schema relaxation cannot accidentally
+# punch through).
+#
+# Per the doc-discipline rule (commit c729cd5 on main): this commit
+# does not edit the canonical docs. The drift entry stays open until
+# commit (d) lands the strikethrough alongside doc updates.
+# =====================================================================
+
+@router.post(
+    "/embed-keys",
+    response_model=EmbedKeyCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+def create_embed_key(
+    request: Request,
+    payload: EmbedKeyCreate,
+    db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> EmbedKeyCreateResponse:
+    """Mint an embed key for the chat widget.
+
+    The Pydantic schema (EmbedKeyCreate) does the heavy lifting:
+    origin shape validation, length caps on widget_config, HTML
+    rejection, wildcard rejection, dedupe, lowercase normalization.
+    By the time this function body runs, the payload is already in
+    the canonical shape.
+
+    What this function adds on top of the schema:
+      1. Scope policy enforcement (caller must be at or above the
+         target scope).
+      2. Mutual exclusion with admin-key minting (the URL alone
+         disambiguates; we do NOT inspect payload.permissions because
+         the schema rejects that field outright).
+      3. Server-set key_kind='embed' and permissions=['chat'] passed
+         to ApiKeyService.create_key. The schema does not accept
+         these fields from the client; this is the only place they
+         get set.
+    """
+    # --- Scope policy: caller mints at or below their own scope ----
+    # Reuse the existing helper from create_api_key. Embed keys never
+    # carry agent_id or luciel_instance_id at v1, so we pass None for
+    # both -- the helper treats that as "no agent constraint", which
+    # is correct: the embed key is tenant- or domain-scoped only.
+    ScopePolicy.enforce_agent_scope(
+        request,
+        payload.tenant_id,
+        payload.domain_id,
+        agent_id=None,
+    )
+
+    # Domain-scoped callers cannot mint tenant-wide embed keys (i.e.
+    # the request must specify a domain_id that matches the caller's
+    # domain). Same rule as admin keys; restated here for clarity.
+    caller_domain = getattr(request.state, "domain_id", None)
+    if caller_domain and not ScopePolicy.is_platform_admin(request):
+        if payload.domain_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Domain-scoped key may not mint tenant-wide embed keys",
+            )
+        if payload.domain_id != caller_domain:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Domain-scoped key may only mint embed keys within its own domain",
+            )
+
+    # Agent-scoped callers cannot mint embed keys at all (embed keys
+    # are tenant- or domain-scoped at v1; per-agent embed keys would
+    # require pinning to a luciel_instance, which is a Step 30c+
+    # follow-up). Refusing here keeps the v1 contract narrow.
+    caller_agent = getattr(request.state, "agent_id", None)
+    if caller_agent and not ScopePolicy.is_platform_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Agent-scoped keys cannot mint embed keys at v1. "
+                "Use a tenant- or domain-scoped admin key."
+            ),
+        )
+
+    # --- Mint via ApiKeyService -------------------------------------
+    # The four embed-only kwargs were added in commit (a). The audit
+    # row is emitted in the same transaction as the api_keys INSERT
+    # (Invariant 4: audit-before-commit), and the audit 'after'
+    # payload records key_kind='embed', allowed_origins_count, the
+    # rate_limit_per_minute, and the widget_config keys that were
+    # set -- enough to prove the row's shape without leaking customer-
+    # facing branding text into the audit log.
+    service = ApiKeyService(db)
+    api_key, raw_key = service.create_key(
+        tenant_id=payload.tenant_id,
+        domain_id=payload.domain_id,
+        agent_id=None,
+        luciel_instance_id=None,
+        display_name=payload.display_name,
+        # Server-set: the schema does not accept these from the client.
+        permissions=["chat"],
+        # Per-day rate_limit is an admin-key concept; embed keys are
+        # gated by rate_limit_per_minute. We set rate_limit to 0
+        # (=unlimited at the per-day layer) because the per-minute
+        # cap is the only quota that applies and we don't want to
+        # double-gate on a column that has no semantic meaning here.
+        rate_limit=0,
+        created_by=payload.created_by,
+        audit_ctx=audit_ctx,
+        key_kind="embed",
+        allowed_origins=payload.allowed_origins,
+        rate_limit_per_minute=payload.rate_limit_per_minute,
+        widget_config=payload.widget_config.to_jsonb(),
+    )
+
+    # raw_key is always non-None here because ssm_write defaulted to
+    # False (and is in fact rejected by create_key when key_kind='embed').
+    assert raw_key is not None, (
+        "create_key returned None raw_key for an embed key; this would "
+        "mean ssm_write slipped through, which create_key explicitly "
+        "rejects. Investigate immediately."
+    )
+
+    return EmbedKeyCreateResponse(
+        embed_key=EmbedKeyRead.model_validate(api_key),
+        raw_key=raw_key,
+    )
 
 
 @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)

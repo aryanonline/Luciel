@@ -50,13 +50,16 @@ import logging
 
 from fastapi import HTTPException, Request, status
 
+# Step 30b commit (a) of step-30b-embed-key-issuance: import the
+# embed-permission contract from the schema layer so the runtime gate
+# (this module) and the issuance validator (app.api.v1.admin via the
+# EmbedKeyCreate schema) read from the same frozenset object. Pre-30b
+# this constant lived here as a private '_EMBED_REQUIRED_PERMISSIONS';
+# the schema layer is the canonical home for permission vocabulary
+# (alongside ALLOWED_PERMISSIONS).
+from app.schemas.api_key import EMBED_REQUIRED_PERMISSIONS
+
 logger = logging.getLogger(__name__)
-
-
-# Embed keys at v1 carry exactly this permission set. Step 30c will
-# extend the lockstep contract to allow ['chat', 'tool:routine'] etc.
-# once the action classifier is in place.
-_EMBED_REQUIRED_PERMISSIONS: frozenset[str] = frozenset({"chat"})
 
 
 # Stable error codes the widget bundle reads to render the right UI
@@ -113,7 +116,7 @@ def require_embed_key(request: Request) -> dict:
             },
         )
 
-    if frozenset(permissions) != _EMBED_REQUIRED_PERMISSIONS:
+    if frozenset(permissions) != EMBED_REQUIRED_PERMISSIONS:
         # Lockstep with Step 30c: until the action classifier ships,
         # embed keys are conversational only. A future commit relaxes
         # this gate by adding tier-scoped permission tokens.
