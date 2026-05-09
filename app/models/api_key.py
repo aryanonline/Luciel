@@ -16,6 +16,7 @@ Each key is scoped to a tenant and optionally to a domain and agent.
 from __future__ import annotations
 
 from sqlalchemy import JSON, Boolean, String
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -74,3 +75,40 @@ class ApiKey(Base, TimestampMixin):
 
     created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     """Audit field — who created this key."""
+
+    # Step 30b — chat widget embed keys.
+    # See alembic/versions/a7c1f4e92b85_step30b_api_keys_widget_columns.py
+    # for the full rationale on why these live on api_keys rather than
+    # a separate embed_keys table. The four columns together gate the
+    # public widget surface: key_kind discriminates admin vs embed,
+    # allowed_origins enforces the Origin header allowlist, the per-
+    # minute cap is the burst guard distinct from the per-day rate
+    # limit, and widget_config holds the three branding knobs that
+    # are safe to render without inviting XSS on customer sites.
+
+    key_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="admin", server_default="admin"
+    )
+    """Credential class. 'admin' = server-to-server (existing keys; full
+    permissions array honored; no origin check; per-day rate_limit only).
+    'embed' = public widget key (must have exactly ['chat'] permissions,
+    non-empty allowed_origins, and rate_limit_per_minute set)."""
+
+    allowed_origins: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), nullable=True
+    )
+    """Origin allowlist for embed keys (scheme + host + port match).
+    NULL on admin keys; required non-empty on embed keys."""
+
+    rate_limit_per_minute: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    """Per-minute burst cap enforced before SSE stream opens. The existing
+    rate_limit column (per-day) still applies. NULL on admin keys;
+    required on embed keys."""
+
+    widget_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    """Three-knob branding payload at v1: accent_color (7-char hex),
+    greeting_message (length-capped plaintext), display_name (length-
+    capped plaintext). No logo, no font, no free-form CSS — those
+    surfaces invite XSS we cannot QA on customer sites."""
