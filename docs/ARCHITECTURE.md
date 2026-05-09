@@ -1,333 +1,522 @@
-# Luciel — Architecture (Dev + Prod)
+# Luciel — Architecture (Design)
 
-**Scope:** Code layout, data model, request flow, async flow, dev environment, AWS topology, deployment flow, verification harness, audit chain.
-**Out of scope:** Business value, pricing, roadmap. See `CANONICAL_RECAP.md`. Drifts and resolutions live in `DRIFTS.md`.
+**What this document is:** The design for how Luciel is built — both the development environment where we work, and the production environment where customers use it. Every architectural decision is anchored to a business reason from `CANONICAL_RECAP.md`.
 
-**Maintenance protocol:** Surgical edits only. When the topology, schema, or deployment shape changes, update the affected §-section in place. Log prior state in `DRIFTS.md` if the change closes a drift or supersedes a decision.
+**What this document is not:** A snapshot of what the repository currently contains. The repository is the implementation; this document is the design. The two will be reconciled in a structured comparison pass, with every gap recorded as a token in `DRIFTS.md`.
 
-**Last updated:** 2026-05-08 (Step 29.y close-out)
+**Audience:** A senior engineer, a security reviewer, a thoughtful customer doing due diligence, or a future hire who needs to understand what we are building and why.
 
----
+**Maintenance protocol:** Surgical edits only. When the design changes, update the relevant section in place and log the prior decision in `DRIFTS.md`. When the implementation catches up to a section, mark it implemented (per the marker scheme adopted in `DRIFTS.md` Phase 2).
 
-## §1 Scope-Hierarchy Primitive
-
-The platform is built around a single primitive: **every persisted row is scoped to a hierarchy** that is enforced at schema, query, and verification layers.
-
-```
-tenant
-  └── luciel_instance        (per-tenant deployment instance)
-        └── agent            (an AI persona configured for the tenant)
-              └── actor      (a human or system using the agent)
-                    └── memory_item / event / audit row
-```
-
-Enforcement layers:
-
-1. **Schema:** `tenant_id` is `NOT NULL` on every domain table. FKs cascade soft-delete via Pattern E (deactivation), not hard delete.
-2. **Query:** Every read and write filters by `tenant_id`. Verified by Pillar 13 (cross-tenant attack-test) and Pillar 11 (per-tenant memory writes).
-3. **Verification:** 25-pillar harness asserts isolation, audit, and cascade behavior on every prod-shaped run.
+**Last updated:** 2026-05-09
 
 ---
 
-## §2 Data Model
+## Section 1 — The two environments
 
-### §2.1 Live-aware tables (mutable, scoped, soft-deletable)
+Luciel runs in two environments. They are deliberately different, and the differences are part of the design.
 
-| Table | Purpose | Notes |
-|-------|---------|-------|
-| `tenants` | Tenant registry | `is_active` for soft-delete |
-| `luciel_instances` | Per-tenant runtime instance config | FK to tenant |
-| `agents` | AI personas configured for a tenant | FK to tenant + instance |
-| `actors` | Humans or systems using agents | `permissions JSONB` (Step 30b migration to typed format) |
-| `memory_items` | Tenant-scoped memory | `tenant_id NOT NULL`; per-agent FK; **no `domain` column today** (Step 31 Tier 1 gap) |
-| `*_configs` | Config tables (auth, channels, integrations, etc.) | All config tables suffix `_configs` |
+**Development.** Where we build, break, and verify. No real customer data ever enters this environment. External integrations are mocked or replaced with sandboxes. The path from a working change in development to a deployed change in production is short, automatic in the parts that should be automatic, and gated at the points that need human judgment.
 
-### §2.2 Append-only tables (no UPDATE, no DELETE)
+**Production.** Where customers use the product. Customer data lives only here. Every request is authenticated, scope-bounded, and audited. The environment is in a single Canadian region for data residency. It is designed to fail safe, recover automatically from common failures, and require a human only when something genuinely unexpected happens.
 
-| Table | Purpose | Notes |
-|-------|---------|-------|
-| `audit_events` | Three-channel audit row | Hash-chained (`prev_hash`, `current_hash`); no row deletion |
-| `verification_runs` | 25-pillar harness results | Full run history; one row per pillar per run |
-
-### §2.3 Memory item detail
-
-`memory_items` is the core retrieval surface:
-
-- `id` (UUID), `tenant_id NOT NULL`, `agent_id`, `actor_id`, `luciel_instance_id`
-- `content` (text), `embedding` (pgvector), `metadata` (JSONB)
-- `created_at`, `updated_at`, `is_active`
-- Indexed on `(tenant_id, agent_id, created_at)` and on `embedding` (HNSW)
-- Writes go through Celery worker (async); reads go through backend (sync)
-
-### §2.4 Auth + Audit (three-channel)
-
-Every privileged action writes to **three** channels:
-
-1. **`audit_events` row** — append-only, scoped, queryable
-2. **Hash chain** — `current_hash = sha256(prev_hash || row_payload)`; chain validated by Pillar 23
-3. **CloudWatch log** — JSON-structured, retained per log-group policy
-
-Audit grants are governed by Pillar 22; chain validity by Pillar 23.
-
-### §2.5 Cascade discipline (Pattern E)
-
-When a tenant is deactivated:
-
-- Application code (not DB FK) walks the scope hierarchy and sets `is_active=false` on each child row.
-- No DELETE. No row removal.
-- Audit chain stays intact (no audit rows are touched).
-- Re-activation is supported by re-flipping `is_active`; the relationship graph is preserved.
+The rest of this document describes each environment, then the cross-cutting properties that span both.
 
 ---
 
-## §3 Operator Patterns
+## Section 2 — Development environment
 
-| Pattern | Meaning | Applied where |
-|---------|---------|---------------|
-| **E — deactivate, never delete** | All "removals" set `is_active=false` | All tables; cascade walker |
-| **N — no-op safety** | Operations that find no work succeed silently | Migrations, cascade, cleanup jobs |
-| **O — operator-tagged** | Operator-initiated changes carry an actor tag in audit | All prod-ops actions |
-| **S — secrets in SSM** | No secrets in code, env files, or task defs | All credentials, DSNs, API keys |
+### 2.1 What development is for
 
----
+Development exists to do three things and only three things:
 
-## §4 Code Layout
+1. Let an engineer make a change to Luciel and see the effect immediately.
+2. Run the verification suite that proves the change did not break any existing guarantee.
+3. Produce a build artifact (a container image and a database migration plan) that can be promoted to production through a controlled path.
 
-```
-Luciel/
-├── pyproject.toml                # build + deps (no setup.py)
-├── alembic.ini
-├── alembic/
-│   └── versions/                 # migrations; latest head must match prod RDS
-├── app/
-│   ├── main.py                   # FastAPI entrypoint; audit chain listener bound here
-│   ├── settings.py               # Pydantic settings (REDIS_URL, DSN, etc., centralized)
-│   ├── db/
-│   │   ├── models/               # SQLAlchemy models per scoping primitive
-│   │   └── session.py            # psycopg v3 driver
-│   ├── api/                      # FastAPI routers
-│   ├── worker/
-│   │   ├── celery_app.py         # Celery app instance
-│   │   └── tasks/                # Async memory writes, embeddings, verification dispatch
-│   ├── auth/                     # Tenant + agent + actor identity
-│   ├── audit/                    # Three-channel audit, hash chain
-│   └── verification/
-│       ├── runner.py             # Verification harness orchestrator
-│       └── tests/
-│           ├── pillar_01_*.py
-│           ├── ...
-│           └── pillar_25_*.py    # 25 pillars total
-├── docs/
-│   ├── CANONICAL_RECAP.md        # business
-│   ├── ARCHITECTURE.md           # this file
-│   ├── DRIFTS.md                 # open + resolved
-│   ├── runbooks/
-│   ├── incidents/
-│   ├── verification-reports/
-│   └── archive/                  # superseded docs (Step 29.y close-out)
-└── infra/
-    ├── ecs/                      # task definitions per service
-    ├── cfn/                      # CloudFormation: autoscaling, alarms
-    └── ssm/                      # SSM parameter naming convention
+Development is **not** for testing with real customer data, demonstrating to customers, or running long-lived shared services. Anything that needs real-customer-equivalent conditions belongs in a separate staging environment (not yet built; see `DRIFTS.md` once Phase 2 begins).
+
+### 2.2 The pieces
+
+The development environment is a single engineer's machine plus a small set of services running locally or in tightly scoped sandboxes.
+
+**Application server (local).** The same Luciel application that runs in production, running on the engineer's machine. Connects to a local database, a local task queue, and either a sandbox or a mocked version of every external integration.
+
+**Database (local Postgres).** A local PostgreSQL instance with the same schema as production. Seeded with synthetic data — never with anything derived from a real customer. Migrations run against it on every change so schema drift cannot accumulate silently.
+
+**Task queue (local Redis + worker).** A local Redis instance brokers background jobs to a locally-running worker process. The worker is the same code as the production worker, running with the same configuration shape — the only difference is which database and queue it points at.
+
+**Foundation model access.** Calls to AI providers go to the real API in development, because mocking model behavior produces tests that pass against fiction. Cost and rate limits are handled by environment variables that an engineer can tighten on their own machine.
+
+**External integrations.** Every external integration — calendar, CRM, email, SMS, voice, payments — is replaced in development by either a documented sandbox provided by the vendor (Stripe test mode, for example) or a local mock that records what would have been sent. No development call ever touches a real customer system.
+
+**Secrets.** Development secrets are local-only, not derived from production, and never committed. The mechanism for loading them on an engineer's machine is the same mechanism production uses (a single secrets-loader function that reads from a configured source); only the source differs.
+
+### 2.3 How a change moves from local to production
+
+A change to Luciel passes through five stages, in order. The boundaries between stages are where we make sure the change is safe.
+
+1. **Local change.** Engineer modifies the code. The application server reloads automatically. The engineer verifies the change behaves as intended.
+2. **Local verification.** The verification suite runs on the engineer's machine. If it does not pass, the change does not move forward.
+3. **Branch and pull request.** The change is pushed to a branch. The pull request is the gate where another engineer (or the founder) reviews it. The verification suite runs again, in continuous integration, against a clean checkout — to catch anything that depended on the engineer's local environment.
+4. **Merge to main.** Once the pull request is approved and CI is green, the change merges to the `main` branch. Main is always deployable.
+5. **Promotion to production.** A separate, deliberate step (not a merge side-effect) builds the production container image, runs migrations, and rolls the application servers and workers. Promotion is gated on a green production verification run.
+
+The gates exist because the cost of a bad change increases exponentially after each one. A bug caught locally costs ten minutes; a bug caught in CI costs an hour; a bug caught in production after a customer noticed costs a day, a credit, and trust.
+
+### 2.4 Development environment diagram
+
+```mermaid
+flowchart LR
+  subgraph LOCAL["Engineer's machine"]
+    EDITOR["Code editor"]
+    APP["Luciel application<br/>(local)"]
+    WORKER["Background worker<br/>(local)"]
+    PG[(Local Postgres<br/>synthetic data)]
+    REDIS[(Local Redis)]
+    MOCKS["External integration<br/>mocks + sandboxes"]
+  end
+
+  subgraph EXTERNAL["External (real)"]
+    AI["Foundation model API"]
+  end
+
+  subgraph PIPELINE["Promotion pipeline"]
+    BRANCH["Feature branch<br/>+ pull request"]
+    CI["Continuous integration<br/>(verification suite)"]
+    MAIN["main branch"]
+    BUILD["Build production image<br/>+ migration plan"]
+    PROMOTE["Promote to production<br/>(gated)"]
+  end
+
+  EDITOR --> APP
+  APP --- PG
+  APP --- REDIS
+  REDIS --> WORKER
+  WORKER --- PG
+  APP --> AI
+  APP --> MOCKS
+  WORKER --> MOCKS
+
+  APP -.local verify.-> BRANCH
+  BRANCH --> CI
+  CI --> MAIN
+  MAIN --> BUILD
+  BUILD --> PROMOTE
 ```
 
+### 2.5 What development deliberately does not have
+
+These are not gaps; they are decisions.
+
+- **No real customer data.** Ever. Synthetic seeds only.
+- **No real external sends.** Calendar invites, emails, SMS, payments — all sandboxed or mocked.
+- **No production secrets.** Production secrets are unreachable from a developer machine.
+- **No long-lived shared instance.** Each engineer runs their own. A future staging environment will fill the "shared, integration-tested, customer-equivalent" role.
+- **No production data migration on local Postgres.** Migrations run forward against synthetic seeds; never copy production schema state down.
+
 ---
 
-## §5 Request Flow (Sync — Backend)
+## Section 3 — Production environment
 
+### 3.1 What production is for
+
+Production exists to do four things:
+
+1. Receive customer requests through any of the supported channels (chat widget, phone, email, SMS, and a programmatic API for integrators).
+2. Authenticate every request, resolve which scope it belongs to, and reject anything that crosses a scope boundary.
+3. Produce a Luciel response — composed of memory retrieval, tool invocation, foundation-model reasoning, and policy enforcement — and return it on the same channel.
+4. Record every consequential action in the audit trail, atomically with the action itself, so the trail cannot diverge from reality.
+
+Production is also responsible for keeping itself running — recovering from worker failures, scaling under load, and rotating secrets — without human intervention for the common cases.
+
+### 3.2 The pieces
+
+The production environment runs in **AWS, Canadian region (`ca-central-1`)**, deliberately. Customer data residency is a real differentiator for Canadian brokerages, and Canadian-region operation is a defensible answer in due diligence.
+
+#### 3.2.1 Public endpoint
+
+Customers reach Luciel through a single public hostname (the production API endpoint). The hostname is fronted by an Application Load Balancer.
+
+*Why a load balancer:* it terminates TLS once, distributes incoming requests across multiple application servers (so a single server failure does not take the platform down), and provides a single chokepoint where request rate-limits and a Web Application Firewall can be applied. The chokepoint also gives the operator a single place to flip traffic during a deployment or roll back from one.
+
+*Why not API Gateway:* an ALB is the right tool for steady-state, long-lived, multi-channel traffic with WebSocket and streaming response support. API Gateway is well-suited to bursty, request-response, function-style workloads, which Luciel is not.
+
+#### 3.2.2 Application tier
+
+A pool of application servers runs the request-handling Luciel code. Each server is identical, stateless across requests, and replaceable. Scaling is horizontal — adding capacity means adding more servers, not making any one server larger.
+
+*Why stateless:* statelessness is what makes recovery and scaling trivial. Any conversation state that needs to persist across requests lives in the database or in a session store, not in server memory. A server can die mid-request and the next request from the same conversation routes to a healthy server with no loss.
+
+*Why a pool, not a single server:* survivability. Single-server architectures fail visibly to the customer when the one server fails. A pool absorbs the failure of any one member.
+
+*Autoscaling:* application-tier capacity scales on observed load (request rate, CPU, response latency). The minimum is sized to absorb a single-server failure without customer impact; the maximum is sized to absorb any plausible burst the GTM plan would produce.
+
+#### 3.2.3 Background worker tier
+
+A separate pool of worker processes handles work that should not block a customer's chat response: ingesting documents the customer uploaded, refreshing search indexes, sending follow-up emails, running scheduled retention purges, and similar. Workers receive jobs from a queue and report results back through the database.
+
+*Why a separate tier:* a worker doing a 30-second document ingestion should never delay a customer's three-second chat response. Putting workers on their own pool isolates the two workloads from each other.
+
+*Why a queue, not direct invocation:* the queue is what makes worker failures invisible to the customer. If a worker dies mid-job, the queue redelivers the job to another worker. The customer's interaction was already complete when the job was enqueued; the worker is doing its work behind the scenes.
+
+*Worker autoscaling:* worker-tier capacity scales on queue depth and CPU. Quiet hours run a small fixed pool; busy hours scale up to absorb the backlog and scale back down once it clears.
+
+#### 3.2.4 Database — PostgreSQL on Amazon RDS, Canadian region
+
+A single managed PostgreSQL instance (with a hot standby in a second availability zone) holds the durable state of the platform.
+
+*Why Postgres:* mature, audited, and supports the relational integrity our scope hierarchy depends on. Every Luciel, memory, key, and audit row has a foreign key to its scope, and the database enforces it — so a bug in our application code cannot accidentally hand one scope another scope's data, regardless of which scope level (tenant, domain, agent, or instance) is involved.
+
+*Why managed RDS rather than self-hosted:* operational maturity. Backups, point-in-time recovery, version upgrades, and standby failover are all handled by AWS. The cost of self-hosting Postgres at this stage is engineering time we do not have to spare.
+
+*Why a single instance, not a per-tenant instance:* cost and operational simplicity. Per-tenant isolation at the row level (with hard-enforced scope foreign keys) gives us the isolation properties we need without paying for a separate database per customer. The dedicated-infrastructure tier (Section 13 of the canonical recap) provides a per-tenant database for customers whose compliance posture requires it; that is a deliberately separate product.
+
+*Two database roles, not one.* The application server connects as a privileged role that can write any table, including identity tables. Background workers connect as a least-privilege role that can read most tables and write some, but **cannot** write to identity tables, audit tables, or anything that mints or rotates keys. This is enforced at the database grant level, not in application code.
+
+*Why two roles:* a worker bug, or a worker compromise, must not be usable to mint or rotate keys. The database refuses the write, regardless of what the worker code says. Defense in depth.
+
+#### 3.2.5 Memory tier
+
+Memory is layered (per the canonical recap). The four kinds — session, user preference, domain, client operational — live as distinct logical concerns over the database, with retrieval driven by a memory service.
+
+*Session memory* lives in a fast key-value store (Redis) for the active conversation, with a short time-to-live; persistent state for that conversation is also written to Postgres so a Redis flush does not lose conversation history.
+
+*User preference memory*, *domain memory*, and *client operational memory* all live in Postgres, with vector embeddings for semantic retrieval and (per the strategic answer to Q3) an opt-in graph layer for relationship-walking queries — implemented first as recursive Postgres queries, with a path to a dedicated graph database when scale demands it.
+
+*Why layered, not flat:* different kinds of memory have different retention rules, different scoping rules, and different retrieval patterns. Flat memory cannot enforce that user preferences should expire or be exportable on request, while operational rules should not. Layering is what makes the policies enforceable.
+
+#### 3.2.6 Audit trail
+
+Every consequential action in production produces an immutable audit record. There are three independent channels, designed so a tampering attempt is detectable.
+
+- **Database audit log.** A append-only table (`admin_audit_logs`) that records every control-plane and data-plane control event (key minting, scope changes, deactivations, deletions, configuration changes). Each row is hash-chained to its predecessor — modifying any historical row breaks the chain and is detectable on the next verification run.
+- **Application log stream.** A separate stream (CloudWatch Logs) where the application emits the same audit events in human-readable form. Independent of the database. Useful for forensic investigation, incident response, and regulator-facing exports.
+- **AWS CloudTrail.** AWS's own immutable record of every IAM and infrastructure action — who logged in, who minted what, what was deployed when. We do not write to CloudTrail; AWS does, and we read it.
+
+A retention purge produces records in a fourth append-only table (`deletion_logs`) so retention events are distinguishable from control-plane events but follow the same immutability discipline.
+
+*Why three channels:* an attacker who compromises the application can write false rows to the database log, but cannot retroactively rewrite the application log stream or CloudTrail. A regulator asking "show me what happened" gets three independent answers; if they disagree, that disagreement is itself the signal.
+
+#### 3.2.7 Secrets store
+
+Every secret used in production — database credentials, foundation-model API keys, third-party integration credentials, signing keys — lives in AWS Systems Manager Parameter Store as a SecureString, encrypted with a customer-managed KMS key.
+
+*Why Parameter Store, not environment variables baked into images:* secrets in container images leak. Image layers are inspectable. A compromised image registry exposes every secret used by every image. Parameter Store decouples secrets from images — the image fetches the secret at startup, and rotating the secret means updating Parameter Store, not rebuilding and redeploying.
+
+*Why SSM, not Secrets Manager:* both work; we picked Parameter Store for cost predictability and because the audit story (CloudTrail records every read) is identical.
+
+*Pattern E:* secrets are deactivated, never deleted. A rotated secret remains in Parameter Store with a deactivated flag, so an audit query can reconstruct what credential was active at any past moment. This is part of the broader audit-chain discipline (see Section 4).
+
+#### 3.2.8 Monitoring and alerting
+
+Production emits four kinds of signal:
+
+- **Metrics:** request rate, error rate, latency percentiles, worker queue depth, database connection saturation, foundation-model token usage. CloudWatch Metrics.
+- **Logs:** the application log stream described above, plus access logs from the load balancer.
+- **Traces:** for slow or failed requests, a trace records which database calls, model calls, and tool calls were made and how long each took. Used for debugging slow conversations.
+- **Alarms:** thresholds on metrics that, when crossed, page the operator. Examples: error rate above 1% sustained for five minutes, queue depth above 1000 for ten minutes, database connection saturation above 80%.
+
+*Why all four:* metrics tell us *that* something is wrong; logs and traces tell us *what* is wrong; alarms tell us *when* to act. Removing any of the four leaves a gap.
+
+### 3.3 How a customer request flows through production
+
+A customer sends a message to a Luciel through any supported channel. Here is what happens.
+
+1. **Channel ingest.** The message arrives at the appropriate channel adapter — chat widget for web, voice gateway for phone, email gateway for email, etc. The adapter normalizes the message into the same internal format regardless of channel.
+2. **Public endpoint.** The normalized request lands at the production API endpoint, fronted by the load balancer. The load balancer terminates TLS and forwards the request to a healthy application server.
+3. **Authentication.** The request includes a key (or a session token derived from a key). The application server resolves the key to its owning scope (tenant, domain, agent, or specific Luciel instance). Unknown keys are rejected with a 401.
+4. **Scope policy check.** The server confirms the key has authority over the resource being accessed. A request to access a resource that lives outside the requesting key's scope is rejected with a 403, even if the key is otherwise valid. The rejection holds whether the boundary being crossed is between two tenants, two domains within a tenant, two agents within a domain, or two Luciel instances under the same agent. Scope is enforced at the server, and again at the database (foreign-key constraint), and again at the database role grant. Three layers.
+5. **Memory retrieval.** The server asks the memory service for context relevant to this conversation: session memory for the active conversation, user preferences if the customer is identified, domain memory for the vertical, client operational memory for the deploying organization. Retrieval is scoped — a Luciel cannot pull memory from a sibling Luciel's scope.
+6. **Reasoning.** The server assembles the persona prompt (Soul layer), the profession prompt (Profession layer), the retrieved memory, and the user's message into a foundation-model call. The model produces a response and, if needed, a tool-invocation plan.
+7. **Tool invocation.** If the response calls for an action (book an appointment, send an email, query a CRM), the server invokes the relevant tool through the tool registry. Every tool invocation goes through the same scope policy check as the original request — a tool cannot reach outside the scope of the calling Luciel.
+8. **Policy gate.** If the action is consequential (irreversible, external-facing, or above a confidence threshold), the server returns a confirmation request to the customer rather than executing immediately. The action runs only after explicit approval.
+9. **Audit emission.** Every consequential action — key resolution, scope check, tool invocation, policy gate, configuration change — produces an audit row, written atomically with the action it describes.
+10. **Response.** The final response is returned through the same channel adapter that received the message, formatted appropriately for that channel (text for chat, voice synthesis for phone, etc.).
+11. **Background work.** Anything that does not need to block the response — embedding the new message into memory, refreshing a search index, sending an external email — is enqueued for background workers.
+
+### 3.4 What guarantees the production environment provides
+
+These are the architectural commitments. Every commitment is enforced by a specific mechanism, not by good intentions.
+
+| Guarantee | How it is enforced |
+|---|---|
+| Customer data lives only in Canada | All data services and storage are in `ca-central-1` |
+| Scopes cannot access each other's data — at any level (tenant, domain, agent, or instance) | Foreign-key scope on every scope-bearing table; server-side scope policy check; least-privilege database role for workers |
+| Workers cannot mint or rotate keys | Database grants on the `luciel_worker` role exclude write access to identity and audit tables |
+| Every consequential action is audited | Three-channel audit (database, application log stream, CloudTrail), all append-only, hash-chained where applicable |
+| A single-server failure is invisible to the customer | Application tier and worker tier both run as pools; load balancer routes around failures |
+| A single-availability-zone failure is recoverable | Database has hot standby in a second availability zone; application and worker tiers run across multiple availability zones |
+| Secrets cannot be inspected from container images | All secrets in Parameter Store SecureString, encrypted with customer-managed KMS key, fetched at runtime |
+| A retention purge cannot break the audit chain | Purges write to `deletion_logs` (append-only) and run under `FOR UPDATE SKIP LOCKED` so they do not block live traffic |
+| A bad deploy can be rolled back without data loss | The application is stateless; rollback is replacing the running image with the previous one. Migrations are forward-compatible by design — a new image that adds a column does not break the previous image |
+| A scope's deactivation is atomic | Deactivating a scope flips `active=false` on the scope row and cascades through every dependent resource in a single transaction. The same mechanism handles a tenant cancelling their subscription, a domain being wound down, or an agent leaving an organization |
+
+### 3.5 What a failure looks like and how it recovers
+
+The interesting cases are the ones the platform handles without a human.
+
+**Application server crash.** The load balancer health-check detects the dead server within seconds and routes traffic away from it. Autoscaling launches a replacement. The customer experiences either a single retried request (if their request was in flight) or no impact at all.
+
+**Worker crash.** The job the worker was processing is redelivered to another worker by the queue. Idempotency on the job ensures the work is not done twice; if it was already partially complete, the second attempt picks up cleanly.
+
+**Database primary failure.** RDS automatically fails over to the standby in a second availability zone. The application tier reconnects on the next request. Customer impact is a brief (seconds) period of failed requests, which the application surfaces as a retry-after rather than an error.
+
+**Foundation model provider outage.** The reasoning step fails. The application returns a graceful fallback ("I'm having trouble reaching the model — please try again in a moment") and emits an alarm. If the outage persists, the operator can switch to a backup provider through configuration, because Luciel is model-agnostic by design.
+
+**Cascading load.** Autoscaling on both application and worker tiers absorbs the load up to their configured maximums. If the maximums are hit, the load balancer rate-limits new requests and returns a 429 — preserving service for customers already in conversation. Alarms fire to wake the operator; the operator can raise the maximums temporarily and investigate root cause.
+
+**Configuration error in a deploy.** The pre-deploy verification suite catches most configuration errors before they reach production. The ones that slip through manifest as elevated error rate post-deploy; the deploy is rolled back to the previous image while the error is investigated.
+
+**A genuine bug.** The bug is logged, traced, and (depending on severity) either rolled back or hotfixed forward. Drift token in `DRIFTS.md`. Post-incident review.
+
+### 3.6 Production architecture diagram
+
+```mermaid
+flowchart TB
+  subgraph CHANNELS["Customer channels"]
+    WEB["Chat widget<br/>(customer's website)"]
+    PHONE["Voice"]
+    EMAIL["Email"]
+    SMS["SMS"]
+    API_CH["Programmatic API"]
+  end
+
+  subgraph AWS_CA["AWS — Canadian region (ca-central-1)"]
+    direction TB
+    WAF["Web Application<br/>Firewall"]
+    ALB["Application<br/>Load Balancer<br/>(TLS termination)"]
+
+    subgraph APPTIER["Application tier (autoscaled pool)"]
+      APP1["Server 1"]
+      APP2["Server 2"]
+      APP3["Server N"]
+    end
+
+    QUEUE[(Job queue<br/>Redis/SQS)]
+
+    subgraph WORKERTIER["Worker tier (autoscaled pool)"]
+      W1["Worker 1"]
+      W2["Worker 2"]
+      W3["Worker N"]
+    end
+
+    subgraph DB["Database tier"]
+      PG_PRIMARY[(Postgres primary<br/>AZ-A)]
+      PG_STANDBY[(Postgres standby<br/>AZ-B)]
+      PG_PRIMARY -.replication.- PG_STANDBY
+    end
+
+    SESSION[(Session store<br/>Redis)]
+
+    subgraph SECRETS["Secrets and configuration"]
+      SSM["SSM Parameter Store<br/>SecureString + KMS"]
+    end
+
+    subgraph AUDIT["Audit (three channels)"]
+      AUDIT_DB[(admin_audit_logs<br/>+ deletion_logs<br/>append-only, hash-chained)]
+      CW["CloudWatch Logs<br/>(application stream)"]
+      CT["CloudTrail<br/>(IAM and infra)"]
+    end
+
+    METRICS["CloudWatch Metrics<br/>+ Alarms"]
+  end
+
+  subgraph EXTERNAL["External services"]
+    AI["Foundation model API<br/>(model-agnostic)"]
+    INTEGRATIONS["Customer integrations<br/>(CRM, calendar, email, etc.)"]
+  end
+
+  WEB --> WAF
+  PHONE --> WAF
+  EMAIL --> WAF
+  SMS --> WAF
+  API_CH --> WAF
+  WAF --> ALB
+  ALB --> APPTIER
+
+  APPTIER --> PG_PRIMARY
+  APPTIER --> SESSION
+  APPTIER --> QUEUE
+  APPTIER --> AI
+  APPTIER --> INTEGRATIONS
+  APPTIER --> SSM
+  APPTIER -- writes --> AUDIT_DB
+  APPTIER -- emits --> CW
+
+  QUEUE --> WORKERTIER
+  WORKERTIER --> PG_PRIMARY
+  WORKERTIER --> AI
+  WORKERTIER --> INTEGRATIONS
+  WORKERTIER --> SSM
+  WORKERTIER -- writes --> AUDIT_DB
+  WORKERTIER -- emits --> CW
+
+  APPTIER -.metrics.-> METRICS
+  WORKERTIER -.metrics.-> METRICS
+  PG_PRIMARY -.metrics.-> METRICS
 ```
-client → ALB (api.vantagemind.ai) → ECS service luciel-backend (FastAPI)
-   → auth middleware (tenant + agent + actor resolution)
-   → router handler
-   → DB read (psycopg v3, luciel_worker role for runtime DML)
-   → optional Celery enqueue (memory write, embedding, audit)
-   → response
-   ↓
-audit_events row + CloudWatch log line emitted on every privileged op
+
+---
+
+## Section 4 — Cross-cutting architectural properties
+
+These are properties of the system that span both environments and are not visible in any single piece. Each is a design commitment, anchored to a business reason from the canonical recap.
+
+### 4.1 Scope hierarchy as the billing boundary
+
+The scope hierarchy — `tenant → domain → agent → Luciel instance` — is the single organizing principle of the data model. Every Luciel, every memory record, every key, every audit row has a foreign key to its scope. Scope is enforced at three layers (the application server, the database foreign-key constraint, and the database role grants).
+
+*Why:* the canonical recap commits that pricing tiers map 1:1 to scope levels. If scope is leaky — if an agent-scope key can read another agent's memory — then the Individual tier delivers Team-tier value at Individual-tier price. The architecture's job is to make scope leakage impossible at the data layer, not at the application layer alone.
+
+A separate, orthogonal table set (`users`, `scope_assignments`) records who is currently assigned to which scope. People come and go; scope persists. When a person leaves, their assignments are revoked but the scope's data remains owned by the scope.
+
+### 4.2 Soul layer and Profession layer at runtime
+
+Luciel's two-layer design (Section 2 of the canonical recap) is reflected in how a request is composed.
+
+The **Soul layer** is loaded from a versioned, immutable persona configuration shared across every deployment. Changing the Soul layer is a deliberate platform-wide event. A customer cannot modify the Soul layer, and a brokerage's configuration cannot override it — this is what enforces the behavior contracts in Section 4 of the canonical recap (e.g., Luciel cannot be configured to coerce, even by a paying customer).
+
+The **Profession layer** is loaded per scope: the deploying organization's domain knowledge, tools, workflows, and configuration. This is what makes a real-estate Luciel feel like a real-estate Luciel.
+
+At runtime, both layers are composed in a single foundation-model context, with the Soul layer placed structurally so it cannot be overridden by injected Profession-layer content. This is enforced both by the prompt structure and by output-side policy checks that catch a model trying to violate Soul-layer rules even if the prompt was somehow compromised.
+
+### 4.3 Immutable audit chain
+
+Every audit-bearing table in the database is append-only and hash-chained. New rows include a hash of the previous row's content; modifying a historical row breaks the chain on the next verification run.
+
+*Why:* a regulator or a brokerage's compliance officer asking "show me what happened, and prove no one tampered with the record" gets a defensible answer. The application code cannot lie about history, because the chain is verifiable independent of the application.
+
+Three append-only tables matter most:
+
+- `admin_audit_logs` — control-plane and data-plane control events
+- `deletion_logs` — retention purge events
+- `scope_assignments_history` — every change in who is assigned to what scope
+
+A regulator-facing export merges all three streams ordered by timestamp, with bulk events expanded on demand.
+
+### 4.4 Soft-delete by default
+
+Every "delete" operation in production flips an `active=false` flag rather than removing the row. Hard purges happen only through the scheduled retention worker, after the contracted retention period.
+
+*Why:* two reasons.
+
+1. **Audit chains stay intact.** A regulator's question "what was deleted, by whom, and when?" gets a real answer.
+2. **Accidental deletes are recoverable.** A misclick by any scope admin — tenant, domain, or agent — is not a permanent data loss event during the retention window.
+
+The cost is that storage grows. The retention worker handles that, in batches sized to coexist with live traffic without lock contention.
+
+### 4.5 Cascade-correct departure
+
+When a scope is deactivated, the cascade flips `active=false` atomically across every dependent resource at and below it. Deactivating a tenant cascades through its domains, agents, Luciel instances, memory records, keys, and scope assignments. Deactivating a domain cascades through its agents, instances, and memory. Deactivating an agent cascades through their instances and memory. The cascade runs in a single transaction at every level. Partial cascades are not possible.
+
+*Why:* the canonical recap (Section 13.2 T11) commits that a customer's offboarding is a clean, atomic event. If the cascade left half the customer's resources active, the brokerage's compliance officer cannot in good conscience tell their board "we exited cleanly." Atomicity is the architectural guarantee that makes the customer-facing commitment defensible — and the same guarantee applies whether the offboarding is a whole tenant cancelling, a domain being wound down, or an individual agent leaving.
+
+### 4.6 Pattern E for secrets
+
+Every secret in production is created, rotated, and deactivated — never deleted. Rotated secrets remain in the secrets store with a deactivated flag and a timestamp.
+
+*Why:* an audit query needs to be able to reconstruct "what credential was active at this moment in the past?" Hard-deleting a rotated secret destroys that ability. Pattern E preserves it.
+
+### 4.7 Three-layer scope enforcement
+
+A request that asks for cross-scope data must be rejected, and we want that rejection to hold even if one of our defenses fails. So scope is enforced at three independent layers:
+
+1. **Application layer.** The server resolves the requesting key's scope and refuses to dispatch the request if it crosses a boundary.
+2. **Database foreign-key layer.** Every scope-bearing row's scope foreign keys are non-null and non-changeable. A bug in the application that asks for a row by ID still cannot return a cross-scope row, because the lookup includes a scope predicate that the database refuses to relax.
+3. **Database grant layer.** The least-privilege role used by workers cannot write to identity or audit tables. A worker bug or compromise cannot mint or rotate a key, regardless of what its code says.
+
+This is defense in depth. Each layer alone is sufficient most of the time; together they make a single bug in any one layer not enough to breach.
+
+### 4.8 Foundation-model agnosticism
+
+Luciel calls foundation models through a model-agnostic interface. Switching from one provider to another is a configuration change, not a rewrite.
+
+*Why:* two reasons.
+
+1. **Provider risk.** A foundation-model provider can have an outage, change its pricing, deprecate a model we depend on, or be unavailable in our region. The architecture must let us route around any single provider.
+2. **Model fitness for purpose.** Different domains and different cognitive abilities (Section 7 of the canonical recap) may be better served by different models. An evaluation framework (roadmap Step 33) is what tells us which model fits which job; agnosticism is what lets us act on the evaluation.
+
+### 4.9 Design choices we deliberately did not make
+
+These are alternatives we considered and rejected. Recording them here prevents them from being rediscovered as "new ideas."
+
+- **Per-tenant database (instead of row-level scope).** Considered and rejected at this stage because cost and operational overhead grow linearly with customer count, while row-level scope with three-layer enforcement provides the isolation properties we need. The dedicated-infrastructure tier (Section 13 of the canonical recap) is the deliberate exception, built on demand for customers whose compliance posture requires it.
+- **Single application + worker process (instead of two pools).** Rejected because it couples customer-facing latency to background work duration. A 30-second document ingestion would block a 3-second chat response.
+- **State stored on application servers (instead of stateless servers + database/session store).** Rejected because it makes survivability and scaling far harder.
+- **Synchronous tool invocation only (instead of confirmation gates for consequential actions).** Rejected because the canonical recap (Section 4) commits that Luciel does not take consequential action without permission. Synchronous-only invocation makes the commitment unimplementable.
+- **Hard-delete on cancel (instead of soft-delete + scheduled purge).** Rejected because it breaks audit chains and makes accidental deletes irreversible. Soft-delete + retention is the design.
+- **Single audit channel (instead of three independent channels).** Rejected because a single channel can be tampered with by anyone who can compromise it. Three channels make tampering detectable.
+
+---
+
+## Section 5 — Conceptual model: scope, identity, and data flow
+
+A diagram of how the pieces relate conceptually, separate from the deployment topology. Useful when reasoning about why a particular data layout is the way it is.
+
+```mermaid
+flowchart TB
+  subgraph SCOPE["Scope hierarchy (billing boundary)"]
+    TENANT["Tenant<br/>(company)"]
+    DOMAIN["Domain<br/>(department)"]
+    AGENT["Agent<br/>(individual)"]
+    INSTANCE["Luciel instance<br/>(single deployed Luciel)"]
+
+    TENANT --> DOMAIN
+    DOMAIN --> AGENT
+    AGENT --> INSTANCE
+  end
+
+  subgraph IDENTITY["Identity (orthogonal to scope)"]
+    USER["Users<br/>(email-stable identity)"]
+    ASSIGNMENT["Scope assignments<br/>(who is assigned where)"]
+    CLAIMS["Identity claims<br/>(phone, email, SSO)"]
+
+    USER --- ASSIGNMENT
+    USER --- CLAIMS
+  end
+
+  subgraph DATA["Data owned by scope"]
+    KEYS["API keys<br/>(scope-bounded)"]
+    MEM["Memory<br/>(four kinds)"]
+    KNOWLEDGE["Domain knowledge<br/>+ ingested files"]
+    AUDIT["Audit rows<br/>(append-only)"]
+  end
+
+  ASSIGNMENT -.points to.-> SCOPE
+  KEYS -.scoped to.-> SCOPE
+  MEM -.scoped to.-> SCOPE
+  KNOWLEDGE -.scoped to.-> SCOPE
+  AUDIT -.scoped to.-> SCOPE
+
+  subgraph CHANNELS_C["Channels (configured per scope)"]
+    WIDGET["Chat widget"]
+    VOICE["Voice"]
+    EMAIL_C["Email"]
+    SMS_C["SMS"]
+  end
+
+  CHANNELS_C -.dispatch to.-> INSTANCE
 ```
 
-Key invariants:
+The two important things this diagram shows:
 
-- Every DB query filters by `tenant_id` resolved from auth context.
-- Auth resolution failure returns 401 before any DB read.
-- Backend is **stateless**; no in-process queue, no in-process cache that crosses requests.
-- Backend currently **runs without autoscaling** (Step 30 — deliberate, ALB-fronted steady-state).
+1. **Identity (people) is orthogonal to scope (data).** Sarah is a `User`. Sarah's `scope_assignments` say which scopes she has authority over. The data she works with belongs to the scope, not to her. When Sarah's role changes, her assignments change; the data does not.
+2. **Channels are dispatched per scope.** A single Luciel instance can be reachable through multiple channels. Adding a channel is a configuration change on the instance, not a separate product.
 
 ---
 
-## §6 Async Flow (Worker)
+## Section 6 — Maintenance protocol
 
-```
-backend → Celery enqueue (Redis broker) → ECS service luciel-worker
-   → Celery task picks up
-   → DB write (memory_item, audit, embedding)
-   → CloudWatch log
-   ↓
-DLQ on repeated failure (alarm binding pending — Step 31 Tier 4)
-```
-
-Worker autoscaling: **LIVE** since 2026-05-05.
-
-- CFN stack: `luciel-prod-worker-autoscaling`
-- Capacity: 1–4
-- Target: CPU 60%
-- Cooldowns: scale-out 60s, scale-in 300s
+- This document is the design. It does not describe what the repository currently contains.
+- Surgical edits only. When a design decision changes, update the relevant section in place and log the prior decision in `DRIFTS.md`.
+- When the repository catches up to a section, an implementation marker is added to that section (per the marker scheme adopted in `DRIFTS.md` Phase 2).
+- No version-history sediment. The document reflects the current design.
+- One source of truth per fact. If a fact appears in two sections, delete one.
+- The diagrams are part of the design, not decoration. When a diagram disagrees with the prose, both are wrong until they agree.
 
 ---
 
-## §7 Verification Harness (25 Pillars)
+## Section 7 — Source-of-truth rule
 
-Pillars cover scope isolation, auth, audit, cascade, async correctness, performance, and infrastructure. Each pillar emits a row to `verification_runs` per run.
-
-| Pillar | Focus | Notable detail |
-|--------|-------|----------------|
-| P1–P10 | Identity, schema, FK integrity, soft-delete | Foundation |
-| P11 | Async memory write end-to-end | F1 warm-up patch (C32c) ensures steady-state latency, not cold-start, is measured |
-| P13 | Cross-tenant attack | A5 attempts a write under tenant A as tenant B; must fail |
-| P14 | Verify task on prod-shaped TD | Caught stale-image bug in C31 |
-| P22 | Audit grants | Validates `audit_events` insert permissions |
-| P23 | Audit hash chain | `prev_hash || payload → current_hash` continuity |
-| P24–P25 | Operational invariants | DLQ, autoscaling presence |
-
-Latest run: F.1.b verify task `de3abaabe5534c06a21df87f2f479fc1` — **25/25 FULL** on `luciel-verify:20` (rev32 digest `sha256:22b2a029d4e7b363fb0b71ea91aa2972dd5459dbb767f952eef8e923be280adb`), exitCode 0.
-
-Runner entrypoint: `app/verification/runner.py`. Pillar tests: `app/verification/tests/pillar_*.py`.
-
----
-
-## §8 Dev Environment
-
-- **OS:** Windows 11; primary shell PowerShell from `C:\Users\aryan\Projects\Business\Luciel`
-- **Python:** virtualenv `.venv`, Python 3.x with `pyproject.toml` deps (`pip install -e .`)
-- **Local DB:** Docker PostgreSQL with pgvector extension; matches prod schema via Alembic
-- **Local Redis:** Docker Redis; broker for Celery worker
-- **IDE:** VS Code with Python + Docker extensions
-- **Linting/formatting:** project-pinned via `pyproject.toml`
-- **Git:** feature branches, detailed commit messages prefixed by step (e.g., `Step 29.y gap-fix C33a: ...`)
-- **Push remote:** `https://git-agent-proxy.perplexity.ai/aryanonline/Luciel.git` with `api_credentials=["github"]`
-
-Dev workflow:
-
-1. Create or check out feature branch (e.g., `step-29y-gapfix`)
-2. Implement change + alembic migration if schema touches
-3. Run pillar tests locally for any pillar the change touches
-4. Commit with `Step <N>.<x> <Cn>: <message>`
-5. Push; deploy to prod follows the runbook for the relevant step
-6. Verify via `luciel-verify:<N>` task on prod-shaped TD
-
----
-
-## §9 Production AWS Topology
-
-- **Account:** `729005488042`
-- **Region:** `ca-central-1` (Canada Central)
-- **Domain:** `api.vantagemind.ai`
-
-### §9.1 Network
-
-- VPC with public + private subnets across 2 AZs
-- Worker network: subnets `subnet-0e54df62d1a4463bc`, `subnet-0e95d953fd553cbd1`; SG `sg-0f2e317f987925601`; `assignPublicIp` ENABLED
-- ALB in public subnets fronting `luciel-backend` service
-
-### §9.2 Compute (ECS)
-
-- **Cluster:** `luciel-cluster`
-- **Services:**
-  - `luciel-backend` — FastAPI behind ALB; **no autoscaling** (Step 30)
-  - `luciel-worker` — Celery worker; **autoscaling LIVE** (1–4, CPU 60%) since 2026-05-05
-  - `luciel-prod-ops` — operator runner for SSM/IAM tasks (TD `luciel-prod-ops:3`)
-  - `luciel-verify` — verification harness runner (TD `luciel-verify:20`)
-
-Active task definitions (as of Step 29.y):
-- `luciel-backend:34`
-- `luciel-worker:14`
-- `luciel-prod-ops:3`
-- `luciel-verify:20`
-
-ECR rev32 image: `sha256:22b2a029d4e7b363fb0b71ea91aa2972dd5459dbb767f952eef8e923be280adb`
-
-### §9.3 Data
-
-- **RDS PostgreSQL** in `ca-central-1`, multi-AZ, in private subnets
-  - Roles: `luciel_admin` (DDL/migrations), `luciel_worker` (runtime DML)
-  - pgvector extension installed
-  - **No alembic-head-vs-RDS startup check** (open drift — Step 30 carry-forward)
-  - **No cross-region replication** (Step 38 cluster 4b carry-forward)
-- **Redis** (Celery broker) — `REDIS_URL` centralized in `app/settings.py` (closed C19/C30)
-- **SSM Parameter Store** — all secrets; rotation supported (closed C24)
-
-### §9.4 Identity / IAM
-
-- `luciel-prod-ops` role — operator actions; SSM read; **cannot list/remove SSM tags** (open drift)
-- `luciel-worker` role — runtime DML, Celery, CloudWatch logs
-- `luciel-backend` role — runtime read + Celery enqueue + CloudWatch logs
-- Audit chain listener bound in `app/main.py` (closed C25)
-
-### §9.5 Observability
-
-- CloudWatch log groups per service
-- CloudWatch metrics for ECS CPU/memory + RDS + Redis
-- **DLQ + 5xx + worker-failure alarms not yet bound** (Step 31 Tier 4)
-
----
-
-## §10 Deployment Flow
-
-1. Build image locally or via CI from feature branch
-2. Push to ECR
-3. Register new task definition revision pointing to new image digest (digest, not tag — see C31 closure)
-4. Update ECS service `desiredCount` or use service deployment to roll
-5. Run verification harness (`luciel-verify:<N>`) on the new image **before** declaring deploy complete
-6. Tag git ref (`step-<N>-complete`) only after 25/25 FULL on prod-shaped TD
-
-Migrations:
-
-- Alembic migrations run from `luciel-prod-ops` task with `luciel_admin` role
-- Migration must apply cleanly forward; no destructive migrations (Pattern E)
-- DISC-2026-003 lesson: forward-only with `created_at >= '2026-05-08 04:00:00+00'` watermark; never delete audit duplicates retroactively
-
----
-
-## §11 Audit Chain Detail (Pillar 22 + Pillar 23)
-
-**Pillar 22 — Grants:** asserts the `luciel_worker` role can `INSERT` into `audit_events` and `verification_runs`, and **cannot** `DELETE` or `UPDATE` either. The role grants are minimal and explicit.
-
-**Pillar 23 — Hash chain:** for each new `audit_events` row:
-
-```
-current_hash = sha256(prev_hash || canonical_json(row_payload))
-```
-
-`prev_hash` is the most recent existing row's `current_hash`. P23 walks the chain and asserts continuity; any break is a critical failure.
-
-Chain repair history:
-
-- 2026-05-08: 60 chain links broken by attempted delete of 223 verification audit duplicates; restored from CSV; redesigned forward-only with watermark. See `DRIFTS.md` DISC-2026-003.
-
----
-
-## §12 Service Boundaries
-
-| Concern | Where it lives |
-|---------|----------------|
-| Auth resolution | `app/auth/` middleware, runs before any router |
-| Tenant scoping | Schema (NOT NULL) + query filters + P13 attack-test |
-| Memory writes | Always async via Celery worker |
-| Memory reads | Sync via backend |
-| Audit emission | Three-channel; emitter in `app/audit/` |
-| Secrets | SSM only; loaded via `app/settings.py` at startup |
-| Migrations | `alembic/versions/` only; applied via prod-ops task |
-| Verification | `app/verification/` only; runs in luciel-verify TD on prod-shaped image |
-
----
-
-## §13 Known Architectural Gaps (forward references — full detail in DRIFTS.md)
-
-- No alembic-head-vs-RDS startup check (Step 30 carry-forward)
-- `luciel-prod-ops` cannot list/remove SSM tags
-- Backend service has no autoscaling (deliberate; revisit Step 30)
-- Actor permissions stored as untyped JSONB (migration Step 30b)
-- `domain` is not a column on `memory_items` (Step 31 Tier 1 product-intent gap)
-- Cross-region replication absent (Step 38 carry-forward)
-- DLQ + 5xx + worker-failure alarms not yet bound (Step 31 Tier 4)
-- Tenant data-deletion request flow not yet documented (Step 31 Tier 5)
+If a chat summary, a session recap, a slide, or any other artifact contradicts this document, **this document wins**. Update the document; do not produce contradicting versions in flight.
