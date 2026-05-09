@@ -122,18 +122,6 @@ Every drift below is tagged with the section that raised it. Production-only dri
 **Repo state:** Restored verbatim in commit `2903bc4` (Step 29.y postmerge, recap restore from v3.4) and re-incorporated into the product-philosophy-first rewrite in commit `e56887b`. The canonical recap on `main` at `c3ed8b6` carries the substantive answers.
 **Resolution path:** Self-correction recorded for audit. Moves to Section 5 in this commit (commit (a) of the reconciliation pass).
 
-### D-embed-key-issuance-workflow-missing-2026-05-09
-
-**Status:** OPEN — blocks Step 30b success criterion
-**Raised by:** Step 30b commit (e) end-of-build review.
-**Design claim:** CANONICAL_RECAP §12 Step 30b row: "A company adds a few lines of code to their site, and within an hour their visitors are having real conversations with the company's Luciel." The within-an-hour clause requires an operator-runnable issuance path that produces an embed key with `key_kind='embed'`, `permissions=['chat']`, a non-empty `allowed_origins`, a `rate_limit_per_minute`, and a populated `widget_config`.
-**Repo state:** `app/services/api_key_service.py:create_key` mints rows on the `api_keys` table but does not validate the embed-key invariants (the four columns added in commit (b) are accepted positionally as kwargs and pass through unchecked). No admin endpoint, no CLI, no runbook produces a key in the embed shape today; an operator would have to write the row by hand and read the raw key out of the create_key return value, which is not a workflow we can hand to ourselves let alone a customer.
-**Operational impact:** The widget bundle and the gate are both green, but no one can issue the credential they validate. First paying customer cannot self-serve, and the operator's manual path is fragile (hand-rolled SQL, no audit row, no SSM write).
-**Owning roadmap step:** Step 30b. Closes when the issuance path lands and an operator can mint an embed key in under five minutes against any tenant. Likely shape: extend `app/api/v1/admin.py` with `POST /api/v1/admin/embed-keys` that wraps `create_key` with the embed-shape validation + writes the four widget columns, and a small CLI (`scripts/mint-embed-key.py`) for operator use before the admin UI exists.
-**Pattern E:** New rows only; no mutation of existing keys. Audit emission via the same `AdminAuditRepository.record` path the rest of `api_key_service` uses.
-
----
-
 ### D-retention-purge-worker-missing-2026-05-09
 
 **Status:** OPEN — load-bearing; needs a roadmap home
@@ -280,6 +268,13 @@ Closed drifts are kept here permanently with a strikethrough heading. The closin
 **Status:** RESOLVED on 2026-05-09
 **Closing commit:** `bf7dff4` (architecture rewrite, terminology sweep)
 **Resolution:** Operator caught isolation/enforcement claims framed at the tenant level when the actual guarantee is at the scope level (any of tenant, domain, agent, or instance). 7-edit terminology sweep applied: scope language used for isolation guarantees; tenant/domain/agent/instance reserved for cases where the specific scope level genuinely matters (per-tenant DB tier, named memory kinds, hierarchy diagrams).
+
+### ~~D-embed-key-issuance-workflow-missing-2026-05-09~~
+
+**Status:** RESOLVED on 2026-05-09
+**Closing tag:** `step-30b-embed-key-issuance-complete` on the merge of branch `step-30b-embed-key-issuance` into `main`
+**Closing commits:** `64ee2a3` (commit (a): EmbedKeyCreate / WidgetConfig / EmbedKeyRead / EmbedKeyCreateResponse schemas, four widget kwargs on `ApiKeyService.create_key`, `EMBED_REQUIRED_PERMISSIONS` re-exported from `app.api.widget_deps` for backward compat) → `fe296a9` (commit (b): `POST /admin/embed-keys` endpoint with three scope guards and audit-before-commit) → `f7b8b6f` (commit (c): `scripts/mint_embed_key.py` non-interactive flag-based CLI)
+**Resolution:** The issuance path now exists in two operator-facing forms (HTTP and CLI), both funneling through the same `EmbedKeyCreate` schema and the same `ApiKeyService.create_key` entrypoint, so they cannot drift on validation or audit behavior. Embed keys land with `key_kind='embed'`, `permissions=['chat']`, validated `allowed_origins` (exact scheme+host+optional port, no wildcards/paths), `rate_limit_per_minute` capped at 10000, and a 3-knob `widget_config` (accent_color, display_name, greeting_message) with HTML rejection. SSM write is rejected for embed keys at the service layer because the customer cannot read SSM. The audit row lands in the same transaction as the `api_keys` INSERT (Invariant 4). 69 offline assertions cover schema, service, runtime gate, HTTP surface, and CLI. Step 30b's success criterion ("within an hour") still has one outstanding blocker: the widget bundle CDN, tracked separately at `D-prod-widget-bundle-cdn-unprovisioned-2026-05-09`.
 
 ### Step 29.z — Repo-vs-Design audit (no findings)
 
