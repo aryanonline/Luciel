@@ -2,13 +2,21 @@
 
 **What this document is:** The design for how Luciel is built — both the development environment where we work, and the production environment where customers use it. Every architectural decision is anchored to a business reason from `CANONICAL_RECAP.md`.
 
-**What this document is not:** A snapshot of what the repository currently contains. The repository is the implementation; this document is the design. The two will be reconciled in a structured comparison pass, with every gap recorded as a token in `DRIFTS.md`.
+**What this document is not:** A snapshot of what the repository currently contains. The repository is the implementation; this document is the design. Gaps between design and implementation are tracked as tokens in `DRIFTS.md`.
+
+**Implementation markers used below.** Each substantive design claim that has a known implementation status carries one of:
+- ✅ Implemented — repo (and prod where applicable) match the design
+- 🔧 Partial — some of the design exists; specific gaps tracked as drifts in `DRIFTS.md`
+- 📋 Planned — design committed; implementation tracked against a named roadmap step
+- 🔬 Decision-gate — design says "we will choose later"; not a drift, an open product decision
+
+Absence of a marker means the claim is design-level (architectural property, rationale) rather than a specific verifiable mechanism.
 
 **Audience:** A senior engineer, a security reviewer, a thoughtful customer doing due diligence, or a future hire who needs to understand what we are building and why.
 
 **Maintenance protocol:** Surgical edits only. When the design changes, update the relevant section in place and log the prior decision in `DRIFTS.md`. When the implementation catches up to a section, mark it implemented (per the marker scheme adopted in `DRIFTS.md` Phase 2).
 
-**Last updated:** 2026-05-09
+**Last updated:** 2026-05-09 (Phase 2 reconciliation, commit (b))
 
 ---
 
@@ -136,7 +144,7 @@ The production environment runs in **AWS, Canadian region (`ca-central-1`)**, de
 
 #### 3.2.1 Public endpoint
 
-Customers reach Luciel through a single public hostname (the production API endpoint). The hostname is fronted by an Application Load Balancer.
+Customers reach Luciel through a single public hostname (the production API endpoint). The hostname is fronted by an Application Load Balancer. 📋 The full multi-channel surface (chat widget, voice, email, SMS, programmatic API) lands in roadmap Step 34a; today only the chat / programmatic API path exists — see `DRIFTS.md` token `D-channels-only-chat-implemented-2026-05-09`.
 
 *Why a load balancer:* it terminates TLS once, distributes incoming requests across multiple application servers (so a single server failure does not take the platform down), and provides a single chokepoint where request rate-limits and a Web Application Firewall can be applied. The chokepoint also gives the operator a single place to flip traffic during a deployment or roll back from one.
 
@@ -154,11 +162,19 @@ A pool of application servers runs the request-handling Luciel code. Each server
 
 #### 3.2.3 Background worker tier
 
-A separate pool of worker processes handles work that should not block a customer's chat response: ingesting documents the customer uploaded, refreshing search indexes, sending follow-up emails, running scheduled retention purges, and similar. Workers receive jobs from a queue and report results back through the database.
+A separate pool of worker processes handles work that should not block a customer's chat response. Per-responsibility status:
+- ✅ Memory extraction (the worker task that reads recent turns and persists durable memories)
+- 🔧 Document ingestion — implemented today as foreground code in `app/knowledge/ingestion.py`, not as a worker task; promotion to background is roadmap Step 34
+- 📋 Scheduled retention purge — the policy exists in `app/policy/retention.py`; the worker that runs it does not — see `DRIFTS.md` token `D-retention-purge-worker-missing-2026-05-09` (load-bearing because Section 4.4 depends on it)
+- 📋 Search-index refresh, follow-up emails, and other workflow-action background work — roadmap Step 34
+
+Workers receive jobs from a queue and report results back through the database.
 
 *Why a separate tier:* a worker doing a 30-second document ingestion should never delay a customer's three-second chat response. Putting workers on their own pool isolates the two workloads from each other.
 
 *Why a queue, not direct invocation:* the queue is what makes worker failures invisible to the customer. If a worker dies mid-job, the queue redelivers the job to another worker. The customer's interaction was already complete when the job was enqueued; the worker is doing its work behind the scenes.
+
+*Production broker:* **Amazon SQS** (not Redis) in production. Redis is the development broker only. The split is documented in detail in `app/worker/celery_app.py` (lines 116-138) and exists because ElastiCache Redis in cluster mode cannot satisfy kombu's MULTI/EXEC requirements (ClusterCrossSlot constraint), and SQS is the right primitive for durable, multi-AZ job delivery in AWS. The architecture diagram in Section 3.6 shows "Job queue Redis/SQS" — read that as Redis-in-dev / SQS-in-prod, not as a choice.
 
 *Worker autoscaling:* worker-tier capacity scales on queue depth and CPU. Quiet hours run a small fixed pool; busy hours scale up to absorb the backlog and scale back down once it clears.
 
@@ -206,9 +222,15 @@ Every secret used in production — database credentials, foundation-model API k
 
 *Why SSM, not Secrets Manager:* both work; we picked Parameter Store for cost predictability and because the audit story (CloudTrail records every read) is identical.
 
-*Pattern E:* secrets are deactivated, never deleted. A rotated secret remains in Parameter Store with a deactivated flag, so an audit query can reconstruct what credential was active at any past moment. This is part of the broader audit-chain discipline (see Section 4).
+*Pattern E:* secrets are deactivated, never deleted. A rotated secret remains in Parameter Store with a deactivated flag, so an audit query can reconstruct what credential was active at any past moment. This is part of the broader audit-chain discipline (see Section 4). 🔬 The exact SSM-side mechanism for the deactivated flag (suffix-renamed parameter vs. SSM version history) is pending operator confirmation — see `DRIFTS.md` token `D-prod-secrets-pattern-e-unverified-2026-05-09`.
 
-#### 3.2.8 Monitoring and alerting
+#### 3.2.8 What integrations exist today
+
+The design anticipates a full slate of external integrations — calendar, CRM, email, SMS, voice, payments — with a sandbox-in-development / real-in-production split per integration. Today, the integrations layer (`app/integrations/`) contains only the foundation-model clients (Anthropic and OpenAI). The tool registry shape (`app/tools/registry.py`, `app/tools/broker.py`) is in place; the integrations themselves are not. 📋 The full slate is roadmap Step 34 (Workflow actions); the channel surface specifically is roadmap Step 34a. Tracked as `DRIFTS.md` token `D-external-integrations-llm-only-2026-05-09`.
+
+This subsection exists so the doc stops implying the full slate is present. The framework is ready; the integrations are not.
+
+#### 3.2.9 Monitoring and alerting
 
 Production emits four kinds of signal:
 
@@ -223,14 +245,19 @@ Production emits four kinds of signal:
 
 A customer sends a message to a Luciel through any supported channel. Here is what happens.
 
-1. **Channel ingest.** The message arrives at the appropriate channel adapter — chat widget for web, voice gateway for phone, email gateway for email, etc. The adapter normalizes the message into the same internal format regardless of channel.
+1. **Channel ingest.** The message arrives at the appropriate channel adapter. 📋 Today only the chat widget and programmatic API adapters exist; voice / email / SMS adapters are roadmap Step 34a. The adapter normalizes the message into the same internal format regardless of channel.
 2. **Public endpoint.** The normalized request lands at the production API endpoint, fronted by the load balancer. The load balancer terminates TLS and forwards the request to a healthy application server.
 3. **Authentication.** The request includes a key (or a session token derived from a key). The application server resolves the key to its owning scope (tenant, domain, agent, or specific Luciel instance). Unknown keys are rejected with a 401.
 4. **Scope policy check.** The server confirms the key has authority over the resource being accessed. A request to access a resource that lives outside the requesting key's scope is rejected with a 403, even if the key is otherwise valid. The rejection holds whether the boundary being crossed is between two tenants, two domains within a tenant, two agents within a domain, or two Luciel instances under the same agent. Scope is enforced at the server, and again at the database (foreign-key constraint), and again at the database role grant. Three layers.
 5. **Memory retrieval.** The server asks the memory service for context relevant to this conversation: session memory for the active conversation, user preferences if the customer is identified, domain memory for the vertical, client operational memory for the deploying organization. Retrieval is scoped — a Luciel cannot pull memory from a sibling Luciel's scope.
 6. **Reasoning.** The server assembles the persona prompt (Soul layer), the profession prompt (Profession layer), the retrieved memory, and the user's message into a foundation-model call. The model produces a response and, if needed, a tool-invocation plan.
 7. **Tool invocation.** If the response calls for an action (book an appointment, send an email, query a CRM), the server invokes the relevant tool through the tool registry. Every tool invocation goes through the same scope policy check as the original request — a tool cannot reach outside the scope of the calling Luciel.
-8. **Policy gate.** If the action is consequential (irreversible, external-facing, or above a confidence threshold), the server returns a confirmation request to the customer rather than executing immediately. The action runs only after explicit approval.
+8. **Action classification.** Each tool invocation is classified into one of three tiers, and the tier determines what happens next:
+   - **Routine** — just do it. The action executes immediately and an audit row is written. Examples: logging a call note Luciel was clearly authorized to log; pulling a customer's calendar to read availability; saving a memory.
+   - **Notify-and-proceed** — execute and surface visibly to the customer. The action runs without blocking, and the response shows the customer what was done, so they can intervene if needed. Examples: sending a routine follow-up email; creating a CRM lead; booking a meeting on a slot the customer already offered.
+   - **Approval-required** — return a confirmation request to the customer rather than executing. The action runs only after explicit approval. This tier is reserved for actions that are genuinely consequential: irreversible (sending a contract, charging a card, deleting data), high-blast-radius (mass communications, anything affecting other people on the customer's behalf), off-pattern relative to the customer's established usage (a $10,000 spend when the pattern is $200, an action in a category they have never done), or where Luciel itself is uncertain.
+
+   The senior-advisor voice committed in Recap Section 3 depends on this tiering being right: a senior advisor does not interrupt to ask permission for routine work, but does pause when the stakes warrant it. 📋 The classifier and the gate land together in roadmap Step 30c (Action classification); today none of the three tiers exist — see `DRIFTS.md` token `D-confirmation-gate-not-enforced-2026-05-09`.
 9. **Audit emission.** Every consequential action — key resolution, scope check, tool invocation, policy gate, configuration change — produces an audit row, written atomically with the action it describes.
 10. **Response.** The final response is returned through the same channel adapter that received the message, formatted appropriately for that channel (text for chat, voice synthesis for phone, etc.).
 11. **Background work.** Anything that does not need to block the response — embedding the new message into memory, refreshing a search index, sending an external email — is enqueued for background workers.
@@ -251,6 +278,8 @@ These are the architectural commitments. Every commitment is enforced by a speci
 | A retention purge cannot break the audit chain | Purges write to `deletion_logs` (append-only) and run under `FOR UPDATE SKIP LOCKED` so they do not block live traffic |
 | A bad deploy can be rolled back without data loss | The application is stateless; rollback is replacing the running image with the previous one. Migrations are forward-compatible by design — a new image that adds a column does not break the previous image |
 | A scope's deactivation is atomic | Deactivating a scope flips `active=false` on the scope row and cascades through every dependent resource in a single transaction. The same mechanism handles a tenant cancelling their subscription, a domain being wound down, or an agent leaving an organization |
+
+Production-tier verification of the items in this table that depend on AWS configuration (Multi-AZ standby, autoscaling, alarms, KMS key management) is tracked as `[PROD-PHASE-2B]` drifts in `DRIFTS.md`.
 
 ### 3.5 What a failure looks like and how it recovers
 
@@ -357,6 +386,8 @@ flowchart TB
   PG_PRIMARY -.metrics.-> METRICS
 ```
 
+*Diagram caveats:* Voice, email, and SMS channel adapters in the diagram are 📋 (Step 34a). The job queue is shown as Redis/SQS to span both environments — read it as **SQS in production, Redis in development**. WAF presence in production is `[PROD-PHASE-2B]`-pending operator verification.
+
 ---
 
 ## Section 4 — Cross-cutting architectural properties
@@ -379,7 +410,7 @@ The **Soul layer** is loaded from a versioned, immutable persona configuration s
 
 The **Profession layer** is loaded per scope: the deploying organization's domain knowledge, tools, workflows, and configuration. This is what makes a real-estate Luciel feel like a real-estate Luciel.
 
-At runtime, both layers are composed in a single foundation-model context, with the Soul layer placed structurally so it cannot be overridden by injected Profession-layer content. This is enforced both by the prompt structure and by output-side policy checks that catch a model trying to violate Soul-layer rules even if the prompt was somehow compromised.
+At runtime, both layers are composed in a single foundation-model context, with the Soul layer placed structurally so it cannot be overridden by injected Profession-layer content. This is enforced both by the prompt structure and by output-side policy checks that catch a model trying to violate Soul-layer rules even if the prompt was somehow compromised. 🔧 Today, prompt assembly happens in `app/services/chat_service.py` rather than being consolidated in `app/runtime/context_assembler.py`, and the output-side policy guard does not yet exist — tracked as `DRIFTS.md` token `D-context-assembler-thin-2026-05-09`.
 
 ### 4.3 Immutable audit chain
 
@@ -387,11 +418,11 @@ Every audit-bearing table in the database is append-only and hash-chained. New r
 
 *Why:* a regulator or a brokerage's compliance officer asking "show me what happened, and prove no one tampered with the record" gets a defensible answer. The application code cannot lie about history, because the chain is verifiable independent of the application.
 
-Three append-only tables matter most:
+Three append-only logs matter most:
 
-- `admin_audit_logs` — control-plane and data-plane control events
-- `deletion_logs` — retention purge events
-- `scope_assignments_history` — every change in who is assigned to what scope
+- `admin_audit_logs` — control-plane and data-plane control events; hash-chained at the row level
+- `deletion_logs` — retention purge events; append-only
+- `scope_assignments` — every change in who is assigned to what scope is recorded as a new row, never an `UPDATE` in place. The same table acts as both the current-state view (latest active row per (user, scope)) and the immutable history. This **append-on-change discipline** is enforced in the repository layer rather than by a separate `*_history` table, because a single append-only table is simpler and removes the consistency risk of keeping current-state and history in sync
 
 A regulator-facing export merges all three streams ordered by timestamp, with bulk events expanded on demand.
 
@@ -404,7 +435,7 @@ Every "delete" operation in production flips an `active=false` flag rather than 
 1. **Audit chains stay intact.** A regulator's question "what was deleted, by whom, and when?" gets a real answer.
 2. **Accidental deletes are recoverable.** A misclick by any scope admin — tenant, domain, or agent — is not a permanent data loss event during the retention window.
 
-The cost is that storage grows. The retention worker handles that, in batches sized to coexist with live traffic without lock contention.
+The cost is that storage grows. The retention worker handles that, in batches sized to coexist with live traffic without lock contention. 📋 The retention worker itself does not yet exist; the policy in `app/policy/retention.py` is enforced today only when triggered by application code paths, not by a scheduled worker. Tracked as `DRIFTS.md` token `D-retention-purge-worker-missing-2026-05-09` — load-bearing for this section's storage-cost story.
 
 ### 4.5 Cascade-correct departure
 
@@ -444,7 +475,7 @@ These are alternatives we considered and rejected. Recording them here prevents 
 - **Per-tenant database (instead of row-level scope).** Considered and rejected at this stage because cost and operational overhead grow linearly with customer count, while row-level scope with three-layer enforcement provides the isolation properties we need. The dedicated-infrastructure tier (Section 13 of the canonical recap) is the deliberate exception, built on demand for customers whose compliance posture requires it.
 - **Single application + worker process (instead of two pools).** Rejected because it couples customer-facing latency to background work duration. A 30-second document ingestion would block a 3-second chat response.
 - **State stored on application servers (instead of stateless servers + database/session store).** Rejected because it makes survivability and scaling far harder.
-- **Synchronous tool invocation only (instead of confirmation gates for consequential actions).** Rejected because the canonical recap (Section 4) commits that Luciel does not take consequential action without permission. Synchronous-only invocation makes the commitment unimplementable.
+- **Synchronous tool invocation only (instead of tiered action classification).** Rejected because the canonical recap (Section 4) commits that Luciel does not take consequential action without permission. Synchronous-only invocation cannot honour that contract. The chosen design is the three-tier classifier (routine / notify-and-proceed / approval-required) described in Section 3.3 step 8 — it preserves the senior-advisor voice (no nuisance approvals on routine work) while preserving the contract (genuine approval gate when an action is consequential).
 - **Hard-delete on cancel (instead of soft-delete + scheduled purge).** Rejected because it breaks audit chains and makes accidental deletes irreversible. Soft-delete + retention is the design.
 - **Single audit channel (instead of three independent channels).** Rejected because a single channel can be tampered with by anyone who can compromise it. Three channels make tampering detectable.
 

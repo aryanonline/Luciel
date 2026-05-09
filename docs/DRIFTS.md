@@ -1,160 +1,275 @@
-# Luciel — Drifts (Open + Resolved)
+# Luciel — Drifts (Open and Resolved)
 
-**Scope:** Every named drift token, every closure, every supersession, every disclosure.
-**Out of scope:** Business value (`CANONICAL_RECAP.md`), code/AWS topology (`ARCHITECTURE.md`).
+**What this document is:** The single ledger of every gap between the design (`ARCHITECTURE.md` + `CANONICAL_RECAP.md`) and the implementation (this repository, and the running production environment in AWS `ca-central-1`). Each gap is a token with a stable id, a status, and a resolution path.
 
-**Doctrine:** Every fix lands as one named drift token + one named commit + a verify gate. Tokens are immutable once recorded. Supersession is captured via a new entry that references the prior token, never by editing. Source-of-truth precedence: code > commit > recap > prior recaps > chat. Hashes here are pointers; if a hash and `git log` disagree, `git log` wins.
+**What this document is not:** A changelog. A version-history dump. A historical narrative. Closed drifts stay in the doc with a strikethrough so the audit chain of decisions remains walkable, but the document does not accumulate sediment beyond that.
 
-**Maintenance protocol:** Surgical edits only. New tokens append. Status changes edit the row in a new commit (the commit message must reference the token). Resolved tokens are kept (with strikethrough on the token cell) so future operators can see the full history.
+**Maintenance protocol:** Surgical edits only. New drifts are appended with a unique id. Closed drifts get the closing commit/tag noted and the heading wrapped in strikethrough (`~~`). Reopened drifts get a new id; the original stays closed.
 
-**Last updated:** 2026-05-08 (Step 29.y close-out)
-
----
-
-## §1 Schema
-
-| Column | Meaning |
-|---|---|
-| Token | Drift token, format `D-<slug>-YYYY-MM-DD` |
-| Commit | Hash on the branch where the fix landed (or `_deferred_` / `_pending_`) |
-| Status | `closed` (fix landed + verified), `open` (acknowledged, not yet fixed), `deferred` (carry-forward to a future step), `superseded-by-<token>` |
-| Pillar / Cluster | Verification pillar or cluster the token belongs to, if any |
-| Summary | One-line description; full rationale lives in the commit body |
+**Last updated:** 2026-05-09
 
 ---
 
-## §2 Open / Deferred (forward-looking)
+## Section 1 — Status legend and id scheme
 
-These are the gaps the platform knowingly carries forward. Each has a target step.
+**Status values:**
 
-| Token | Target step | Pillar / Cluster | Summary |
-|---|---|---|---|
-| `D-step29y-impl-no-close-tag-2026-05-07` | Step 29.y close (this commit cycle) | meta | No `step-29y-complete` tag exists yet; closes when tag is created on main after merge |
-| `D-canonical-recap-v3.4-omits-step-29x-29y-2026-05-07` | Step 29.y close (this commit cycle) | meta | Old canonical recap omitted Step 29.x and 29.y; closes when this 3-doc regime ships and old recap moves to `docs/archive/` |
-| `D-no-alembic-head-vs-rds-startup-check-2026-05-08` | Step 30 | meta / deploy process | Add backend startup health-check comparing image's `alembic heads` vs `SELECT version_num FROM alembic_version`; refuse traffic or alarm on mismatch. Structural fix for RC-3 of the prod-RDS-two-migrations-behind drift. |
-| `D-prod-ops-role-cannot-list-or-remove-ssm-tags-2026-05-08` | Step 30 | meta / IAM | Cosmetic: `luciel-ecs-prod-ops-role` lacks `ssm:ListTagsForResource` and `ssm:RemoveTagsFromResource`. Leftover `luciel:iam-probe=ok` tag from 2026-05-08 12:27 EDT IAM-propagation probe cannot be removed. Harmless. |
-| `D-backend-service-no-autoscaling-2026-05-08` | Step 30 | meta / capacity planning | Backend service has no scalable target. Deliberate per Step 28 ALB-fronted steady-state design. Worker autoscaling IS live (CFN `luciel-prod-worker-autoscaling`, CPU 60%, capacity 1–4) since 2026-05-05. Add backend autoscaling once real customer traffic patterns exist to size against. |
-| `D-actor-permissions-storage-format-migration-step-30b-2026-05-07` | Step 30b | meta | Actor permissions stored as untyped JSONB; migrate to typed format. Full column rewrite + chain recompute requires prod migration + Pattern N alignment; outside code-only window. |
-| Cluster 4b items (E-6 prod IaC, E-12 cross-region replication, E-13 DR runbook) | Step 30b | Cluster 4b | Prod IaC, cross-region replication, DR runbook; outside code-only window. |
-| `D-pre-launch-validation-gate-not-on-roadmap-2026-05-08` | Step 31 | meta / product | Five-tier validation gate (isolation / customer journey / memory quality / ops readiness / compliance) not yet a roadmap step. Closes when Step 31 spec lands. See `CANONICAL_RECAP.md` §1.1. |
+- `OPEN` — gap exists; no fix in flight
+- `IN-PROGRESS` — fix is in flight on a named branch or PR
+- `RESOLVED` — fix has landed on `main`; closing commit/tag noted; heading wrapped in `~~strikethrough~~`
+- `DEFERRED` — gap acknowledged, deliberate decision to not fix this cycle; rationale recorded inline
+- `WONTFIX` — gap re-examined and judged not a drift (design changed, or claim was wrong); rationale recorded inline
 
-**Per-pillar product-intent notes (not yet drift tokens — captured here for Step 31 spec):**
+**Implementation marker scheme** (used in `ARCHITECTURE.md` and `CANONICAL_RECAP.md` once Phase 2 reconciliation begins applying them):
 
-- **Per-agent leak attack-test:** schema enforces agent_id, but no live attack-test exists analogous to P13 A5. Step 31 Tier 1.
-- **Per-domain scoping:** `domain` is not a column on `memory_items` today. Either add column or scope-via-agent-domain-mapping. Step 31 Tier 1.
-- **Per-luciel-instance coverage:** schema FK exists, weak verification coverage. Step 31 Tier 1.
+- ✅ Implemented — repo and prod both match the design
+- 🔧 Partial — repo or prod implements some of the design; gaps tracked as drifts here
+- 📋 Planned — design committed, no implementation yet; tracked as drift here
+- 🔬 Decision-gate — design says "we will choose later"; not a drift, an open product decision
 
----
+**Drift id scheme:** `D-<short-slug>-YYYY-MM-DD`. The date is when the drift was first opened, not when it was discovered later. Slug is short, hyphenated, and stable — never rename a slug after creation.
 
-## §3 Closed — Step 29.y gap-fix series (2026-05-07)
-
-Branch: `step-29y-gapfix` (forked from `step-29y-impl`).
-
-| Token | Commit | Status | Pillar / Cluster | Summary |
-|---|---|---|---|---|
-| ~~`D-actor-permissions-comma-fragility-2026-05-07`~~ | `1099f4f` | closed | P23 | JSON-serialize new `actor_permissions` writes; dual-format read; historical rows untouched to preserve hash chain. |
-| ~~`D-audit-note-length-unbounded-2026-05-07`~~ | `30878b0` | closed | P23 | Cap audit `note` at 256 chars at `AdminAuditRepository.record()` boundary with truncation marker. |
-| ~~`D-scope-policy-action-class-gap-2026-05-07`~~ | `5d99db8` | closed | P14 | Add `ScopePolicy.enforce_action(...)` primitive; no callers wired in this commit. |
-| ~~`D-worker-audit-write-failure-not-alerted-2026-05-07`~~ | `491d427` | closed | P23 | `WORKER_AUDIT_WRITE_FAILED` structured log marker + thread-safe process-local failure counter. |
-| ~~`D-findings-docs-not-in-repo-2026-05-07`~~ | `d2572db` | closed | meta | Reconstruct `docs/findings/` index for phases 1b/1d/1e/1f/1g from code + commit history. (Note: this folder is now in `docs/archive/findings/` after Step 29.y close-out.) |
-| ~~`D-cluster-4b-deferral-undocumented-2026-05-07`~~ | `4c8522a` | closed | Cluster 4b | Cluster 4b deferrals (E-6 / E-12 / E-13) recorded; carry-forward listed in §2 above. |
-| ~~`D-cluster-7-unaccounted-2026-05-07`~~ | (cluster commit) | closed | Cluster 7 | Cluster 7 has no commits, tests, or code citations on `step-29y-impl`; investigated, no evidence on branch; logged here as canonical disposition. |
-| ~~`D-historical-rate-limit-typo-disclosure-2026-05-07`~~ | C19 | closed | P11 | Disclosure of the `REDISURL` (no underscore) typo. Pre-29.y the SlowAPI middleware read `os.getenv("REDISURL")`, which always resolved to None, falling through to `memory://`. Per-route limits were per-process across N backend containers — a tenant on `100/min` could effectively achieve `100*N/min`. Corrected in `7e783a5`. Full disclosure in §6 below (DISC-2026-001). |
-| ~~`D-audit-verification-harness-retry-duplicates-2026-05-07`~~ | C11 (`3798b32`) + C12 | closed | Cluster 4 (E-2) | 223 verification-harness duplicate `worker_*` audit rows blocked migration `d8e2c4b1a0f3`. First attempt deleted 166 rows but broke 60 hash-chain links. Reverted via CSV restore; migration redesigned forward-only. Full disclosure §6 (DISC-2026-003). |
-| ~~`D-cluster4-e2-rework-as-forward-only-2026-05-07`~~ | C12 | closed | Cluster 4 (E-2) | Migration `d8e2c4b1a0f3` redesigned to add `AND created_at >= TIMESTAMPTZ '2026-05-08 04:00:00+00'` to its partial UNIQUE index; preserves Pattern E without exception. |
-| ~~`D-celery-app-not-imported-on-uvicorn-boot-2026-05-07`~~ | C13 (`0922cdf`) | closed | P25 | `app/main.py` did not import `app.worker.celery_app`, so `@shared_task` on `extract_memory_from_turn` bound to Celery's default `current_app` whose default broker is `amqp://guest@localhost//`. Fix: import in `app/main.py` (canonical) and `app/memory/service.py` (defense in depth). |
-| ~~`D-pillar14-consent-grant-uses-wrong-tenant-key-2026-05-07`~~ | C14 (`0b6f913`) | closed | P14 | `pillar_14_departure_semantics.py` issued T2 consent grant with `k1_raw` while specifying `tenant_id=t2_id`; correctly rejected as cross-tenant. Test bug. Fix: swap `k1_raw → k2_raw`. |
-| ~~`D-pillar13-spoof-audit-poll-too-short-2026-05-07`~~ | C15 (`cf69393`) + C16 (`128ce83`) | superseded-by-`D-pillar13-action-constant-case-divergence-2026-05-08` | P13 | Initially diagnosed as poll-too-short under `--pool=solo` Windows dev contention; widened to 180s. Real cause was action-constant case divergence (lowercase canonical vs uppercase test literal); see C18. |
-| ~~`D-pillar13-action-constant-case-divergence-2026-05-08`~~ | C18 | closed | P13 | Test re-declared audit-action constant locally as `"WORKER_IDENTITY_SPOOF_REJECT"` (uppercase) while model defines canonical `"worker_identity_spoof_reject"` (lowercase). PostgreSQL `text` is case-sensitive; test polled 180s with no row found while row was always present. Fix: import `ACTION_WORKER_IDENTITY_SPOOF_REJECT` from `app.models.admin_audit_log` so divergence becomes compile-time error. Revert poll budget to 90s. |
-| ~~`D-redis-url-centralize-via-settings-2026-05-08`~~ | C19 | closed | meta / architecture | `REDIS_URL` historically read in 4 separate locations; 3 sites used `os.environ.get("REDIS_URL", "redis://localhost:6379/0")` directly, bypassing `Settings`. Same drift class as the original `REDISURL` typo. Fix: route all readers through `app.core.config.settings.redis_url`. CELERY_BROKER_URL stays a direct env read because it is broker-selection state. |
-| ~~`D-celery-app-set-default-or-import-order-2026-05-08`~~ | C17 (`2f73121`) | closed | P25 | After branch consolidation, P25 regressed to FAIL (`OperationalError [WinError 10061]` to `pyamqp/5672`). C13 import-on-boot is necessary but not sufficient; under uvicorn another import path can touch `celery.current_app` first, leaving the default at the stock instance. Fix: `celery_app.set_default()` after `Celery(...)` constructor. Idempotent and import-order-independent. |
+**Source of truth:** When this document, the architecture document, the canonical recap, the repository, or production disagree, the resolution is recorded here as a drift. The four artifacts converge by closing drifts, not by editing one and hoping the others catch up.
 
 ---
 
-## §4 Closed — Step 29.y close-out series (2026-05-08)
+## Section 2 — Phase 2A repo reconciliation: how this register was built
 
-Branch: `step-29y-gapfix` (continuing).
+This document was rebuilt on 2026-05-09 by walking `ARCHITECTURE.md` and `CANONICAL_RECAP.md` section by section against the repository at commit `c3ed8b6` on `main`. The previous DRIFTS.md (a partial, history-shaped register) was archived to `docs/archive/DRIFTS_pre-reconciliation.md` rather than discarded; that file remains the historical record up to that point.
 
-| Token | Commit | Status | Pillar / Cluster | Summary |
-|---|---|---|---|---|
-| ~~`D-prod-ops-role-missing-ssm-tags-2026-05-08`~~ | C23 (`bc8b269`) | closed | meta / IAM | `luciel-ecs-prod-ops-role` policy `WriteProdPlatformAdminKey` granted `ssm:PutParameter` but not `ssm:AddTagsToResource`. boto3's `put_parameter(Tags=[...])` issues both API calls, so any rotation requesting tags would 403 on the tag write while value-write succeeded. Fix: add `ssm:AddTagsToResource` to the same Sid, scoped to single-resource ARN. |
-| ~~`D-ssm-write-overwrite-false-blocks-rotation-2026-05-08`~~ | C24 (`bc8b269`) | closed | meta / key rotation | `_write_key_to_ssm` issued `put_parameter(Overwrite=False, Tags=[...])`, the bootstrap-only contract. Production rotation needs `Overwrite=True`. AWS API also forbids `Tags` alongside `Overwrite=True`, so the rotation path is split: put_parameter then add_tags_to_resource. Bootstrap path keeps original single-call contract. Tag-write failures logged-but-non-fatal. |
-| ~~`D-audit-chain-listener-only-in-app-main-2026-05-08`~~ | C25 | closed | P23 | `install_audit_chain_event()` was registered only by `app/main.py` and `app/worker/celery_app.py` at process boot. Code paths importing `SessionLocal` directly without importing `app.main` (operator heredocs, one-off scripts) constructed sessions whose flushes did NOT trigger the chain handler — silently writing audit rows with NULL `row_hash` / `prev_row_hash`. Fix: install listener in `app/db/session.py` at module-import time. Every ORM code path imports `SessionLocal`, so "forgot to install the listener" becomes impossible. |
-| ~~`D-audit-row-3445-hash-backfilled-2026-05-08`~~ | C25 | closed | P23 | During Phase E platform-admin-key consolidation, ad-hoc heredoc minted api_keys row 597 + audit row 3445 without listener registered (heredoc imported `SessionLocal` directly without `app.main`). Row 3445 backfilled by hand by computing `canonical_row_hash(_row_to_dict(row), prev_hash=row_3444.row_hash)` exactly as listener would have done; meta-audit row 3446 documents the backfill. Audit chain end-to-end walk passes. |
-| ~~`D-prod-rds-two-migrations-behind-deployed-code-2026-05-08`~~ | C28 | closed | meta / deploy / P23 (latent) | Two alembic migrations sat in-repo for ~14h45m without being applied to prod RDS while application code depending on the schema was deployed. `c5d8a1e7b3f9` (audit_logs hash NOT NULL) and `d8e2c4b1a0f3` (worker-reject idempotency unique index). Applied at 2026-05-08 14:19 EDT. Latent risks did not materialize because: (a) hash columns were nullable during the gap so the row 3445 NULL-hash incident was hand-recoverable; (b) the worker-reject idempotency window was small. Structural fix tracked as open token in §2. |
-| ~~`D-task-def-registry-bloat-2026-05-08`~~ | C29 | closed | meta / operational hygiene | Pre-cleanup: 84 ACTIVE task defs across 9 families. Only latest revision of each family was referenced. 82 deregister-task-definition calls applied 2026-05-08 14:39–14:48 EDT (47 in Phase 1: backend rev 1–33 + worker rev 2–13 + prod-ops rev 1–2; 35 in Phase 2: grant-check rev 1–3 + migrate rev 1–13 + mint rev 1–3 + smoke rev 1 + verify rev 1–12 + 14–16). All returned INACTIVE cleanly. |
-| ~~`D-orphaned-apprunner-ecr-role-2026-05-08`~~ | C29 | closed | meta / IAM | `luciel-apprunner-ecr-role` (created 2026-04-12) was a remnant of an abandoned App Runner exploration from before the ECS-only consolidation in Step 27. No active App Runner service; no IaC referenced the role. Detach + delete applied 2026-05-08 14:48 EDT. Final luciel-* role inventory = 8. |
-| ~~`D-session-summary-asserted-no-autoscaling-cfn-shows-live-2026-05-08`~~ | C29 | closed | meta / process | Track 3 session-summary carried stale assumption that no production autoscaling existed. Tier 2 enumeration revealed three live luciel-* CFN stacks: `luciel-prod-alarms`, `luciel-prod-worker-autoscaling`, `luciel-prod-verify-role`. Worker autoscaling has been live since Step 28 Phase 2 Commit 6 (2026-05-05). Process fix: ground autoscaling claims against `aws cloudformation list-stacks` before any Tier 2 cleanup planning. |
-| ~~`D-cluster-task-def-cleanup-runbook-stale-2026-05-08`~~ | C29 | closed | meta / docs | `docs/runbooks/step-29y-prod-cleanup-2026-05-08.md` included a deregistration directive for `luciel-grant-check:4` — but rev 4 is the latest, currently-runnable revision. Following verbatim would have wrongly deregistered the active task def. T2.2 Phase 2 corrected this and kept rev 4 active. Process fix: compute "keep latest, deregister all others" programmatically rather than read static revision lists from runbooks. |
-| ~~`D-c19-tests-not-updated-after-redis-centralize-2026-05-08`~~ | C30 | closed | meta / test maintenance | C19 centralized `REDIS_URL` reads through `settings.redis_url`. Two tests in `tests/security/test_rate_limit_failmode.py` continued asserting the pre-C19 read pattern. AST-asserted literal `os.getenv("REDIS_URL")` no longer exists; reload-chain didn't include `app.core.config` so cached Settings retained boot-time value. Fix: tests updated to assert through `Settings.redis_url`. No behavioral regression in production code. |
-| ~~`D-pillar14-fail-on-stale-verify-td-image-2026-05-08`~~ | C31 | closed | P14 / meta / deploy | F.1.b verify-suite returned 24/25 GREEN with P14 FAIL on `luciel-verify:17`. Bug NOT reproduced from laptop diagnostic against the same `api.vantagemind.ai` endpoint. Diagnosis: failing client image was in verify TD, not backend. `luciel-verify:17` ran image `sha256:14ae8b53...` (rev28-era, pushed 2026-05-07 14:54 EDT) — pre-C14, so issued consent.grant with k1_raw while specifying tenant_id=t2_id. Production route is not regressed. Fix: re-pin verify-td.json to rev30 digest, register as `luciel-verify:18`. Subsequent re-pin to rev32 in C32d. |
-| ~~`D-verify-td-registered-with-mystery-digest-2026-05-08`~~ | C31 | closed | meta / deploy / process | Local `verify-td.json` carried `sha256:933a141a...` (Step 28 C10-era) but `aws ecs describe-task-definition --task-definition luciel-verify:17` returned `sha256:14ae8b53...`. Most likely cause: out-of-band `aws ecs register-task-definition` with inline JSON override never committed back. Fix: verify-td.json updated to rev30 digest, registered as `:18`. Carry-forward to Step 30: CI guardrail diffing in-repo verify-td.json against `luciel-verify:LATEST` and failing build on mismatch. |
-| ~~`D-verify-worker-reachable-not-sqs-aware-2026-05-08`~~ | C32 series | closed | P14 | Verify worker-reachable check assumed Redis broker; rewrote to be SQS-aware on prod-shaped path. Closed alongside C32-final (25/25 FULL). |
-| ~~`D-pillar11-f1-cold-start-vs-steady-state-2026-05-08`~~ | C32c (`db164dc`) + C32d (`f8de897`) + C32-close (`4443f96`) | closed | P11 | F1 measured cold-start latency (275ms FAIL) instead of steady-state. Patch in `app/verification/tests/pillar_11_async_memory.py` lines 257–356 enqueues warm-up so steady-state latency budget is what gets measured. Result: 3.98s FULL on luciel-verify:20 (rev32). |
-| ~~`D-untracked-diag-artifacts-no-gitignore-2026-05-08`~~ | C33a (`cea23af`) | closed | meta / hygiene | 37 stale operational JSONs (probe outputs, CFN describe dumps, run-task skeletons) tracked in repo root + diag artifacts had no `.gitignore` rules. Fix: delete the 37 stale JSONs; extend `.gitignore` with diag artifact patterns. |
+The comparison covered:
 
----
+- Architecture §2 — Development environment
+- Architecture §3 — Production environment (every subsection)
+- Architecture §4 — Cross-cutting properties
+- Architecture §5 — Conceptual model
+- Canonical Recap §1 — The two layers (Soul and Profession)
+- Canonical Recap §2 — Six components
+- Canonical Recap §3 — Cognitive abilities
+- Canonical Recap §4 — Behavior contracts
+- Canonical Recap §6 — Operating loop
+- Canonical Recap §10 — Fixed-vs-configurable matrix
+- Canonical Recap §11 — Eight strategic answers
+- Canonical Recap §13 — End-to-end testing scenarios
 
-## §5 Step 29.y close-out — three-doc regime (this commit cycle)
-
-| Token | Commit | Status | Pillar / Cluster | Summary |
-|---|---|---|---|---|
-| `D-three-doc-regime-not-yet-adopted-2026-05-08` | C34a/b/c (this cycle) | closing | meta | Adopt `CANONICAL_RECAP.md` (business), `ARCHITECTURE.md` (technical), `DRIFTS.md` (this file) as the only three living docs. Legacy docs move to `docs/archive/`. Closes when C35 ships. |
+Every drift below is tagged with the section that raised it. Production-only drifts (where the repo matches the design but production does not, or where we cannot tell from the repo alone) are tagged `[PROD-PHASE-2B]` and will be confirmed during Phase 2B with the operator at the PowerShell.
 
 ---
 
-## §6 Disclosures (security-relevant historical defects)
+## Section 3 — Open drifts (repository scope)
 
-CVE-style internal log of defects that were silently present in production (or production-equivalent) and have since been remediated. Append-only.
+### D-channels-only-chat-implemented-2026-05-09
 
-### DISC-2026-001 — Rate-limiter env-var typo silently disabled cluster-shared rate limiting
+**Status:** OPEN — tracked against roadmap Step 34a
+**Raised by:** Architecture §3.2.1, §3.3 step 1; Canonical Recap §13 T8
+**Design claim:** Customers reach Luciel through chat widget, voice, email, SMS, and a programmatic API. A channel adapter normalizes each channel into the same internal format.
+**Repo state:** Only the chat / programmatic API surface exists (`app/api/v1/chat.py`, sessions, etc.). There is no voice gateway, no email gateway, no SMS gateway, and no channel-adapter layer. `RuntimeRequest.channel` exists as a string field but no dispatch logic differentiates by it.
+**Owning roadmap step:** Step 34a (Channel adapter framework — SMS, voice, email, governed by the same scope policy as the chat widget). This drift closes when Step 34a closes.
+**Doc-truthing this pass:** Architecture §3.2.1, §3.3 step 1, §3.6 receive 📋 markers pointing to Step 34a. Recap §13 T8 receives a footnote that the multi-channel scenario currently demonstrates chat + programmatic only. No code change.
 
-- **Date logged:** 2026-05-07
-- **Drift token:** `D-historical-rate-limit-typo-disclosure-2026-05-07` (closed §3)
-- **Remediation commit:** `7e783a5` (Step 29.y Cluster 5 / B-1)
-- **Verification gate:** Pillar P11; behavioral + AST tests in `a98525a`; structural follow-up `D-redis-url-centralize-via-settings-2026-05-08` / C19
-- **Severity (internal):** High — control was advertised as enforced, was silently bypassed in prod
-- **Customer impact:** None observed; no abuse incident recovered from logs
+### D-external-integrations-llm-only-2026-05-09
 
-**Root cause:** Rate-limiter module read its storage URL via `os.getenv('REDISURL')` — missing underscore. Production exports `REDIS_URL`. The `getenv` resolved to `None` on every process start. SlowAPI silently fell through to its `memory://` backend (per-process). Cluster-shared rate limiting was never in effect for the affected build window. Upper-bound theoretical exposure: a `60/minute` route would have permitted `N × 60/minute` cluster-wide where `N` is the active task count.
+**Status:** OPEN — tracked against roadmap Step 34
+**Raised by:** Architecture §2.2 ("calendar, CRM, email, SMS, voice, payments") and §3.2 (production tools); Canonical Recap §2 (six components: tools), §6 (operating loop step 5)
+**Design claim:** External integrations include calendar, CRM, email, SMS, voice, and payments, sandboxed in development and real in production.
+**Repo state:** `app/integrations/` contains only `llm/` (Anthropic and OpenAI clients). `app/tools/implementations/` has three internal tools (`escalate_tool`, `save_memory_tool`, `session_summary_tool`) — none of them external integrations. The tool registry shape (`app/tools/registry.py`, `app/tools/broker.py`) is in place — the gap is the integrations themselves, not the framework.
+**Owning roadmap step:** Step 34 (Workflow actions — book appointments, send emails, create leads, query business systems on behalf of the user). This drift closes when Step 34 closes.
+**Doc-truthing this pass:** Architecture §3.2 gets a "what integrations exist today" subsection so the doc stops implying the full slate is present. Recap §2 (tools component) and Recap §6 step 5 receive 🔧 markers pointing to Step 34.
 
-**Why it escaped:** (1) SlowAPI's fallback is silent — no raise, no log, when it falls through to `memory://`. (2) No startup assertion that the configured backend matched the intended backend. (3) Local dev ran a single process, so per-process behavior was indistinguishable from intended cluster-shared behavior. (4) No integration test asserted that two simultaneous workers shared a counter.
+### D-confirmation-gate-not-enforced-2026-05-09
 
-**Remediation:** (1) Env-var name corrected to `REDIS_URL` with fail-loud assertion at module load. (2) Pool hardening: `retry_on_timeout=True`, 1.5s connect / 1.5s read socket timeouts, 30s `health_check_interval`. (3) Differentiated fail-mode: `in_memory_fallback_enabled=True` so reads transparently degrade to per-process when primary backend dies (read fail-open); fallback middleware classifies escaping exceptions and returns `503 + Retry-After` only for write methods, preserving write-quota integrity.
+**Status:** OPEN — tracked against new roadmap Step 30c (action classification, tiered)
+**Raised by:** Architecture §3.3 step 8 ("Policy gate"), §4.9 (synchronous-only invocation rejected); Canonical Recap §4 (behavior contracts: "Luciel does not take consequential action without permission")
+**Design claim (revised in this pass):** Tool invocations are classified into three tiers: **routine** (just do it, audited), **notify-and-proceed** (execute and surface visibly to the customer), and **approval-required** (return a confirmation request before executing). Approval is required only when an action is genuinely consequential — irreversible, high-blast-radius, off-pattern relative to the customer's established usage, or where Luciel itself is uncertain. Routine and reversible external-facing actions are not gated, because gating them would make Luciel feel timid and bureaucratic and would violate the senior-advisor voice in Recap §3.
+**Repo state:** `app/policy/` does not contain an action-classification module. None of the three tiers exist. No `consequential_action` predicate, no off-pattern detector, no confidence-threshold check, no confirmation-pending state on sessions or messages, no model-side instruction in `LUCIEL_SYSTEM_PROMPT` describing the tiered contract. The escalate tool is the closest existing mechanism but it is voluntary and unstructured.
+**Owning roadmap step:** Step 30c (Action classification — tiered approval discipline). Positioned between Step 30b (embeddable chat widget) and Step 31 (dashboards + validation gate) so the tiered contract holds before the first paying customer arrives. The off-pattern tier leans on the memory layers being correct, so it has a soft dependency on the four-kinds memory architecture being usable. This drift closes when Step 30c closes.
+**Doc-truthing this pass:** Architecture §3.3 step 8 rewrites from a binary gate to tier-aware classification. Architecture §4.9 softens the synchronous-only rejection to acknowledge the tier split. Recap §4 receives a one-sentence clarification of what "consequential" means (irreversible, high-blast-radius, or off-pattern — not merely external-facing). Recap §12 gets the new Step 30c line.
 
-**Verification:** Behavioral tests assert two test-mode limiter instances sharing a backend block at the configured threshold; AST tests assert `REDIS_URL` (with underscore) is the only string the module reads, blocking regression.
+### D-scope-assignments-history-table-missing-2026-05-09
 
-**Status:** Remediated. Structural follow-up C19 routes all `REDIS_URL` reads through `Settings`, making future regressions of this class compile-time-detectable.
+**Status:** RESOLVING THIS PASS — closes in commit (b) of this reconciliation
+**Raised by:** Architecture §4.3 lists `scope_assignments_history` as one of three append-only tables that matter most.
+**Repo state:** `app/models/scope_assignment.py` exists; the model docstring describes append-on-change discipline ("create a new one. Two rows in history, never UPDATE in place") using the same `scope_assignments` table as an append-only log. There is no separate `scope_assignments_history` table or migration anywhere in `alembic/versions/` or `app/models/`.
+**Resolution:** The design is option (a) — `scope_assignments` is itself the append-only history. The architecture doc was wrong to imply a separate table. Fix Architecture §4.3 to describe the append-on-change pattern explicitly, removing the separate-table claim. Code is correct; doc was wrong.
 
-### DISC-2026-003 — Verification-harness retry generated 4× duplicate audit rows; deletion attempted, reverted, migration redesigned forward-only
+### D-celery-task-surface-thin-2026-05-09
 
-- **Date logged:** 2026-05-07
-- **Drift token:** `D-audit-verification-harness-retry-duplicates-2026-05-07` (closed §3)
-- **Remediation commits:** C11 (`3798b32`), C12 (forward-only redesign of `d8e2c4b1a0f3`)
-- **Severity (internal):** Low — Pattern E preserved
-- **Customer impact:** None
+**Status:** OPEN — partially tracked against existing roadmap; retention purge is the load-bearing gap
+**Raised by:** Architecture §3.2.3 (background workers handle "ingesting documents the customer uploaded, refreshing search indexes, sending follow-up emails, running scheduled retention purges, and similar")
+**Repo state:** `app/worker/tasks/` contains only `memory_extraction.py`. Document ingestion is built but as foreground code (`app/knowledge/ingestion.py`), not a worker task. There is no search-index refresh task, no follow-up-email task, no scheduled retention-purge task. `app/policy/retention.py` defines the policy; the worker that runs it does not exist.
+**Owning roadmap mapping:** Document ingestion-as-worker and follow-up emails are subsumed by Step 34 (workflow actions). **Retention purge is not currently on the roadmap** and it is the load-bearing gap because Architecture §4.4's soft-delete + scheduled-purge guarantee depends on it actually running. Without a running purge worker, soft-deleted rows accumulate forever and the storage-cost story in §4.4 ("the retention worker handles that") is fiction.
+**Doc-truthing this pass:** Architecture §3.2.3 gets per-responsibility markers (✅ memory extraction, 🔧 document ingestion as foreground, 📋 the rest). The retention-purge gap is escalated to its own drift token below (`D-retention-purge-worker-missing-2026-05-09`) because it has a load-bearing guarantee depending on it.
 
-**Root cause:** Verification harness retry produced 223 duplicate `worker_*` audit rows in `admin_audit_logs`. Migration `d8e2c4b1a0f3` (worker-reject idempotency partial UNIQUE index) could not apply against the duplicated history.
+### D-context-assembler-thin-2026-05-09
 
-**Why the duplicates exist:** Verification scenarios re-enqueue the same scope-policy attack to assert idempotency, and the worker-side audit emit fired once per delivery before the application-level idempotency check landed. The duplicate rows were a true history of duplicate worker actions, not corruption.
+**Status:** OPEN — code-quality drift, no owning roadmap step yet
+**Raised by:** Architecture §4.2 ("at runtime, both layers are composed in a single foundation-model context, with the Soul layer placed structurally so it cannot be overridden by injected Profession-layer content")
+**Repo state:** `app/runtime/context_assembler.py` produces a 6-line prompt: identity + tenant id + domain id + channel + user message + a stock instruction. The actual production prompt assembly happens in `app/services/chat_service.py` and is more substantive than the assembler suggests, but is not consolidated. Specifically missing: per-scope Profession-layer loading as a coherent step, a structural Soul-vs-Profession separation that prevents prompt injection from overriding Soul rules, and an output-side policy check that catches a model attempting to violate Soul-layer rules.
+**Owning roadmap mapping:** None today. This is a refactor + a small policy addition, not a feature, so it does not naturally belong to one of the existing roadmap steps. Best fit is as a prerequisite of Step 33 (evaluation framework) since evaluation needs a single observable assembly point. Defer assignment; track as a code-quality drift.
+**Doc-truthing this pass:** Architecture §4.2 gets a 🔧 marker. The drift stays open as a known refactor with no scheduled date — flagged for a future roadmap-grooming pass.
 
-**Procedure used (full timeline including the reverted attempt):**
+### D-untracked-diag-files-persist-2026-05-09
 
-1. First attempt: `DELETE FROM admin_audit_logs WHERE ...` removed 166 rows.
-2. Pillar 23 walk failed: 60 hash-chain links broken (each deleted row had been the `prev_hash` source for a subsequent row).
-3. Reverted via CSV restore from pre-deletion snapshot.
-4. Migration redesigned forward-only: partial UNIQUE index gains `AND created_at >= TIMESTAMPTZ '2026-05-08 04:00:00+00'` so only post-cutoff rows are governed by the idempotency rule. Historical duplicates retained.
+**Status:** OPEN — sandbox-side gitignore widening attempted in commit (d) of this pass; operator-side survey deferred to Phase 2B
+**Raised by:** Operator observation; not a doc claim, but a repo-hygiene drift carried forward from the previous reconciliation pass.
+**Repo state:** Approximately 47 untracked diagnostic files persist in the working tree across recent sessions despite the gitignore-widening commit `cea23af`. The sandbox tree is clean (these accumulate on the operator's local clone during diagnosis sessions); we cannot survey them from here directly. We can only widen `.gitignore` for patterns we anticipate.
+**Resolution path:** This pass widens `.gitignore` for any plausibly-missing patterns based on what we know operators produce (PowerShell transcripts, ad-hoc probe outputs, evidence captures). Phase 2B confirms the actual untracked set on the operator's clone and tightens further if needed.
 
-**Pattern E reasoning (lesson):** Pattern E (deactivate, never delete) applies to audit rows even when those rows look like junk. The hash chain depends on every row being present; deletion is irreversible loss of forensic provenance. Forward-only migrations with explicit timestamp watermarks are the correct primitive when historical data has a property the new constraint can't satisfy.
+### D-canonical-recap-q1-q8-roadmap-genericized-2026-05-08
 
-**Status:** Resolved. Pattern E preserved. Historical duplicates retained.
+**Status:** OPEN (self-correction, will be moved to Section 5 in commit (a) of this pass)
+**Raised by:** Operator catch on 2026-05-08; the Q1-Q8 strategic answers and roadmap had been genericized in an earlier pass before being restored from `archive/CANONICAL_RECAP_v3.4.md`.
+**Repo state:** Restored verbatim in commit `2903bc4` (Step 29.y postmerge, recap restore from v3.4) and re-incorporated into the product-philosophy-first rewrite in commit `e56887b`. The canonical recap on `main` at `c3ed8b6` carries the substantive answers.
+**Resolution path:** Self-correction recorded for audit. Moves to Section 5 in this commit (commit (a) of the reconciliation pass).
+
+### D-retention-purge-worker-missing-2026-05-09
+
+**Status:** OPEN — load-bearing; needs a roadmap home
+**Raised by:** Split out from `D-celery-task-surface-thin-2026-05-09` because it has a load-bearing architectural guarantee depending on it.
+**Design claim:** Architecture §4.4 ("The retention worker handles that, in batches sized to coexist with live traffic without lock contention"); Architecture §3.2.3 lists "running scheduled retention purges" as a worker responsibility; Architecture §3.4 commits "a retention purge cannot break the audit chain" which presumes a purge worker exists.
+**Repo state:** `app/policy/retention.py` defines the retention policy. There is no scheduled task in `app/worker/tasks/` that runs the purge. Soft-deleted rows accumulate without bound today.
+**Operational impact:** Storage cost grows with every soft-delete and never shrinks. Customers cannot be told "data is purged after the contracted retention period" with a straight face until this lands. Compliance posture is also weaker than the architecture claims.
+**Owning roadmap step:** None today. Recommend adding to roadmap (this pass does not unilaterally add it because retention purge is enough work — schedule, idempotency, lock semantics, audit emission to `deletion_logs`, end-to-end test — that it deserves its own line and operator buy-in before scheduling). For now, flagged here as a known gap requiring a near-term roadmap decision.
+**Doc-truthing this pass:** Architecture §3.2.3 and §4.4 receive 📋 markers; the prose stays unchanged because the design is correct, the implementation is missing.
 
 ---
 
-## §7 Maintenance Contract
+## Section 4 — Drifts pending production confirmation [PROD-PHASE-2B]
 
-1. New drift tokens must be appended in the same commit that introduces them.
-2. Status changes (open → closed, etc.) are recorded by editing the row in a new commit; the commit message must reference the token.
-3. Tokens are never deleted. Resolved tokens carry strikethrough on the token cell. Supersession is recorded by setting `Status = superseded-by-<new-token>` and adding a new row for the replacement.
-4. Hashes here are pointers, not the source of truth. If a hash and `git log` disagree, `git log` wins and this file must be corrected.
-5. Resolved gaps do not migrate to `CANONICAL_RECAP.md` or `ARCHITECTURE.md`. They stay here with strikethrough.
+These are claims in `ARCHITECTURE.md` whose verification requires operator-side access to the AWS account. Each will be walked together with the operator step by step in Phase 2B. The repository alone cannot confirm or deny any of them.
+
+### D-prod-waf-presence-unverified-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B]
+**Raised by:** Architecture §3.2.1 and §3.6 diagram (WAF in front of ALB)
+**Repo state:** No CFN template in `cfn/` provisions a WAF Web ACL. No infra-as-code claim of a WAF.
+**Resolution path:** Operator confirms whether a WAF Web ACL is associated with the production ALB. If yes, capture its arn and the rule set. If no, mark §3.2.1's WAF claim as 📋 Planned and open a roadmap item.
+
+### D-prod-multi-az-rds-unverified-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B]
+**Raised by:** Architecture §3.2.4 ("hot standby in a second availability zone"), §3.6 diagram (PG_PRIMARY ↔ PG_STANDBY)
+**Repo state:** No CFN template provisions the RDS instance. The repo cannot confirm Multi-AZ.
+**Resolution path:** Operator runs `aws rds describe-db-instances` (read-only) and confirms `MultiAZ: true` and the standby AZ. If single-AZ, mark §3.2.4's standby claim as 📋 Planned.
+
+### D-prod-app-tier-pool-unverified-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B]
+**Raised by:** Architecture §3.2.2 ("a pool of application servers"), §3.5 ("application server crash" recovery story)
+**Repo state:** Task definitions exist (`td-backend-rev34.json`) but desired-count and minimum-pool size are an ECS service property, not a task-def property.
+**Resolution path:** Operator confirms desired count and minimum healthy count of the backend ECS service. If desired count is 1, mark §3.2.2's pool claim as 🔧 Partial and open a roadmap item to raise the floor.
+
+### D-prod-worker-autoscaling-unverified-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B]
+**Raised by:** Architecture §3.2.3 ("worker autoscaling on queue depth and CPU")
+**Repo state:** `cfn/luciel-prod-worker-autoscaling.yaml` exists. Need to confirm it is deployed and active in the prod account.
+**Resolution path:** Operator confirms the worker-autoscaling stack is in `CREATE_COMPLETE` or `UPDATE_COMPLETE` state and the scaling policies are attached to the worker service.
+
+### D-prod-alarms-deployed-unverified-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B]
+**Raised by:** Architecture §3.2.8 (four signal kinds, alarms thresholds: 1% error, 1000 queue depth, 80% DB connection saturation)
+**Repo state:** `cfn/luciel-prod-alarms.yaml` exists. Need to confirm deployment.
+**Resolution path:** Operator confirms the alarms stack is deployed and the alarms are in `OK` state (not `INSUFFICIENT_DATA`).
+
+### D-prod-kms-customer-managed-unverified-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B]
+**Raised by:** Architecture §3.2.7 ("encrypted with a customer-managed KMS key")
+**Repo state:** Verify task role (`cfn/luciel-verify-task-role.yaml`) references KMS Decrypt via SSM service principal but does not name the key. Cannot confirm whether the key in use is AWS-managed (`aws/ssm`) or customer-managed.
+**Resolution path:** Operator runs `aws ssm describe-parameters` for one of the SecureString parameters, captures the `KeyId`, then `aws kms describe-key` on it. Confirm `KeyManager: CUSTOMER`. If `AWS`, mark as 🔧 Partial — works the same operationally but rotation control is AWS's, not ours.
+
+### D-prod-secrets-pattern-e-unverified-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B]
+**Raised by:** Architecture §3.2.7 ("Pattern E: secrets are deactivated, never deleted")
+**Repo state:** SSM Parameter Store does not natively support Pattern E (deactivated flag) — it supports versioning. The current implementation pattern needs documentation.
+**Resolution path:** Operator inventories SSM parameters with `aws ssm describe-parameters` and confirms the operational pattern: are old versions retained (relying on SSM history) or are deactivated rotated parameters retained as separate parameter names with a `-deactivated-YYYY-MM-DD` suffix? The doc should reflect what we actually do; right now §3.2.7 implies a discipline the implementation may not have.
+
+### D-prod-celery-broker-sqs-vs-redis-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B]
+**Raised by:** Architecture §3.6 diagram (`Job queue Redis/SQS`); §3.2.3 prose does not name SQS.
+**Repo state:** `app/worker/celery_app.py` lines 116-138 explicitly document a two-mode broker design: SQS in production, Redis in development. Production task definitions inject `REDIS_URL` from SSM. The architecture document does not commit clearly to SQS-in-prod.
+**Resolution path:** Update Architecture §3.2.3 to state SQS as the production broker explicitly, with the rationale already in `app/worker/celery_app.py` lines 132-138 (ElastiCache cluster mode incompatible with kombu's MULTI/EXEC). Confirm with operator that production is in fact running SQS-mode (not Redis broker via SSM `REDIS_URL`). If REDIS_URL is the actual broker, the architecture is wrong; otherwise the architecture is incomplete and we tighten it.
+
+### D-prod-sqs-stale-messages-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B] (operator-flagged, symptom description pending)
+**Raised by:** Operator on 2026-05-09 ("SQS stale messages drift"); not yet captured in either design doc.
+**Repo state:** Pending operator description.
+**Resolution path:** Operator describes the symptom — what is stale, how it manifests, what was observed in CloudWatch or in queue inspection. Drift will be expanded with the description, then we decide whether the cause is a design gap (e.g., visibility timeout vs job duration), a code bug (idempotency or ack handling), or an operational incident (poison messages stuck redelivering).
+
+### D-memory-truncation-2026-05-09
+
+**Status:** OPEN [PROD-PHASE-2B] (operator-flagged, symptom description pending)
+**Raised by:** Operator on 2026-05-09 ("memory truncation drift"); possibly distinct from the audit-note 256-char cap (test exists in `tests/integrity/test_audit_note_length_cap.py`).
+**Repo state:** Pending operator description.
+**Resolution path:** Operator describes which memory is being truncated — session, user preference, domain, or operational — and at what boundary (storage column length, retrieval window, model context). Drift will be expanded with the description, then we decide whether the truncation is a column-length cap, a retrieval-window heuristic, or a model-context budget cap.
+
+---
+
+## Section 5 — Resolved drifts (kept for audit)
+
+Closed drifts are kept here permanently with a strikethrough heading. The closing commit, the closing tag (if applicable), and a one-line resolution note are recorded. This makes the audit chain of design decisions walkable backwards; nothing is rewritten or deleted.
+
+### ~~D-step29y-impl-no-close-tag-2026-05-07~~
+
+**Status:** RESOLVED on 2026-05-08
+**Closing tag:** `step-29y-complete` on commit `5f297b7`
+**Resolution:** Step 29.y implementation work was tagged `step-29y-complete`, providing a stable anchor for "all step-29.y code merged."
+
+### ~~D-canonical-recap-v3.4-omits-step-29x-29y-2026-05-07~~
+
+**Status:** RESOLVED on 2026-05-08
+**Closing commit:** `3e8678d` (Step 29.y close-out C34/C35: 3-doc regime adoption + archive of legacy docs)
+**Resolution:** The legacy `CANONICAL_RECAP_v3.4.md` (which omitted Step 29.x and 29.y) was archived to `docs/archive/CANONICAL_RECAP_v3.4.md`. The new `CANONICAL_RECAP.md` is the single living canonical recap going forward, written product-philosophy-first per the user's revised framing.
+
+### ~~D-canonical-recap-q1-q8-roadmap-genericized-2026-05-08~~
+
+**Status:** RESOLVED on 2026-05-08; entry retained for audit
+**Closing commits:** `2903bc4` (verbatim restore from v3.4) → `e56887b` (rewrite with Q1-Q8 + roadmap intact, "How we'll know" columns filled in business-observable language) → merged to main as `08a830e`
+**Resolution:** A pre-restore version of the recap had genericized the eight strategic answers (Q1-Q8) and the roadmap. Operator caught it; restore + targeted rewrite preserved the substantive content while reframing for product-philosophy-first.
+
+### ~~D-untracked-diag-artifacts-no-gitignore-2026-05-08~~
+
+**Status:** RESOLVED on 2026-05-08 (initial pass)
+**Closing commit:** `cea23af` (Step 29.y gap-fix C33a: repo cleanup, delete 37 stale operational JSONs and extend .gitignore for diag artifacts)
+**Resolution:** Initial sweep of stale operational JSONs and .gitignore widening landed. **Note:** A second wave of untracked diagnostic files has appeared since (see open drift `D-untracked-diag-files-persist-2026-05-09`); the original closure remains valid for the patterns it covered, and the new patterns are tracked separately rather than as a re-open of the same id.
+
+### ~~D-pattern-e-architecture-doc-missing-2026-05-08~~
+
+**Status:** RESOLVED on 2026-05-09
+**Closing commit:** `bf7dff4` (Architecture rewrite as design-target document)
+**Resolution:** Pattern E (deactivate, never delete) is now an explicit cross-cutting property in Architecture §4.6, with the rationale, and is also referenced in §3.2.7 (secrets) and §4.5 (cascade-correct departure). The implementation pattern in production for SSM specifically is still tracked as open (`D-prod-secrets-pattern-e-unverified-2026-05-09`) until verified.
+
+### ~~D-architecture-doc-implementation-snapshot-not-design-2026-05-08~~
+
+**Status:** RESOLVED on 2026-05-09
+**Closing commits:** `bf7dff4` (Architecture rewrite as design-target) → merged to main as `c3ed8b6`
+**Resolution:** Architecture is now explicitly a design-target document, with an explicit reconciliation protocol (this DRIFTS.md). The previous implementation-snapshot framing (which conflated "what we built" and "what we intend to build") is gone. Marker scheme adopted but not yet applied — that is Phase 2 work and is the work this document tracks.
+
+### ~~D-tenant-language-vs-scope-language-2026-05-09~~
+
+**Status:** RESOLVED on 2026-05-09
+**Closing commit:** `bf7dff4` (architecture rewrite, terminology sweep)
+**Resolution:** Operator caught isolation/enforcement claims framed at the tenant level when the actual guarantee is at the scope level (any of tenant, domain, agent, or instance). 7-edit terminology sweep applied: scope language used for isolation guarantees; tenant/domain/agent/instance reserved for cases where the specific scope level genuinely matters (per-tenant DB tier, named memory kinds, hierarchy diagrams).
+
+---
+
+## Section 6 — How drifts are added, closed, or reopened
+
+**Adding a drift.** Append to Section 3 (open) or Section 4 (production-pending), with a fresh `D-<slug>-YYYY-MM-DD` id, a status, the section that raised it, the design claim, the repo or prod state, and a resolution path. Do not add to closed-drift section while the drift is still open.
+
+**Closing a drift.** Move the entry verbatim to Section 5, wrap the heading in `~~strikethrough~~`, fill in the closing commit (and tag if relevant) and a one-line resolution. Do not delete the entry from Section 3 — move it. The audit chain depends on the body of each drift remaining readable after closure.
+
+**Reopening a drift.** Open a new drift with a fresh id and a date suffix matching the day of reopening. Reference the closed predecessor in the body. The closed predecessor stays closed; reopening is a new story.
+
+**Marker propagation.** As drifts close, the corresponding section in `ARCHITECTURE.md` or `CANONICAL_RECAP.md` gets the appropriate ✅ / 🔧 / 📋 / 🔬 marker added in surgical edits. The marker is the connective tissue between the design docs and this register; the doc edit and the drift closure are part of the same commit.
+
+---
+
+## Section 7 — Source-of-truth rule
+
+If a chat summary, a session recap, a slide, an email, or any other artifact contradicts this document about the status of a drift, **this document wins**. Update the document; do not let the contradicting artifact stand.

@@ -111,3 +111,18 @@ backend_*.log
 worker_*.log
 migrate_*.log
 verify_*.log
+
+# Step 29.y reconciliation: widen diagnostic-artifact ignores. These
+# patterns capture the second wave of operator scratch surfaces that
+# escaped the C33 pass — chat-session transcripts, dated evidence and
+# probe dumps, and cross-step snapshot logs. Canonical record of any
+# incident lives in CloudWatch + admin_audit_logs + DRIFTS.md; the
+# files matched here are per-session intermediates and forensics that
+# should never be committed.
+*.transcript.txt
+*-transcript-*.txt
+*-evidence-*.json
+*-evidence-*.log
+*-probe-*.json
+*-probe-*.log
+*-snapshot-*.log
