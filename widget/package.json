@@ -9,6 +9,8 @@
     "build": "vite build",
     "size": "node scripts/check-bundle-size.mjs",
     "ci": "npm run build && npm run size",
+    "mock-backend": "node scripts/mock-backend.mjs",
+    "test:e2e": "npm run build && node scripts/e2e-smoke.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
