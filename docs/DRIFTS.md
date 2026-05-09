@@ -277,6 +277,8 @@ Closed drifts are kept here permanently with a strikethrough heading. The closin
 
 **Marker propagation.** As drifts close, the corresponding section in `ARCHITECTURE.md` or `CANONICAL_RECAP.md` gets the appropriate ✅ / 🔧 / 📋 / 🔬 marker added in surgical edits. The marker is the connective tissue between the design docs and this register; the doc edit and the drift closure are part of the same commit.
 
+**What does NOT belong in the design docs.** The three canonical docs (`CANONICAL_RECAP.md`, `ARCHITECTURE.md`, `DRIFTS.md`) are stable references, not running notebooks. Build-time detail — framework choice, library selection, schema column lists, transport-protocol rationale, branding-knob inventories, sandbox demo plans — belongs in **commit messages** and **code-level docstrings**, not in the canonical docs. The canonical docs grow only when the architectural shape changes: a new cross-cutting property, a new component, a deletion of something that is no longer true, or a roadmap step landing such that its success criterion is provably met. A new roadmap step, on its own, is not a reason to grow the docs — the recap row already exists, and implementation detail is recoverable from `git log` and the code itself. If a build genuinely needs a multi-day shared scratchpad, it lives in `docs/in-flight/<slug>.md` during the build and is **deleted** (not archived) on merge. This principle exists because docs that grow with every roadmap step become unparsable; the discipline of keeping them stable is what makes them useful as references.
+
 ---
 
 ## Section 7 — Source-of-truth rule
