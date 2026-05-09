@@ -8,6 +8,12 @@
 
 **Last updated:** 2026-05-09
 
+**Status markers used in this document:**
+- ✅ Resolved / Closed — the answer is settled and the build matches.
+- 🔧 Build-in-progress — designed and described as the target; current implementation is partial, with the gap captured in `DRIFTS.md` and a roadmap step that closes it.
+- 📋 Planned — on the roadmap with a defined success criterion; not yet built.
+- 🔬 Decision-gate — evidence is being gathered before the answer is committed.
+
 ---
 
 ## Section 1 — What Luciel is
@@ -61,6 +67,8 @@ These are non-negotiable. They define the product as much as the features do.
 - Retain sensitive information without explicit policy approval.
 - Reach beyond the scope and tools the deployment was given.
 
+**On "consequential."** A consequential action is one that is irreversible (signing a contract, charging a card, deleting data), high-blast-radius (mass communications, broad data exports), or off-pattern for the user (an unusual category, an unusual amount, an unusual recipient, an unusual time). Routine work — reading a calendar, recording call notes, saving a memory — is not consequential and Luciel does not interrupt the user to confirm it. The shape of this gate, including the action-classification tiers that drive it, is defined in roadmap Step 30c.
+
 ---
 
 ## Section 5 — How Luciel thinks
@@ -70,7 +78,7 @@ Luciel runs the same internal loop every time, no matter the domain:
 1. **Perceive** — capture the explicit request, and read the emotional tone underneath it.
 2. **Infer** — identify hidden priorities, constraints, and uncertainties.
 3. **Verify** — ask one targeted question, or pull one targeted data point, to resolve the most consequential unknown.
-4. **Act** — recommend, explain, retrieve, route, or carry out work, depending on what's appropriate.
+4. **Act** — recommend, explain, retrieve, route, or carry out work, depending on what's appropriate. 🔧 Acting beyond conversation (booking, sending, writing to external systems) lands in Step 34; the action-classification gate that governs it lands in Step 30c.
 5. **Reflect** — assess confidence and outcome quality, and decide whether the situation has crossed a threshold that requires escalation.
 
 This loop is what makes Luciel feel like judgment instead of search.
@@ -92,7 +100,7 @@ Every Luciel deployment, regardless of vertical or scope, is built from the same
 - **Domain memory** — structured knowledge patterns for the vertical (real estate, legal, mortgage, etc.).
 - **Client operational memory** — business-specific rules, workflows, and exceptions for the deploying organization.
 
-**Tool.** The registry and invocation interface for everything outside Luciel's head — search, calculation, retrieval, external APIs, other Luciels. Loosely coupled by design, so the implementations can change without changing Luciel itself.
+**Tool.** The registry and invocation interface for everything outside Luciel's head — search, calculation, retrieval, external APIs, other Luciels. Loosely coupled by design, so the implementations can change without changing Luciel itself. 🔧 Today the tool surface is LLM-only at the runtime; calendar, CRM, email, and database actions are designed and reserved but land in Step 34.
 
 **Policy.** What Luciel is allowed to do. Governs scope of access, escalation rules, action confirmation, and any client- or domain-specific restrictions.
 
@@ -185,6 +193,7 @@ The path from where Luciel is today to a fully realized version of the product. 
 | Testing | **29** | Automated verification suite that re-runs against every change and proves the platform is still healthy. | Before any change ships to a real customer, an automated check confirms that all 25 platform guarantees still hold. We never ship a regression by accident. | ✅ Closed (25/25 verification passing) |
 | Billing | **30a** | Subscription billing — sign-up, payment, plan changes, cancellation — integrated with our company website. | A new individual customer can find Luciel on our website, sign up, pay, start using their Luciel, change plans, and cancel — all without anyone from our team being involved. | 📋 Planned (after 30b) |
 | Frontend | **30b** | Embeddable chat widget that any company can drop into their existing website. | A company adds a few lines of code to their site, and within an hour their visitors are having real conversations with the company's Luciel. This is the unblock for the first paying customer. | 📋 Planned — next |
+| Hardening | **30c** | Action classification — tool invocations are tiered as routine, notify-and-proceed, or approval-required, so Luciel asks first only when an action is genuinely consequential. | Customers feel that Luciel acts decisively on routine work and pauses to confirm only when the stakes warrant it. An audit log can prove every approval-required action had a confirmation row preceding it. The behavior contract in Section 4 stops being aspirational and becomes enforced — with the right scope, not an annoying one. | 📋 Planned (carved out in 2026-05-09 reconciliation; lands before first paying customer per Step 30b) |
 | Frontend | **31** | Hierarchical dashboards (company / department / individual) and a five-part pre-launch validation gate before any new customer goes live. | Each level of the organization sees exactly what's happening at and below them, and can answer "is Luciel earning its keep here?" in under a minute. No customer goes live until five categories of readiness — isolation, customer journey, memory quality, operations, and compliance — are all green. | 📋 Planned |
 | Frontend | **32** | Self-service for individual professionals — they spin up their own Luciels under their own scope, no operator involvement. | Sarah signs up, configures her own Luciel for her own client work, and starts getting value, without anyone from our team on the call. | 📋 Planned |
 | Frontend | **32a** | File input — every Luciel can ingest documents the customer provides. | A customer drops in their listing book, their playbook, or their internal handbook, and the Luciel starts using that knowledge in conversations the same day. | 📋 Planned |
@@ -216,7 +225,7 @@ The first eight scenarios map directly to the strategic questions in Section 11 
 | **T5** (proves Q5) | Sarah has been using Luciel as an individual for six months at $30/month. Her department signs up for the Team tier. With one click on Sarah's end and one approval on the department lead's end, Sarah's history moves up. | Sarah's saved client preferences, her conversation history, her ingested knowledge, and her configured Luciels all carry forward into the department's deployment. Sarah loses nothing. The department starts on day one with the benefit of Sarah's six months. Three months later, when the company itself signs up for the Company tier, the same flow runs again — department to company — without loss. |
 | **T6** (proves Q6) | An agent at a brokerage is promoted to department lead. A different agent leaves the brokerage entirely. | The promoted agent's access expands cleanly. The Luciels they built as an individual are still theirs and still working, and they now have department-scope authority on top. The departing agent's access ends within the same hour they leave. Every key they had touched is rotated. The Luciels they built for the department are still working — because the data was never theirs. The audit log shows exactly what happened, when, and by whom. |
 | **T7** (proves Q7) | A brokerage configures a Luciel that takes inbound phone calls, replies to text messages, answers chat-widget conversations on the company's public site, and sends follow-up emails. | A prospect interacting through any of the four channels experiences the same Luciel — same character, same memory of their prior interactions, same recommendations. From the inside, adding a fifth channel later (say, WhatsApp) is a configuration change, not a separate product build. |
-| **T8** (proves Q8) | A prospect chats with a brokerage's Luciel on the website Monday morning. Wednesday afternoon they call the brokerage's phone line, which is also Luciel-answered. | The Luciel on the phone greets them by name, references what they were looking for on Monday, and continues the conversation as if no time had passed. The prospect does not re-introduce themselves or repeat their context. The handoff between channels feels human. |
+| **T8** (proves Q8) | A prospect chats with a brokerage's Luciel on the website Monday morning. Wednesday afternoon they call the brokerage's phone line, which is also Luciel-answered. | The Luciel on the phone greets them by name, references what they were looking for on Monday, and continues the conversation as if no time had passed. The prospect does not re-introduce themselves or repeat their context. The handoff between channels feels human. _Today the cross-channel demonstration runs over chat plus programmatic ingress only; voice and SMS legs land with Step 34a (channel adapter framework)._ |
 
 ### 13.2 Cross-cutting customer journey scenarios
 
