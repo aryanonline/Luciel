@@ -134,6 +134,101 @@ jobs:
         working-directory: widget
         run: npm run size
 
+      - name: upload widget bundle as artifact
+        # The bundle is consumed downstream by the widget-cdn-deploy job
+        # so deploy never trusts a different node_modules / npm cache
+        # than the one the size gate validated. Artifacts are scoped to
+        # the workflow run, expire after 1 day, and are not exposed
+        # outside the repo.
+        uses: actions/upload-artifact@v4
+        with:
+          name: widget-dist
+          path: widget/dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  widget-cdn-deploy:
+    name: Widget bundle deploy to CDN (Step 30b Phase 2B)
+    # Only on direct pushes to main. Pull requests do NOT deploy --
+    # they are gated on the build+size job above for signal, but the
+    # OIDC role's trust policy refuses ref:refs/heads/<other-branch>
+    # anyway, so this is defense in depth.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: widget-build-and-size
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Required for the GitHub OIDC token used by aws-actions/configure-
+      # aws-credentials. Default GITHUB_TOKEN does not include id-token.
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ca-central-1
+      WIDGET_CDN_DEPLOY_ROLE_ARN: arn:aws:iam::729005488042:role/luciel-widget-cdn-deploy
+      # The deploy script also reads these. They are baked in as the
+      # script's defaults, but setting them here makes the job log
+      # explicit about what stack the runner is targeting.
+      WIDGET_CDN_BUCKET: luciel-widget-cdn-prod-ca-central-1
+      WIDGET_CDN_DISTRIBUTION_ID: EU5R6YVX26RPY
+      WIDGET_CDN_DISTRIBUTION_DOMAIN: d1t84i96t71fsi.cloudfront.net
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: download bundle from build job
+        # Same artifact the size gate just validated. The deploy script
+        # expects widget/dist/luciel-chat-widget.js + .map; that is what
+        # was uploaded.
+        uses: actions/download-artifact@v4
+        with:
+          name: widget-dist
+          path: widget/dist/
+
+      - name: configure AWS credentials via GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.WIDGET_CDN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          # 15 minutes is enough for the upload + invalidation wait;
+          # shorter session = smaller blast radius if the token leaks.
+          role-session-name: gha-widget-cdn-deploy-${{ github.run_id }}
+          role-duration-seconds: 900
+
+      - name: run deploy script
+        # The script is idempotent: same content -> same hash -> no-op
+        # at the object level, but a fresh invalidation is still issued
+        # so any edge with a stale alias picks up. This is by design.
+        run: bash scripts/deploy_widget_cdn.sh
+
+      - name: post-deploy reachability check
+        # Smoke test from the runner's network (a public internet point
+        # outside our control). HEAD instead of GET to avoid pulling
+        # the bundle bytes; only checks status, content-type, and
+        # cache-control. If any of these regress, the job fails and
+        # the post-merge tag does not get applied.
+        run: |
+          set -euo pipefail
+          URL="https://${WIDGET_CDN_DISTRIBUTION_DOMAIN}/widget.js"
+          echo "==> HEAD ${URL}"
+          # Allow up to 90 seconds for the invalidation to propagate to
+          # the runner's nearest edge (the deploy script already waited
+          # for the invalidation to complete, but propagation to a
+          # specific edge can lag a few extra seconds).
+          for attempt in 1 2 3 4 5 6; do
+            if curl --silent --show-error --fail-with-body --location \
+                    --max-time 15 \
+                    --output /dev/null --write-out '%{http_code} %{content_type}\n' \
+                    --head "${URL}" | tee /tmp/curl.out | grep -E '^200 application/javascript'; then
+              echo "==> reachability OK on attempt ${attempt}"
+              exit 0
+            fi
+            echo "::warning::attempt ${attempt} did not match expected response, retrying in 15s"
+            sleep 15
+          done
+          echo "::error::widget.js did not return 200 + application/javascript after 6 attempts"
+          cat /tmp/curl.out
+          exit 1
+
   # ---------------------------------------------------------------------------
   # Future job (intentionally not enabled now): full pillar verify suite.
   # Uncomment + flesh out when we're ready to pay the per-push minutes for
