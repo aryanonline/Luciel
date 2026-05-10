@@ -56,10 +56,18 @@
 #    - AssumeRole trust limited to the GitHub OIDC provider, repository
 #      aryanonline/Luciel, and ref refs/heads/main. Pull requests
 #      cannot assume this role; only merges to main can.
-#    - Permissions: s3:PutObject + s3:DeleteObject on
-#      arn:aws:s3:::<bucket>/*, plus cloudfront:CreateInvalidation
-#      scoped to this distribution. Nothing else. No s3:* wildcard,
-#      no PassRole, no read on any other resource.
+#    - Permissions: s3:PutObject + s3:DeleteObject + s3:GetObject +
+#      s3:ListBucket on arn:aws:s3:::<bucket> and /*, plus three
+#      cloudfront verbs scoped to this one distribution:
+#      CreateInvalidation (issue the purge), GetInvalidation (poll
+#      its status -- required by `aws cloudfront wait invalidation-
+#      completed`), and GetDistribution (sanity-read distribution
+#      config when debugging a deploy). Nothing else. No s3:*
+#      wildcard, no PassRole, no read on any other resource.
+#      GetInvalidation was added 2026-05-10 after the first CI deploy
+#      proved the upload + invalidation issuance succeeded but the
+#      wait step crashed on AccessDenied; closed via this template
+#      revision.
 #
 # What this template deliberately does NOT provision
 # ==================================================
@@ -352,7 +360,19 @@ Resources:
               - Sid: CloudFrontInvalidate
                 Effect: Allow
                 Action:
+                  # CreateInvalidation issues the purge after upload;
+                  # GetInvalidation lets `aws cloudfront wait
+                  # invalidation-completed` poll until the purge
+                  # actually finishes (without it, the wait crashes
+                  # with AccessDenied even though the invalidation
+                  # is propagating fine). GetDistribution is a
+                  # debug aid for confirming origin/OAC config
+                  # when a deploy goes sideways. All three are
+                  # read-only or scoped to this one distribution
+                  # by Resource below; the role cannot touch any
+                  # other distribution in the account.
                   - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
                   - cloudfront:GetDistribution
                 Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${WidgetDistribution}"
 
