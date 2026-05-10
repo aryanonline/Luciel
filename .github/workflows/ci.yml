@@ -85,6 +85,22 @@ jobs:
         run: python tests/api/test_admin_forensics_step29c.py
 
       - name: run http_client params + health pytest tests
+        # tests/api/test_health.py imports `app.main`, which transitively
+        # imports `app.core.config.Settings`. Settings.database_url is a
+        # required field with no default, so a bare CI runner with no
+        # DATABASE_URL exported fails pytest collection with a Pydantic
+        # ValidationError before any test code runs. The /health endpoint
+        # itself does NOT touch the DB -- it returns {"status": "ok",
+        # "service": settings.app_name} -- so a stub URL is sufficient.
+        # We use sqlite:///:memory: rather than a postgres+asyncpg URL
+        # because asyncpg is not in the CI install set; sqlite ships with
+        # SQLAlchemy core and resolves at engine-creation time without
+        # touching the network. The DATABASE_URL is scoped to this step
+        # only so the next step (pillar harness collection) keeps its
+        # "skip cleanly when DATABASE_URL is unset" behavior, which is
+        # the contract the file-header comment block above documents.
+        env:
+          DATABASE_URL: "sqlite:///:memory:"
         run: python -m pytest tests/verification/test_http_client_params.py tests/api/test_health.py -v
 
       - name: run pillar harness collection (skips cleanly without DB)
