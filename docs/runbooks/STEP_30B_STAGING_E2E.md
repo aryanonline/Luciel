@@ -54,24 +54,46 @@ Run from a host with platform_admin credentials to the production API. If you ha
 $AdminKey = $env:LUCIEL_PROD_ADMIN_KEY
 if (-not $AdminKey) { Write-Error "LUCIEL_PROD_ADMIN_KEY not set" }
 
-curl -X POST https://api.vantagemind.ai/v1/admin/tenants `
+curl -X POST https://api.vantagemind.ai/api/v1/admin/tenants `
   -H "Authorization: Bearer $AdminKey" `
   -H "Content-Type: application/json" `
   -d '{
     "tenant_id": "luciel-staging-widget-test",
     "display_name": "Luciel Staging Widget Test (2026-05-10)",
-    "tier": "standard"
+    "description": "Dedicated tenant for Step 30b staging end-to-end test. Never reused; never recycled for a paying customer.",
+    "created_by": "aryan@step30b-staging-e2e"
   }'
 
-# Expected: HTTP 201, response body echoes tenant_id, created_at timestamp.
-# If 409 Conflict: tenant already exists from a prior run — skip to phase 2.
+# Expected: HTTP 201, response body echoes tenant_id, id (numeric), created_at.
+# If 409 Conflict: tenant already exists from a prior run — skip to phase 1.3.
+# Schema (TenantConfigCreate, app/schemas/admin.py): tenant_id, display_name,
+# description?, escalation_contact?, allowed_domains?, system_prompt_additions?,
+# created_by?. No `tier` field exists -- do not add one.
 
 # 1.2 Verify tenant landed.
-curl -X GET https://api.vantagemind.ai/v1/admin/tenants/luciel-staging-widget-test `
+curl -X GET https://api.vantagemind.ai/api/v1/admin/tenants/luciel-staging-widget-test `
   -H "Authorization: Bearer $AdminKey"
-```
 
-A LucielInstance under this tenant must exist before the chat path will accept messages. Create one (default persona, no special config) per the existing admin flow before phase 2.
+# 1.3 Create a LucielInstance under the tenant. The chat path requires one;
+#     widget calls land at the tenant-scoped instance by default routing.
+curl -X POST https://api.vantagemind.ai/api/v1/admin/luciel-instances `
+  -H "Authorization: Bearer $AdminKey" `
+  -H "Content-Type: application/json" `
+  -d '{
+    "instance_id": "staging-widget",
+    "display_name": "Staging Widget Instance",
+    "description": "Default-persona instance for the Step 30b staging e2e test.",
+    "scope_level": "tenant",
+    "scope_owner_tenant_id": "luciel-staging-widget-test"
+  }'
+
+# Expected: HTTP 201. Schema reference: LucielInstanceCreate in
+# app/schemas/luciel_instance.py line 42. instance_id is a slug; scope_level
+# 'tenant' means the instance is owned at the tenant level (no domain/agent
+# narrowing). If the test path requires domain or agent scoping, supply
+# scope_owner_domain_id / scope_owner_agent_id and adjust scope_level
+# accordingly.
+```
 
 ---
 
@@ -176,7 +198,7 @@ Open `https://<tunnel-host>` in a fresh browser profile (no extensions, no other
 |---|---|
 | `widget.js` loads | Network panel: 200 from `d1t84i96t71fsi.cloudfront.net`, content-type `application/javascript`, ≥27 KB. Check the `x-cache` header — `Hit from cloudfront` confirms warm cache, `Miss` the first time. |
 | Widget UI renders | Floating chat surface appears in the corner. Greeting message matches what was minted in phase 2.3 ("This is the staging test widget…"). |
-| First message round-trips | Send "test message 1." Network panel: a `POST` to `https://api.vantagemind.ai/v1/widget/chat` (confirm the exact path against the widget bundle source if it differs), 200 response, response body contains a model reply. Same exchange visible in the widget UI. |
+| First message round-trips | Send "test message 1." Network panel: a `POST` to `https://api.vantagemind.ai/api/v1/chat/widget` (confirmed against `widget/src/api.ts` line 53 and `app/api/v1/chat_widget.py` route prefix). Response is an SSE stream (server-sent events) read via `fetch()` + `ReadableStream`, not a single JSON body — you'll see `Content-Type: text/event-stream` and chunked tokens flowing in. The widget UI renders them as they arrive. |
 | Origin enforcement holds | From DevTools console, run `fetch(...)` to the same widget endpoint with the embed key but `Origin: https://attacker.example`. Confirm rejection (403 or appropriate). |
 | Rate limit fires | Send 31 messages in under a minute via the script-injected loop. Confirm the 31st gets a 429 with rate-limit headers. Then wait one minute and confirm normal operation resumes. |
 | Audit row visible | Operator query against production DB: rows in `audit_log` for tenant `luciel-staging-widget-test` matching this session, with `actor_kind='embed_key'` and the last-4 of the minted key. |
