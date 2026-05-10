@@ -711,7 +711,7 @@ def create_embed_key(
         request,
         payload.tenant_id,
         payload.domain_id,
-        agent_id=None,
+        target_agent_id=None,
     )
 
     # Domain-scoped callers cannot mint tenant-wide embed keys (i.e.
