@@ -147,15 +147,14 @@ These are claims in `ARCHITECTURE.md` whose verification requires operator-side 
 
 ### D-prod-widget-bundle-cdn-unprovisioned-2026-05-09
 
-**Status:** OPEN [PROD-PHASE-2B] — blocks Step 30b success criterion
+**Status:** OPEN [PROD-PHASE-2B] — infrastructure provisioned, first deploy pending merge
 **Raised by:** Step 30b commit (e) end-of-build review.
 **Design claim:** CANONICAL_RECAP §12 Step 30b row: customers add "a few lines of code to their site" and the widget loads. That requires the bundle to be reachable from any customer origin under a stable, cacheable URL.
-**Repo state:** The widget bundle is built on every push by the `widget-build-and-size` CI job (commit d) and ships at 9.2 KB gzipped, but it is published nowhere. There is no S3 bucket, no CloudFront distribution, no infrastructure-as-code claim of either, and no deploy step in CI that uploads `widget/dist/luciel-chat-widget.js` to a CDN.
-**Resolution path (Phase 2B with operator):**
-  1. Provision an S3 bucket (private, with CloudFront OAC). Bucket name follows the existing `cfn/` naming convention if one exists; otherwise pick `luciel-widget-cdn-prod-<region>`.
-  2. Provision a CloudFront distribution serving from the bucket with a long max-age on the hashed bundle filename and a short max-age on a stable `widget.js` alias if we want versionless URLs.
-  3. Add a CI job (gated to `main`, after the size job passes) that uploads `widget/dist/luciel-chat-widget.js` plus its `.map` to the bucket on every merge.
-  4. Document the public URL in `docs/CANONICAL_RECAP.md` Step 30b row only after the URL is reachable from outside our network.
+**Progress on `step-30b-widget-cdn-deploy` (open):** Three of the four resolution-path items now ship in repo + AWS:
+  1. Private S3 bucket `luciel-widget-cdn-prod-ca-central-1` with CloudFront OAC, distribution `EU5R6YVX26RPY` at `d1t84i96t71fsi.cloudfront.net`, and GitHub OIDC deploy role `arn:aws:iam::729005488042:role/luciel-widget-cdn-deploy` are provisioned via `cfn/luciel-widget-cdn.yaml` (commit `ae87491`). Stack is in `CREATE_COMPLETE` in account 729005488042 / region ca-central-1.
+  2. `scripts/deploy_widget_cdn.sh` (commit `903d39e`, mode 755) uploads the bundle as both a hashed filename (`luciel-chat-widget.<hash>.js`, immutable Cache-Control) and a stable alias (`widget.js`, short Cache-Control), then issues a CloudFront invalidation on `widget.js` only. Idempotent: identical content → identical hash → object-level no-op, but a fresh invalidation still fires.
+  3. `.github/workflows/ci.yml` adds a `widget-cdn-deploy` job (commit `0cc2ecb`) gated on `push + refs/heads/main`, gated on the existing `widget-build-and-size` job, and using GitHub OIDC (`id-token: write`, `role-duration-seconds: 900`) to assume the deploy role. The job downloads the artifact the size gate just validated, runs the deploy script, and HEAD-checks the resulting URL with 6 retries × 15s.
+**What still blocks closure:** The fourth item — "the URL is reachable from outside our network" — cannot be claimed until the first CI deploy runs on merge to main. The deploy job has never executed and the CloudFront distribution serves a 403 today (empty bucket). This drift closes only after the first merge to main triggers the deploy job, the in-job reachability check passes, and an operator-side `curl -I https://d1t84i96t71fsi.cloudfront.net/widget.js` independently confirms `200 application/javascript`.
 **Pattern E:** No row mutations. CDN artifacts are forward-only; old hashed paths stay reachable for any customer that pinned a specific version.
 
 ### D-prod-multi-az-rds-unverified-2026-05-09

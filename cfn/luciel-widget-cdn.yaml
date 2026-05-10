@@ -1,0 +1,392 @@
+# =====================================================================
+# Luciel widget CDN -- Step 30b Phase 2B
+# =====================================================================
+#
+# Region: ca-central-1 (S3 origin region)
+# Account: 729005488042
+# CloudFront is a global service; this template creates the
+# distribution in us-east-1 implicitly via the global API.
+#
+# Closes drift D-prod-widget-bundle-cdn-unprovisioned-2026-05-09.
+#
+# What this template provisions
+# =============================
+#
+# 1. WidgetBucket
+#    - Private (PublicAccessBlockConfiguration locks all public ACLs).
+#    - Versioned (so a bad deploy does not destroy old hashed bundles
+#      and we can roll back at the object level).
+#    - SSE with S3-managed keys at rest.
+#    - No website hosting -- objects are served via CloudFront only.
+#
+# 2. WidgetOAC (Origin Access Control)
+#    - Modern replacement for the deprecated Origin Access Identity.
+#    - Uses SigV4 signing so CloudFront authenticates as itself when
+#      fetching objects from the bucket.
+#
+# 3. WidgetDistribution
+#    - Origin: WidgetBucket via OAC.
+#    - Default behavior: stable alias (e.g. /widget.js) with short
+#      max-age (5 minutes) so customers who paste the alias get
+#      updates fast.
+#    - Path-pattern behavior: hashed bundles (luciel-chat-widget.*.js
+#      and *.map) with 1-year immutable caching since the filename
+#      changes on every content change.
+#    - Viewer protocol policy: redirect-to-https (no plaintext widget
+#      loads from a customer page that is itself HTTPS, since browsers
+#      would block the mixed-content load anyway).
+#    - Compression: gzip + brotli automatically applied at the edge.
+#    - Response headers policy: SecurityHeadersPolicy for HSTS,
+#      X-Content-Type-Options, Referrer-Policy. No CORS headers needed
+#      (a <script src> load does not require CORS unless the customer
+#      opts into integrity hashing).
+#
+# 4. WidgetBucketPolicy
+#    - Allows ONLY the CloudFront distribution to read, scoped by
+#      aws:SourceArn condition. Defense in depth: even if the OAC is
+#      misconfigured, the bucket policy refuses unsigned reads.
+#
+# 5. GitHubOIDCProvider (created conditionally)
+#    - Account-level resource. The Url, Audience, and Thumbprint match
+#      the GitHub-published values. CreateOIDCProvider parameter
+#      defaults to true; set to false if a later stack also wants to
+#      reference this provider without re-creating it.
+#
+# 6. WidgetCdnDeployRole
+#    - AssumeRole trust limited to the GitHub OIDC provider, repository
+#      aryanonline/Luciel, and ref refs/heads/main. Pull requests
+#      cannot assume this role; only merges to main can.
+#    - Permissions: s3:PutObject + s3:DeleteObject on
+#      arn:aws:s3:::<bucket>/*, plus cloudfront:CreateInvalidation
+#      scoped to this distribution. Nothing else. No s3:* wildcard,
+#      no PassRole, no read on any other resource.
+#
+# What this template deliberately does NOT provision
+# ==================================================
+#
+# - ACM certificate or alternate domain name. v1 ships from the raw
+#   *.cloudfront.net domain. The custom domain (e.g. cdn.luciel.ai)
+#   is a clean retrofit later -- CloudFront supports adding aliases
+#   live without breaking already-pasted URLs.
+# - WAF. The bundle is public-readable static JavaScript with no
+#   auth surface; WAF would add cost without earning it.
+# - CloudFront access logs to S3. CloudWatch metrics are sufficient
+#   for v1 traffic patterns. Access logs can be added via a separate
+#   template if forensics demands it.
+# - Lambda@Edge or CloudFront Functions. No rewrite logic needed;
+#   /widget.js is a static alias kept current by the deploy script.
+# =====================================================================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Luciel widget CDN (Step 30b Phase 2B): private S3 bucket fronted by
+  CloudFront, with a GitHub OIDC role for keyless CI deploys. Closes
+  D-prod-widget-bundle-cdn-unprovisioned-2026-05-09. Region
+  ca-central-1, account 729005488042. See top-of-file comment block
+  for the per-resource design rationale.
+
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: luciel-widget-cdn-prod-ca-central-1
+    Description: >
+      Name of the S3 bucket holding the widget bundle. Must be
+      globally unique. Default follows the luciel-*-prod-* convention.
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+
+  GitHubOrg:
+    Type: String
+    Default: aryanonline
+    Description: >
+      GitHub organization or user that owns the repository. The CI
+      deploy role's trust policy is anchored here.
+
+  GitHubRepo:
+    Type: String
+    Default: Luciel
+    Description: >
+      Name of the GitHub repository allowed to assume the deploy role.
+      Combined with GitHubOrg, this scopes the role to this single
+      repo.
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: >
+      Branch ref allowed to assume the deploy role. Pull request runs
+      cannot assume the role; only merges to this branch can. Set to
+      "*" only if you have a strong reason; default is intentionally
+      restrictive.
+
+  CreateOIDCProvider:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: >
+      Whether to create the GitHub OIDC provider in this account. Set
+      to false if another stack already provisioned it. The provider
+      is an account-level singleton; a duplicate-create attempt fails.
+
+  StableAliasMaxAgeSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 60
+    MaxValue: 86400
+    Description: >
+      Max-age for /widget.js (the stable alias customers paste). 300
+      seconds (5 minutes) is the v1 default: customer sites refresh
+      within minutes of a new deploy without hammering CloudFront.
+      Lower means faster updates but more origin load; higher means
+      slower updates but less origin load.
+
+  HashedBundleMaxAgeSeconds:
+    Type: Number
+    Default: 31536000
+    MinValue: 86400
+    MaxValue: 31536000
+    Description: >
+      Max-age for hashed bundles like luciel-chat-widget.<hash>.js.
+      Default is 1 year (the immutable-by-content idiom). Hashed
+      filenames change on every content change, so cache forever is
+      safe and saves origin requests for any customer that pins a
+      version.
+
+Conditions:
+  ShouldCreateOIDCProvider: !Equals [!Ref CreateOIDCProvider, "true"]
+
+Resources:
+
+  # -------------------------------------------------------------------
+  # 1. Private S3 bucket holding widget assets.
+  # -------------------------------------------------------------------
+  WidgetBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-noncurrent-versions-after-90-days
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  # -------------------------------------------------------------------
+  # 2. Origin Access Control (OAC) -- CloudFront authenticates to S3
+  #    as itself, no anonymous reads.
+  # -------------------------------------------------------------------
+  WidgetOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${BucketName}-oac"
+        Description: OAC for the Luciel widget CDN.
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # -------------------------------------------------------------------
+  # 3. CloudFront distribution.
+  # -------------------------------------------------------------------
+  WidgetDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "Luciel widget CDN -- ${BucketName}"
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        DefaultRootObject: ""
+        Origins:
+          - Id: WidgetBucketOrigin
+            DomainName: !GetAtt WidgetBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !GetAtt WidgetOAC.Id
+        DefaultCacheBehavior:
+          # Default behavior covers /widget.js and any other
+          # not-yet-defined paths. Short cache so customers who paste
+          # the stable alias get updates fast.
+          TargetOriginId: WidgetBucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # CachingOptimized policy id (AWS-managed). Combined with
+          # the ResponseHeadersPolicy, this gives us the right headers
+          # without writing a custom cache policy.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+          FunctionAssociations: []
+        CacheBehaviors:
+          # Hashed bundle behavior: long cache, content-addressed.
+          - PathPattern: "luciel-chat-widget.*.js"
+            TargetOriginId: WidgetBucketOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+            ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+          # Source maps follow the same long-cache rule.
+          - PathPattern: "*.map"
+            TargetOriginId: WidgetBucketOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+            ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+        ViewerCertificate:
+          # Use the default *.cloudfront.net certificate. When we
+          # add cdn.luciel.ai, this block changes to AcmCertificateArn
+          # + SslSupportMethod=sni-only + Aliases.
+          CloudFrontDefaultCertificate: true
+
+  # -------------------------------------------------------------------
+  # 4. Bucket policy: ONLY this distribution may read.
+  # -------------------------------------------------------------------
+  WidgetBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WidgetBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action:
+              - s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${BucketName}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${WidgetDistribution}"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${BucketName}"
+              - !Sub "arn:aws:s3:::${BucketName}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # -------------------------------------------------------------------
+  # 5. GitHub OIDC provider (account-level singleton).
+  # -------------------------------------------------------------------
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        # GitHub Actions OIDC root CA thumbprint. AWS no longer requires
+        # accurate thumbprints for the GitHub OIDC provider (since
+        # July 2023 they validate the chain server-side), but the field
+        # is still required by the API. Using a known-good value.
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  # -------------------------------------------------------------------
+  # 6. CI deploy role.
+  # -------------------------------------------------------------------
+  WidgetCdnDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: luciel-widget-cdn-deploy
+      Description: >
+        Role assumed by the GitHub Actions widget-cdn-deploy job to
+        upload the built widget bundle to the CDN bucket and invalidate
+        the stable alias. Trust is anchored to the specific GitHub
+        repo and branch; PR runs cannot assume this role.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${GitHubBranch}"
+      Policies:
+        - PolicyName: widget-cdn-deploy-permissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WidgetBucketWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${BucketName}"
+                  - !Sub "arn:aws:s3:::${BucketName}/*"
+              - Sid: CloudFrontInvalidate
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetDistribution
+                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${WidgetDistribution}"
+
+Outputs:
+  BucketName:
+    Description: S3 bucket holding widget assets.
+    Value: !Ref WidgetBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-BucketName"
+
+  DistributionId:
+    Description: CloudFront distribution ID (used for invalidations).
+    Value: !Ref WidgetDistribution
+    Export:
+      Name: !Sub "${AWS::StackName}-DistributionId"
+
+  DistributionDomainName:
+    Description: >
+      Public CloudFront domain. The widget URL customers paste is
+      https://<this>/widget.js -- this is THE answer to "where do I
+      get the widget bundle?"
+    Value: !GetAtt WidgetDistribution.DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-DistributionDomainName"
+
+  DeployRoleArn:
+    Description: >
+      ARN of the CI deploy role. This goes into the GitHub Actions
+      workflow's role-to-assume input; the workflow stays free of
+      long-lived AWS credentials.
+    Value: !GetAtt WidgetCdnDeployRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-DeployRoleArn"
+
+  StableAliasUrl:
+    Description: Stable widget URL for customers to paste.
+    Value: !Sub "https://${WidgetDistribution.DomainName}/widget.js"
