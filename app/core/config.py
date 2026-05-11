@@ -46,6 +46,26 @@ class Settings(BaseSettings):
     # worker-side AWS calls. PIPEDA data residency: stays ca-central-1.
     aws_region: str = "ca-central-1"
 
+    # --- Content-safety moderation gate (Step 30d Deliverable B) ---
+    # Provider-agnostic moderation runs on every widget chat turn
+    # BEFORE the LLM call. See app/policy/moderation.py for the
+    # provider abstraction and ARCHITECTURE.md §3.3 step 6.5 for the
+    # design statement.
+    #
+    # moderation_provider:
+    #   'openai' -- production default. Wrapped in FailClosed.
+    #   'null'   -- development only; never blocks. Logs WARNING on
+    #               every call so it cannot silently ship.
+    # moderation_timeout_seconds: hard timeout on the provider call.
+    #   3.0s is conservative for a single short text moderation;
+    #   anything longer trips the fail-closed path.
+    # moderation_fail_closed: when True (the production default), an
+    #   unavailable provider is treated as a block. Set False only in
+    #   dev to debug the gate; never in production.
+    moderation_provider: str = "openai"
+    moderation_timeout_seconds: float = 3.0
+    moderation_fail_closed: bool = True
+
     # --- Retention purge batching (Step 28 Phase 2 Commit 8) ---
     # Retention purges run as a sequence of bounded DELETE/UPDATE
     # statements rather than one unbounded statement. Without
