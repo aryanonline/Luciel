@@ -14,10 +14,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.policy.action_classification import ActionTier
 from app.tools.base import LucielTool, ToolResult
 
 
 class SaveMemoryTool(LucielTool):
+
+    # Step 30c: ROUTINE. Writing a memory row is reversible (Pattern
+    # E retention), low-blast-radius (one row keyed to the current
+    # user/tenant scope), and is exactly the senior-advisor work
+    # Recap §4 names as not consequential.
+    declared_tier = ActionTier.ROUTINE
 
     @property
     def name(self) -> str:

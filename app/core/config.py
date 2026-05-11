@@ -80,6 +80,29 @@ class Settings(BaseSettings):
     moderation_fail_closed: bool = True
     moderation_keyword_block_terms: list[str] = Field(default_factory=list)
 
+    # --- Action classification gate (Step 30c) ---
+    # Provider-agnostic action classifier runs on every tool
+    # invocation BEFORE the tool's execute() method is called. See
+    # app/policy/action_classification.py for the provider
+    # abstraction and ARCHITECTURE.md §3.3 step 8 for the design
+    # statement.
+    #
+    # action_classifier:
+    #   'static' -- production default. Reads `declared_tier` from
+    #               each tool class; wrapped in
+    #               FailClosedActionClassifier so an undeclared
+    #               tier routes to APPROVAL_REQUIRED rather than
+    #               silently executing.
+    #   'null'   -- development only; treats every invocation as
+    #               ROUTINE. Logs WARNING on every call so it
+    #               cannot silently ship.
+    # action_classifier_fail_closed: when True (the production
+    #   default), a classifier exception or an undeclared tier is
+    #   treated as APPROVAL_REQUIRED. Set False only in dev to
+    #   debug the gate; never in production.
+    action_classifier: str = "static"
+    action_classifier_fail_closed: bool = True
+
     # --- E2E-only stub LLM provider (Step 30d Deliverable C harness) ---
     # When True, ModelRouter registers a deterministic StubLLMClient
     # alongside any real provider. The stub yields fixed tokens and

@@ -10,10 +10,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.policy.action_classification import ActionTier
 from app.tools.base import LucielTool, ToolResult
 
 
 class SessionSummaryTool(LucielTool):
+
+    # Step 30c: ROUTINE. Reading the current session's own messages
+    # is the reading-shaped work Recap §4 names as not consequential.
+    # No external surface, no write side-effect.
+    declared_tier = ActionTier.ROUTINE
 
     @property
     def name(self) -> str:

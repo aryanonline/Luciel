@@ -13,10 +13,21 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.policy.action_classification import ActionTier
 from app.tools.base import LucielTool, ToolResult
 
 
 class EscalateTool(LucielTool):
+
+    # Step 30c: NOTIFY_AND_PROCEED. Escalation runs without blocking
+    # (we never want Luciel to pause for approval to reach a human
+    # when it has already judged the situation needs one) but the
+    # customer must see that an escalation happened, because their
+    # next turn will likely be with a human rather than Luciel. The
+    # tier records that surfacing requirement — the Runtime layer
+    # is responsible for actually rendering the notification frame
+    # to the customer; the broker just hands it the tier signal.
+    declared_tier = ActionTier.NOTIFY_AND_PROCEED
 
     @property
     def name(self) -> str:
