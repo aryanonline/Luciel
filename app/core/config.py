@@ -80,6 +80,20 @@ class Settings(BaseSettings):
     moderation_fail_closed: bool = True
     moderation_keyword_block_terms: list[str] = Field(default_factory=list)
 
+    # --- E2E-only stub LLM provider (Step 30d Deliverable C harness) ---
+    # When True, ModelRouter registers a deterministic StubLLMClient
+    # alongside any real provider. The stub yields fixed tokens and
+    # makes no network call, which is exactly what the widget-e2e
+    # workflow needs to assert the happy-path SSE three-frame contract
+    # without a billable OpenAI/Anthropic call on every dispatch.
+    #
+    # MUST be False in production. StubLLMClient.__init__ emits a
+    # WARNING on construction so a misconfigured deploy is observable
+    # in the application log stream the first time the module is
+    # imported. Parallel discipline to NullModerationProvider /
+    # empty-list KeywordModerationProvider in app/policy/moderation.py.
+    enable_stub_llm_provider: bool = False
+
     # --- Retention purge batching (Step 28 Phase 2 Commit 8) ---
     # Retention purges run as a sequence of bounded DELETE/UPDATE
     # statements rather than one unbounded statement. Without

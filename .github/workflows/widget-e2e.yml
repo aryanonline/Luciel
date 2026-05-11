@@ -127,6 +127,17 @@ jobs:
       # not below.
       MODERATION_PROVIDER: "keyword"
       MODERATION_KEYWORD_BLOCK_TERMS: '["E2E_REFUSE_SENTINEL"]'
+      # E2E-only stub LLM provider. Required for the happy-path SSE
+      # assertion: without it, ModelRouter has zero providers (no
+      # OPENAI_API_KEY or ANTHROPIC_API_KEY is configured in CI by
+      # design, since both are billable and would couple this gate
+      # to live third-party availability) and the chat stream
+      # raises RuntimeError before yielding any token. The stub is
+      # a deterministic, hermetic provider (see
+      # app/integrations/llm/stub_client.py); production deploys
+      # leave this flag False and the construction-time WARNING
+      # makes any future drift observable.
+      ENABLE_STUB_LLM_PROVIDER: "true"
 
     steps:
       - name: checkout
