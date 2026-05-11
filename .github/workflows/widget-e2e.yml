@@ -59,9 +59,6 @@
 #         - ci/e2e/**
 #         - .github/workflows/widget-e2e.yml
 #         - tests/api/test_widget_e2e_harness_shape.py
-#       paths-ignore:
-#         - docs/**
-#         - widget/**
 #
 #   Adds `pull_request` next to `workflow_dispatch` (add-alongside, not
 #   deactivate-by-replacement: `workflow_dispatch` stays useful for
@@ -77,6 +74,19 @@
 #   every PR to boot the harness -- a real CI-minute regression) is
 #   caught before the workflow runs.
 #
+#   Note: `paths-ignore` is intentionally absent. GitHub Actions
+#   treats `paths` and `paths-ignore` as mutually exclusive for the
+#   same event (a workflow file that uses both is rejected at
+#   parse-time with no jobs launched). `paths` is allowlist
+#   semantics: any PR whose changed files do not match at least one
+#   entry is implicitly skipped, so a `docs/**`-only or
+#   `widget/**`-only PR is already correctly skipped without an
+#   explicit `paths-ignore` block. The earlier v2 example in this
+#   header (before the `step-30d-harness-pr-trigger` fix-up) showed
+#   both keys; that example was never run and was incorrect. The
+#   AST contract test pins the absence of `paths-ignore` so this
+#   bug cannot return.
+#
 # Cost shape
 # ----------
 #
@@ -91,6 +101,10 @@ name: widget-e2e
 on:
   workflow_dispatch: {}
   pull_request:
+    # `paths` is an allowlist (GitHub Actions: `paths` and
+    # `paths-ignore` are mutually exclusive for the same event;
+    # an unmatched PR is implicitly skipped, so `docs/**` /
+    # `widget/**` exclusions are redundant under an allowlist).
     paths:
       - app/api/v1/chat_widget.py
       - app/api/v1/admin.py
@@ -103,9 +117,6 @@ on:
       - ci/e2e/**
       - .github/workflows/widget-e2e.yml
       - tests/api/test_widget_e2e_harness_shape.py
-    paths-ignore:
-      - docs/**
-      - widget/**
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -204,15 +204,28 @@ def test_widget_e2e_workflow_pull_request_trigger_pins_widget_surface_paths() ->
         "gate that CANONICAL_RECAP §12 Step 30d commits to."
     )
 
-    expected_ignore = {"docs/**", "widget/**"}
-    actual_ignore = set(pr_block.get("paths-ignore", []) or [])
-    missing_ignore = expected_ignore - actual_ignore
-    assert not missing_ignore, (
-        "widget-e2e.yml 'on.pull_request.paths-ignore' is missing "
-        f"required exclusions: {sorted(missing_ignore)}. Docs and "
-        "widget-bundle paths are deliberately excluded so a docs "
-        "typo or a widget-bundle-only change does not pay the "
-        "~1m21s backend-boot cost."
+    # `paths-ignore` MUST be absent. GitHub Actions treats `paths`
+    # and `paths-ignore` as mutually exclusive for the same event
+    # and rejects the workflow file at parse-time (no jobs launched)
+    # if both are present. The first commit of this Pattern E
+    # follow-up (`ef921f3`) shipped both keys and was rejected with
+    # a 0s workflow-file failure (run `25696913391` on PR #21); the
+    # fix-up dropped `paths-ignore` because `paths` is allowlist
+    # semantics anyway -- any PR whose changed files do not match
+    # at least one entry is already skipped, so an explicit
+    # `paths-ignore` block for `docs/**` / `widget/**` was both
+    # redundant and rejected by GitHub.
+    assert "paths-ignore" not in pr_block, (
+        "widget-e2e.yml 'on.pull_request' MUST NOT have a "
+        "`paths-ignore` key alongside `paths`. GitHub Actions "
+        "treats them as mutually exclusive and rejects the "
+        "workflow file at parse-time (0s failure, no jobs "
+        "launched). `paths` is allowlist semantics, so a PR that "
+        "only touches docs/widget paths is already skipped by "
+        "non-match. If you need to exclude a path that would "
+        "otherwise match an allowlist glob (e.g. a sub-tree of "
+        "`ci/e2e/**`), use a `!` exclusion prefix INSIDE the "
+        "`paths` list rather than re-introducing `paths-ignore`."
     )
 
 

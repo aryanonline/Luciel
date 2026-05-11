@@ -76,9 +76,6 @@ on:
       - ci/e2e/**
       - .github/workflows/widget-e2e.yml
       - tests/api/test_widget_e2e_harness_shape.py
-    paths-ignore:
-      - docs/**
-      - widget/**
 ```
 
 `workflow_dispatch` stays useful for ad-hoc re-runs against `main` and
@@ -86,9 +83,19 @@ for future debugging dispatches. The path list is bounded to the
 widget surface so unrelated PRs do not pay the ~1m21s backend-boot
 cost; `app/integrations/llm/**`, the workflow file itself, and the
 AST contract test are included because changes to any of them
-functionally change what this gate is gating. `docs/**` and
-`widget/**` are excluded so a docs typo or a widget-bundle-only
-change does not trigger the harness.
+functionally change what this gate is gating.
+
+**No `paths-ignore` block.** GitHub Actions treats `paths` and
+`paths-ignore` as mutually exclusive for the same event and rejects
+the workflow file at parse-time (0s failure, no jobs launched) if
+both are present. The first commit of this Pattern E follow-up
+(`ef921f3` on `step-30d-harness-pr-trigger`) shipped both keys and
+was rejected with exactly that 0s failure on run `25696913391`. The
+fix-up dropped `paths-ignore` because `paths` is allowlist semantics
+anyway: a PR whose changed files do not match at least one entry is
+already skipped, so an explicit `paths-ignore` for `docs/**` /
+`widget/**` was both redundant and invalid. The AST contract test
+pins the absence of `paths-ignore` so this bug cannot return.
 
 The AST contract test `tests/api/test_widget_e2e_harness_shape.py`
 pins the exact path list at PR-time in the backend-free CI lane so a
