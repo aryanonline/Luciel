@@ -66,13 +66,33 @@ from app.api.widget_deps import (
     cors_response_headers,
     require_embed_key,
 )
+from app.core.config import settings
 from app.middleware.rate_limit import limiter, get_api_key_or_ip
+from app.policy.moderation import ModerationGate
 from app.schemas.chat import ChatWidgetRequest
 from app.services.chat_service import ChatService
 from app.services.session_service import SessionService
 
 router = APIRouter(prefix="/chat", tags=["chat-widget"])
 logger = logging.getLogger(__name__)
+
+# Step 30d Deliverable B: content-safety moderation gate.
+#
+# Built once at module import, same pattern as the module-level
+# `logger` above. The factory reads settings.moderation_provider
+# and raises ConfigurationError immediately if 'openai' is selected
+# but openai_api_key is empty -- so a misconfigured production
+# deploy crash-loops on rollout rather than silently running with a
+# disabled gate. See app/policy/moderation.py.
+_moderation_gate = ModerationGate.from_settings(settings)
+
+# Neutral refusal returned when the moderation gate blocks a turn.
+# Deliberately category-free: the operator sees the categories in
+# the server-side WARNING line, but the client never does (same
+# sanitization discipline as findings_phase1g.md G-1).
+REFUSAL_MESSAGE = (
+    "I can't help with that. Please rephrase or try a different question."
+)
 
 
 @router.options("/widget")
@@ -172,6 +192,74 @@ def widget_chat_stream(
         # codebase that touches the SessionModel attribute directly.
         session_id = session.id
 
+    # --- Content-safety moderation gate (Step 30d Deliverable B) ----
+    # Runs BEFORE the LLM call. If the gate blocks, we return a
+    # 200 + sanitized SSE refusal frame in the existing widget frame
+    # shape (session_id frame, single token frame, done frame). 200
+    # not 4xx so the widget UI renders the refusal inline rather
+    # than as a network-error banner, AND so the existence of the
+    # gate is not trivially fingerprintable by a hostile prober
+    # (4xx is a different signal than 200). The block is logged
+    # server-side at WARNING with structured fields so the operator
+    # has a triage signal; the moderation categories never reach the
+    # client.
+    sse_headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    sse_headers.update(cors_response_headers(request, widget_config))
+
+    moderation = _moderation_gate.moderate(payload.message)
+    if moderation.blocked:
+        logger.warning(
+            "widget_chat_stream: turn blocked by moderation gate",
+            extra={
+                "tenant_id": tenant_id,
+                "domain_id": domain_id,
+                "session_id": session_id,
+                "categories": moderation.categories,
+                "provider": moderation.provider,
+                "provider_request_id": moderation.provider_request_id,
+            },
+        )
+
+        def refusal_stream():
+            # Same three-frame shape as a successful turn so the
+            # widget renders the refusal as if it were a one-token
+            # reply. session_id is echoed so follow-up turns can
+            # carry it (an attacker who keeps probing will keep
+            # getting refusals -- the block does NOT terminate the
+            # session).
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "session_id": session_id,
+                        "widget_config": widget_config,
+                    }
+                )
+                + "\n\n"
+            )
+            yield (
+                "data: "
+                + json.dumps({"token": REFUSAL_MESSAGE})
+                + "\n\n"
+            )
+            yield (
+                "data: "
+                + json.dumps(
+                    {"done": True, "session_id": session_id}
+                )
+                + "\n\n"
+            )
+
+        return StreamingResponse(
+            refusal_stream(),
+            media_type="text/event-stream",
+            headers=sse_headers,
+        )
+
     try:
         generator = chat_service.respond_stream(
             session_id=session_id,
@@ -208,13 +296,8 @@ def widget_chat_stream(
             logger.exception("widget_chat_stream: unhandled exception")
             yield f"data: {json.dumps({'error': 'Stream interrupted. Please retry.'})}\n\n"
 
-    sse_headers = {
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",
-    }
-    sse_headers.update(cors_response_headers(request, widget_config))
-
+    # sse_headers built above (shared with the moderation refusal
+    # path so both responses carry the same CORS/cache contract).
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
