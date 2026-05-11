@@ -6,7 +6,7 @@
 
 **Maintenance protocol:** Surgical edits only. New drifts are appended with a unique id. Closed drifts get the closing commit/tag noted and the heading wrapped in strikethrough (`~~`). Reopened drifts get a new id; the original stays closed.
 
-**Last updated:** 2026-05-11 (cross-doc audit: corrected §3.5→§3.2.6 reference in this drift body)
+**Last updated:** 2026-05-11 (renumber pass: new §3.2.2 inserted in ARCHITECTURE, so every cross-ref in this file to ARCHITECTURE §3.2.2–§3.2.9 has been shifted by +1. Also corrected a pre-existing off-by-one in `D-prod-alarms-deployed-unverified-2026-05-09` which had pointed at §3.2.8 [Integrations] when the content described was Monitoring; now correctly points at §3.2.10 Monitoring. Historical change note from the prior cross-doc audit [§3.5→§3.2.6] is preserved unchanged to keep the audit trail honest about what was done when.)
 
 ---
 
@@ -95,10 +95,10 @@ Every drift below is tagged with the section that raised it. Production-only dri
 ### D-celery-task-surface-thin-2026-05-09
 
 **Status:** OPEN — partially tracked against existing roadmap; retention purge is the load-bearing gap
-**Raised by:** Architecture §3.2.3 (background workers handle "ingesting documents the customer uploaded, refreshing search indexes, sending follow-up emails, running scheduled retention purges, and similar")
+**Raised by:** Architecture §3.2.4 (background workers handle "ingesting documents the customer uploaded, refreshing search indexes, sending follow-up emails, running scheduled retention purges, and similar")
 **Repo state:** `app/worker/tasks/` contains only `memory_extraction.py`. Document ingestion is built but as foreground code (`app/knowledge/ingestion.py`), not a worker task. There is no search-index refresh task, no follow-up-email task, no scheduled retention-purge task. `app/policy/retention.py` defines the policy; the worker that runs it does not exist.
 **Owning roadmap mapping:** Document ingestion-as-worker and follow-up emails are subsumed by Step 34 (workflow actions). **Retention purge is not currently on the roadmap** and it is the load-bearing gap because Architecture §4.4's soft-delete + scheduled-purge guarantee depends on it actually running. Without a running purge worker, soft-deleted rows accumulate forever and the storage-cost story in §4.4 ("the retention worker handles that") is fiction.
-**Doc-truthing this pass:** Architecture §3.2.3 gets per-responsibility markers (✅ memory extraction, 🔧 document ingestion as foreground, 📋 the rest). The retention-purge gap is escalated to its own drift token below (`D-retention-purge-worker-missing-2026-05-09`) because it has a load-bearing guarantee depending on it.
+**Doc-truthing this pass:** Architecture §3.2.4 gets per-responsibility markers (✅ memory extraction, 🔧 document ingestion as foreground, 📋 the rest). The retention-purge gap is escalated to its own drift token below (`D-retention-purge-worker-missing-2026-05-09`) because it has a load-bearing guarantee depending on it.
 
 ### D-context-assembler-thin-2026-05-09
 
@@ -126,11 +126,11 @@ Every drift below is tagged with the section that raised it. Production-only dri
 
 **Status:** OPEN — load-bearing; needs a roadmap home
 **Raised by:** Split out from `D-celery-task-surface-thin-2026-05-09` because it has a load-bearing architectural guarantee depending on it.
-**Design claim:** Architecture §4.4 ("The retention worker handles that, in batches sized to coexist with live traffic without lock contention"); Architecture §3.2.3 lists "running scheduled retention purges" as a worker responsibility; Architecture §3.4 commits "a retention purge cannot break the audit chain" which presumes a purge worker exists.
+**Design claim:** Architecture §4.4 ("The retention worker handles that, in batches sized to coexist with live traffic without lock contention"); Architecture §3.2.4 lists "running scheduled retention purges" as a worker responsibility; Architecture §3.4 commits "a retention purge cannot break the audit chain" which presumes a purge worker exists.
 **Repo state:** `app/policy/retention.py` defines the retention policy. There is no scheduled task in `app/worker/tasks/` that runs the purge. Soft-deleted rows accumulate without bound today.
 **Operational impact:** Storage cost grows with every soft-delete and never shrinks. Customers cannot be told "data is purged after the contracted retention period" with a straight face until this lands. Compliance posture is also weaker than the architecture claims.
 **Owning roadmap step:** None today. Recommend adding to roadmap (this pass does not unilaterally add it because retention purge is enough work — schedule, idempotency, lock semantics, audit emission to `deletion_logs`, end-to-end test — that it deserves its own line and operator buy-in before scheduling). For now, flagged here as a known gap requiring a near-term roadmap decision.
-**Doc-truthing this pass:** Architecture §3.2.3 and §4.4 receive 📋 markers; the prose stays unchanged because the design is correct, the implementation is missing.
+**Doc-truthing this pass:** Architecture §3.2.4 and §4.4 receive 📋 markers; the prose stays unchanged because the design is correct, the implementation is missing.
 
 ### D-route-shipped-without-end-to-end-coverage-2026-05-10
 
@@ -161,11 +161,11 @@ Every drift below is tagged with the section that raised it. Production-only dri
 
 **Status:** OPEN — observability gap; belongs to Step 31 (dashboards + validation gate), not a Step 30b blocker
 **Raised by:** Step 30b Phase 5 staging audit-log spot check. Four `POST /api/v1/chat/widget` calls were sent through the live widget at 02:09:42, 02:09:53, 02:10:44, 02:11:08 UTC on 2026-05-11. CloudWatch log group `/ecs/luciel-backend` carries only uvicorn access lines (HTTP method, path, source IP, status code) for those four turns. A targeted CloudWatch `filter-log-events` against the same time window with pattern `?tenant_id ?domain_id ?embed_key ?session_id ?widget_chat ?chat_completion` returned **zero** events. The widget chat request path emits no application-level structured log lines — no per-turn record carrying `tenant_id`, `domain_id`, `embed_key_prefix`, `session_id`, message length, latency, or model used.
-**Design claim:** CANONICAL_RECAP §13 (end-to-end product acceptance) implies per-tenant observability for any customer-facing surface — "we can answer is Luciel earning its keep here in under a minute." ARCHITECTURE §3.2.6 (Audit trail) states that every consequential action produces an immutable audit record across three channels, one of which is the application log stream where the application emits audit events in human-readable form. The widget chat path emits none of these for a chat turn — only uvicorn access lines.
+**Design claim:** CANONICAL_RECAP §13 (end-to-end product acceptance) implies per-tenant observability for any customer-facing surface — "we can answer is Luciel earning its keep here in under a minute." ARCHITECTURE §3.2.7 (Audit trail) states that every consequential action produces an immutable audit record across three channels, one of which is the application log stream where the application emits audit events in human-readable form. The widget chat path emits none of these for a chat turn — only uvicorn access lines.
 **Repo state:** `app/api/v1/chat_widget.py` does not emit explicit `logger.info(...)` records at request entry, after dependency resolution, or after the LLM response is streamed. The chat service does not appear to emit per-turn audit records either (no `audit_logs` table write, no structured log line). The only application-level evidence today that a widget conversation happened is the `messages` and `sessions` row writes — which are state, not observability — plus uvicorn's HTTP access line, which carries only path and status.
 **Operational impact today:** For the REMAX preview, we have HTTP-level monitoring only. We cannot: (a) attribute a tenant-specific widget 500 to a specific tenant from logs alone (we would have to correlate source IP against CloudFront access logs and then DB rows); (b) build a usage-by-tenant chart for Step 31 from log data; (c) prove from logs that a sensitive-content refusal happened versus a generic 200 with empty SSE; (d) target a retention-purge sweep on widget audit records (none exist). For a single controlled demo customer this is tolerable. For a paying-customer cohort it is not.
 **Owning roadmap step:** **Step 31 (dashboards + validation gate).** Step 31 already commits to a five-part pre-launch validation gate including operations and compliance categories — both of those require the structured logs this drift identifies as missing. Folding this into Step 31 rather than spawning a Step 30e because (1) the fix shape — structured loggers, audit-log table write, dashboard ingest — is the same fix that Step 31 needs anyway, (2) splitting it would force Step 31 to inherit a half-built audit pipeline, (3) the widget surface can ship to a single demo customer (REMAX) without it as long as we are honest with REMAX that detailed per-conversation metrics arrive in the next milestone. This drift closes when Step 31's validation gate exercises a widget turn and verifies the structured record landed with the documented field set.
-**Doc-truthing this pass:** Step 30b row in CANONICAL_RECAP §12 updated to record stage-1 (Luciel-owned staging E2E) observed clean on 2026-05-10, with the three bugs found-and-fixed and the three open drifts (this one, route-coverage, content-safety) called out by id. Marker stays 🔧 — the row's literal success criterion is REMAX-customer visitors exchanging real conversations, which has not happened yet. ARCHITECTURE §3.2.6 receives a 📋 marker on the "Application log stream" bullet pointing to Step 31; the prose stays unchanged because the design is correct, the implementation for the widget surface is incomplete.
+**Doc-truthing this pass:** Step 30b row in CANONICAL_RECAP §12 updated to record stage-1 (Luciel-owned staging E2E) observed clean on 2026-05-10, with the three bugs found-and-fixed and the three open drifts (this one, route-coverage, content-safety) called out by id. Marker stays 🔧 — the row's literal success criterion is REMAX-customer visitors exchanging real conversations, which has not happened yet. ARCHITECTURE §3.2.7 receives a 📋 marker on the "Application log stream" bullet pointing to Step 31; the prose stays unchanged because the design is correct, the implementation for the widget surface is incomplete.
 
 ---
 
@@ -183,51 +183,51 @@ These are claims in `ARCHITECTURE.md` whose verification requires operator-side 
 ### D-prod-multi-az-rds-unverified-2026-05-09
 
 **Status:** OPEN [PROD-PHASE-2B]
-**Raised by:** Architecture §3.2.4 ("hot standby in a second availability zone"), §3.6 diagram (PG_PRIMARY ↔ PG_STANDBY)
+**Raised by:** Architecture §3.2.5 ("hot standby in a second availability zone"), §3.6 diagram (PG_PRIMARY ↔ PG_STANDBY)
 **Repo state:** No CFN template provisions the RDS instance. The repo cannot confirm Multi-AZ.
-**Resolution path:** Operator runs `aws rds describe-db-instances` (read-only) and confirms `MultiAZ: true` and the standby AZ. If single-AZ, mark §3.2.4's standby claim as 📋 Planned.
+**Resolution path:** Operator runs `aws rds describe-db-instances` (read-only) and confirms `MultiAZ: true` and the standby AZ. If single-AZ, mark §3.2.5's standby claim as 📋 Planned.
 
 ### D-prod-app-tier-pool-unverified-2026-05-09
 
 **Status:** OPEN [PROD-PHASE-2B]
-**Raised by:** Architecture §3.2.2 ("a pool of application servers"), §3.5 ("application server crash" recovery story)
+**Raised by:** Architecture §3.2.3 ("a pool of application servers"), §3.5 ("application server crash" recovery story)
 **Repo state:** Task definitions exist (`td-backend-rev34.json`) but desired-count and minimum-pool size are an ECS service property, not a task-def property.
-**Resolution path:** Operator confirms desired count and minimum healthy count of the backend ECS service. If desired count is 1, mark §3.2.2's pool claim as 🔧 Partial and open a roadmap item to raise the floor.
+**Resolution path:** Operator confirms desired count and minimum healthy count of the backend ECS service. If desired count is 1, mark §3.2.3's pool claim as 🔧 Partial and open a roadmap item to raise the floor.
 
 ### D-prod-worker-autoscaling-unverified-2026-05-09
 
 **Status:** OPEN [PROD-PHASE-2B]
-**Raised by:** Architecture §3.2.3 ("worker autoscaling on queue depth and CPU")
+**Raised by:** Architecture §3.2.4 ("worker autoscaling on queue depth and CPU")
 **Repo state:** `cfn/luciel-prod-worker-autoscaling.yaml` exists. Need to confirm it is deployed and active in the prod account.
 **Resolution path:** Operator confirms the worker-autoscaling stack is in `CREATE_COMPLETE` or `UPDATE_COMPLETE` state and the scaling policies are attached to the worker service.
 
 ### D-prod-alarms-deployed-unverified-2026-05-09
 
 **Status:** OPEN [PROD-PHASE-2B]
-**Raised by:** Architecture §3.2.8 (four signal kinds, alarms thresholds: 1% error, 1000 queue depth, 80% DB connection saturation)
+**Raised by:** Architecture §3.2.10 (four signal kinds, alarms thresholds: 1% error, 1000 queue depth, 80% DB connection saturation) — corrects a pre-existing off-by-one (was §3.2.8 Integrations, content described is Monitoring)
 **Repo state:** `cfn/luciel-prod-alarms.yaml` exists. Need to confirm deployment.
 **Resolution path:** Operator confirms the alarms stack is deployed and the alarms are in `OK` state (not `INSUFFICIENT_DATA`).
 
 ### D-prod-kms-customer-managed-unverified-2026-05-09
 
 **Status:** OPEN [PROD-PHASE-2B]
-**Raised by:** Architecture §3.2.7 ("encrypted with a customer-managed KMS key")
+**Raised by:** Architecture §3.2.8 ("encrypted with a customer-managed KMS key")
 **Repo state:** Verify task role (`cfn/luciel-verify-task-role.yaml`) references KMS Decrypt via SSM service principal but does not name the key. Cannot confirm whether the key in use is AWS-managed (`aws/ssm`) or customer-managed.
 **Resolution path:** Operator runs `aws ssm describe-parameters` for one of the SecureString parameters, captures the `KeyId`, then `aws kms describe-key` on it. Confirm `KeyManager: CUSTOMER`. If `AWS`, mark as 🔧 Partial — works the same operationally but rotation control is AWS's, not ours.
 
 ### D-prod-secrets-pattern-e-unverified-2026-05-09
 
 **Status:** OPEN [PROD-PHASE-2B]
-**Raised by:** Architecture §3.2.7 ("Pattern E: secrets are deactivated, never deleted")
+**Raised by:** Architecture §3.2.8 ("Pattern E: secrets are deactivated, never deleted")
 **Repo state:** SSM Parameter Store does not natively support Pattern E (deactivated flag) — it supports versioning. The current implementation pattern needs documentation.
-**Resolution path:** Operator inventories SSM parameters with `aws ssm describe-parameters` and confirms the operational pattern: are old versions retained (relying on SSM history) or are deactivated rotated parameters retained as separate parameter names with a `-deactivated-YYYY-MM-DD` suffix? The doc should reflect what we actually do; right now §3.2.7 implies a discipline the implementation may not have.
+**Resolution path:** Operator inventories SSM parameters with `aws ssm describe-parameters` and confirms the operational pattern: are old versions retained (relying on SSM history) or are deactivated rotated parameters retained as separate parameter names with a `-deactivated-YYYY-MM-DD` suffix? The doc should reflect what we actually do; right now §3.2.8 implies a discipline the implementation may not have.
 
 ### D-prod-celery-broker-sqs-vs-redis-2026-05-09
 
 **Status:** OPEN [PROD-PHASE-2B]
-**Raised by:** Architecture §3.6 diagram (`Job queue Redis/SQS`); §3.2.3 prose does not name SQS.
+**Raised by:** Architecture §3.6 diagram (`Job queue Redis/SQS`); §3.2.4 prose does not name SQS.
 **Repo state:** `app/worker/celery_app.py` lines 116-138 explicitly document a two-mode broker design: SQS in production, Redis in development. Production task definitions inject `REDIS_URL` from SSM. The architecture document does not commit clearly to SQS-in-prod.
-**Resolution path:** Update Architecture §3.2.3 to state SQS as the production broker explicitly, with the rationale already in `app/worker/celery_app.py` lines 132-138 (ElastiCache cluster mode incompatible with kombu's MULTI/EXEC). Confirm with operator that production is in fact running SQS-mode (not Redis broker via SSM `REDIS_URL`). If REDIS_URL is the actual broker, the architecture is wrong; otherwise the architecture is incomplete and we tighten it.
+**Resolution path:** Update Architecture §3.2.4 to state SQS as the production broker explicitly, with the rationale already in `app/worker/celery_app.py` lines 132-138 (ElastiCache cluster mode incompatible with kombu's MULTI/EXEC). Confirm with operator that production is in fact running SQS-mode (not Redis broker via SSM `REDIS_URL`). If REDIS_URL is the actual broker, the architecture is wrong; otherwise the architecture is incomplete and we tighten it.
 
 ### D-prod-sqs-stale-messages-2026-05-09
 
@@ -277,7 +277,7 @@ Closed drifts are kept here permanently with a strikethrough heading. The closin
 
 **Status:** RESOLVED on 2026-05-09
 **Closing commit:** `bf7dff4` (Architecture rewrite as design-target document)
-**Resolution:** Pattern E (deactivate, never delete) is now an explicit cross-cutting property in Architecture §4.6, with the rationale, and is also referenced in §3.2.7 (secrets) and §4.5 (cascade-correct departure). The implementation pattern in production for SSM specifically is still tracked as open (`D-prod-secrets-pattern-e-unverified-2026-05-09`) until verified.
+**Resolution:** Pattern E (deactivate, never delete) is now an explicit cross-cutting property in Architecture §4.6, with the rationale, and is also referenced in §3.2.8 (secrets) and §4.5 (cascade-correct departure). The implementation pattern in production for SSM specifically is still tracked as open (`D-prod-secrets-pattern-e-unverified-2026-05-09`) until verified.
 
 ### ~~D-architecture-doc-implementation-snapshot-not-design-2026-05-08~~
 
