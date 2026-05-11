@@ -564,7 +564,12 @@ def test_failclosed_wrapper_converts_undeclared_to_approval_required() -> None:
     clf = FailClosedActionClassifier(StaticTierRegistryClassifier())
     result = clf.classify(_FakeTool(declared_tier=None))
     assert result.tier == ActionTier.APPROVAL_REQUIRED
-    assert result.reason == "unknown_tool"
+    # reason='tier_undeclared' is deliberately distinct from the
+    # broker's not-found path 'unknown_tool' so an audit log can
+    # tell a stray LLM-emitted tool name (handled inside the broker)
+    # apart from a registered tool whose maintainer forgot to
+    # declare a tier (handled here in the fail-closed wrapper).
+    assert result.reason == "tier_undeclared"
     assert result.classifier == "static+failclosed"
 
 
@@ -757,8 +762,15 @@ def test_broker_executes_notify_and_proceed_tool_and_stamps_tier(broker) -> None
 def test_broker_refuses_unknown_tool_with_approval_required(broker) -> None:
     """A tool that is not in the registry at all must fail closed
     too, not just fail. The tier is APPROVAL_REQUIRED with reason
-    'unknown_tool' so the audit trail of the refusal is identical to
-    the undeclared-tier path."""
+    'unknown_tool' (set inside the broker; never produced by a
+    classifier). This is deliberately distinct from the
+    'tier_undeclared' reason that the fail-closed wrapper produces
+    when a registered tool is missing `declared_tier` — the two
+    failure modes look different to an auditor on purpose so a
+    stray LLM-emitted tool name (this test) can be told apart from
+    a maintainer forgetting to declare a tier on a real tool
+    (test_broker_refuses_undeclared_tier_tool_without_executing).
+    Both still route to APPROVAL_REQUIRED."""
 
     result = broker.execute_tool("definitely_not_a_real_tool", {})
     assert result.success is False
@@ -819,6 +831,11 @@ def test_broker_refuses_undeclared_tier_tool_without_executing() -> None:
     )
     assert result.success is False
     assert result.metadata["tier"] == "approval_required"
+    # tier_reason MUST be 'tier_undeclared' (set by the fail-closed
+    # wrapper) and MUST NOT be 'unknown_tool' (the broker's
+    # not-found path) -- this is the audit-clarity distinction
+    # introduced after the live-e2e review of Step 30c.
+    assert result.metadata["tier_reason"] == "tier_undeclared"
     assert result.metadata["pending"] is True
     assert result.metadata["tool_name"] == "undeclared_test_tool"
     assert result.metadata["proposed_parameters"] == {"arbitrary": "payload"}

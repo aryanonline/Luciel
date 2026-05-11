@@ -80,12 +80,19 @@ implementations:
 
 The production wiring is FailClosedActionClassifier wrapping
 StaticTierRegistryClassifier. If the inner classifier raises
-ToolTierUndeclared (unknown tool) or any other exception, the
-wrapper returns ActionClassification(tier=APPROVAL_REQUIRED,
-reason='unknown_tool' or 'classifier_error') rather than allowing
-the tool to execute. The behavior contract in Recap §4 forbids
-silent consequential action; an unclassifiable tool is treated as
-consequential by default.
+ToolTierUndeclared (a registered tool that forgot to set
+`declared_tier`) the wrapper returns
+ActionClassification(tier=APPROVAL_REQUIRED, reason='tier_undeclared');
+if it raises any other exception the wrapper returns
+reason='classifier_error'. Either way the tool is NOT executed.
+Note: the broker's separate not-found path (a tool name the
+registry does not know about) uses reason='unknown_tool' and is
+routed directly inside the broker without invoking the classifier.
+The two reason codes are deliberately distinct so an audit log can
+tell a stray tool name (LLM hallucination) apart from a
+maintainer forgetting to declare a tier on a real tool. The
+behavior contract in Recap §4 forbids silent consequential action;
+an unclassifiable tool is treated as consequential by default.
 
 What this module deliberately does NOT do
 =========================================
@@ -191,7 +198,15 @@ class ActionClassification:
         Short machine-readable reason code. For ROUTINE and
         NOTIFY_AND_PROCEED this is usually 'declared_tier'. For
         APPROVAL_REQUIRED it carries the specific cause:
-        'declared_tier', 'unknown_tool', 'classifier_error'.
+        'declared_tier' (a tool whose declared_tier is itself
+        APPROVAL_REQUIRED — not yet used by any shipped tool but
+        reserved), 'tier_undeclared' (the registered tool did not
+        set declared_tier and the fail-closed wrapper caught the
+        ToolTierUndeclared exception), 'unknown_tool' (the broker
+        did not find the tool in the registry at all — set inside
+        the broker, never produced by a classifier), and
+        'classifier_error' (the classifier raised an arbitrary
+        exception and the fail-closed wrapper translated it).
         Operator-only — never returned to the customer.
     classifier : str
         Which classifier produced this result. Composite labels
@@ -341,9 +356,14 @@ class FailClosedActionClassifier:
                 self._inner.name,
                 exc,
             )
+            # reason='tier_undeclared' (distinct from the broker's
+            # 'unknown_tool' not-found path) so an audit log can
+            # tell a stray LLM-emitted tool name apart from a
+            # registered tool whose maintainer forgot to declare a
+            # tier. Both still route to APPROVAL_REQUIRED.
             return ActionClassification(
                 tier=ActionTier.APPROVAL_REQUIRED,
-                reason="unknown_tool",
+                reason="tier_undeclared",
                 classifier=self.name,
             )
         except Exception as exc:
