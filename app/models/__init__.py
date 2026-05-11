@@ -14,6 +14,8 @@ from app.models.luciel_instance import LucielInstance  # noqa: F401  (Step 24.5)
 from app.models.admin_audit_log import AdminAuditLog  # noqa: F401  (Step 24.5 — File 6.5a)
 from app.models.user import User  # noqa: F401  (Step 24.5b)
 from app.models.scope_assignment import ScopeAssignment, EndReason  # noqa: F401  (Step 24.5b)
+from app.models.conversation import Conversation  # noqa: F401  (Step 24.5c)
+from app.models.identity_claim import IdentityClaim, ClaimType  # noqa: F401  (Step 24.5c)
 
 __all__ = [
     "AgentConfig",
@@ -34,4 +36,7 @@ __all__ = [
     "User",
     "ScopeAssignment",
     "EndReason",
+    "Conversation",
+    "IdentityClaim",
+    "ClaimType",
 ]

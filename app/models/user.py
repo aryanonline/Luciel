@@ -51,6 +51,7 @@ from app.models.base import Base
 
 if TYPE_CHECKING:
     from app.models.agent import Agent
+    from app.models.identity_claim import IdentityClaim
     from app.models.memory import MemoryItem
     from app.models.scope_assignment import ScopeAssignment
 
@@ -150,6 +151,18 @@ class User(Base):
         "MemoryItem",
         back_populates="actor_user",
         foreign_keys="MemoryItem.actor_user_id",
+        lazy="select",
+    )
+
+    # Step 24.5c -- channel-specific identifiers bound to this User across
+    # scopes. One User can have many claims (e.g. work email + personal
+    # phone), possibly under different scopes. The identity resolver looks
+    # up the right claim at request time per (tenant, domain, claim_type,
+    # normalised claim_value). See ARCHITECTURE §3.2.11.
+    identity_claims: Mapped[list["IdentityClaim"]] = relationship(
+        "IdentityClaim",
+        back_populates="user",
+        foreign_keys="IdentityClaim.user_id",
         lazy="select",
     )
 
