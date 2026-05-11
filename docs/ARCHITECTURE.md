@@ -16,7 +16,7 @@ Absence of a marker means the claim is design-level (architectural property, rat
 
 **Maintenance protocol:** Surgical edits only. When the design changes, update the relevant section in place and log the prior decision in `DRIFTS.md`. When the implementation catches up to a section, mark it implemented (per the marker scheme adopted in `DRIFTS.md` Phase 2).
 
-**Last updated:** 2026-05-11 (§3.2.6 Application log stream bullet 📋-marked for widget-chat audit gap)
+**Last updated:** 2026-05-11 (new §3.2.2 documents the widget CDN tier and the embed-key public-surface model; old §3.2.2 – §3.2.9 each shift by one; §3.2.1 updated to reflect chat-widget live; §3.2.7 Application log stream bullet renumbered from §3.2.6 and retains its 📋 mark for the widget-chat audit gap)
 
 ---
 
@@ -144,13 +144,39 @@ The production environment runs in **AWS, Canadian region (`ca-central-1`)**, de
 
 #### 3.2.1 Public endpoint
 
-Customers reach Luciel through a single public hostname (the production API endpoint). The hostname is fronted by an Application Load Balancer. 📋 The full multi-channel surface (chat widget, voice, email, SMS, programmatic API) lands in roadmap Step 34a; today only the chat / programmatic API path exists — see `DRIFTS.md` token `D-channels-only-chat-implemented-2026-05-09`.
+Customers reach Luciel through a single public hostname (the production API endpoint). The hostname is fronted by an Application Load Balancer. 📋 The full multi-channel surface lands in roadmap Step 34a; as of 2026-05-10 the chat widget (see §3.2.2 for its CDN tier and embed-key model), the programmatic API, and the operator-facing admin surface are the live channels, while voice / email / SMS adapters are still planned — see `DRIFTS.md` token `D-channels-only-chat-implemented-2026-05-09`.
 
 *Why a load balancer:* it terminates TLS once, distributes incoming requests across multiple application servers (so a single server failure does not take the platform down), and provides a single chokepoint where request rate-limits and a Web Application Firewall can be applied. The chokepoint also gives the operator a single place to flip traffic during a deployment or roll back from one.
 
 *Why not API Gateway:* an ALB is the right tool for steady-state, long-lived, multi-channel traffic with WebSocket and streaming response support. API Gateway is well-suited to bursty, request-response, function-style workloads, which Luciel is not.
 
-#### 3.2.2 Application tier
+#### 3.2.2 Public widget surface (CDN + embed keys)
+
+The chat widget is a public surface: the JavaScript bundle that customers paste into their site is served by a content delivery network, and every chat turn it makes to the production API is authenticated by a key designed for public distribution. Both pieces are distinct from the rest of §3.2 — they sit at the edge alongside §3.2.1, before any request reaches the application tier — and warrant naming.
+
+**Widget bundle CDN.** The widget bundle (`widget.js`, currently ~27 KB) is published to a CloudFront distribution backed by an S3 bucket in the same Canadian region as the rest of production. Two URLs serve the same body: a stable alias (`/widget.js`, `max-age=300, must-revalidate`) for customers who want auto-updates on a five-minute lag, and an immutable hashed alias (`/luciel-chat-widget.<hash>.js`, `max-age=31536000, immutable`) for customers who want to pin a specific version. Both URLs stay reachable forever — the deploy pipeline is forward-only, never overwriting an existing hashed bundle.
+
+*Why CDN, not direct from the application tier:* customers' sites embed the bundle on every page load; serving it from the application tier would put every page-load request on the same path as chat turns and tax the wrong scaling axis. A CDN serves the static bundle at the edge, near the visitor, with no application-tier (§3.2.3) involvement.
+
+*Why a Canadian-region origin:* data residency. The bundle has no PII in it, but the residency story is cleaner when every Luciel-controlled production resource sits in `ca-central-1`. The CDN itself is global, as it must be — a Toronto visitor and a Vancouver visitor should both get fast bundle loads — but the origin is Canadian.
+
+*Pattern E for bundles:* the deploy pipeline is forward-only. A new bundle build produces a new hashed filename; the old hashed filename is never deleted. A customer that pinned `luciel-chat-widget.36a25740a60c.js` two months ago still gets that exact bundle today. The stable alias `widget.js` is updated to point at the new bundle, but the old bundle stays reachable for any pinned consumer. This is the bundle analogue of §4.6 (Pattern E for secrets): deactivation by replacement, never deletion.
+
+**Public-surface keys (embed keys).** Embed keys are a distinct kind of API key from the admin keys operators use to manage tenants and domains. The differences are deliberate:
+
+- An embed key is scoped to a single domain and a small set of allowed origins (exact scheme + host + optional port, no wildcards or paths). A POST from any other origin is refused at the auth layer regardless of what the key permits.
+- An embed key carries a `widget_config` (accent color, display name, greeting message) that the widget bundle reads to brand the chat surface per customer. This is the only place where customer-facing presentation is encoded outside the customer's own site.
+- An embed key carries a per-key rate limit (today static, designed to be tunable per customer once Step 31 dashboards expose it).
+- An embed key has the chat permission and only the chat permission — it cannot call admin endpoints, cannot mint other keys, cannot invoke tools. The three-layer scope enforcement described in §4.7 applies the same way it does to any other key.
+- An embed key is **safe to ship in public source code** on the customer's site, because origin enforcement plus permission constraint plus rate limit plus domain scoping bound the worst case to "a malicious actor on an allowed origin can run a chat session at the published rate limit." That is a customer-tolerable failure mode; an admin key in the same position is not.
+
+*Why embed keys exist as a separate kind:* the trust model is different. Admin keys are operator secrets and rotate per operator. Embed keys are customer-shipped credentials and rotate per customer-side incident (e.g., a customer accidentally publishes their key to the wrong repo). Conflating them would either over-protect admin keys with widget concerns or under-protect customer surfaces with admin assumptions.
+
+*Pattern E for embed keys:* deactivation, never deletion. A rotated embed key remains in the `api_keys` table with `is_active=false`; the audit chain (§3.2.7) stays walkable. The customer pastes a new key into their site and the old one stops authenticating on the next request.
+
+*Issuance:* `POST /admin/embed-keys` (with three scope guards and an audit row written in the same transaction as the key insert) or the operator CLI `scripts/mint_embed_key.py`. Both paths funnel through the same `EmbedKeyCreate` schema and the same service entrypoint, so they cannot drift on validation or audit behavior. The raw key value is returned exactly once at mint time and is never recoverable; SSM (§3.2.8) is rejected for embed keys at the service layer because the customer cannot read SSM.
+
+#### 3.2.3 Application tier
 
 A pool of application servers runs the request-handling Luciel code. Each server is identical, stateless across requests, and replaceable. Scaling is horizontal — adding capacity means adding more servers, not making any one server larger.
 
@@ -160,7 +186,7 @@ A pool of application servers runs the request-handling Luciel code. Each server
 
 *Autoscaling:* application-tier capacity scales on observed load (request rate, CPU, response latency). The minimum is sized to absorb a single-server failure without customer impact; the maximum is sized to absorb any plausible burst the GTM plan would produce.
 
-#### 3.2.3 Background worker tier
+#### 3.2.4 Background worker tier
 
 A separate pool of worker processes handles work that should not block a customer's chat response. Per-responsibility status:
 - ✅ Memory extraction (the worker task that reads recent turns and persists durable memories)
@@ -178,7 +204,7 @@ Workers receive jobs from a queue and report results back through the database.
 
 *Worker autoscaling:* worker-tier capacity scales on queue depth and CPU. Quiet hours run a small fixed pool; busy hours scale up to absorb the backlog and scale back down once it clears.
 
-#### 3.2.4 Database — PostgreSQL on Amazon RDS, Canadian region
+#### 3.2.5 Database — PostgreSQL on Amazon RDS, Canadian region
 
 A single managed PostgreSQL instance (with a hot standby in a second availability zone) holds the durable state of the platform.
 
@@ -192,7 +218,7 @@ A single managed PostgreSQL instance (with a hot standby in a second availabilit
 
 *Why two roles:* a worker bug, or a worker compromise, must not be usable to mint or rotate keys. The database refuses the write, regardless of what the worker code says. Defense in depth.
 
-#### 3.2.5 Memory tier
+#### 3.2.6 Memory tier
 
 Memory is layered (per the canonical recap). The four kinds — session, user preference, domain, client operational — live as distinct logical concerns over the database, with retrieval driven by a memory service.
 
@@ -202,7 +228,7 @@ Memory is layered (per the canonical recap). The four kinds — session, user pr
 
 *Why layered, not flat:* different kinds of memory have different retention rules, different scoping rules, and different retrieval patterns. Flat memory cannot enforce that user preferences should expire or be exportable on request, while operational rules should not. Layering is what makes the policies enforceable.
 
-#### 3.2.6 Audit trail
+#### 3.2.7 Audit trail
 
 Every consequential action in production produces an immutable audit record. There are three independent channels, designed so a tampering attempt is detectable.
 
@@ -214,7 +240,7 @@ A retention purge produces records in a fourth append-only table (`deletion_logs
 
 *Why three channels:* an attacker who compromises the application can write false rows to the database log, but cannot retroactively rewrite the application log stream or CloudTrail. A regulator asking "show me what happened" gets three independent answers; if they disagree, that disagreement is itself the signal.
 
-#### 3.2.7 Secrets store
+#### 3.2.8 Secrets store
 
 Every secret used in production — database credentials, foundation-model API keys, third-party integration credentials, signing keys — lives in AWS Systems Manager Parameter Store as a SecureString, encrypted with a customer-managed KMS key.
 
@@ -224,13 +250,13 @@ Every secret used in production — database credentials, foundation-model API k
 
 *Pattern E:* secrets are deactivated, never deleted. A rotated secret remains in Parameter Store with a deactivated flag, so an audit query can reconstruct what credential was active at any past moment. This is part of the broader audit-chain discipline (see Section 4). 🔬 The exact SSM-side mechanism for the deactivated flag (suffix-renamed parameter vs. SSM version history) is pending operator confirmation — see `DRIFTS.md` token `D-prod-secrets-pattern-e-unverified-2026-05-09`.
 
-#### 3.2.8 What integrations exist today
+#### 3.2.9 What integrations exist today
 
 The design anticipates a full slate of external integrations — calendar, CRM, email, SMS, voice, payments — with a sandbox-in-development / real-in-production split per integration. Today, the integrations layer (`app/integrations/`) contains only the foundation-model clients (Anthropic and OpenAI). The tool registry shape (`app/tools/registry.py`, `app/tools/broker.py`) is in place; the integrations themselves are not. 📋 The full slate is roadmap Step 34 (Workflow actions); the channel surface specifically is roadmap Step 34a. Tracked as `DRIFTS.md` token `D-external-integrations-llm-only-2026-05-09`.
 
 This subsection exists so the doc stops implying the full slate is present. The framework is ready; the integrations are not.
 
-#### 3.2.9 Monitoring and alerting
+#### 3.2.10 Monitoring and alerting
 
 Production emits four kinds of signal:
 
