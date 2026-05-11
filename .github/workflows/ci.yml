@@ -101,7 +101,21 @@ jobs:
         # the contract the file-header comment block above documents.
         env:
           DATABASE_URL: "sqlite:///:memory:"
-        run: python -m pytest tests/verification/test_http_client_params.py tests/api/test_health.py -v
+          # OPENAI_API_KEY is set to a non-functional placeholder so that
+          # `app.main` import succeeds during pytest collection. The module-
+          # level ModerationGate.from_settings(settings) in chat_widget.py
+          # raises ConfigurationError at import time when moderation_provider
+          # defaults to 'openai' and the key is empty (Step 30d Deliverable B
+          # judgment #4: crash-loop on rollout, not first-request). That
+          # boot-time crash is the correct PRODUCTION behavior -- uvicorn
+          # never accepts traffic with a misconfigured gate -- but pytest
+          # collection in a backend-free CI runner is a different lifecycle
+          # and must be able to import the app surface to test it. The key
+          # is intentionally non-functional (would 401 against the real API)
+          # so any test that accidentally tries a real moderation call fails
+          # loudly at the httpx boundary rather than silently passing.
+          OPENAI_API_KEY: "ci-not-a-real-key-backend-free-tests-only"
+        run: python -m pytest tests/verification/test_http_client_params.py tests/api/test_health.py tests/api/test_embed_key_preflight.py tests/api/test_content_safety_gate.py -v
 
       - name: run pillar harness collection (skips cleanly without DB)
         # Even though every pillar test will SKIP here (no DATABASE_URL,
