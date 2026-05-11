@@ -26,12 +26,20 @@ Each constraint raises a 4xx with a stable error code so the
 widget bundle and the customer's debug surface can distinguish
 configuration errors from bad requests.
 
-This module also exposes ``embed_per_minute_limit_string`` for the
-slowapi @limit decorator on the endpoint. Slowapi accepts a
-callable that runs at request time and returns a limit string; the
-callable reads the per-key cap from request.state (populated by
-auth middleware from the api_keys row) so each embed key burns
-against its own minutely budget rather than a hard-coded global.
+Rate limiting on the widget endpoint is enforced via a static
+slowapi limit string ("30/minute") applied at decoration time. The
+per-embed-key dynamic cap that this module previously exposed via
+``embed_per_minute_limit_string`` shipped broken: slowapi calls a
+zero-arg or one-arg-keyed provider (slowapi/wrappers.py:85-94) and
+never passes a Request, so a provider signed as
+``(request: Request) -> str`` raised TypeError before any limit
+was computed. Rather than paper over the abstraction mismatch with
+a contextvar hack or a per-request DB hit inside the slowapi
+callback, the per-key dynamic cap is deferred to a real feature
+(tracked in DRIFTS as D-embed-key-dynamic-rate-limit-deferred); the
+v1 widget surface uses the conservative global cap, which is the
+same cap admin chat uses and which we already validated under
+load.
 
 Pattern E note
 --------------
@@ -187,24 +195,13 @@ def require_embed_key(request: Request) -> dict:
     return widget_config
 
 
-def embed_per_minute_limit_string(request: Request) -> str:
-    """Slowapi limit-string callable.
-
-    Slowapi's @limit decorator accepts a callable that runs per
-    request and returns a limit string. We read the per-key minutely
-    cap from request.state (populated by auth middleware from the
-    api_keys row) so each embed key burns its own bucket. If the
-    field is missing or non-positive we fall back to a conservative
-    global default so a misconfigured row cannot uncap traffic.
-    """
-    cap = getattr(request.state, "rate_limit_per_minute", None)
-    if isinstance(cap, int) and cap > 0:
-        return f"{cap}/minute"
-    # Conservative default: 20/minute matches CHAT_RATE_LIMIT for the
-    # admin chat endpoint. An embed key without an explicit cap should
-    # never have been issued, so this branch is a defense-in-depth
-    # backstop, not the documented contract.
-    return "20/minute"
+# Static rate limit applied via @limiter.limit at decoration time on
+# the widget endpoint. See module docstring above for why we no
+# longer expose a per-request callable. Keeping the value as a
+# module-level constant (rather than inlined in chat_widget.py)
+# preserves a single place to revisit when the dynamic-cap feature
+# is built for real.
+EMBED_WIDGET_RATE_LIMIT = "30/minute"
 
 
 def cors_response_headers(request: Request, widget_config: dict | None) -> dict[str, str]:

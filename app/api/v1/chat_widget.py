@@ -15,7 +15,9 @@ sits behind extra constraints scoped to embed keys:
 
 See app/api/widget_deps.py for the dependency that enforces the
 first three; the slowapi limit decorator below reads the per-key
-cap dynamically via embed_per_minute_limit_string.
+cap statically via the EMBED_WIDGET_RATE_LIMIT constant on the
+widget_deps module. The previous dynamic per-key cap shipped broken
+(see widget_deps docstring); v1 uses a conservative global cap.
 
 Why this is a SEPARATE endpoint from /chat/stream
 --------------------------------------------------
@@ -60,8 +62,8 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_chat_service, get_session_service
 from app.api.widget_deps import (
+    EMBED_WIDGET_RATE_LIMIT,
     cors_response_headers,
-    embed_per_minute_limit_string,
     require_embed_key,
 )
 from app.middleware.rate_limit import limiter, get_api_key_or_ip
@@ -99,7 +101,7 @@ def widget_preflight(request: Request) -> Response:
 
 
 @router.post("/widget")
-@limiter.limit(embed_per_minute_limit_string, key_func=get_api_key_or_ip)
+@limiter.limit(EMBED_WIDGET_RATE_LIMIT, key_func=get_api_key_or_ip)
 def widget_chat_stream(
     request: Request,
     payload: ChatWidgetRequest,
