@@ -4,9 +4,15 @@ Session repository.
 PATCHED:
   S1 — get_session() now accepts optional tenant_id for ownership check.
   S2 — list_sessions() now accepts agent_id filter.
+  S3 — Step 24.5c sub-branch 4: create_session() now accepts an optional
+       conversation_id (UUID) that the identity resolver supplies. NULL
+       is the legacy / single-session conversation path (existing
+       callers see no behavioural change).
 """
 
 from __future__ import annotations
+
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -30,7 +36,17 @@ class SessionRepository:
         user_id: str | None = None,
         channel: str = "web",
         status: str = "active",
+        conversation_id: uuid.UUID | None = None,
     ) -> SessionModel:
+        # Step 24.5c sub-branch 4: conversation_id is the FK to
+        # conversations.id that groups sibling sessions across
+        # channels. NULL = no continuity claim yet (a single-session
+        # conversation, the existing semantics). The identity
+        # resolver (app.identity.resolver) supplies a UUID when
+        # the request asserted an identity_claim. Existing callers
+        # that don't pass conversation_id continue to mint NULL
+        # sessions -- behavioural compatibility per the §3.2.11
+        # nullable-by-design contract.
         session = SessionModel(
             id=session_id,
             tenant_id=tenant_id,
@@ -39,6 +55,7 @@ class SessionRepository:
             user_id=user_id,
             channel=channel,
             status=status,
+            conversation_id=conversation_id,
         )
         self.db.add(session)
         self.db.commit()
