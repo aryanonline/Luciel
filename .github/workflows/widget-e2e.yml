@@ -88,7 +88,12 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:15
+        # pgvector/pgvector:pg15 is the upstream postgres:15 image with
+        # the pgvector extension preinstalled. The b0e003ffa07f migration
+        # (knowledge_embeddings) calls CREATE EXTENSION vector, which
+        # the stock postgres:15 image cannot satisfy. This pin keeps the
+        # harness deterministic and self-contained.
+        image: pgvector/pgvector:pg15
         env:
           POSTGRES_USER: luciel
           POSTGRES_PASSWORD: luciel
