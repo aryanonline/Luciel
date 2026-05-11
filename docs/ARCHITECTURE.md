@@ -16,7 +16,7 @@ Absence of a marker means the claim is design-level (architectural property, rat
 
 **Maintenance protocol:** Surgical edits only. When the design changes, update the relevant section in place and log the prior decision in `DRIFTS.md`. When the implementation catches up to a section, mark it implemented (per the marker scheme adopted in `DRIFTS.md` Phase 2).
 
-**Last updated:** 2026-05-09 (Phase 2 reconciliation, commit (b))
+**Last updated:** 2026-05-11 (§3.2.6 Application log stream bullet 📋-marked for widget-chat audit gap)
 
 ---
 
@@ -207,7 +207,7 @@ Memory is layered (per the canonical recap). The four kinds — session, user pr
 Every consequential action in production produces an immutable audit record. There are three independent channels, designed so a tampering attempt is detectable.
 
 - **Database audit log.** A append-only table (`admin_audit_logs`) that records every control-plane and data-plane control event (key minting, scope changes, deactivations, deletions, configuration changes). Each row is hash-chained to its predecessor — modifying any historical row breaks the chain and is detectable on the next verification run.
-- **Application log stream.** A separate stream (CloudWatch Logs) where the application emits the same audit events in human-readable form. Independent of the database. Useful for forensic investigation, incident response, and regulator-facing exports.
+- **Application log stream.** A separate stream (CloudWatch Logs) where the application emits the same audit events in human-readable form. Independent of the database. Useful for forensic investigation, incident response, and regulator-facing exports. 📋 Implementation incomplete for the customer-facing widget chat surface: as of 2026-05-11, `app/api/v1/chat_widget.py` emits no per-turn structured log line (no `tenant_id`/`domain_id`/`embed_key_prefix`/`session_id` audit record), so this channel currently carries control-plane events but not chat-turn events. Tracked as `D-widget-chat-no-application-level-audit-log-2026-05-10`. Closes with Step 31 (dashboards + validation gate).
 - **AWS CloudTrail.** AWS's own immutable record of every IAM and infrastructure action — who logged in, who minted what, what was deployed when. We do not write to CloudTrail; AWS does, and we read it.
 
 A retention purge produces records in a fourth append-only table (`deletion_logs`) so retention events are distinguishable from control-plane events but follow the same immutability discipline.
