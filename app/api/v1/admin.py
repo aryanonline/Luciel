@@ -96,6 +96,10 @@ from app.schemas.api_key import (
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService
 from app.services.memory_admin_service import MemoryAdminService
+from app.services.scope_prompt_preflight import (
+    ScopePromptMissingError,
+    ScopePromptPreflight,
+)
 from app.schemas.memory import MemoryRead
 from app.policy.scope import ScopePolicy
 from app.models.luciel_instance import LucielInstance
@@ -744,6 +748,44 @@ def create_embed_key(
             ),
         )
 
+    # --- Scope-prompt preflight (Step 30d Deliverable A) ------------
+    # For domain-scoped mints, verify the target domain_configs row
+    # exists and has a non-empty system_prompt_additions BEFORE the
+    # api_keys row is inserted. We block at issuance time rather than
+    # at chat time so existing widget keys aren't retroactively bricked
+    # and operators get the failure during a controlled admin action
+    # rather than from a stranger's browser on a customer site
+    # (ARCHITECTURE §3.2.2 'Issuance').
+    #
+    # Tenant-wide mints (domain_id is None) skip the preflight because
+    # they are governed by TenantConfig.system_prompt at chat time; we
+    # surface a non-fatal warning on the response instead.
+    warnings: list[str] = []
+    if payload.domain_id is None:
+        warnings.append(
+            "Tenant-wide embed key minted; scope is governed by "
+            "TenantConfig.system_prompt at chat time, not by a "
+            "per-domain scope prompt."
+        )
+    else:
+        try:
+            ScopePromptPreflight.check(
+                db,
+                tenant_id=payload.tenant_id,
+                domain_id=payload.domain_id,
+            )
+        except ScopePromptMissingError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error": "scope_prompt_missing",
+                    "reason": exc.reason,
+                    "tenant_id": exc.tenant_id,
+                    "domain_id": exc.domain_id,
+                    "message": str(exc),
+                },
+            ) from exc
+
     # --- Mint via ApiKeyService -------------------------------------
     # The four embed-only kwargs were added in commit (a). The audit
     # row is emitted in the same transaction as the api_keys INSERT
@@ -786,6 +828,7 @@ def create_embed_key(
     return EmbedKeyCreateResponse(
         embed_key=EmbedKeyRead.model_validate(api_key),
         raw_key=raw_key,
+        warnings=warnings,
     )
 
 

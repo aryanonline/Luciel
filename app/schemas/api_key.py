@@ -427,7 +427,13 @@ class EmbedKeyCreateResponse(BaseModel):
     cannot retrieve it later (only the SHA-256 hash is stored). If the
     customer loses the key, the operator deactivates the row and mints
     a new one (Pattern E: deactivate, never delete).
+
+    `warnings` carries non-fatal operator-facing notes from issuance
+    (e.g. tenant-wide mints that skip the scope-prompt preflight; see
+    ARCHITECTURE §3.2.2 'Issuance'). Defaults to an empty list to keep
+    the response backward-compatible with pre-Step-30d clients.
     """
 
     embed_key: EmbedKeyRead
     raw_key: str
+    warnings: list[str] = []
