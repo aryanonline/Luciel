@@ -185,6 +185,15 @@ def test_widget_e2e_workflow_has_postgres_and_redis_services() -> None:
         "service. The session/chat path imports celery wiring at "
         "app boot; a missing redis aborts startup."
     )
+    postgres_image = services["postgres"].get("image", "")
+    assert "pgvector" in postgres_image, (
+        "Step 30d-C harness contract: the postgres service image must "
+        "be a pgvector-enabled variant (e.g. pgvector/pgvector:pg15). "
+        "Alembic migration b0e003ffa07f issues CREATE EXTENSION vector "
+        "against the harness DB; the stock postgres:15 image lacks the "
+        "extension and run 25690719076 failed there. Pinning the image "
+        "in this AST test catches a regression before workflow_dispatch."
+    )
 
 
 # =====================================================================
