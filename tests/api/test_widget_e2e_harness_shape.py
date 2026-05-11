@@ -418,3 +418,40 @@ def test_readme_documents_workflow_dispatch_v1_state() -> None:
         "follow-up so the maintainer can correlate the v1 state "
         "with the planned final shape."
     )
+
+
+# =====================================================================
+# Readiness-probe cross-reference (workflow <-> app.main)
+# =====================================================================
+
+
+def test_widget_e2e_workflow_probe_path_matches_app_main_health_route() -> None:
+    """The workflow's uvicorn-readiness curl loop must hit a path the
+    app actually mounts. Run 25693123650 failed because the workflow
+    probed /healthz while app/main.py mounts /health -- uvicorn was
+    healthy but the probe returned 404 for 15 attempts and the job
+    timed out. We pin both sides here so a future rename on either
+    file is caught at the cheap AST job rather than at a 30-second
+    workflow_dispatch timeout.
+    """
+
+    workflow = _read(".github/workflows/widget-e2e.yml")
+    assert "http://127.0.0.1:8000/health" in workflow, (
+        "widget-e2e.yml must probe http://127.0.0.1:8000/health (the "
+        "path app/main.py actually mounts). Using /healthz or any "
+        "other suffix returns 404 from the running app and the "
+        "readiness loop will time out, as it did in run 25693123650."
+    )
+    assert "http://127.0.0.1:8000/healthz" not in workflow, (
+        "widget-e2e.yml must NOT probe /healthz -- app/main.py mounts "
+        "the route at /health (no trailing 'z'). A previous edit had "
+        "this wrong and the workflow_dispatch timed out at the "
+        "readiness step."
+    )
+
+    app_main = _read("app/main.py")
+    assert '@app.get("/health")' in app_main, (
+        "app/main.py must mount the health route at /health. If this "
+        "is intentionally renamed, update widget-e2e.yml in lockstep "
+        "and adjust this assertion."
+    )

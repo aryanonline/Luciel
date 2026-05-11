@@ -172,8 +172,8 @@ jobs:
           echo "::add-mask::$(cat /tmp/admin_key.txt)"
 
       - name: launch uvicorn in background
-        # Start the app and wait for /healthz. We give it up to 30
-        # seconds; if /healthz isn't ready by then, the runner has a
+        # Start the app and wait for /health. We give it up to 30
+        # seconds; if /health isn't ready by then, the runner has a
         # bigger problem than this gate can paper over.
         run: |
           uvicorn app.main:app --host 127.0.0.1 --port 8000 \
@@ -181,7 +181,7 @@ jobs:
           echo $! > /tmp/uvicorn.pid
           for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
             if curl --silent --fail --max-time 2 \
-                http://127.0.0.1:8000/healthz >/dev/null; then
+                http://127.0.0.1:8000/health >/dev/null; then
               echo "==> uvicorn ready on attempt ${attempt}"
               exit 0
             fi
