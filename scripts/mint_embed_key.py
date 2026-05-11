@@ -101,6 +101,10 @@ from app.db.session import SessionLocal
 from app.repositories.admin_audit_repository import AuditContext
 from app.schemas.api_key import EmbedKeyCreate, WidgetConfig
 from app.services.api_key_service import ApiKeyService
+from app.services.scope_prompt_preflight import (
+    ScopePromptMissingError,
+    ScopePromptPreflight,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -239,6 +243,36 @@ def main() -> int:
     # values through identically.
     db = SessionLocal()
     svc = ApiKeyService(db)
+
+    # --- Scope-prompt preflight (Step 30d Deliverable A) ----------------
+    # For domain-scoped mints, refuse to issue a key when the target
+    # domain_configs row is missing or has an empty
+    # system_prompt_additions. Same rule as the HTTP route
+    # (POST /admin/embed-keys); both paths funnel through
+    # ScopePromptPreflight so they cannot drift. Tenant-wide mints
+    # (domain_id is None) skip the preflight and emit a stdout warning.
+    if payload.domain_id is None:
+        print(
+            "WARNING: tenant-wide embed key; scope is governed by "
+            "TenantConfig.system_prompt at chat time, not by a "
+            "per-domain scope prompt.",
+            file=sys.stderr,
+        )
+    else:
+        try:
+            ScopePromptPreflight.check(
+                db,
+                tenant_id=payload.tenant_id,
+                domain_id=payload.domain_id,
+            )
+        except ScopePromptMissingError as exc:
+            print(
+                f"FATAL: scope-prompt preflight failed "
+                f"({exc.reason}): {exc}",
+                file=sys.stderr,
+            )
+            db.close()
+            return 2
 
     try:
         api_key, raw_key = svc.create_key(
