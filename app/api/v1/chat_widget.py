@@ -165,7 +165,12 @@ def widget_chat_stream(
             user_id=None,  # widget visitors are anonymous at v1
             channel="widget",
         )
-        session_id = session.session_id
+        # SessionModel's primary key column is `id` (see
+        # app/models/session.py:17), not `session_id`. The session_id
+        # name lives on payload (ChatWidgetRequest) and on MessageModel
+        # as an FK, which is why this read site is the only one in the
+        # codebase that touches the SessionModel attribute directly.
+        session_id = session.id
 
     try:
         generator = chat_service.respond_stream(
