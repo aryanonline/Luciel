@@ -110,17 +110,22 @@ def test_widget_e2e_workflow_file_exists_and_parses_as_yaml() -> None:
     )
 
 
-def test_widget_e2e_workflow_v1_trigger_is_workflow_dispatch_only() -> None:
-    """In v1 (this commit), the only trigger is workflow_dispatch.
+def test_widget_e2e_workflow_has_workflow_dispatch_and_pull_request_triggers() -> None:
+    """In v2 (Pattern E follow-up `step-30d-harness-pr-trigger`), the
+    workflow has BOTH `workflow_dispatch` (preserved per Pattern E:
+    add-alongside, never delete) AND `pull_request` (the path-filtered
+    gate that runs on every widget-surface PR).
 
-    The follow-up commit on the next branch ADDS a pull_request
-    trigger next to it (Pattern E: deactivate by replacement, never
-    delete). Until that follow-up lands, the path-trigger MUST NOT
-    be present -- shipping it on PR #16 itself is exactly the
-    chicken-and-egg this scaffolding avoided.
+    v1 history: dispatch-only. Closed 2026-05-11 by observed-clean
+    manual dispatch `25695322187` and this Pattern E follow-up.
+    See `.github/workflows/widget-e2e.yml` header comment for the
+    full v1/v2 reasoning.
 
-    If you are landing the follow-up commit, update this test in the
-    same diff so the contract evolves with the trigger."""
+    The companion test
+    `test_widget_e2e_workflow_pull_request_trigger_pins_widget_surface_paths`
+    pins the exact path list so a future "someone removed the paths
+    filter" regression (which would cause every PR to boot the harness
+    -- a real CI-minute regression) is caught at PR-time."""
 
     yaml = pytest.importorskip("yaml")
     doc = yaml.safe_load(_read(".github/workflows/widget-e2e.yml"))
@@ -133,14 +138,81 @@ def test_widget_e2e_workflow_v1_trigger_is_workflow_dispatch_only() -> None:
     )
     assert "workflow_dispatch" in triggers, (
         "widget-e2e.yml must keep the workflow_dispatch trigger; it "
-        "is the v1 manual entry point."
+        "is preserved per Pattern E (add-alongside, never delete) and "
+        "remains the manual re-run entry point against `main`."
     )
-    assert "pull_request" not in triggers, (
-        "Step 30d-C v1 contract: widget-e2e.yml MUST NOT have a "
-        "pull_request trigger yet. It is added in the follow-up "
-        "commit after the harness has been observed running cleanly "
-        "via manual dispatch. If you are landing that follow-up, "
-        "update this test in the same commit."
+    assert "pull_request" in triggers, (
+        "Step 30d v2 contract: widget-e2e.yml MUST have a pull_request "
+        "trigger; the v1 dispatch-only state was closed by the "
+        "Pattern E follow-up `step-30d-harness-pr-trigger` after "
+        "observed-clean dispatch `25695322187`. If you are removing "
+        "the pull_request trigger, that is a Pattern E violation "
+        "(delete) -- use a deactivate-by-replacement strategy instead."
+    )
+
+
+def test_widget_e2e_workflow_pull_request_trigger_pins_widget_surface_paths() -> None:
+    """The pull_request trigger's `paths:` list MUST contain the
+    widget-surface glob set, and `paths-ignore:` MUST exclude docs and
+    widget-bundle paths so unrelated PRs do not pay the ~1m21s
+    backend-boot cost.
+
+    This assertion exists because removing the paths filter (or
+    silently dropping one of the surface globs) is a high-blast-radius
+    regression: removing the filter outright would cause every PR
+    against `main` to boot the harness (real CI-minute regression),
+    and dropping a surface glob would silently weaken the safety gate
+    the row in CANONICAL_RECAP §12 commits to.
+
+    The expected path list is the doctrine-pinned set from the v2
+    block in `.github/workflows/widget-e2e.yml`'s header comment and
+    from `ci/e2e/README.md`'s v2 trigger-state section."""
+
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load(_read(".github/workflows/widget-e2e.yml"))
+
+    triggers = doc.get("on") if "on" in doc else doc.get(True)
+    pr_block = triggers.get("pull_request")
+    assert isinstance(pr_block, dict), (
+        "widget-e2e.yml 'on.pull_request' must be a mapping with "
+        "`paths:` and `paths-ignore:` keys, not None/[] (a bare "
+        "`pull_request:` would trigger on every PR and defeat the "
+        "backend-boot cost containment)."
+    )
+
+    expected_paths = {
+        "app/api/v1/chat_widget.py",
+        "app/api/v1/admin.py",
+        "app/api/widget_deps.py",
+        "app/middleware/auth.py",
+        "app/policy/moderation.py",
+        "app/core/config.py",
+        "app/services/scope_prompt_preflight.py",
+        "app/integrations/llm/**",
+        "ci/e2e/**",
+        ".github/workflows/widget-e2e.yml",
+        "tests/api/test_widget_e2e_harness_shape.py",
+    }
+    actual_paths = set(pr_block.get("paths", []) or [])
+    missing = expected_paths - actual_paths
+    assert not missing, (
+        "widget-e2e.yml 'on.pull_request.paths' is missing required "
+        f"widget-surface globs: {sorted(missing)}. The doctrine-pinned "
+        "path list is in the workflow header comment block under "
+        "'v2 (current)' and in ci/e2e/README.md under 'v2 trigger "
+        "state'. Dropping a surface glob silently weakens the safety "
+        "gate that CANONICAL_RECAP §12 Step 30d commits to."
+    )
+
+    expected_ignore = {"docs/**", "widget/**"}
+    actual_ignore = set(pr_block.get("paths-ignore", []) or [])
+    missing_ignore = expected_ignore - actual_ignore
+    assert not missing_ignore, (
+        "widget-e2e.yml 'on.pull_request.paths-ignore' is missing "
+        f"required exclusions: {sorted(missing_ignore)}. Docs and "
+        "widget-bundle paths are deliberately excluded so a docs "
+        "typo or a widget-bundle-only change does not pay the "
+        "~1m21s backend-boot cost."
     )
 
 
@@ -403,20 +475,21 @@ def test_bootstrap_script_refuses_production_db_url() -> None:
 # =====================================================================
 
 
-def test_readme_documents_workflow_dispatch_v1_state() -> None:
-    """The README must explain the v1 workflow_dispatch-only state so
-    a future maintainer knows the path-trigger flip is intentional
-    and tracked, not just an oversight."""
+def test_readme_documents_v1_to_v2_trigger_history() -> None:
+    """The README must explain both the v1 dispatch-only state
+    (historical) and the v2 dispatch+pull_request state (current) so a
+    future maintainer can correlate the manifest with the design intent
+    and understand that the v1 -> v2 flip was deliberate Pattern E
+    follow-up, not accidental drift."""
 
     src = _read("ci/e2e/README.md")
     assert "workflow_dispatch" in src, (
-        "ci/e2e/README.md must mention workflow_dispatch in the "
-        "trigger-state section."
+        "ci/e2e/README.md must mention workflow_dispatch (preserved "
+        "in v2 per Pattern E: add-alongside, never delete)."
     )
     assert "pull_request" in src, (
-        "ci/e2e/README.md must show the planned pull_request "
-        "follow-up so the maintainer can correlate the v1 state "
-        "with the planned final shape."
+        "ci/e2e/README.md must mention pull_request (the v2 trigger "
+        "landed by `step-30d-harness-pr-trigger`)."
     )
 
 

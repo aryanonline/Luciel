@@ -18,50 +18,64 @@
 #   strictly hermetic. Two workflow files, each with a single coherent
 #   purpose, is the cleaner long-term shape.
 #
-# Trigger state in v1 (this commit)
-# ---------------------------------
+# Trigger state
+# -------------
+#
+# v1 (closed 2026-05-11 by observed-clean manual dispatch `25695322187`
+# and the Pattern E follow-up that landed this v2 block):
 #
 #   on:
 #     workflow_dispatch: {}
 #
-#   ONLY manual dispatch for v1. Two reasons:
+#   Only manual dispatch. The harness depended on several runtime
+#   invariants (Postgres service health, uvicorn startup time under
+#   the runner's provisioned CPU, the bootstrap script's stdout-capture
+#   contract, sentinel-term parity between this file and
+#   run_widget_e2e.sh) that had NOT yet been observed running end-to-end
+#   in a GitHub Actions runner. Path-triggering on PR #16 itself would
+#   have meant discovering any such runtime issue on the PR that
+#   introduced the gate -- the chicken-and-egg this scaffolding avoided.
+#   Three pre-existing harness gaps surfaced over four manual dispatches
+#   and were closed by Pattern E follow-up branches against `main`
+#   (PR #18 pgvector image pin, PR #19 readiness probe /healthz -> /health,
+#   PR #20 hermetic stub LLM provider); dispatch `25695322187` was the
+#   first observed clean run end-to-end and flipped CANONICAL_RECAP §12
+#   Step 30d row 🔧 -> ✅ in commit `21d7101`.
 #
-#     1. The harness depends on several runtime invariants (Postgres
-#        service health, uvicorn startup time under the runner's
-#        provisioned CPU, the bootstrap script's stdout-capture
-#        contract, sentinel-term parity between this file and
-#        run_widget_e2e.sh) that have NOT yet been observed running
-#        end-to-end in a GitHub Actions runner. Path-triggering the
-#        gate on PR #16 itself would mean discovering any such
-#        runtime issue on the PR that introduces the gate, which is
-#        a poor-debuggability chicken-and-egg state.
+# v2 (current, this commit):
 #
-#     2. Pattern E discipline (see DRIFTS.md section 6) requires
-#        deactivate-by-replacement, never delete. The path-trigger
-#        block lands in a follow-up commit that ADDS it next to the
-#        workflow_dispatch block:
+#   on:
+#     workflow_dispatch: {}
+#     pull_request:
+#       paths:
+#         - app/api/v1/chat_widget.py
+#         - app/api/v1/admin.py
+#         - app/api/widget_deps.py
+#         - app/middleware/auth.py
+#         - app/policy/moderation.py
+#         - app/core/config.py
+#         - app/services/scope_prompt_preflight.py
+#         - app/integrations/llm/**
+#         - ci/e2e/**
+#         - .github/workflows/widget-e2e.yml
+#         - tests/api/test_widget_e2e_harness_shape.py
+#       paths-ignore:
+#         - docs/**
+#         - widget/**
 #
-#          on:
-#            workflow_dispatch: {}
-#            pull_request:
-#              paths:
-#                - app/api/v1/chat_widget.py
-#                - app/api/v1/admin.py
-#                - app/api/widget_deps.py
-#                - app/middleware/auth.py
-#                - app/policy/moderation.py
-#                - app/core/config.py
-#                - app/services/scope_prompt_preflight.py
-#                - ci/e2e/**
-#              paths-ignore:
-#                - docs/**
-#                - widget/**
-#
-#        That follow-up flip is the natural moment to also mark the
-#        Step 30d row in CANONICAL_RECAP from 🔧 to ✅, since 🔧
-#        means "gate landed, not yet observed gating a real PR
-#        cleanly" and ✅ means "observed gating cleanly at least
-#        once" (matching the Step 30b precedent).
+#   Adds `pull_request` next to `workflow_dispatch` (add-alongside, not
+#   deactivate-by-replacement: `workflow_dispatch` stays useful for
+#   ad-hoc re-runs against `main` and for future debugging dispatches).
+#   The path list is bounded to the widget surface so unrelated PRs do
+#   not pay the ~1m21s backend-boot cost; `app/integrations/llm/**`,
+#   the workflow file itself, and the AST contract test are included
+#   because changes to any of them functionally change what this gate
+#   is gating. The AST contract test
+#   `tests/api/test_widget_e2e_harness_shape.py` pins the exact path
+#   list at PR-time in the backend-free CI lane so a future
+#   "someone removed the paths filter" regression (which would cause
+#   every PR to boot the harness -- a real CI-minute regression) is
+#   caught before the workflow runs.
 #
 # Cost shape
 # ----------
@@ -76,6 +90,22 @@ name: widget-e2e
 
 on:
   workflow_dispatch: {}
+  pull_request:
+    paths:
+      - app/api/v1/chat_widget.py
+      - app/api/v1/admin.py
+      - app/api/widget_deps.py
+      - app/middleware/auth.py
+      - app/policy/moderation.py
+      - app/core/config.py
+      - app/services/scope_prompt_preflight.py
+      - app/integrations/llm/**
+      - ci/e2e/**
+      - .github/workflows/widget-e2e.yml
+      - tests/api/test_widget_e2e_harness_shape.py
+    paths-ignore:
+      - docs/**
+      - widget/**
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

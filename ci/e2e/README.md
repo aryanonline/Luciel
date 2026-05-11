@@ -25,26 +25,40 @@ The harness depends on one CI-only helper at the repo root:
 | --- | --- |
 | `scripts/bootstrap_platform_admin_ci.py` | CI-only platform-admin key mint. Prints raw key to stdout under a guardrail env var. NOT for production -- production uses `scripts/mint_platform_admin_ssm.py`. |
 
-## v1 trigger state (this branch)
+## Trigger state
 
-The workflow is **dispatch-only**:
+### v1 (closed 2026-05-11)
+
+Dispatch-only:
 
 ```yaml
 on:
   workflow_dispatch: {}
 ```
 
-No path filter, no PR trigger. Reason: the harness depends on
-several runtime invariants (Postgres service health, uvicorn startup
-time, sentinel-term parity between the workflow env and the bash
-script) that have NOT been observed running cleanly in a GitHub
-Actions runner. Path-triggering the gate on the same PR that
-introduces the harness would mean discovering any such issue on the
-PR you're trying to land, which is a poor-debuggability state.
+No path filter, no PR trigger. The harness depended on several
+runtime invariants (Postgres service health, uvicorn startup time,
+sentinel-term parity between the workflow env and the bash script,
+stub-LLM-provider registration) that had NOT been observed running
+cleanly in a GitHub Actions runner. Path-triggering the gate on the
+same PR that introduced the harness would have meant discovering any
+such issue on the PR being landed -- the chicken-and-egg this
+scaffolding deliberately avoided.
 
-The follow-up commit (next branch off `step-30d` or `main`, depending
-on merge timing) ADDS the path-trigger block next to the
-`workflow_dispatch` block, preserving Pattern E:
+Three pre-existing harness gaps surfaced over four manual dispatches
+and were closed by Pattern E follow-up branches against `main`:
+pgvector postgres image pin (PR #18 / `ff0e116`, closed run
+`25690719076`), readiness probe `/healthz` -> `/health` (PR #19 /
+`b517f29`, closed run `25693123650`), hermetic stub LLM provider
+(PR #20 / `ec8a72d`, closed run `25694850046`). Dispatch `25695322187`
+was the first observed clean run end-to-end (every assertion green,
+~1m21s) and flipped CANONICAL_RECAP §12 Step 30d row 🔧 -> ✅ in
+commit `21d7101`. v1 closed by this same observed-clean evidence and
+by the Pattern E follow-up below.
+
+### v2 (current)
+
+Dispatch preserved + pull_request added (add-alongside, never delete):
 
 ```yaml
 on:
@@ -58,15 +72,29 @@ on:
       - app/policy/moderation.py
       - app/core/config.py
       - app/services/scope_prompt_preflight.py
+      - app/integrations/llm/**
       - ci/e2e/**
+      - .github/workflows/widget-e2e.yml
+      - tests/api/test_widget_e2e_harness_shape.py
     paths-ignore:
       - docs/**
       - widget/**
 ```
 
-That follow-up flip is also the natural moment to mark the Step 30d
-row in `docs/CANONICAL_RECAP.md` from 🔧 to ✅, matching the Step 30b
-precedent that ✅ means "observed gating cleanly at least once."
+`workflow_dispatch` stays useful for ad-hoc re-runs against `main` and
+for future debugging dispatches. The path list is bounded to the
+widget surface so unrelated PRs do not pay the ~1m21s backend-boot
+cost; `app/integrations/llm/**`, the workflow file itself, and the
+AST contract test are included because changes to any of them
+functionally change what this gate is gating. `docs/**` and
+`widget/**` are excluded so a docs typo or a widget-bundle-only
+change does not trigger the harness.
+
+The AST contract test `tests/api/test_widget_e2e_harness_shape.py`
+pins the exact path list at PR-time in the backend-free CI lane so a
+future "someone removed the paths filter" regression (which would
+cause every PR against `main` to boot the harness -- a real
+CI-minute regression) is caught before the workflow runs.
 
 ## Sentinel-term contract
 
