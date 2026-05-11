@@ -455,3 +455,98 @@ def test_widget_e2e_workflow_probe_path_matches_app_main_health_route() -> None:
         "is intentionally renamed, update widget-e2e.yml in lockstep "
         "and adjust this assertion."
     )
+
+
+# =====================================================================
+# Stub LLM provider cross-reference (workflow <-> settings <-> stub module)
+# =====================================================================
+
+
+def test_widget_e2e_workflow_enables_stub_llm_provider() -> None:
+    """The workflow env must set ENABLE_STUB_LLM_PROVIDER=true. Without
+    it, ModelRouter has zero registered providers (no OPENAI_API_KEY
+    or ANTHROPIC_API_KEY is configured in CI by design) and the
+    happy-path chat stream raises RuntimeError before yielding any
+    token. Run 25694850046 failed there until the stub was added."""
+
+    raw = _read(".github/workflows/widget-e2e.yml")
+    assert "ENABLE_STUB_LLM_PROVIDER:" in raw, (
+        "widget-e2e.yml env must declare ENABLE_STUB_LLM_PROVIDER so "
+        "ModelRouter has at least one provider to fall back to. The "
+        "chat stream raises RuntimeError otherwise and the harness "
+        "fails at the happy-path frame assertion."
+    )
+    assert '"true"' in raw.split("ENABLE_STUB_LLM_PROVIDER:")[1].split("\n")[0], (
+        "ENABLE_STUB_LLM_PROVIDER must be the string 'true' so "
+        "pydantic-settings parses it as bool True. Any other value "
+        "leaves the stub unregistered and the harness fails the same "
+        "way as before this commit."
+    )
+
+
+def test_stub_llm_client_module_exists_and_warns_at_construction() -> None:
+    """app/integrations/llm/stub_client.py must exist, define
+    StubLLMClient, and emit a logger.warning at construction. The
+    WARNING is the production-deploy guardrail (parallel to
+    NullModerationProvider): if a future change accidentally flips
+    enable_stub_llm_provider=True in prod, the warning surfaces in
+    the application log stream the first time the module is imported."""
+
+    src = _read("app/integrations/llm/stub_client.py")
+    tree = ast.parse(src)
+
+    classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+    class_names = {c.name for c in classes}
+    assert "StubLLMClient" in class_names, (
+        "stub_client.py must define class StubLLMClient. ModelRouter "
+        "imports this symbol directly."
+    )
+
+    stub_cls = next(c for c in classes if c.name == "StubLLMClient")
+    init_methods = [
+        n for n in stub_cls.body
+        if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+    ]
+    assert init_methods, (
+        "StubLLMClient must define an __init__ that emits a "
+        "construction-time WARNING."
+    )
+    init_src = ast.unparse(init_methods[0])
+    assert "logger.warning" in init_src, (
+        "StubLLMClient.__init__ must call logger.warning so a "
+        "misconfigured production deploy (enable_stub_llm_provider=True) "
+        "is visible in the log stream at module-import time."
+    )
+
+
+def test_settings_has_enable_stub_llm_provider_flag_defaulting_to_false() -> None:
+    """app/core/config.py must declare enable_stub_llm_provider with a
+    False default. The False default is the production safety: a
+    deploy that does not explicitly opt in cannot accidentally
+    register the stub."""
+
+    src = _read("app/core/config.py")
+    tree = ast.parse(src)
+
+    found_flag = False
+    found_false_default = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id == "enable_stub_llm_provider":
+                found_flag = True
+                if (
+                    isinstance(node.value, ast.Constant)
+                    and node.value.value is False
+                ):
+                    found_false_default = True
+                break
+    assert found_flag, (
+        "app/core/config.py must declare a field named "
+        "enable_stub_llm_provider so ModelRouter has a gate-flag to "
+        "check before registering StubLLMClient."
+    )
+    assert found_false_default, (
+        "enable_stub_llm_provider must default to False so production "
+        "deploys cannot accidentally register the stub by omission. "
+        "The widget-e2e workflow flips it to True explicitly via env."
+    )

@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.integrations.llm.base import LLMBase, LLMRequest, LLMResponse
 from app.integrations.llm.openai_client import OpenAIClient
 from app.integrations.llm.anthropic_client import AnthropicClient
+from app.integrations.llm.stub_client import StubLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,14 @@ class ModelRouter:
             self._register("openai", OpenAIClient())
         if settings.anthropic_api_key:
             self._register("anthropic", AnthropicClient())
+
+        # Hermetic stub provider for the widget-e2e CI harness
+        # (Step 30d Deliverable C). Off by default so production is
+        # unaffected; the harness flips it via ENABLE_STUB_LLM_PROVIDER.
+        # StubLLMClient logs a WARNING at construction so a deploy
+        # that flips the flag in production is observable.
+        if getattr(settings, "enable_stub_llm_provider", False):
+            self._register("stub", StubLLMClient())
 
         self._default_provider = settings.default_llm_provider
 
