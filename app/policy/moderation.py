@@ -39,6 +39,16 @@ implementations:
     have no provider key configured. Logs a WARNING on every call so
     it cannot silently ship to production.
 
+  * KeywordModerationProvider -- deterministic substring match
+    against a configured list of block terms. Has no transport, so
+    cannot raise ModerationProviderUnavailable and is never wrapped
+    in FailClosed. Exists to give the widget-surface E2E CI gate
+    (Step 30d Deliverable C) a refusal-path scenario whose outcome
+    does not depend on network reachability or a billable third-
+    party API call. Useful in dev too. Logs a WARNING at
+    construction time when the block-term list is empty so a
+    misconfigured production deploy is observable.
+
 The production wiring is the FailClosedModerationProvider wrapping
 the OpenAIModerationProvider. If the OpenAI provider raises
 ModerationProviderUnavailable, the wrapper returns
@@ -273,6 +283,77 @@ class NullModerationProvider:
 
 
 # =====================================================================
+# Keyword provider (deterministic E2E + dev)
+# =====================================================================
+
+
+class KeywordModerationProvider:
+    """Blocks any input that contains one of a configured list of terms.
+
+    Match semantics: case-insensitive substring. No regex, no
+    tokenisation, no language-awareness -- this provider exists for
+    deterministic test scenarios and dev environments, NOT as a
+    production content-safety mechanism. The production provider is
+    OpenAIModerationProvider (wrapped in FailClosed); this class is
+    explicitly NOT wrapped in FailClosed because it has no transport
+    that could become unavailable.
+
+    The intended consumer is the widget-surface E2E CI gate (Step 30d
+    Deliverable C): the E2E script issues a benign turn (asserts
+    happy-path SSE frames) and a turn containing a known block term
+    (asserts the REFUSAL_MESSAGE frame). With OpenAIModerationProvider
+    the refusal path would depend on api.openai.com reachability and
+    cost a billable call per push; with KeywordModerationProvider
+    the same scenario runs hermetically.
+
+    Empty-block-term list means this provider never blocks. We log a
+    WARNING at construction in that case so a misconfiguration is
+    visible in the application log stream the first time the module
+    is imported.
+    """
+
+    name = "keyword"
+
+    def __init__(self, block_terms: list[str]) -> None:
+        # Normalise once at construction so the hot path is a pure
+        # substring scan with no per-call lowercasing of the term
+        # list. Skip empty / whitespace-only entries defensively.
+        self._terms = [t.lower() for t in (block_terms or []) if t and t.strip()]
+        if not self._terms:
+            logger.warning(
+                "KeywordModerationProvider constructed with empty "
+                "block-term list -- this provider will never block. "
+                "Configure moderation_keyword_block_terms or switch "
+                "moderation_provider to 'openai' for production."
+            )
+
+    def moderate(self, text: str) -> ModerationResult:
+        haystack = (text or "").lower()
+        for term in self._terms:
+            if term in haystack:
+                logger.warning(
+                    "KeywordModerationProvider blocked input on "
+                    "term match. provider=%s",
+                    self.name,
+                    extra={"matched_term_length": len(term)},
+                )
+                # We deliberately do NOT echo the matched term into
+                # the categories list. Categories are operator-only
+                # but the term itself is policy data; we expose only
+                # the fact that a keyword match occurred.
+                return ModerationResult(
+                    blocked=True,
+                    categories=["keyword_match"],
+                    provider=self.name,
+                )
+        return ModerationResult(
+            blocked=False,
+            categories=[],
+            provider=self.name,
+        )
+
+
+# =====================================================================
 # Fail-closed wrapper (production wiring)
 # =====================================================================
 
@@ -332,6 +413,7 @@ class ModerationGate:
         Recognised values for settings.moderation_provider:
           * 'openai'  -- FailClosedModerationProvider(OpenAIModerationProvider(...))
           * 'null'    -- NullModerationProvider (dev only)
+          * 'keyword' -- KeywordModerationProvider (E2E CI + dev)
 
         Raises ConfigurationError at call time for:
           * unknown provider value
@@ -349,6 +431,16 @@ class ModerationGate:
 
         if provider_name == "null":
             return NullModerationProvider()
+
+        if provider_name == "keyword":
+            terms = list(
+                getattr(settings, "moderation_keyword_block_terms", []) or []
+            )
+            # KeywordModerationProvider has no transport so wrapping
+            # it in FailClosed would be a no-op. Return the raw
+            # provider; the construction-time WARNING (when terms is
+            # empty) is the misconfig signal.
+            return KeywordModerationProvider(terms)
 
         if provider_name == "openai":
             api_key = getattr(settings, "openai_api_key", "") or ""
@@ -374,5 +466,5 @@ class ModerationGate:
 
         raise ConfigurationError(
             f"Unknown moderation_provider={provider_name!r}. "
-            f"Expected one of: 'openai', 'null'."
+            f"Expected one of: 'openai', 'null', 'keyword'."
         )

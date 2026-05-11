@@ -505,11 +505,17 @@ class _FakeSettings:
         openai_api_key="sk-test",
         moderation_timeout_seconds=3.0,
         moderation_fail_closed=True,
+        moderation_keyword_block_terms=None,
     ):
         self.moderation_provider = moderation_provider
         self.openai_api_key = openai_api_key
         self.moderation_timeout_seconds = moderation_timeout_seconds
         self.moderation_fail_closed = moderation_fail_closed
+        # None means "do not set the attribute" so we can assert the
+        # factory's defensive getattr default-list behavior; pass an
+        # explicit [] or [...] to set the attribute.
+        if moderation_keyword_block_terms is not None:
+            self.moderation_keyword_block_terms = moderation_keyword_block_terms
 
 
 def test_gate_factory_returns_null_provider_for_null_setting() -> None:
@@ -780,3 +786,133 @@ def test_moderation_module_imports_cleanly() -> None:
     assert res.categories == []
     assert res.provider == ""
     assert res.provider_request_id is None
+
+
+# =====================================================================
+# Behavioural tests: KeywordModerationProvider (Step 30d Deliverable C)
+# =====================================================================
+#
+# The KeywordModerationProvider exists so the widget-surface E2E CI
+# gate (Deliverable C) has a deterministic refusal path that does not
+# require an OpenAI API call per push. These tests pin the provider's
+# contract so a future refactor cannot quietly change the semantics
+# the E2E harness depends on.
+
+
+def test_keyword_provider_blocks_on_exact_match() -> None:
+    from app.policy.moderation import KeywordModerationProvider
+
+    provider = KeywordModerationProvider(block_terms=["forbidden"])
+    result = provider.moderate("this contains forbidden material")
+    assert result.blocked is True
+    assert result.categories == ["keyword_match"], (
+        "Keyword provider must surface only the generic 'keyword_match' "
+        "label and NOT echo the matched term into categories -- the "
+        "term itself is policy data."
+    )
+    assert result.provider == "keyword"
+
+
+def test_keyword_provider_blocks_case_insensitively() -> None:
+    from app.policy.moderation import KeywordModerationProvider
+
+    provider = KeywordModerationProvider(block_terms=["BlockMe"])
+    # Term is mixed-case; input is upper-case. Both must normalise.
+    result = provider.moderate("PLEASE BLOCKME NOW")
+    assert result.blocked is True
+    assert result.provider == "keyword"
+
+
+def test_keyword_provider_passes_clean_text() -> None:
+    from app.policy.moderation import KeywordModerationProvider
+
+    provider = KeywordModerationProvider(block_terms=["forbidden"])
+    result = provider.moderate("this is a perfectly benign question")
+    assert result.blocked is False
+    assert result.categories == []
+    assert result.provider == "keyword"
+
+
+def test_keyword_provider_empty_term_list_warns_at_construction(
+    caplog,
+) -> None:
+    """An empty block-term list must emit a WARNING at construction so a
+    misconfigured deploy is visible in the application log stream the
+    first time the module is imported. Without this signal, flipping
+    moderation_provider='keyword' but forgetting to populate the term
+    list would silently disable the gate."""
+
+    from app.policy.moderation import KeywordModerationProvider
+
+    caplog.set_level(logging.WARNING, logger="app.policy.moderation")
+    provider = KeywordModerationProvider(block_terms=[])
+    # Empty-list construction must produce a never-blocks provider.
+    result = provider.moderate("anything at all")
+    assert result.blocked is False
+    # And the construction-time WARNING must have fired.
+    assert any(
+        "empty block-term list" in rec.message
+        for rec in caplog.records
+    ), (
+        "Step 30d-C: KeywordModerationProvider with empty term list "
+        "must emit an operator-facing WARNING so a misconfigured "
+        "deploy is observable."
+    )
+
+
+def test_keyword_provider_filters_whitespace_only_terms() -> None:
+    """Whitespace-only entries in the block-term list must be ignored,
+    not treated as a term that matches every non-empty input."""
+
+    from app.policy.moderation import KeywordModerationProvider
+
+    provider = KeywordModerationProvider(block_terms=["  ", "", "real_term"])
+    # An input that does NOT contain 'real_term' must pass.
+    result = provider.moderate("hello world")
+    assert result.blocked is False
+    # And one that does, must block.
+    result2 = provider.moderate("contains real_term here")
+    assert result2.blocked is True
+
+
+def test_gate_factory_returns_keyword_provider_for_keyword_setting() -> None:
+    from app.policy.moderation import (
+        FailClosedModerationProvider,
+        KeywordModerationProvider,
+        ModerationGate,
+    )
+
+    provider = ModerationGate.from_settings(
+        _FakeSettings(
+            moderation_provider="keyword",
+            moderation_keyword_block_terms=["flag_this"],
+        )
+    )
+    assert isinstance(provider, KeywordModerationProvider)
+    # Critically: NOT wrapped in FailClosed. The keyword provider has
+    # no transport that could become unavailable, so a wrapper would
+    # be dead code.
+    assert not isinstance(provider, FailClosedModerationProvider)
+
+
+def test_gate_factory_keyword_provider_handles_missing_terms_setting() -> None:
+    """If moderation_provider='keyword' but moderation_keyword_block_terms
+    is not set on the Settings object, the factory must NOT raise --
+    it falls back to an empty list, and KeywordModerationProvider's
+    own construction-time WARNING handles the misconfig signal."""
+
+    from app.policy.moderation import (
+        KeywordModerationProvider,
+        ModerationGate,
+    )
+
+    # moderation_keyword_block_terms=None means the attribute is not
+    # set on _FakeSettings (see _FakeSettings.__init__).
+    settings = _FakeSettings(
+        moderation_provider="keyword",
+        moderation_keyword_block_terms=None,
+    )
+    assert not hasattr(settings, "moderation_keyword_block_terms")
+
+    provider = ModerationGate.from_settings(settings)
+    assert isinstance(provider, KeywordModerationProvider)
