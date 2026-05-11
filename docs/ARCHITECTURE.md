@@ -16,7 +16,7 @@ Absence of a marker means the claim is design-level (architectural property, rat
 
 **Maintenance protocol:** Surgical edits only. When the design changes, update the relevant section in place and log the prior decision in `DRIFTS.md`. When the implementation catches up to a section, mark it implemented (per the marker scheme adopted in `DRIFTS.md` Phase 2).
 
-**Last updated:** 2026-05-11 (new §3.2.2 documents the widget CDN tier and the embed-key public-surface model; old §3.2.2 – §3.2.9 each shift by one; §3.2.1 updated to reflect chat-widget live; §3.2.7 Application log stream bullet renumbered from §3.2.6 and retains its 📋 mark for the widget-chat audit gap)
+**Last updated:** 2026-05-11 (§3.2.2 *Issuance* paragraph extended with one sentence documenting the scope-prompt preflight added in Step 30d Deliverable A; tenant-wide mints skip the preflight and surface a non-fatal warning. Prior 2026-05-11 update: new §3.2.2 documented the widget CDN tier and the embed-key public-surface model; old §3.2.2 – §3.2.9 each shifted by one; §3.2.1 updated to reflect chat-widget live; §3.2.7 Application log stream bullet renumbered from §3.2.6 and retains its 📋 mark for the widget-chat audit gap.)
 
 ---
 
@@ -174,7 +174,7 @@ The chat widget is a public surface: the JavaScript bundle that customers paste 
 
 *Pattern E for embed keys:* deactivation, never deletion. A rotated embed key remains in the `api_keys` table with `is_active=false`; the audit chain (§3.2.7) stays walkable. The customer pastes a new key into their site and the old one stops authenticating on the next request.
 
-*Issuance:* `POST /admin/embed-keys` (with three scope guards and an audit row written in the same transaction as the key insert) or the operator CLI `scripts/mint_embed_key.py`. Both paths funnel through the same `EmbedKeyCreate` schema and the same service entrypoint, so they cannot drift on validation or audit behavior. The raw key value is returned exactly once at mint time and is never recoverable; SSM (§3.2.8) is rejected for embed keys at the service layer because the customer cannot read SSM.
+*Issuance:* `POST /admin/embed-keys` (with three scope guards and an audit row written in the same transaction as the key insert) or the operator CLI `scripts/mint_embed_key.py`. Both paths funnel through the same `EmbedKeyCreate` schema and the same service entrypoint, so they cannot drift on validation or audit behavior. The raw key value is returned exactly once at mint time and is never recoverable; SSM (§3.2.8) is rejected for embed keys at the service layer because the customer cannot read SSM. At issuance time, a scope-prompt preflight (see `app/services/scope_prompt_preflight.py`) verifies that domain-scoped mints target a `domain_configs` row with a non-empty `system_prompt_additions`; tenant-wide mints skip the preflight (governed by `TenantConfig.system_prompt` at chat time) and surface a non-fatal warning on the response.
 
 #### 3.2.3 Application tier
 
