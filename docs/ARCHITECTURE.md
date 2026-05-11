@@ -16,7 +16,7 @@ Absence of a marker means the claim is design-level (architectural property, rat
 
 **Maintenance protocol:** Surgical edits only. When the design changes, update the relevant section in place and log the prior decision in `DRIFTS.md`. When the implementation catches up to a section, mark it implemented (per the marker scheme adopted in `DRIFTS.md` Phase 2).
 
-**Last updated:** 2026-05-11 (§3.2.6 Application log stream bullet 📋-marked for widget-chat audit gap)
+**Last updated:** 2026-05-11 (§3.2.1 multi-channel surface updated to reflect chat-widget live, new §3.2.10 documenting the widget CDN tier and the embed-key public-surface model)
 
 ---
 
@@ -144,7 +144,7 @@ The production environment runs in **AWS, Canadian region (`ca-central-1`)**, de
 
 #### 3.2.1 Public endpoint
 
-Customers reach Luciel through a single public hostname (the production API endpoint). The hostname is fronted by an Application Load Balancer. 📋 The full multi-channel surface (chat widget, voice, email, SMS, programmatic API) lands in roadmap Step 34a; today only the chat / programmatic API path exists — see `DRIFTS.md` token `D-channels-only-chat-implemented-2026-05-09`.
+Customers reach Luciel through a single public hostname (the production API endpoint). The hostname is fronted by an Application Load Balancer. 📋 The full multi-channel surface lands in roadmap Step 34a; as of 2026-05-10 the chat widget (§3.2.10), the programmatic API, and the operator-facing admin/chat surface are the live channels, while voice / email / SMS adapters are still planned — see `DRIFTS.md` token `D-channels-only-chat-implemented-2026-05-09`.
 
 *Why a load balancer:* it terminates TLS once, distributes incoming requests across multiple application servers (so a single server failure does not take the platform down), and provides a single chokepoint where request rate-limits and a Web Application Firewall can be applied. The chokepoint also gives the operator a single place to flip traffic during a deployment or roll back from one.
 
@@ -240,6 +240,32 @@ Production emits four kinds of signal:
 - **Alarms:** thresholds on metrics that, when crossed, page the operator. Examples: error rate above 1% sustained for five minutes, queue depth above 1000 for ten minutes, database connection saturation above 80%.
 
 *Why all four:* metrics tell us *that* something is wrong; logs and traces tell us *what* is wrong; alarms tell us *when* to act. Removing any of the four leaves a gap.
+
+#### 3.2.10 Public widget surface (CDN + embed keys)
+
+The chat widget is a public surface: the JavaScript bundle that customers paste into their site is served by a content delivery network, and every chat turn it makes to the production API is authenticated by a key designed for public distribution. Both pieces are distinct from the rest of §3.2 and warrant naming.
+
+**Widget bundle CDN.** The widget bundle (`widget.js`, currently ~27 KB) is published to a CloudFront distribution backed by an S3 bucket in the same Canadian region as the rest of production. Two URLs serve the same body: a stable alias (`/widget.js`, `max-age=300, must-revalidate`) for customers who want auto-updates on a five-minute lag, and an immutable hashed alias (`/luciel-chat-widget.<hash>.js`, `max-age=31536000, immutable`) for customers who want to pin a specific version. Both URLs stay reachable forever — the deploy pipeline is forward-only, never overwriting an existing hashed bundle.
+
+*Why CDN, not direct from the application tier:* customers' sites embed the bundle on every page load; serving it from the application tier would put every page-load request on the same path as chat turns and tax the wrong scaling axis. A CDN serves the static bundle at the edge, near the visitor, with no API-tier involvement.
+
+*Why a Canadian-region origin:* data residency. The bundle has no PII in it, but the residency story is cleaner when every Luciel-controlled production resource sits in `ca-central-1`. The CDN itself is global, as it must be — a Toronto visitor and a Vancouver visitor should both get fast bundle loads — but the origin is Canadian.
+
+*Pattern E for bundles:* the deploy pipeline is forward-only. A new bundle build produces a new hashed filename; the old hashed filename is never deleted. A customer that pinned `luciel-chat-widget.36a25740a60c.js` two months ago still gets that exact bundle today. The stable alias `widget.js` is updated to point at the new bundle, but the old bundle stays reachable for any pinned consumer. This is the bundle analogue of §4.6 (Pattern E for secrets): deactivation by replacement, never deletion.
+
+**Public-surface keys (embed keys).** Embed keys are a distinct kind of API key from the admin keys operators use to manage tenants and domains. The differences are deliberate:
+
+- An embed key is scoped to a single domain and a small set of allowed origins (exact scheme + host + optional port, no wildcards or paths). A POST from any other origin is refused at the auth layer regardless of what the key permits.
+- An embed key carries a `widget_config` (accent color, display name, greeting message) that the widget bundle reads to brand the chat surface per customer. This is the only place where customer-facing presentation is encoded outside the customer's own site.
+- An embed key carries a per-key rate limit (today static, designed to be tunable per customer once Step 31 dashboards expose it).
+- An embed key has the chat permission and only the chat permission — it cannot call admin endpoints, cannot mint other keys, cannot invoke tools (§4.7).
+- An embed key is **safe to ship in public source code** on the customer's site, because origin enforcement plus permission constraint plus rate limit plus domain scoping bound the worst case to "a malicious actor on an allowed origin can run a chat session at the published rate limit." That is a customer-tolerable failure mode; an admin key in the same position is not.
+
+*Why embed keys exist as a separate kind:* the trust model is different. Admin keys are operator secrets and rotate per operator. Embed keys are customer-shipped credentials and rotate per customer-side incident (e.g., a customer accidentally publishes their key to the wrong repo). Conflating them would either over-protect admin keys with widget concerns or under-protect customer surfaces with admin assumptions.
+
+*Pattern E for embed keys:* deactivation, never deletion. A rotated embed key remains in the `api_keys` table with `is_active=false`; the audit chain stays walkable. The customer pastes a new key into their site and the old one stops authenticating on the next request.
+
+*Issuance:* `POST /admin/embed-keys` (with three scope guards and an audit row written in the same transaction as the key insert) or the operator CLI `scripts/mint_embed_key.py`. Both paths funnel through the same `EmbedKeyCreate` schema and the same service entrypoint, so they cannot drift on validation or audit behavior. The raw key value is returned exactly once at mint time and is never recoverable; SSM is rejected for embed keys at the service layer because the customer cannot read SSM.
 
 ### 3.3 How a customer request flows through production
 
