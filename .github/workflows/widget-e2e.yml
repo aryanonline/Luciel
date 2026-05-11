@@ -1,0 +1,219 @@
+# Step 30d Deliverable C: widget-surface end-to-end CI gate.
+#
+# Scope (intentional, doctrine "honest long term fixes -- not shortcuts"):
+#
+#   This workflow boots a real backend stack (Postgres 15 + Redis 7 +
+#   uvicorn) inside the runner, provisions a tenant + domain + embed
+#   key through the platform-admin HTTP surface, and exercises two
+#   widget-chat SSE scenarios -- one benign, one moderation-blocked --
+#   against the running uvicorn. It is the integration-level proof
+#   that the Step 30d Deliverable A issuance preflight and Deliverable
+#   B content-safety gate wire together correctly under a live
+#   request, not just under inline-fakes in AST/unit tests.
+#
+#   This workflow is intentionally SEPARATE from .github/workflows/ci.yml
+#   because ci.yml's file-header comment block explicitly documents
+#   that workflow as backend-free. Adding a backend-up job there would
+#   silently break the contract that ci.yml's fast-feedback gates are
+#   strictly hermetic. Two workflow files, each with a single coherent
+#   purpose, is the cleaner long-term shape.
+#
+# Trigger state in v1 (this commit)
+# ---------------------------------
+#
+#   on:
+#     workflow_dispatch: {}
+#
+#   ONLY manual dispatch for v1. Two reasons:
+#
+#     1. The harness depends on several runtime invariants (Postgres
+#        service health, uvicorn startup time under the runner's
+#        provisioned CPU, the bootstrap script's stdout-capture
+#        contract, sentinel-term parity between this file and
+#        run_widget_e2e.sh) that have NOT yet been observed running
+#        end-to-end in a GitHub Actions runner. Path-triggering the
+#        gate on PR #16 itself would mean discovering any such
+#        runtime issue on the PR that introduces the gate, which is
+#        a poor-debuggability chicken-and-egg state.
+#
+#     2. Pattern E discipline (see DRIFTS.md section 6) requires
+#        deactivate-by-replacement, never delete. The path-trigger
+#        block lands in a follow-up commit that ADDS it next to the
+#        workflow_dispatch block:
+#
+#          on:
+#            workflow_dispatch: {}
+#            pull_request:
+#              paths:
+#                - app/api/v1/chat_widget.py
+#                - app/api/v1/admin.py
+#                - app/api/widget_deps.py
+#                - app/middleware/auth.py
+#                - app/policy/moderation.py
+#                - app/core/config.py
+#                - app/services/scope_prompt_preflight.py
+#                - ci/e2e/**
+#              paths-ignore:
+#                - docs/**
+#                - widget/**
+#
+#        That follow-up flip is the natural moment to also mark the
+#        Step 30d row in CANONICAL_RECAP from 🔧 to ✅, since 🔧
+#        means "gate landed, not yet observed gating a real PR
+#        cleanly" and ✅ means "observed gating cleanly at least
+#        once" (matching the Step 30b precedent).
+#
+# Cost shape
+# ----------
+#
+#   * Two services (postgres:15, redis:7) and one Python install on
+#     each manual run. Bounded by GitHub Actions free-tier minutes.
+#   * No real OpenAI call: the running app boots with
+#     moderation_provider=keyword + a deterministic block-term list,
+#     so the refusal-path scenario is hermetic.
+
+name: widget-e2e
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  widget-e2e:
+    name: Widget surface E2E (live backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: luciel
+          POSTGRES_PASSWORD: luciel
+          POSTGRES_DB: luciel_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Application config consumed by app.core.config.Settings.
+      # These MUST be in lockstep with the harness scripts under
+      # ci/e2e/. See ci/e2e/README.md.
+      DATABASE_URL: "postgresql+psycopg2://luciel:luciel@localhost:5432/luciel_e2e"
+      REDIS_URL: "redis://localhost:6379/0"
+      # OPENAI_API_KEY intentionally NOT set. The 'keyword' moderation
+      # provider has no transport, so a key would be dead weight; and
+      # the production-default 'openai' provider would only fire if
+      # the app booted with that setting, which it explicitly does
+      # not below.
+      MODERATION_PROVIDER: "keyword"
+      MODERATION_KEYWORD_BLOCK_TERMS: '["E2E_REFUSE_SENTINEL"]'
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: install app deps
+        # We install the app package itself (non-editable) plus the
+        # tools the harness leans on (httpx is already an app dep;
+        # we add psycopg2-binary explicitly because the production
+        # extras may pin asyncpg only).
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install httpx psycopg2-binary
+
+      - name: alembic upgrade head
+        # Apply every migration to the freshly-created service DB.
+        # Failures here would mean a migration regressed; we want
+        # that loud and on this PR, not on a future Step 31 deploy.
+        run: alembic upgrade head
+
+      - name: bootstrap platform-admin key
+        # The CI-only bootstrap script prints the raw key to stdout
+        # under a guardrail env var; we capture stdout into a file
+        # that the next step reads. Stderr (metadata, banners) is
+        # not captured into ADMIN_KEY.
+        env:
+          LUCIEL_CI_ALLOW_RAW_KEY_STDOUT: "yes"
+        run: |
+          python -m scripts.bootstrap_platform_admin_ci > /tmp/admin_key.txt
+          if [ ! -s /tmp/admin_key.txt ]; then
+            echo "::error::bootstrap script produced an empty admin key file"
+            exit 1
+          fi
+          # Mask the key in the GitHub Actions log so any accidental
+          # echo of $ADMIN_KEY in a downstream step is redacted.
+          echo "::add-mask::$(cat /tmp/admin_key.txt)"
+
+      - name: launch uvicorn in background
+        # Start the app and wait for /healthz. We give it up to 30
+        # seconds; if /healthz isn't ready by then, the runner has a
+        # bigger problem than this gate can paper over.
+        run: |
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 \
+              > /tmp/uvicorn.log 2>&1 &
+          echo $! > /tmp/uvicorn.pid
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            if curl --silent --fail --max-time 2 \
+                http://127.0.0.1:8000/healthz >/dev/null; then
+              echo "==> uvicorn ready on attempt ${attempt}"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::uvicorn did not become healthy within ~30s"
+          echo "===== uvicorn.log ====="
+          cat /tmp/uvicorn.log || true
+          exit 1
+
+      - name: run widget-e2e harness
+        # Reads ADMIN_KEY from the bootstrap file (NOT from an env
+        # var directly, so the masked value in the log doesn't get
+        # interpolated into the step command line).
+        run: |
+          export ADMIN_KEY="$(cat /tmp/admin_key.txt)"
+          export BASE_URL="http://127.0.0.1:8000"
+          export TEST_ORIGIN="https://e2e.luciel.test"
+          bash ci/e2e/run_widget_e2e.sh
+
+      - name: capture uvicorn log on failure
+        # If anything above failed we want the app log archived so
+        # the operator can triage without re-running. on:failure-only.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: widget-e2e-uvicorn-log
+          path: /tmp/uvicorn.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: shut down uvicorn
+        # Always run so the runner doesn't try to clean up a stuck
+        # subprocess. kill -TERM gives uvicorn a chance to flush
+        # logs; the runner tears down the VM seconds later anyway.
+        if: always()
+        run: |
+          if [ -f /tmp/uvicorn.pid ]; then
+            kill -TERM "$(cat /tmp/uvicorn.pid)" 2>/dev/null || true
+          fi

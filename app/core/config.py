@@ -6,6 +6,7 @@ This is the single source of truth for configuration across the app.
 Add new provider keys or feature flags here as the product grows.
 """
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,18 +54,31 @@ class Settings(BaseSettings):
     # design statement.
     #
     # moderation_provider:
-    #   'openai' -- production default. Wrapped in FailClosed.
-    #   'null'   -- development only; never blocks. Logs WARNING on
-    #               every call so it cannot silently ship.
+    #   'openai'  -- production default. Wrapped in FailClosed.
+    #   'null'    -- development only; never blocks. Logs WARNING on
+    #                every call so it cannot silently ship.
+    #   'keyword' -- deterministic substring match against
+    #                moderation_keyword_block_terms. Consumed by the
+    #                widget-surface E2E CI gate (Step 30d Deliverable
+    #                C) and by dev when an OpenAI key is unavailable.
+    #                Not wrapped in FailClosed (no transport). Logs
+    #                WARNING at construction when block-term list is
+    #                empty so it cannot silently ship.
     # moderation_timeout_seconds: hard timeout on the provider call.
     #   3.0s is conservative for a single short text moderation;
     #   anything longer trips the fail-closed path.
     # moderation_fail_closed: when True (the production default), an
     #   unavailable provider is treated as a block. Set False only in
     #   dev to debug the gate; never in production.
+    # moderation_keyword_block_terms: list of substrings that the
+    #   'keyword' provider blocks on. Case-insensitive. Only consulted
+    #   when moderation_provider='keyword'. Empty default so a deploy
+    #   that flips to 'keyword' without also configuring terms emits
+    #   the construction-time WARNING.
     moderation_provider: str = "openai"
     moderation_timeout_seconds: float = 3.0
     moderation_fail_closed: bool = True
+    moderation_keyword_block_terms: list[str] = Field(default_factory=list)
 
     # --- Retention purge batching (Step 28 Phase 2 Commit 8) ---
     # Retention purges run as a sequence of bounded DELETE/UPDATE
