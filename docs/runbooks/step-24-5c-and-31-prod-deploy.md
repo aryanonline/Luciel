@@ -99,9 +99,16 @@ aws configure list-profiles
 
 ## Step 1 — Verify presumed production state
 
-Two independent checks. Both must match presumption before any
-forward action. If either does not match, **stop and revise the
+Three independent checks. All three must match presumption before
+any forward action. If any does not match, **stop and revise the
 runbook** before continuing.
+
+These checks exist because the Step 24.5c/31 deploy is the first
+event after which the new code path and new schema are exercised by
+real customer traffic via the production embed key. Verifying the
+architectural footing **before** that event is the architectural
+discipline §6 commits to — production-observed evidence, not
+design-document assertion.
 
 ### Step 1a — Verify production ECS task-def revisions
 
@@ -160,6 +167,141 @@ any other revision, stop and reconcile.
 > `luciel-backend-service`. Pull them from the service description
 > output of Step 1a's `aws ecs describe-services` if you need them
 > in the override invocation.
+
+### Step 1c — Verify in-region resilience configuration
+
+This step confirms the §3.4 architectural commitment
+*"A single-availability-zone failure is recoverable — Database has
+hot standby in a second availability zone; application and worker
+tiers run across multiple availability zones"* is **actually
+configured** in production, not just designed for. This is the
+same honesty discipline that opened
+`D-step-24-5c-and-31-schema-and-code-undeployed-to-prod-2026-05-12`
+— design says it is true; production must observe it as true
+before the deploy proceeds.
+
+Multi-AZ is **single-region** by construction: both AZs live in
+`ca-central-1` (Montreal). The §3.2 data-residency commitment
+("customer data lives only in Canada") is unchanged — Multi-AZ
+means we run in two of Montreal's data centers instead of one of
+them, not that we leave Canada. This subsection's title is
+"in-region resilience" not "Multi-AZ" so the residency framing is
+unambiguous in the audit trail.
+
+#### Step 1c.0 — RDS Multi-AZ check
+
+```powershell
+aws rds describe-db-instances `
+  --region ca-central-1 `
+  --query 'DBInstances[?starts_with(DBInstanceIdentifier, `luciel`)==`true`].{id:DBInstanceIdentifier,az:AvailabilityZone,multiAz:MultiAZ,status:DBInstanceStatus}' `
+  --output table
+```
+
+Expect `multiAz=True`. Record the observed value verbatim in the
+runbook execution log.
+
+#### Step 1c.1 — ECS AZ-spread check
+
+```powershell
+aws ecs list-tasks `
+  --cluster luciel-cluster `
+  --service-name luciel-backend-service `
+  --region ca-central-1 `
+  --query 'taskArns' --output text `
+  | ForEach-Object {
+      aws ecs describe-tasks --cluster luciel-cluster --tasks $_ `
+        --region ca-central-1 `
+        --query 'tasks[].{taskArn:taskArn,az:availabilityZone}' `
+        --output table
+    }
+```
+
+Expect at least two distinct `availabilityZone` values across
+running tasks (e.g. `ca-central-1a` + `ca-central-1b`). Repeat for
+`luciel-worker-service`. Record observed values.
+
+#### Step 1c — Branch logic
+
+**Scenario A (RDS Multi-AZ=True and ECS spans ≥2 AZs):** Record
+the observations. `D-prod-multi-az-rds-unverified-2026-05-09`
+becomes a side-benefit close at Step 5 doc-truthing (move §3 → §5
+with strikethrough per §6 doctrine). Continue to Step 2.
+
+**Scenario B (RDS Multi-AZ=False, or ECS pinned to a single AZ):**
+**Pause the Step 24.5c/31 deploy.** Architecture commitment §3.4
+is not currently enforced; flipping it without first establishing
+the enforcement would carry the same shape of dishonesty this
+runbook exists to resolve. Run Step 1c.2 (Multi-AZ flip) below,
+then resume Step 2.
+
+#### Step 1c.2 — Multi-AZ flip sub-runbook (conditional on Scenario B)
+
+This sub-runbook is its own discrete piece of operational scope.
+It has its own observed-clean stanza, its own drift close, and its
+own rollback. Execute only if Step 1c.0 returned `multiAz=False`
+for the production RDS instance.
+
+**Default-safety claim:** `aws rds modify-db-instance --multi-az`
+is a synchronous-replication enablement. AWS provisions the
+standby in a separate AZ within the same `ca-central-1` region
+(typical ~15-30 minutes). The primary remains writable throughout;
+the application sees zero downtime. The only application-visible
+side effect is a one-time storage I/O briefly elevated during
+standby seed.
+
+```powershell
+# Flip Multi-AZ on the production RDS instance.
+# Replace <db-instance-id> with the value observed at Step 1c.0.
+aws rds modify-db-instance `
+  --db-instance-identifier <db-instance-id> `
+  --multi-az `
+  --apply-immediately `
+  --region ca-central-1 `
+  --query 'DBInstance.{id:DBInstanceIdentifier,status:DBInstanceStatus,multiAzPending:PendingModifiedValues.MultiAZ}' `
+  --output table
+```
+
+Then poll status until the standby is provisioned and `MultiAZ`
+reflects `True` on the live instance (not `PendingModifiedValues`):
+
+```powershell
+aws rds wait db-instance-available `
+  --db-instance-identifier <db-instance-id> `
+  --region ca-central-1
+
+# Re-verify
+aws rds describe-db-instances `
+  --db-instance-identifier <db-instance-id> `
+  --region ca-central-1 `
+  --query 'DBInstances[0].{id:DBInstanceIdentifier,az:AvailabilityZone,multiAz:MultiAZ,status:DBInstanceStatus,storage:AllocatedStorage}' `
+  --output table
+```
+
+Expect `multiAz=True`. If ECS was the single-AZ surface (the
+rarer case for Fargate, which scheduler-spreads by default), check
+the service's `placementStrategy` and confirm it includes a `spread`
+strategy across `availabilityZone`; if not, update the service with
+`--placement-strategy 'field=attribute:ecs.availability-zone,type=spread'`
+before proceeding.
+
+**Observed-clean for Step 1c.2:** one full RDS health-check cycle
+passes with `multiAz=True`, one full ECS service describe shows
+tasks spanning ≥2 AZs, no `ERROR` or connection-drop spikes in
+`/ecs/luciel-backend` during the flip window.
+
+**Doc-truthing for Step 1c.2** (lands in the same Step 5
+doc-truthing commit, not its own commit): close
+`D-prod-multi-az-rds-unverified-2026-05-09` §3 → §5 with
+strikethrough heading per §6 doctrine; one-line resolution noting
+the flip timestamp, the observed `multiAz=True` value, and the
+two AZ identifiers now spanned.
+
+**Rollback for Step 1c.2:** Multi-AZ deactivation is
+`aws rds modify-db-instance --no-multi-az --apply-immediately`,
+but should not be needed for an additive enablement that completes
+the AWS-managed provisioning cycle cleanly. If a rollback is
+required for cost reasons, document the decision explicitly — do
+not silent-rollback an architectural commitment.
 
 ## Step 2 — Apply Alembic migration on production RDS
 
@@ -255,12 +397,39 @@ task-def update).
 
 ### Step 3.0 — Build the image locally
 
+**Platform pin (load-bearing).** The application tier (§3.2.3) is
+"identical, stateless across requests, replaceable." That contract
+requires every image in the rolling deploy to be ABI-compatible
+with every other — i.e. all tasks run the same CPU architecture.
+The registered `td-backend-rev39.json` task-def declares
+`runtimePlatform.cpuArchitecture` — confirm it and pin the local
+build to match. Building on an operator's host architecture (e.g.
+Apple Silicon `arm64`) and pushing to an `amd64` task family is a
+classic post-deploy failure mode that the §3.5 "Configuration error
+in a deploy" recovery would catch as an elevated error rate — but
+catching it pre-push is cheaper.
+
 ```powershell
+# Confirm the production task arch from the existing manifest.
+# Expect linux/amd64 unless the manifest says otherwise.
+Get-Content td-backend-rev39.json `
+  | Select-String -Pattern 'cpuArchitecture|operatingSystemFamily'
+# expect: "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX"
+
 $IMAGE_TAG = "step-24-5c-31-7828a42"
 $ECR_REPO  = "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend"
 
-docker build -t "luciel-backend:$IMAGE_TAG" .
-docker tag    "luciel-backend:$IMAGE_TAG" "$ECR_REPO`:$IMAGE_TAG"
+# Pin the build platform to match the task-def runtimePlatform.
+docker buildx build --platform linux/amd64 `
+  -t "luciel-backend:$IMAGE_TAG" `
+  --load .
+
+docker tag "luciel-backend:$IMAGE_TAG" "$ECR_REPO`:$IMAGE_TAG"
+
+# Sanity-check the built image's reported architecture.
+docker image inspect "luciel-backend:$IMAGE_TAG" `
+  --format '{{.Architecture}} / {{.Os}}'
+# expect: amd64 / linux
 ```
 
 ### Step 3.1 — Auth to ECR and push
@@ -373,13 +542,36 @@ aws ecs describe-services `
 
 Re-run every 30s until each service has exactly one `PRIMARY`
 deployment, no `ACTIVE` deployments draining, and `running ==
-desired`. Rolling deploy with circuit breaker means a bad image
-auto-rolls back; if `ACTIVE` lingers more than a couple of minutes
-or the circuit breaker fires, capture CloudWatch logs and **stop**.
+desired`.
 
-## Step 4 — Observed-clean verification
+**On circuit-breaker firing:** ECS's deployment circuit breaker is
+the §3.5 *"Configuration error in a deploy"* recovery mechanism
+doing its job — observe the auto-rollback to `:39` / `:19`
+complete, do **not** manually intervene unless the circuit breaker
+itself misbehaves. Once rollback steady-state is reached, capture
+the CloudWatch logs that triggered the breaker, open a drift entry
+for the failure mode, and treat the deploy as paused (not failed —
+paused) pending root-cause. The architecture's failure model
+working as designed is a *successful* outcome of the deploy
+attempt, not a stop signal.
 
-### Step 4a — Log review on backend and worker
+## Step 4 — Observed-clean verification (five-pillar shape)
+
+The Step 31 row in CANONICAL_RECAP §12 commits to a five-pillar
+pre-launch validation gate as the visible promise — isolation,
+customer journey, memory quality, operations, compliance. The
+harness pins those pillars at the local-Postgres level (run stamp
+`20260512-144847-068362`, 40/40 claims green). This deploy's
+first-prod-observation owes the same shape, scoped to what is
+actually demonstrable in production without seeding multi-tenant
+fixtures into the live RDS.
+
+Each pillar's prod probe is the **production-observed evidence**
+for the architectural commitment it carries. Steps 4a-4b verify
+the deploy-mechanical clean-startup contract (§3.2.3 / §3.2.4);
+Steps 4c-4g verify the five pillars 1:1.
+
+### Step 4a — Backend startup log review
 
 Logs Insights against `/ecs/luciel-backend`:
 
@@ -394,6 +586,8 @@ Expect on each new backend task:
 - `Started server process [1]`
 - `Application startup complete.`
 - Steady `GET /health → 200 OK`
+
+### Step 4b — Worker startup log review
 
 Logs Insights against `/ecs/luciel-worker`:
 
@@ -410,7 +604,12 @@ worker task `Warm shutdown` completing cleanly.
 Across the full post-deploy window: **zero** `ERROR`, `Traceback`,
 or `CRITICAL` hits in either log group.
 
-### Step 4b — Widget chat E2E against the staging embed key
+### Step 4c — Customer journey pillar (§3.3 steps 4 + 9)
+
+The customer-journey pillar is the architectural claim that a
+widget turn flows end-to-end through scope check (§3.3 step 4),
+session resolution against the new identity primitives, audit
+emission (§3.3 step 9), and lands the documented row writes.
 
 The staging embed key `luc_sk_xwij1...` (id 698 on
 `domain_configs.id=374`, `tenant=luciel-staging-widget-test`,
@@ -435,30 +634,173 @@ fields @timestamp, @message
 All three lines should appear, in order, with consistent
 correlation id.
 
-### Step 4c — Database-level verification (scoped read)
-
-From a one-shot or bastion `psql`, with the scope bound to
-tenant `luciel-staging-widget-test`:
+Database-level verification (scoped read from a one-shot or
+bastion `psql`, scope bound to tenant
+`luciel-staging-widget-test`):
 
 ```sql
 SELECT count(*) FROM identity_claims WHERE active = true;
--- expect ≥ 1 (the adapter claim from the Step 4b turn)
+-- expect ≥ 1 (the adapter claim from the turn above)
 
 SELECT count(*) FROM conversations;
--- expect ≥ 1 (the conversation created during Step 4b turn)
+-- expect ≥ 1 (the conversation created during the turn above)
 
 SELECT id, conversation_id, channel
   FROM sessions
   WHERE conversation_id IS NOT NULL
   ORDER BY created_at DESC LIMIT 1;
--- expect 1 row, the session created during Step 4b, with
--- conversation_id populated.
+-- expect 1 row, conversation_id populated.
 ```
 
-### Step 4d — Capture run stamp
+### Step 4d — Isolation pillar (§4.7 three-layer scope enforcement)
+
+The isolation pillar is the architectural claim that the caller's
+resolved scope is the **upper bound** of what a method can read,
+not a hint. The production-observable probe is a negative-case
+read: confirm that an admin key scoped to a synthetic *probe*
+tenant cannot reach the staging tenant's data.
+
+**One-time probe-tenant seed** (deactivated immediately after this
+step — Pattern E):
+
+```sql
+-- Seed a synthetic probe tenant with no data.
+INSERT INTO tenants (id, slug, display_name, active, created_at)
+  VALUES (gen_random_uuid(), 'prod-probe-isolation', 'Prod probe — isolation', true, NOW())
+  RETURNING id;
+```
+
+Mint a tenant-admin key against the probe tenant via
+`scripts/mint_embed_key.py` or the admin endpoint, then exercise
+`GET /api/v1/dashboard/tenant` with that key:
+
+- Expect: 200 OK with zero turns, zero conversations, zero
+  identity claims (because the probe tenant has none).
+- Crucially: confirm the response body does **not** contain any
+  identifier from the `luciel-staging-widget-test` tenant.
+
+Then attempt to call `GET /api/v1/dashboard/domain/{staging-domain-id}`
+with the probe-tenant admin key:
+
+- Expect: 403 (scope policy refusal) — not 200 with empty results,
+  not 404. The §4.7 promise is that the boundary itself is
+  enforced, not that empty results happen to come back.
+
+Deactivate the probe tenant immediately (Pattern E):
+
+```sql
+UPDATE tenants SET active = false
+  WHERE slug = 'prod-probe-isolation';
+UPDATE api_keys SET is_active = false
+  WHERE tenant_id = (SELECT id FROM tenants WHERE slug = 'prod-probe-isolation');
+```
+
+The deactivated probe tenant remains in the audit chain per §3.2.7;
+it is not deleted.
+
+### Step 4e — Memory quality pillar (§3.3 step 5 cross-session retriever)
+
+The memory quality pillar is the **load-bearing Q8 demonstration**
+— the architectural claim that, given a `(User, conversation_id)`
+pair, the `CrossSessionRetriever` surfaces sibling-session messages
+within the same scope. This is the read-side of Step 24.5c. The
+write-side was verified at Step 4c; this step verifies the read-side.
+
+Fire **two turns** against `POST /api/v1/chat/widget` carrying the
+same embed key, but with the second turn declaring a different
+channel identifier than the first (the adapter-asserted claim from
+§3.2.11 — the production embed key today asserts via `channel='web'`;
+for the second turn, use the programmatic-API embed-key equivalent
+or — if not yet provisioned — capture this gap as a follow-up drift
+and exercise the cross-session retriever via two `channel='web'`
+turns under the same identity claim):
+
+```
+fields @timestamp, @message
+| filter @message like /cross_session_retrieval|conversation_id/
+| sort @timestamp asc
+| limit 20
+```
+
+**Expected:** the second turn's `widget_chat_session_resolved`
+log line carries the **same** `conversation_id` as the first turn,
+and the cross-session retriever log line (or trace span) emits
+at least 1 sibling-session passage with provenance pointing at the
+first turn's session id.
+
+If the second turn resolves to a different `conversation_id`, the
+cross-channel identity resolver is not behaving as designed and the
+deploy should be rolled back before further verification.
+
+### Step 4f — Operations pillar (§3.2.10 alarm declaration)
+
+The operations pillar deliberately splits **declared** (asserted by
+harness at AST level) from **live `OK`-state** (carved out as
+`[PROD-PHASE-2B]`). This split must be preserved verbatim in the
+closing stanza so the next reader does not infer the live half was
+verified.
+
+Record the alarm IDs declared in `cfn/luciel-prod-alarms.yaml`:
+
+- `luciel-worker-no-heartbeat`
+- `luciel-worker-unhealthy-task-count`
+- `luciel-worker-error-log-rate`
+- `luciel-rds-connection-count`
+- `luciel-rds-cpu`
+- `luciel-rds-free-storage`
+- `luciel-ssm-access-failure`
+
+```powershell
+aws cloudwatch describe-alarms `
+  --region ca-central-1 `
+  --alarm-name-prefix luciel- `
+  --query 'MetricAlarms[].{name:AlarmName,state:StateValue,reason:StateReason}' `
+  --output table
+```
+
+Record which alarms exist in CloudWatch and which are still
+undeployed. **Do not** wait for `OK` state on every alarm before
+continuing — that is the `[PROD-PHASE-2B]` carve-out per
+`D-prod-alarms-deployed-unverified-2026-05-09`. Record the observed
+state verbatim in the closing stanza.
+
+### Step 4g — Compliance pillar (§3.2.7 three-channel audit)
+
+The compliance pillar is the architectural claim that the
+`admin_audit_logs` hash chain is intact across the deploy. The
+deploy itself writes audit rows (task-def registration, service
+update, embed-key probe for Step 4d). Verify the chain advances
+and verifies cleanly:
+
+```sql
+-- Confirm the hash chain advanced across the deploy window.
+SELECT count(*) FROM admin_audit_logs
+  WHERE created_at >= '<deploy-start UTC>';
+-- expect ≥ several rows (probe-tenant create, key mint,
+-- deactivation, etc.)
+
+-- Re-run the hash chain verification listener; expect zero
+-- chain-break rows.
+-- (Pillar 23 verification, per Step 31 compliance pillar)
+```
+
+Confirm `deletion_logs` is queryable (no schema regression):
+
+```sql
+SELECT count(*) FROM deletion_logs;
+-- expect: query returns cleanly (count may be 0; the table
+-- must exist).
+```
+
+The retention-purge-worker absence (per
+`D-retention-purge-worker-missing-2026-05-09`) is an acknowledged
+carve-out, preserved verbatim in the closing stanza — not silenced
+by this gate.
+
+### Step 4h — Capture run stamp
 
 Capture the UTC timestamp of the first `widget_chat_turn_completed`
-line as the **observed-clean stamp** (format
+line (Step 4c) as the **observed-clean stamp** (format
 `YYYYMMDD-HHMMSS-NNNNNN` to match the local harness stamp
 convention from Step 31 sub-branch 5).
 
@@ -474,25 +816,41 @@ commit, then PR, squash-merge.
    > new `identity_claims` and `conversations` tables observed
    > YYYY-MM-DD on `luciel-backend-service` task-def revision 40
    > and `luciel-worker-service` task-def revision 20, both pinned
-   > to ECR digest `<NEW_DIGEST>` built from `main` HEAD `7828a42`.
-   > Migration `3dbbc70d0105` applied against production RDS at
-   > HH:MM:SS UTC; first `widget_chat_turn_completed` line on
-   > `/ecs/luciel-backend` at HH:MM:SS UTC. No `ERROR` /
+   > to ECR digest `<NEW_DIGEST>` built from `main` HEAD `7828a42`
+   > on `linux/amd64`. Migration `3dbbc70d0105` applied against
+   > production RDS at HH:MM:SS UTC; first
+   > `widget_chat_turn_completed` line on `/ecs/luciel-backend` at
+   > HH:MM:SS UTC. Cross-session retriever observed surfacing
+   > sibling-session passages on the second-turn probe at
+   > HH:MM:SS UTC (Step 4e), confirming the §3.3 step 5 design
+   > claim end-to-end against live production. No `ERROR` /
    > `Traceback` / `CRITICAL` codes observed in the post-deploy
    > log window. Runbook of record:
    > `docs/runbooks/step-24-5c-and-31-prod-deploy.md`.
 
 2. **CANONICAL_RECAP §12 Step 31 row** — append:
 
-   > **Prod observed-clean:** Step 31 widget audit log emissions
-   > (`widget_chat_turn_received`, `widget_chat_session_resolved`,
-   > `widget_chat_turn_completed`) first observed in
-   > `/ecs/luciel-backend` on YYYY-MM-DD via ECS rev 40
-   > (backend) / rev 20 (worker). The `DashboardService` HTTP
-   > surface (`/admin/dashboards/{tenant,domain,agent}`) is live
-   > under the same image; embed-key denial of dashboard reads
-   > is enforced as designed (per the Step 31 sub-branch 3
-   > contract test). Runbook of record:
+   > **Prod observed-clean (five-pillar shape):** Step 31 widget
+   > audit log emissions (`widget_chat_turn_received`,
+   > `widget_chat_session_resolved`, `widget_chat_turn_completed`)
+   > first observed in `/ecs/luciel-backend` on YYYY-MM-DD via
+   > ECS rev 40 (backend) / rev 20 (worker). Five-pillar
+   > production observation: **isolation** verified via
+   > probe-tenant 403 on cross-tenant dashboard read (Step 4d,
+   > probe tenant deactivated per Pattern E in the same window);
+   > **customer journey** verified via Step 4c widget-turn probe;
+   > **memory quality** verified via Step 4e cross-session
+   > retriever probe; **operations** observed at declaration
+   > level — live `OK`-state remains `[PROD-PHASE-2B]` per
+   > `D-prod-alarms-deployed-unverified-2026-05-09`;
+   > **compliance** verified via `admin_audit_logs` hash chain
+   > advance across the deploy window with retention-purge-worker
+   > absence preserved as the explicit carve-out per
+   > `D-retention-purge-worker-missing-2026-05-09`. The
+   > `DashboardService` HTTP surface
+   > (`/api/v1/dashboard/{tenant,domain/{id},agent/{id}}`) is
+   > live under the same image; embed-key denial of dashboard
+   > reads enforced as designed. Runbook of record:
    > `docs/runbooks/step-24-5c-and-31-prod-deploy.md`.
 
 3. **CANONICAL_RECAP §12 Step 24.5c row parenthetical pointer**
@@ -571,8 +929,15 @@ for an additive-only migration.
 
 ## Cross-references
 
-- DRIFTS entry being closed:
+- DRIFTS entry being closed (primary):
   `D-step-24-5c-and-31-schema-and-code-undeployed-to-prod-2026-05-12`
+- DRIFTS entry potentially closed as side-benefit (Scenario A) or
+  closed by Step 1c.2 sub-runbook (Scenario B):
+  `D-prod-multi-az-rds-unverified-2026-05-09`
+- DRIFTS entries carried forward as preserved carve-outs in the
+  closing stanzas (not closed by this deploy):
+  `D-prod-alarms-deployed-unverified-2026-05-09`,
+  `D-retention-purge-worker-missing-2026-05-09`
 - Closing tags (re-cut forward):
   `step-24-5c-cross-channel-identity-complete`,
   `step-31-dashboards-validation-gate-complete`
@@ -582,8 +947,11 @@ for an additive-only migration.
   `docs/runbooks/step-30c-action-classification-deploy.md`
 - Service-name and Hazard precedent:
   `docs/runbooks/operator-patterns.md`
-- ARCHITECTURE design surfaces this deploy makes live:
+- ARCHITECTURE design surfaces this deploy makes live (write-side
+  and read-side):
   §3.2.11 Identity & conversation continuity (line 268),
-  §3.2.12 Hierarchical dashboards & validation gate (line 292)
+  §3.2.12 Hierarchical dashboards & validation gate (line 292),
+  §3.3 step 5 (memory retrieval — cross-session retriever),
+  §3.4 row "single-AZ failure is recoverable" (verified at Step 1c)
 - Staging E2E precedent for widget surface exercise:
   `docs/runbooks/STEP_30B_STAGING_E2E.md`
