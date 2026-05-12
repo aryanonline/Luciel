@@ -63,7 +63,14 @@ SKIP_AUTH_PATHS = {
     "/api/v1/version",
 }
 
-ADMIN_AUTH_PATHS = ("/api/v1/admin",)
+# Step 31 sub-branch 3: dashboard reads are admin-side observability.
+# Mounting `/api/v1/dashboard` under ADMIN_AUTH_PATHS gives us the same
+# perimeter denial that `/api/v1/admin/*` enjoys -- embed keys (whose
+# `EMBED_REQUIRED_PERMISSIONS = {"chat"}` excludes `admin`) get a 403
+# from this middleware before any route handler runs. ScopePolicy still
+# enforces tenant/domain/agent isolation inside each handler; this is
+# defense-in-depth.
+ADMIN_AUTH_PATHS = ("/api/v1/admin", "/api/v1/dashboard")
 
 
 class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
