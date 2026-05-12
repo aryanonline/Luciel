@@ -115,7 +115,7 @@ jobs:
           # so any test that accidentally tries a real moderation call fails
           # loudly at the httpx boundary rather than silently passing.
           OPENAI_API_KEY: "ci-not-a-real-key-backend-free-tests-only"
-        run: python -m pytest tests/verification/test_http_client_params.py tests/api/test_health.py tests/api/test_embed_key_preflight.py tests/api/test_content_safety_gate.py tests/api/test_widget_e2e_harness_shape.py tests/api/test_step24_5c_models_shape.py tests/api/test_step24_5c_cross_session_retriever_shape.py tests/api/test_step24_5c_identity_resolver_shape.py tests/api/test_step24_5c_adapter_claims_shape.py tests/api/test_step24_5c_live_e2e_shape.py tests/api/test_step31_dashboard_service_shape.py tests/api/test_step31_dashboard_http_shape.py -v
+        run: python -m pytest tests/verification/test_http_client_params.py tests/api/test_health.py tests/api/test_embed_key_preflight.py tests/api/test_content_safety_gate.py tests/api/test_widget_e2e_harness_shape.py tests/api/test_step24_5c_models_shape.py tests/api/test_step24_5c_cross_session_retriever_shape.py tests/api/test_step24_5c_identity_resolver_shape.py tests/api/test_step24_5c_adapter_claims_shape.py tests/api/test_step24_5c_live_e2e_shape.py tests/api/test_step31_dashboard_service_shape.py tests/api/test_step31_dashboard_http_shape.py tests/api/test_step31_validation_gate_shape.py -v
 
       - name: run pillar harness collection (skips cleanly without DB)
         # Even though every pillar test will SKIP here (no DATABASE_URL,
