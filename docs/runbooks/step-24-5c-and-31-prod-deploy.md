@@ -604,6 +604,53 @@ worker task `Warm shutdown` completing cleanly.
 Across the full post-deploy window: **zero** `ERROR`, `Traceback`,
 or `CRITICAL` hits in either log group.
 
+#### Step 4b.1 — SQS broker verification (§3.2.4)
+
+The ARCHITECTURE §3.6 production diagram labels the queue node
+`Redis/SQS` and the §3.2.4 prose pins it down: **SQS in production,
+Redis in development.** §3.2.4 also makes the architectural claim
+load-bearing — "the queue is what makes worker failures invisible
+to the customer" depends on SQS actually being the active broker.
+A worker that started cleanly (Step 4b) but is silently pointed at
+the wrong broker or a wrong queue ARN would pass Step 4b and still
+leave §3.2.4 false in production. This sub-step verifies the broker
+identity directly.
+
+List the production worker queue and confirm it is reachable in
+`ca-central-1`:
+
+```powershell
+aws sqs list-queues --region ca-central-1 `
+  --profile default
+# expect: at least one queue URL ending in the documented
+# worker-queue name; capture the URL into $WORKER_QUEUE_URL
+
+aws sqs get-queue-attributes `
+  --queue-url $WORKER_QUEUE_URL `
+  --attribute-names QueueArn ApproximateNumberOfMessages `
+      ApproximateNumberOfMessagesNotVisible CreatedTimestamp `
+  --region ca-central-1 --profile default
+# expect: QueueArn returns; ApproximateNumberOfMessages is a
+# concrete integer (queue is reachable, not 404).
+```
+
+Grep `/ecs/luciel-worker` for the kombu/SQS poller startup line that
+proves the worker process actually attached to SQS and not a
+fallback Redis broker:
+
+```
+fields @timestamp, @message
+| filter @message like /kombu.transport.SQS|sqs:\/\/|broker_url.*sqs/
+| sort @timestamp asc
+| limit 20
+```
+
+Expect at least one match per new worker task showing the SQS
+transport in the broker URL. If the matches are zero, or any line
+shows `redis://` as the broker URL in production logs, the deploy
+has regressed §3.2.4 even if every other pillar is green — pause,
+open a drift token, do not advance to Step 4c.
+
 ### Step 4c — Customer journey pillar (§3.3 steps 4 + 9)
 
 The customer-journey pillar is the architectural claim that a
@@ -797,6 +844,48 @@ The retention-purge-worker absence (per
 carve-out, preserved verbatim in the closing stanza — not silenced
 by this gate.
 
+#### Step 4g.1 — CloudTrail third-channel verification (§3.2.7)
+
+§3.2.7 names **three** independent audit channels — database
+(`admin_audit_logs` hash chain), application log stream
+(CloudWatch Logs), and AWS CloudTrail — and the rationale only
+holds with all three: "if they disagree, that disagreement is
+itself the signal." Step 4g verified channel one; Steps 4a/4b/4c
+verified channel two implicitly by reading CloudWatch. This
+sub-step verifies channel three — that CloudTrail actually captured
+the deploy events this runbook just executed (`RegisterTaskDefinition`
+for revisions :40 / :20 and `UpdateService` on both services).
+Without this check, two of three channels are observed and the
+§3.2.7 three-channel claim is unverified for this deploy window.
+
+```powershell
+# Capture the deploy window start/end UTC into shell vars first
+# (deploy-start = Step 3.3 first register-task-definition call;
+#  deploy-end   = Step 3.6 rollouts converged).
+
+aws cloudtrail lookup-events `
+  --lookup-attributes AttributeKey=EventName,AttributeValue=RegisterTaskDefinition `
+  --start-time $DEPLOY_START_UTC --end-time $DEPLOY_END_UTC `
+  --region ca-central-1 --profile default
+# expect: at least two events (one for luciel-backend:40, one for
+# luciel-worker:20), each carrying the operator's IAM principal.
+
+aws cloudtrail lookup-events `
+  --lookup-attributes AttributeKey=EventName,AttributeValue=UpdateService `
+  --start-time $DEPLOY_START_UTC --end-time $DEPLOY_END_UTC `
+  --region ca-central-1 --profile default
+# expect: at least two events (luciel-backend-service,
+# luciel-worker-service), each referencing the new task-def ARN.
+```
+
+The disagreement test (§3.2.7 rationale): the count of
+`RegisterTaskDefinition` + `UpdateService` events in CloudTrail
+must be **consistent** with the count of audit rows written to
+`admin_audit_logs` by the deploy and with the corresponding
+`UpdateService` log lines in CloudWatch. A material disagreement
+between the three is the §3.2.7 signal — pause, do not close the
+drift, open an incident token.
+
 ### Step 4h — Capture run stamp
 
 Capture the UTC timestamp of the first `widget_chat_turn_completed`
@@ -823,9 +912,10 @@ commit, then PR, squash-merge.
    > HH:MM:SS UTC. Cross-session retriever observed surfacing
    > sibling-session passages on the second-turn probe at
    > HH:MM:SS UTC (Step 4e), confirming the §3.3 step 5 design
-   > claim end-to-end against live production. No `ERROR` /
-   > `Traceback` / `CRITICAL` codes observed in the post-deploy
-   > log window. Runbook of record:
+   > claim end-to-end against live production. Production worker
+   > broker observed as **SQS** in `ca-central-1` (Step 4b.1) per
+   > §3.2.4. No `ERROR` / `Traceback` / `CRITICAL` codes observed
+   > in the post-deploy log window. Runbook of record:
    > `docs/runbooks/step-24-5c-and-31-prod-deploy.md`.
 
 2. **CANONICAL_RECAP §12 Step 31 row** — append:
@@ -844,8 +934,12 @@ commit, then PR, squash-merge.
    > level — live `OK`-state remains `[PROD-PHASE-2B]` per
    > `D-prod-alarms-deployed-unverified-2026-05-09`;
    > **compliance** verified via `admin_audit_logs` hash chain
-   > advance across the deploy window with retention-purge-worker
-   > absence preserved as the explicit carve-out per
+   > advance across the deploy window plus CloudTrail
+   > `RegisterTaskDefinition` and `UpdateService` events captured
+   > for both services (Step 4g.1, §3.2.7 three-channel audit
+   > observed end-to-end for this deploy), with
+   > retention-purge-worker absence preserved as the explicit
+   > carve-out per
    > `D-retention-purge-worker-missing-2026-05-09`. The
    > `DashboardService` HTTP surface
    > (`/api/v1/dashboard/{tenant,domain/{id},agent/{id}}`) is
