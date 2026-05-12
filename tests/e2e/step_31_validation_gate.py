@@ -97,7 +97,7 @@ if not _DB_URL.startswith("postgresql"):
 
 from sqlalchemy.orm import Session as SqlSession  # noqa: E402
 
-from app.db.database import SessionLocal  # noqa: E402
+from app.db.session import SessionLocal  # noqa: E402
 from app.memory.cross_session_retriever import (  # noqa: E402
     CrossSessionRetriever,
 )
