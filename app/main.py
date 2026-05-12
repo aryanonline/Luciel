@@ -1,3 +1,26 @@
+# Step 31 follow-up (D-prod-app-logger-info-suppressed-2026-05-12):
+# Configure the root logger BEFORE any `app.*` import so every
+# `logger = logging.getLogger(__name__)` inside the application
+# resolves its effective level against an already-configured root.
+# Without this, Python's default root level (WARNING) silently drops
+# every `logger.info(...)` emission across the app -- including the
+# Step 31 sub-branch 1 widget-chat audit log lines
+# (`widget_chat_turn_received` / `widget_chat_session_resolved` /
+# `widget_chat_turn_completed`) the ARCHITECTURE §3.2.7 claim depends
+# on. The worker process does NOT need this fix because Celery's
+# `--loglevel=info` flag configures its own root logger at bootstrap
+# (verified by the 15s heartbeat INFO lines visible in
+# /ecs/luciel-worker). `force=True` is defensive against any earlier
+# handler installation (e.g. uvicorn CLI bootstrap) so the level
+# change is observable regardless of import order.
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    force=True,
+)
+
 from fastapi import FastAPI
 from slowapi.errors import RateLimitExceeded
 
