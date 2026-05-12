@@ -234,6 +234,20 @@ the enforcement would carry the same shape of dishonesty this
 runbook exists to resolve. Run Step 1c.2 (Multi-AZ flip) below,
 then resume Step 2.
 
+*Why pause-and-flip, not parallel-flip:* `aws rds modify-db-instance
+--multi-az --apply-immediately` and the Step 2 Alembic migration
+both act on the same RDS primary. They are technically independent
+— the Multi-AZ flip is AWS control-plane, the migration is DDL on
+the data plane — but **observationally entangled** during the ~15-30
+minute standby provisioning window. A migration latency spike, an
+unexpected reboot triggered by the modify-db-instance apply, or the
+§3.5 "database primary failure" recovery path firing mid-migration
+would all be near-indistinguishable in the audit trail if we ran
+them in parallel. Pause-and-flip costs ~30 minutes of operator
+wall-clock once; parallel-flip risks blurring causal attribution
+on a load-bearing deploy. The wall-clock cost is the architecturally
+honest choice.
+
 #### Step 1c.2 — Multi-AZ flip sub-runbook (conditional on Scenario B)
 
 This sub-runbook is its own discrete piece of operational scope.
@@ -779,6 +793,20 @@ If the second turn resolves to a different `conversation_id`, the
 cross-channel identity resolver is not behaving as designed and the
 deploy should be rolled back before further verification.
 
+*Truth-in-labeling note for the Q8 claim.* This probe verifies the
+**within-channel** half of Recap §11 Q8 "picks up where the
+conversation left off" — two widget turns under the same identity
+claim, same `conversation_id`, sibling-session retrieval with
+correct provenance. The **cross-channel** half (widget Monday →
+phone Wednesday recognised as same `User`) is structurally supported
+by §3.2.11's three primitives (`conversations`, `identity_claims`,
+`CrossSessionRetriever`) and proven at the orthogonal-channel level
+by Step 24.5c CLAIM 6 in `tests/e2e/step_24_5c_live_e2e.py`, but is
+not reachable end-to-end in prod until the voice/SMS/email channel
+adapters land at 📋 Step 34a. The Step 5 doc-truthing stanza should
+record this scope explicitly so the close does not over-claim what
+prod has observed.
+
 ### Step 4f — Operations pillar (§3.2.10 alarm declaration)
 
 The operations pillar deliberately splits **declared** (asserted by
@@ -912,10 +940,15 @@ commit, then PR, squash-merge.
    > HH:MM:SS UTC. Cross-session retriever observed surfacing
    > sibling-session passages on the second-turn probe at
    > HH:MM:SS UTC (Step 4e), confirming the §3.3 step 5 design
-   > claim end-to-end against live production. Production worker
-   > broker observed as **SQS** in `ca-central-1` (Step 4b.1) per
-   > §3.2.4. No `ERROR` / `Traceback` / `CRITICAL` codes observed
-   > in the post-deploy log window. Runbook of record:
+   > claim end-to-end against live production for the
+   > **within-channel** half of §11 Q8; the cross-channel half
+   > remains structurally supported by §3.2.11's three primitives
+   > and proven at the orthogonal-channel level by Step 24.5c
+   > CLAIM 6, with end-to-end prod reachability bound to 📋 Step 34a
+   > channel adapters. Production worker broker observed as **SQS**
+   > in `ca-central-1` (Step 4b.1) per §3.2.4. No `ERROR` /
+   > `Traceback` / `CRITICAL` codes observed in the post-deploy
+   > log window. Runbook of record:
    > `docs/runbooks/step-24-5c-and-31-prod-deploy.md`.
 
 2. **CANONICAL_RECAP §12 Step 31 row** — append:
