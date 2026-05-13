@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 # ---------------------------------------------------------------------
@@ -87,11 +87,56 @@ class LucielInstanceCreate(BaseModel):
 
     created_by: str | None = Field(default=None, max_length=100)
 
+    # ---------------------------------------------------------------
+    # Step 30a.1 — Team/Company invite mode
+    # ---------------------------------------------------------------
+    #
+    # When ``teammate_email`` is provided, the route enters \"invite\"
+    # mode: it resolves-or-creates the User + Agent + ScopeAssignment
+    # for the teammate BEFORE creating the agent-scope LucielInstance,
+    # then dispatches a magic-link email so the teammate can sign in.
+    # In invite mode ``scope_owner_agent_id`` MUST be omitted (the
+    # route mints the agent slug from the email local-part).
+    #
+    # Invite mode is ONLY valid for ``scope_level=\"agent\"``. Inviting a
+    # teammate to a domain-scope or tenant-scope Luciel is nonsensical
+    # (those scopes are shared, not assigned to a single teammate).
+    teammate_email: EmailStr | None = Field(
+        default=None,
+        description=(
+            "Step 30a.1 — if set, the route mints the User+Agent+"
+            "ScopeAssignment for this teammate and binds the new "
+            "agent-scope LucielInstance under them. Only valid with "
+            "scope_level='agent' and scope_owner_agent_id omitted."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_scope_shape(self) -> "LucielInstanceCreate":
         level = self.scope_level
         has_domain = self.scope_owner_domain_id is not None
         has_agent = self.scope_owner_agent_id is not None
+        is_invite = self.teammate_email is not None
+
+        # Invite-mode shape: agent-scope only, no agent_id (the route
+        # mints it). teammate_email coexists with scope_owner_domain_id
+        # (the inviter picks the domain the teammate joins).
+        if is_invite:
+            if level != "agent":
+                raise ValueError(
+                    "teammate_email is only valid with scope_level='agent'."
+                )
+            if not has_domain:
+                raise ValueError(
+                    "invite mode requires scope_owner_domain_id (the domain "
+                    "the teammate is being assigned to)."
+                )
+            if has_agent:
+                raise ValueError(
+                    "invite mode requires scope_owner_agent_id to be null; "
+                    "the route mints the agent_id from the teammate email."
+                )
+            return self
 
         if level == "tenant" and (has_domain or has_agent):
             raise ValueError(

@@ -62,9 +62,13 @@ from app.models.admin_audit_log import (
     RESOURCE_SUBSCRIPTION,
 )
 from app.models.subscription import (
+    ALLOWED_BILLING_CADENCES,
+    ALLOWED_TIERS,
+    BILLING_CADENCE_MONTHLY,
     STATUS_CANCELED,
     Subscription,
     TIER_INDIVIDUAL,
+    TIER_INSTANCE_CAPS,
 )
 from app.models.user import User
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
@@ -78,18 +82,30 @@ logger = logging.getLogger(__name__)
 # Tenant id minting
 # ---------------------------------------------------------------------
 
-def _mint_tenant_id_from_email(email: str) -> str:
+# Tier-aware tenant-id prefix. The prefix tags self-serve tenants by
+# tier at a glance, so a grep / DB query against ``tenant_configs``
+# separates Individual-self-serve from Team-self-serve from Company-
+# self-serve without joining ``subscriptions``. Sales-assisted tenants
+# (created outside the webhook) carry no tier prefix.
+_TIER_PREFIX = {
+    "individual": "ind",
+    "team":       "team",
+    "company":    "co",
+}
+
+
+def _mint_tenant_id_from_email(email: str, tier: str = TIER_INDIVIDUAL) -> str:
     """Generate a URL-safe, collision-resistant tenant slug from an email.
 
-    Shape: ``ind-<8 hex chars>``. The prefix tags Individual self-serve
-    tenants so a grep over tenant_configs separates them from
-    sales-assisted Team / Company tenants at a glance. The 8 hex chars
-    give 32 bits of randomness -- collision probability is negligible
-    at the expected scale of self-serve subscribers, and a collision is
-    caught by the existing tenant_configs.tenant_id unique constraint
-    (the onboard flow raises ValueError, the webhook re-mints).
+    Shape: ``<tier-prefix>-<8 hex chars>``. The prefix is one of
+    ``ind`` / ``team`` / ``co`` per ``_TIER_PREFIX`` (Step 30a.1).
+    The 8 hex chars give 32 bits of randomness — collision probability
+    is negligible at the expected scale of self-serve subscribers, and
+    a collision is caught by the existing tenant_configs.tenant_id
+    unique constraint.
     """
-    return f"ind-{uuid.uuid4().hex[:8]}"
+    prefix = _TIER_PREFIX.get(tier, "ind")
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
 # ---------------------------------------------------------------------
@@ -217,6 +233,30 @@ class BillingWebhookService:
             or (email or "Unknown")
         )
         tier = metadata.get("luciel_tier") or TIER_INDIVIDUAL
+        if tier not in ALLOWED_TIERS:
+            # Defensive — schema-validated upstream, but a hand-crafted
+            # Stripe event could arrive with garbage. Fall back to the
+            # safest tier (Individual) and log loudly; do NOT raise here
+            # because Stripe must get a 200 to stop redelivering.
+            logger.error(
+                "billing-webhook: unknown tier %r in metadata; "
+                "falling back to %s. event=%s sub=%s",
+                tier, TIER_INDIVIDUAL, event_id, stripe_subscription_id,
+            )
+            tier = TIER_INDIVIDUAL
+        billing_cadence = metadata.get("luciel_billing_cadence") or BILLING_CADENCE_MONTHLY
+        if billing_cadence not in ALLOWED_BILLING_CADENCES:
+            logger.error(
+                "billing-webhook: unknown billing_cadence %r in metadata; "
+                "falling back to %s. event=%s sub=%s",
+                billing_cadence, BILLING_CADENCE_MONTHLY, event_id, stripe_subscription_id,
+            )
+            billing_cadence = BILLING_CADENCE_MONTHLY
+        # Per-tier instance cap is fully derivable from the tier; we do
+        # NOT read it from metadata (the buyer cannot influence it).
+        instance_count_cap = TIER_INSTANCE_CAPS.get(
+            tier, TIER_INSTANCE_CAPS[TIER_INDIVIDUAL]
+        )
 
         if not email:
             logger.error(
@@ -233,7 +273,7 @@ class BillingWebhookService:
             user = self._resolve_or_create_user(email=email, display_name=display_name)
 
             # Mint the tenant via the existing onboarding primitive.
-            tenant_id = _mint_tenant_id_from_email(email)
+            tenant_id = _mint_tenant_id_from_email(email, tier=tier)
             from app.services.onboarding_service import OnboardingService
 
             onboarding = OnboardingService(self.db)
@@ -266,6 +306,9 @@ class BillingWebhookService:
                 stripe_price_id=self._extract_price_id(data_object),
                 tier=tier,
                 status=data_object.get("status") or "incomplete",
+                # Step 30a.1: new columns from webhook metadata + per-tier defaults.
+                billing_cadence=billing_cadence,
+                instance_count_cap=instance_count_cap,
                 current_period_start=_ts(data_object.get("current_period_start")),
                 current_period_end=_ts(data_object.get("current_period_end")),
                 trial_end=_ts(data_object.get("trial_end")),
@@ -291,16 +334,44 @@ class BillingWebhookService:
                     "user_id": str(user.id),
                     "customer_email": email,
                     "tier": tier,
+                    "billing_cadence": billing_cadence,
+                    "instance_count_cap": instance_count_cap,
                     "status": sub.status,
                     "stripe_customer_id": stripe_customer_id,
                     "stripe_subscription_id": stripe_subscription_id,
                     "stripe_event_id": event_id,
                     "minted_at": now_iso,
                 },
-                note=f"stripe checkout.session.completed -> minted tenant {tenant_id}",
+                note=(
+                    f"stripe checkout.session.completed -> minted "
+                    f"tenant {tenant_id} tier={tier} cadence={billing_cadence}"
+                ),
             )
 
             self.db.commit()
+
+            # Step 30a.1 pre-mint of tier-differentiating LucielInstances.
+            # Happens AFTER the subscription commit so the cap-enforcement
+            # path can see the subscription row. A pre-mint failure does
+            # NOT roll back the subscription (the tenant is still paid for);
+            # we log loudly and let a follow-up reconciliation handle it.
+            try:
+                from app.services.tier_provisioning_service import (
+                    TierProvisioningService,
+                )
+                premint = TierProvisioningService(self.db)
+                premint.premint_for_tier(
+                    tenant_id=tenant_id,
+                    tier=tier,
+                    primary_user=user,
+                    audit_ctx=ctx,
+                )
+            except Exception:  # pragma: no cover - best-effort post-commit
+                logger.exception(
+                    "billing-webhook: tier pre-mint failed (subscription "
+                    "already committed) tenant=%s tier=%s",
+                    tenant_id, tier,
+                )
         except Exception:
             self.db.rollback()
             logger.exception(

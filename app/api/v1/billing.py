@@ -137,6 +137,7 @@ def create_checkout(payload: CheckoutSessionRequest, db: DbSession) -> CheckoutS
             email=str(payload.email),
             display_name=payload.display_name,
             tier=payload.tier,
+            billing_cadence=payload.billing_cadence,
         )
     except BillingNotConfiguredError as exc:
         raise _501_if_billing_not_ready(exc) from exc
@@ -388,6 +389,9 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
         cancel_at_period_end=sub.cancel_at_period_end,
         canceled_at=sub.canceled_at,
         customer_email=sub.customer_email,
+        # Step 30a.1 additions.
+        billing_cadence=sub.billing_cadence,
+        instance_count_cap=sub.instance_count_cap,
     )
 
 

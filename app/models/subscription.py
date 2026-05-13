@@ -61,6 +61,66 @@ ALLOWED_TIERS = (TIER_INDIVIDUAL, TIER_TEAM, TIER_COMPANY)
 
 
 # ---------------------------------------------------------------------
+# Billing cadence constants (Step 30a.1).
+#
+# Two cadences land at Step 30a.1: monthly (the Step 30a default) and
+# annual (a ~17% prepay incentive). The values are stored in the
+# ``billing_cadence`` String(16) column with a DB CHECK constraint
+# (see migration ``c2a1b9f30e15``) so a malformed payload cannot land
+# a third value.
+# ---------------------------------------------------------------------
+
+BILLING_CADENCE_MONTHLY = "monthly"
+BILLING_CADENCE_ANNUAL = "annual"
+
+ALLOWED_BILLING_CADENCES = (BILLING_CADENCE_MONTHLY, BILLING_CADENCE_ANNUAL)
+
+
+# ---------------------------------------------------------------------
+# Tier → permitted-scope mapping (the ARCHITECTURE §4.7 line 551
+# commitment, made code). Step 30a.1.
+#
+# The CANONICAL_RECAP §14 commitment that *"A Team Luciel is not a
+# bigger Individual Luciel"* is enforced here: the tier of a
+# subscription determines which LucielInstance.scope_level values may
+# be minted under that subscription. Service-layer enforcement only
+# (see drift ``D-tier-scope-mapping-service-layer-only-2026-05-13`` —
+# PostgreSQL CHECK constraints cannot subquery another table, and a
+# trigger adds operational complexity for no functional gain).
+#
+# The scope-level string literals match
+# ``app.models.luciel_instance.SCOPE_LEVEL_{AGENT,DOMAIN,TENANT}`` —
+# we keep them as string literals here (rather than importing) to
+# avoid pulling the luciel_instance module into the subscription
+# module's import graph, which would create a cycle with
+# ``app.services.tier_provisioning_service``.
+# ---------------------------------------------------------------------
+
+TIER_PERMITTED_SCOPES: dict[str, tuple[str, ...]] = {
+    TIER_INDIVIDUAL: ("agent",),
+    TIER_TEAM: ("agent", "domain"),
+    TIER_COMPANY: ("agent", "domain", "tenant"),
+}
+
+
+# ---------------------------------------------------------------------
+# Per-tier instance-count caps (Step 30a.1).
+#
+# §14 forbids per-seat metering, so these caps are a *billing-integrity*
+# guardrail, not a seat count. A runaway script that mints 200 Luciels
+# under a single $300/mo Team subscription is a service-side problem
+# the cap catches; a Team customer with 10 well-curated Luciels is
+# operating within the design intent.
+# ---------------------------------------------------------------------
+
+TIER_INSTANCE_CAPS: dict[str, int] = {
+    TIER_INDIVIDUAL: 3,
+    TIER_TEAM: 10,
+    TIER_COMPANY: 50,
+}
+
+
+# ---------------------------------------------------------------------
 # Status constants — mirror Stripe's subscription status values exactly.
 # https://stripe.com/docs/api/subscriptions/object#subscription_object-status
 # Stored as a String so a future Stripe-side new status doesn't require
@@ -154,11 +214,38 @@ class Subscription(Base, TimestampMixin):
     # -----------------------------------------------------------------
     tier: Mapped[str] = mapped_column(
         String(32), nullable=False, index=True,
-        comment="One of ALLOWED_TIERS. Self-serve v1 only mints 'individual'.",
+        comment=(
+            "One of ALLOWED_TIERS. Step 30a.1 lifted the v1 Individual-only "
+            "carve-out — all three tiers self-serve via /billing/checkout."
+        ),
     )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, index=True,
         comment="Stripe subscription status, mirrored verbatim. See ALLOWED_STATUSES.",
+    )
+
+    # -----------------------------------------------------------------
+    # Step 30a.1 — cadence + per-tier guardrail.
+    # -----------------------------------------------------------------
+    billing_cadence: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=BILLING_CADENCE_MONTHLY,
+        server_default=BILLING_CADENCE_MONTHLY,
+        comment=(
+            "One of ALLOWED_BILLING_CADENCES. DB CHECK enforces the literal "
+            "set; default 'monthly' preserves Step 30a behaviour for existing rows."
+        ),
+    )
+    instance_count_cap: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=TIER_INSTANCE_CAPS[TIER_INDIVIDUAL],
+        server_default=str(TIER_INSTANCE_CAPS[TIER_INDIVIDUAL]),
+        comment=(
+            "Hard ceiling on active LucielInstances under this subscription. "
+            "Not a seat count (§14) — a billing-integrity guardrail."
+        ),
     )
 
     # -----------------------------------------------------------------
@@ -211,6 +298,8 @@ class Subscription(Base, TimestampMixin):
         Index("ix_subscriptions_tenant_active", "tenant_id", "active"),
         # 2. "Which subscription did this Stripe customer last buy?" — for the portal flow.
         Index("ix_subscriptions_stripe_customer", "stripe_customer_id"),
+        # 3. Step 30a.1: tier-cohort queries ("how many active Team subs?").
+        Index("ix_subscriptions_tier_active", "tier", "active"),
         {"comment": "Step 30a — Stripe subscription <-> Luciel tenant binding."},
     )
 

@@ -178,6 +178,29 @@ class LucielInstanceRepository:
             )
         return query.first()
 
+    # ---------------------------------------------------------------
+    # Count helpers — used by the Step 30a.1 cap-enforcement guard.
+    # The repo never raises on count; the service layer compares the
+    # returned int against Subscription.instance_count_cap and decides.
+    # ---------------------------------------------------------------
+
+    def count_active_for_tenant(self, tenant_id: str) -> int:
+        """Return the number of ACTIVE LucielInstances under a tenant.
+
+        Counts across ALL scope levels (tenant + domain + agent) -- the
+        Step 30a.1 cap is a tenant-wide budget on instance_count_cap,
+        not a per-scope cap. Inactive instances are excluded so a
+        deactivate frees a slot.
+        """
+        return (
+            self.db.query(LucielInstance)
+            .filter(
+                LucielInstance.scope_owner_tenant_id == tenant_id,
+                LucielInstance.active.is_(True),
+            )
+            .count()
+        )
+
     def list_for_scope(
         self,
         *,

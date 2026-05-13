@@ -177,8 +177,24 @@ class Settings(BaseSettings):
     stripe_publishable_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_price_individual: str = ""
+    # --- Step 30a.1: five additional Stripe Price IDs (all optional). ---
+    # The BillingService.resolve_price_id (tier, cadence) -> price_id
+    # lookup raises 501 if the requested pair's config slot is empty.
+    # This is the boot-safe pattern (§3.2.9): a backend without billing
+    # configured still boots; the /billing/checkout route returns 501.
+    stripe_price_individual_annual: str = ""
+    stripe_price_team_monthly: str = ""
+    stripe_price_team_annual: str = ""
+    stripe_price_company_monthly: str = ""
+    stripe_price_company_annual: str = ""
     billing_success_url: str = "https://luciel.ai/onboarding?session_id={CHECKOUT_SESSION_ID}"
     billing_cancel_url: str = "https://luciel.ai/pricing?cancelled=1"
+    # billing_trial_days: legacy Step 30a single-value default. Step 30a.1
+    # introduces a (tier, cadence) -> trial_days lookup in BillingService
+    # (TRIAL_DAYS constant). This setting now only governs the v1
+    # Individual-monthly fallback for backward compatibility; the new
+    # tier-aware path overrides it when the (tier, cadence) pair is in
+    # TRIAL_DAYS.
     billing_trial_days: int = 14
 
     # --- Magic-link email auth (Step 30a) ---
