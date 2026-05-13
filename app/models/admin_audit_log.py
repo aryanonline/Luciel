@@ -137,6 +137,41 @@ ACTION_SESSION_CREATE_CROSS_TENANT = "session_create_cross_tenant"
 ACTION_RETENTION_ENFORCE = "retention_enforce"
 ACTION_RETENTION_MANUAL_PURGE = "retention_manual_purge"
 
+# Step 30a: subscription billing.
+#
+# These verbs are deliberately separate from ACTION_CREATE / ACTION_UPDATE /
+# ACTION_DEACTIVATE so that a compliance auditor scanning the audit chain
+# for billing events can filter on the verb alone. Subscription mutations
+# are PIPEDA-significant (financial state + entitlement) AND are emitted
+# almost exclusively by the Stripe webhook path -- so the verb captures
+# the operational origin even when the actor key prefix is the system
+# webhook context.
+#
+# ACTION_SUBSCRIPTION_CREATE     -- first row written when a Stripe
+#                                   checkout.session.completed event
+#                                   mints a tenant + subscription pair.
+# ACTION_SUBSCRIPTION_UPDATE     -- customer.subscription.updated
+#                                   (plan change, trial->active, cancel-
+#                                   at-period-end flip).
+# ACTION_SUBSCRIPTION_CANCEL     -- customer.subscription.deleted; pairs
+#                                   with the existing tenant deactivation
+#                                   cascade in ARCHITECTURE §4.5.
+# ACTION_SUBSCRIPTION_REACTIVATE -- not emitted at v1 (Stripe treats
+#                                   reactivation as a new subscription),
+#                                   reserved so a future flow can use it
+#                                   without a follow-up migration.
+# ACTION_BILLING_WEBHOOK_REPLAY_REJECTED
+#                                -- a Stripe event whose stripe_event_id
+#                                   was already applied. Recorded so the
+#                                   replay attempt is visible (and
+#                                   distinguishable from a successful
+#                                   apply) but does not mutate state.
+ACTION_SUBSCRIPTION_CREATE = "subscription_create"
+ACTION_SUBSCRIPTION_UPDATE = "subscription_update"
+ACTION_SUBSCRIPTION_CANCEL = "subscription_cancel"
+ACTION_SUBSCRIPTION_REACTIVATE = "subscription_reactivate"
+ACTION_BILLING_WEBHOOK_REPLAY_REJECTED = "billing_webhook_replay_rejected"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -170,6 +205,12 @@ ALLOWED_ACTIONS = (
     ACTION_SESSION_CREATE_CROSS_TENANT,
     ACTION_RETENTION_ENFORCE,
     ACTION_RETENTION_MANUAL_PURGE,
+    # Step 30a -- subscription billing
+    ACTION_SUBSCRIPTION_CREATE,
+    ACTION_SUBSCRIPTION_UPDATE,
+    ACTION_SUBSCRIPTION_CANCEL,
+    ACTION_SUBSCRIPTION_REACTIVATE,
+    ACTION_BILLING_WEBHOOK_REPLAY_REJECTED,
 )
 
 
@@ -207,6 +248,12 @@ ACTION_KNOWLEDGE_INGEST = "knowledge_ingest"
 ACTION_KNOWLEDGE_REPLACE = "knowledge_replace"
 ACTION_KNOWLEDGE_DELETE = "knowledge_delete"
 
+# Step 30a: subscription rows on the new `subscriptions` table. Distinct
+# from RESOURCE_TENANT because a single tenant lifecycle can span multiple
+# subscription rows (Pattern E -- cancel + resubscribe leaves an inactive
+# row + an active row, both pointing at the same tenant_id).
+RESOURCE_SUBSCRIPTION = "subscription"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -223,6 +270,8 @@ ALLOWED_RESOURCE_TYPES = (
     # Step 29.y Cluster 1
     RESOURCE_CONSENT,
     RESOURCE_SESSION,
+    # Step 30a -- subscription billing
+    RESOURCE_SUBSCRIPTION,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
