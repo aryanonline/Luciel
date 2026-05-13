@@ -14,6 +14,7 @@ SQLAlchemy row.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -31,13 +32,19 @@ class CheckoutSessionRequest(BaseModel):
     created and no tenant is minted. The webhook does that work once
     Stripe confirms payment.
 
+    Step 30a.1 lifted the v1 Individual-only carve-out: ``tier`` is now
+    a ``Literal['individual','team','company']`` and the new
+    ``billing_cadence`` field accepts ``Literal['monthly','annual']``.
+    The (tier, cadence) pair routes to a Stripe Price ID via
+    ``BillingService.resolve_price_id`` — see the table in that module.
+
     Why tenant_id is OPTIONAL here:
-      v1 self-serve mints a fresh tenant for every Individual checkout.
-      A buyer who is already a Team / Company member upgrading to a
-      paid Individual seat is sales-assisted at v1 (deliberate non-goal
-      tracked in DRIFTS as D-billing-team-company-not-self-serve).
-      The field is reserved so a future Step 30a.1 can route an
-      Individual upgrade onto an existing tenant without an API change.
+      v1 self-serve mints a fresh tenant for every checkout. A buyer
+      who is already a Team / Company member upgrading to a paid
+      Individual seat (Sarah → department, CANONICAL_RECAP Q5) is a
+      Step 38 concern; the field is reserved here so a future
+      cross-tenant flow can route onto an existing tenant without an
+      API change.
     """
     email: EmailStr = Field(
         ..., description="Email of the buyer. Becomes the User.email "
@@ -48,13 +55,24 @@ class CheckoutSessionRequest(BaseModel):
         description="Buyer's name. Carried into the Stripe customer "
                     "object and onto the eventual TenantConfig.",
     )
-    tier: str = Field(
+    tier: Literal["individual", "team", "company"] = Field(
         default="individual",
-        description="Tier slug. v1 only accepts 'individual'.",
+        description=(
+            "Tier slug. Step 30a.1 accepts all three; the (tier, cadence) "
+            "pair must have a configured Stripe Price ID or the route "
+            "returns 501."
+        ),
+    )
+    billing_cadence: Literal["monthly", "annual"] = Field(
+        default="monthly",
+        description=(
+            "Billing cadence. Step 30a.1 adds 'annual' (\u224817% prepay "
+            "incentive). Default 'monthly' preserves Step 30a behaviour."
+        ),
     )
     tenant_id: str | None = Field(
         default=None,
-        description="Reserved for Step 30a.1 upgrade flows; ignored at v1.",
+        description="Reserved for Step 38 upgrade flows; ignored at v1.",
     )
 
 
@@ -127,6 +145,10 @@ class SubscriptionStatusResponse(BaseModel):
     Surfaces only the fields the Account/billing UI renders. The full
     Stripe object is *not* exposed -- a forensic engineer reads it
     out of ``subscriptions.provider_snapshot`` instead.
+
+    Step 30a.1 extended the response with ``billing_cadence`` and
+    ``instance_count_cap`` so the dashboard can render a cadence badge
+    and gate the Create-Luciel form on remaining cap.
     """
     model_config = ConfigDict(from_attributes=True)
 
@@ -141,3 +163,6 @@ class SubscriptionStatusResponse(BaseModel):
     cancel_at_period_end: bool
     canceled_at: datetime | None
     customer_email: str
+    # Step 30a.1 additions.
+    billing_cadence: str
+    instance_count_cap: int
