@@ -143,6 +143,92 @@ class Settings(BaseSettings):
     # any realistic tenant's daily expiry.
     retention_max_batches_per_run: int = 10_000
 
+    # --- Stripe billing (Step 30a) ---
+    #
+    # Self-serve subscription billing for the Individual tier. The Luciel
+    # backend is the single source of truth for tenant entitlement; Stripe
+    # is purely the payment + recurring-billing surface. All money flows
+    # through Stripe-hosted Checkout (lowest PCI scope, SAQ-A) and the
+    # Stripe Customer Portal (cancel + payment-method update). The
+    # backend never touches a PAN.
+    #
+    # stripe_secret_key:      live or test secret key (sk_...).
+    # stripe_publishable_key: pk_... -- not used server-side except as a
+    #                         feature flag mirror; the marketing site reads
+    #                         its own VITE_STRIPE_PUBLISHABLE_KEY.
+    # stripe_webhook_secret:  whsec_... -- MUST be set for webhook signature
+    #                         verification. Without it the /billing/webhook
+    #                         route fails closed (501) at request time.
+    # stripe_price_individual: price_... for the Individual SKU. Single
+    #                         price at v1. Annual / multi-tier prices land
+    #                         in Step 30a.1 / 30a.2 as additional fields.
+    # billing_success_url:    where Stripe redirects post-checkout. Carries
+    #                         {CHECKOUT_SESSION_ID} for the onboarding
+    #                         claim flow.
+    # billing_cancel_url:     where Stripe redirects on "back" from checkout.
+    # billing_trial_days:     trial length in days for new individual
+    #                         subscriptions. 0 disables the trial.
+    #
+    # All Stripe fields default to empty strings so the backend boots in
+    # environments without billing configured (dev, CI, tenants on Team /
+    # Company tiers that don't touch self-serve). The billing routes raise
+    # 501 Not Implemented when the corresponding field is empty, never 500.
+    stripe_secret_key: str = ""
+    stripe_publishable_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_individual: str = ""
+    billing_success_url: str = "https://luciel.ai/onboarding?session_id={CHECKOUT_SESSION_ID}"
+    billing_cancel_url: str = "https://luciel.ai/pricing?cancelled=1"
+    billing_trial_days: int = 14
+
+    # --- Magic-link email auth (Step 30a) ---
+    #
+    # Post-checkout the buyer needs to land in their Account/billing area.
+    # We don't ship a password store at v1 (Step 32 owns that); instead we
+    # mint a signed, single-use JWT that the marketing site exchanges for
+    # a 30-day cookie session.
+    #
+    # magic_link_secret:      HS256 signing secret. MUST be set in prod;
+    #                         empty value makes the /billing/login route
+    #                         fail closed (501) at request time.
+    # magic_link_ttl_hours:   how long the one-shot magic link is valid.
+    #                         24h is the SaaS norm; long enough to survive
+    #                         a slow email delivery, short enough that a
+    #                         leaked link from a stale inbox is bounded.
+    # session_cookie_ttl_days: lifespan of the cookie session after the
+    #                         magic link is exchanged. 30d matches Stripe
+    #                         Customer Portal session norms.
+    # session_cookie_name:    name of the cookie; consistent value across
+    #                         deploys keeps the marketing-site fetch path
+    #                         stable.
+    # session_cookie_secure:  True in prod (HTTPS-only). False allowed in
+    #                         dev so the cookie survives localhost.
+    # session_cookie_domain:  set explicitly so the cookie is visible to
+    #                         both luciel.ai (marketing) and the api
+    #                         subdomain. Empty means "host-only" which is
+    #                         the dev default.
+    magic_link_secret: str = ""
+    magic_link_ttl_hours: int = 24
+    session_cookie_ttl_days: int = 30
+    session_cookie_name: str = "luciel_session"
+    session_cookie_secure: bool = True
+    session_cookie_domain: str = ""
+
+    # --- Outbound transactional email (Step 30a) ---
+    #
+    # At v1 we don't ship a full email service abstraction; the magic-link
+    # email is logged + emitted via a single FROM address. A future Step
+    # 32 commit can swap the sender for SES/Postmark/etc. behind the same
+    # interface (see app/services/email_service.py).
+    #
+    # from_email:           the From address on magic-link emails.
+    # marketing_site_url:   used to build login-link URLs that go through
+    #                       the marketing site (not the backend), so the
+    #                       click lands on the React app where the cookie
+    #                       can be set on the apex domain.
+    from_email: str = "no-reply@luciel.ai"
+    marketing_site_url: str = "https://luciel.ai"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

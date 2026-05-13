@@ -16,6 +16,7 @@ from app.models.user import User  # noqa: F401  (Step 24.5b)
 from app.models.scope_assignment import ScopeAssignment, EndReason  # noqa: F401  (Step 24.5b)
 from app.models.conversation import Conversation  # noqa: F401  (Step 24.5c)
 from app.models.identity_claim import IdentityClaim, ClaimType  # noqa: F401  (Step 24.5c)
+from app.models.subscription import Subscription  # noqa: F401  (Step 30a)
 
 __all__ = [
     "AgentConfig",
@@ -39,4 +40,5 @@ __all__ = [
     "Conversation",
     "IdentityClaim",
     "ClaimType",
+    "Subscription",
 ]
