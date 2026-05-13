@@ -90,6 +90,18 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
             if path.startswith(skip_path) or path == skip_path:
                 return await call_next(request)
 
+        # Step 31.2 commit A: if SessionCookieAuthMiddleware already
+        # authenticated this request via a Step 30a session cookie,
+        # request.state.auth_method is set to "cookie" and request.state
+        # already carries tenant_id / permissions / actor_user_id /
+        # actor_label. Treat this as a pre-authenticated request and
+        # skip the Authorization header check entirely. The cookie
+        # middleware's path filter (COOKIE_AUTH_PATHS) restricts this
+        # short-circuit to /api/v1/admin/* and /api/v1/dashboard/* --
+        # the widget and other paths are never reached via cookie.
+        if getattr(request.state, "auth_method", None) == "cookie":
+            return await call_next(request)
+
         # Step 30b commit (c): CORS preflight has no Authorization
         # header by spec; let it pass through to the route handler
         # which answers with the CORS-allowed headers (origin check
