@@ -142,6 +142,8 @@ The production environment runs in **AWS, Canadian region (`ca-central-1`)**, de
 
 #### 3.2.1 Public endpoint
 
+**Triangulation:** Answers **Q7** (channels). Implements production baseline; full multi-channel surface lands at **Step 34a**. Integrity questions: DRIFTS §3 `D-channels-only-chat-implemented-2026-05-09`.
+
 Customers reach Luciel through a single public hostname (the production API endpoint). The hostname is fronted by an Application Load Balancer. 📋 The full multi-channel surface lands in roadmap Step 34a; as of 2026-05-10 the chat widget (see §3.2.2 for its CDN tier and embed-key model), the programmatic API, and the operator-facing admin surface are the live channels, while voice / email / SMS adapters are still planned — see `DRIFTS.md` token `D-channels-only-chat-implemented-2026-05-09`.
 
 *Why a load balancer:* it terminates TLS once, distributes incoming requests across multiple application servers (so a single server failure does not take the platform down), and provides a single chokepoint where request rate-limits and a Web Application Firewall can be applied. The chokepoint also gives the operator a single place to flip traffic during a deployment or roll back from one.
@@ -149,6 +151,8 @@ Customers reach Luciel through a single public hostname (the production API endp
 *Why not API Gateway:* an ALB is the right tool for steady-state, long-lived, multi-channel traffic with WebSocket and streaming response support. API Gateway is well-suited to bursty, request-response, function-style workloads, which Luciel is not.
 
 #### 3.2.2 Public widget surface (CDN + embed keys)
+
+**Triangulation:** Answers **Q7** (channels — the widget leg). Implements **Step 30b** (CDN + bundle), **Step 30d** (issuance-time scope-prompt preflight, content-safety gate). Closing tags: `step-30b-widget-cdn-complete`, `step-30d-content-safety-complete`. Integrity questions: DRIFTS §3 `D-widget-no-content-safety-or-scope-guardrail-2026-05-10` (CLOSED §5), `D-widget-chat-no-application-level-audit-log-2026-05-10` (CLOSED §5), `D-route-shipped-without-end-to-end-coverage-2026-05-10` (widget-surface slice CLOSED, broader-routes slice OPEN).
 
 The chat widget is a public surface: the JavaScript bundle that customers paste into their site is served by a content delivery network, and every chat turn it makes to the production API is authenticated by a key designed for public distribution. Both pieces are distinct from the rest of §3.2 — they sit at the edge alongside §3.2.1, before any request reaches the application tier — and warrant naming.
 
@@ -176,6 +180,8 @@ The chat widget is a public surface: the JavaScript bundle that customers paste 
 
 #### 3.2.3 Application tier
 
+**Triangulation:** Honours Recap **Section 4** (the never-do contract executes here) and **§4.7** (three-layer scope enforcement). Implements production baseline (Steps 1–10).
+
 A pool of application servers runs the request-handling Luciel code. Each server is identical, stateless across requests, and replaceable. Scaling is horizontal — adding capacity means adding more servers, not making any one server larger.
 
 *Why stateless:* statelessness is what makes recovery and scaling trivial. Any conversation state that needs to persist across requests lives in the database or in a session store, not in server memory. A server can die mid-request and the next request from the same conversation routes to a healthy server with no loss.
@@ -185,6 +191,8 @@ A pool of application servers runs the request-handling Luciel code. Each server
 *Autoscaling:* application-tier capacity scales on observed load (request rate, CPU, response latency). The minimum is sized to absorb a single-server failure without customer impact; the maximum is sized to absorb any plausible burst the GTM plan would produce.
 
 #### 3.2.4 Background worker tier
+
+**Triangulation:** Answers **Q4** (coordinator surface lands here). Implements production baseline; coordinator at **Step 36**, retention/purge worker at **Step 34**. Integrity questions: DRIFTS §3 `D-celery-task-surface-thin-2026-05-09`, `D-retention-purge-worker-missing-2026-05-09`, `D-celery-worker-runs-as-root-2026-05-11`.
 
 A separate pool of worker processes handles work that should not block a customer's chat response. Per-responsibility status:
 - ✅ Memory extraction (the worker task that reads recent turns and persists durable memories)
@@ -204,6 +212,8 @@ Workers receive jobs from a queue and report results back through the database.
 
 #### 3.2.5 Database — PostgreSQL on Amazon RDS, Canadian region
 
+**Triangulation:** Foundation row store for **Q1, Q2, Q6, Q8** (all scope rows + identity claims + conversations live here). Implements production baseline (Steps 1–10); identity tables added at **Step 24.5c**, dashboard read paths at **Step 31**.
+
 A single managed PostgreSQL instance (with a hot standby in a second availability zone) holds the durable state of the platform.
 
 *Why Postgres:* mature, audited, and supports the relational integrity our scope hierarchy depends on. Every Luciel, memory, key, and audit row has a foreign key to its scope, and the database enforces it — so a bug in our application code cannot accidentally hand one scope another scope's data, regardless of which scope level (tenant, domain, agent, or instance) is involved.
@@ -218,6 +228,8 @@ A single managed PostgreSQL instance (with a hot standby in a second availabilit
 
 #### 3.2.6 Memory tier
 
+**Triangulation:** Answers **Q3** (hybrid retrieval decision lives here). Implements production baseline (vector half); document ingestion at **Step 32a**; hybrid retrieval decision-gate at **Step 37**. Cross-session retrieval (the Q8 leg) added at **Step 24.5c** — see §3.2.11. Integrity questions: DRIFTS §3 `D-context-assembler-thin-2026-05-09`.
+
 Memory is layered (per the canonical recap). The four kinds — session, user preference, domain, client operational — live as distinct logical concerns over the database, with retrieval driven by a memory service.
 
 *Session memory* lives in a fast key-value store (Redis) for the active conversation, with a short time-to-live; persistent state for that conversation is also written to Postgres so a Redis flush does not lose conversation history.
@@ -227,6 +239,8 @@ Memory is layered (per the canonical recap). The four kinds — session, user pr
 *Why layered, not flat:* different kinds of memory have different retention rules, different scoping rules, and different retrieval patterns. Flat memory cannot enforce that user preferences should expire or be exportable on request, while operational rules should not. Layering is what makes the policies enforceable.
 
 #### 3.2.7 Audit trail
+
+**Triangulation:** Honours Recap **Section 4** (the contract proves itself through audit rows) and answers **Q6** (audit log shows what happened, when, by whom). Implements production baseline; widget application log stream added at **Step 31 sub-branch 1**. Closing tag: `step-31-dashboards-validation-gate-complete`. Integrity questions: DRIFTS §3 `D-pillar-4c-evidence-location-recap-ambiguous-2026-05-13`, `D-pillar-4d-audit-row-field-verify-deferred-2026-05-13`, `D-pillar-4e-cross-table-row-verify-deferred-2026-05-13`.
 
 Every consequential action in production produces an immutable audit record. There are three independent channels, designed so a tampering attempt is detectable.
 
@@ -240,6 +254,8 @@ A retention purge produces records in a fourth append-only table (`deletion_logs
 
 #### 3.2.8 Secrets store
 
+**Triangulation:** Pattern E (§4.6) lives here. Operational prerequisite for **Q6** (rotation on role change). Implements production baseline; rotation runbook lands at **Step 32**. Integrity questions: DRIFTS §3 `D-secret-disclosure-recurrence-2026-05-12`, `D-rotation-procedure-laptop-dependent-2026-05-12`.
+
 Every secret used in production — database credentials, foundation-model API keys, third-party integration credentials, signing keys — lives in AWS Systems Manager Parameter Store as a SecureString, encrypted with a customer-managed KMS key.
 
 *Why Parameter Store, not environment variables baked into images:* secrets in container images leak. Image layers are inspectable. A compromised image registry exposes every secret used by every image. Parameter Store decouples secrets from images — the image fetches the secret at startup, and rotating the secret means updating Parameter Store, not rebuilding and redeploying.
@@ -250,11 +266,15 @@ Every secret used in production — database credentials, foundation-model API k
 
 #### 3.2.9 What integrations exist today
 
+**Triangulation:** Answers **Q7** (the channel-adapter framework's v1 surface). Implements production baseline; channel-adapter framework at **Step 34a**; workflow tools (CRM, calendar, email send) at **Step 34**. Integrity questions: DRIFTS §3 `D-channels-only-chat-implemented-2026-05-09`, `D-external-integrations-llm-only-2026-05-09`.
+
 The design anticipates a full slate of external integrations — calendar, CRM, email, SMS, voice, payments — with a sandbox-in-development / real-in-production split per integration. Today, the integrations layer (`app/integrations/`) contains only the foundation-model clients (Anthropic and OpenAI). The tool registry shape (`app/tools/registry.py`, `app/tools/broker.py`) is in place; the integrations themselves are not. 📋 The full slate is roadmap Step 34 (Workflow actions); the channel surface specifically is roadmap Step 34a. Tracked as `DRIFTS.md` token `D-external-integrations-llm-only-2026-05-09`.
 
 This subsection exists so the doc stops implying the full slate is present. The framework is ready; the integrations are not.
 
 #### 3.2.10 Monitoring and alerting
+
+**Triangulation:** Operational prerequisite for every live answer (Q1–Q8); the proof surface that says "the platform is still healthy". Implements **Step 28** (alarm foundation); first observed live during **Step 30c** rollout. Integrity questions: DRIFTS §3 `D-prod-alarms-deployed-unverified-2026-05-09`.
 
 Production emits four kinds of signal:
 
@@ -266,6 +286,8 @@ Production emits four kinds of signal:
 *Why all four:* metrics tell us *that* something is wrong; logs and traces tell us *what* is wrong; alarms tell us *when* to act. Removing any of the four leaves a gap.
 
 #### 3.2.11 Identity & conversation continuity
+
+**Triangulation:** Answers **Q8** (cross-channel continuity). Implements **Step 24.5c**. Closing tag: `step-24-5c-cross-channel-identity-complete`. End-user-driven claim verification deferred to **Step 34a**; cross-tenant identity federation deferred to **Step 38**. Integrity questions: DRIFTS §3 `D-step-24-5c-and-31-schema-and-code-undeployed-to-prod-2026-05-12`.
 
 A prospect who chats with Luciel on a customer's website on Monday and calls the customer's Luciel-answered phone line on Wednesday should not have to re-introduce themselves. Continuity across channels is a product commitment (Recap §11 Q8, §13.1 T8), and the architecture answers it with three primitives that compose without breaking any existing scope or audit guarantee. ✅ Implemented in the Step 24.5c implementation arc on 2026-05-11 across five sub-branch PRs (#24 models + Alembic migration `3dbbc70d0105`; #25 `app/memory/cross_session_retriever.py`; #26 `app/identity/resolver.py`; #27 `SessionService.create_session_with_identity()` adapter hook; #28 live e2e + this doc-truthing commit). Closing tag: `step-24-5c-cross-channel-identity-complete`, cut on this doc-truthing commit per the Step 30c `99c6eb5` precedent. v1 success criterion demonstrated end-to-end against the live shipped code in `tests/e2e/step_24_5c_live_e2e.py` (real Postgres, real ORM, real resolver + service + retriever — six claim groups covering channel-cross identity recognition, cross-session retrieval, and scope-boundary rejection); backend-free harness-shape pin in `tests/api/test_step24_5c_live_e2e_shape.py`. The voice/SMS/email legs inherit the same three primitives and become reachable end-to-end when Step 34a's channel adapter framework lands.
 
@@ -290,6 +312,8 @@ Claims are orthogonal to scope the same way `users` are: a `User` can have many 
 - Voice / SMS / email channel adapters (Step 34a). The primitives in this subsection are framework-ready for them; the adapters themselves are not.
 
 #### 3.2.12 Hierarchical dashboards & validation gate
+
+**Triangulation:** Answers **Q2** (three-tier dashboards) and completes pre-launch posture for **Q1 / Q6 / Q8** via the five-pillar gate. Implements **Step 31**. Closing tag: `step-31-dashboards-validation-gate-complete`. Dashboard frontend UI deferred to **Step 32**. Integrity questions: DRIFTS §3 `D-step-24-5c-and-31-schema-and-code-undeployed-to-prod-2026-05-12`, `D-pillar-4c-evidence-location-recap-ambiguous-2026-05-13`, `D-pillar-4d-audit-row-field-verify-deferred-2026-05-13`, `D-pillar-4e-cross-table-row-verify-deferred-2026-05-13`.
 
 Every scope-level operator — a company owner, a department lead, an individual professional — needs to answer "is Luciel earning its keep here?" in under a minute, scoped to exactly what they're allowed to see. And no new customer goes live until five categories of readiness are all green. These are sibling commitments: the dashboards are how a live customer reads value out of Luciel; the validation gate is how an operator proves a customer is ready to be live in the first place. ✅ Implemented across Step 31's five sub-branches (PRs #29 design-lock, #30 widget audit log + `create_session_with_identity` route wiring, #31 `DashboardService`, #32 dashboard HTTP surface, #33 five-pillar validation gate harness, #34 this doc-truthing commit); closing tag `step-31-dashboards-validation-gate-complete` annotated on this doc-truthing commit per the Step 30c `99c6eb5` / Step 24.5c `55e4db9` precedent. The harness exits 0 against live Postgres on 2026-05-12 (run stamp `20260512-144847-068362`, 40/40 claims green across all five pillars); backend-free harness-shape pin in `tests/api/test_step31_validation_gate_shape.py` (19 contract tests) guards it in the existing AST CI lane.
 
@@ -322,6 +346,8 @@ The gate is the operational version of the audit chain in §3.2.7 and the scope 
 - End-user-driven claim verification (Step 34a — the validation gate accepts adapter-asserted claims as v1 trust, same as §3.2.11 v1).
 
 ### 3.3 How a customer request flows through production
+
+**Triangulation per step (Q/Step token map):** step 1 answers **Q7** (channel adapter; full surface at **Step 34a**); step 2 answers **Q7** (public endpoint); steps 3–4 answer **Q1** and **Q6** (key resolution + scope check at the request boundary); step 5 answers **Q3** (memory retrieval) and **Q8** (cross-session retriever, **Step 24.5c**); step 6 honours Recap **Section 2** (two layers); step 6.5 answers **Q7** widget hardening leg (**Step 30d**, closing tag `step-30d-content-safety-complete`); step 7 honours **§4.7** scope at the tool boundary; step 8 enforces Recap **Section 4** never-do contract via the three-tier classifier (**Step 30c**, closing tag `step-30c-action-classification-complete`); step 9 answers **Q6** (audit emission); step 10 answers **Q7** (response on the same channel); step 11 lands the **Q4** coordinator surface and the **Step 34** retention worker. Each numbered step below is the system view of the Q-row or roadmap Step named here.
 
 A customer sends a message to a Luciel through any supported channel. Here is what happens.
 
@@ -477,6 +503,8 @@ These are properties of the system that span both environments and are not visib
 
 ### 4.1 Scope hierarchy as the billing boundary
 
+**Triangulation:** Answers **Q1** (scope hierarchy / one admin key), **Q5** (Sarah-to-department), **Q6** (promotion / demotion / departure). Implements production baseline (Steps 1–10).
+
 The scope hierarchy — `tenant → domain → agent → Luciel instance` — is the single organizing principle of the data model. Every Luciel, every memory record, every key, every audit row has a foreign key to its scope. Scope is enforced at three layers (the application server, the database foreign-key constraint, and the database role grants).
 
 *Why:* the canonical recap commits that pricing tiers map 1:1 to scope levels. If scope is leaky — if an agent-scope key can read another agent's memory — then the Individual tier delivers Team-tier value at Individual-tier price. The architecture's job is to make scope leakage impossible at the data layer, not at the application layer alone.
@@ -484,6 +512,8 @@ The scope hierarchy — `tenant → domain → agent → Luciel instance` — is
 A separate, orthogonal table set (`users`, `scope_assignments`) records who is currently assigned to which scope. People come and go; scope persists. When a person leaves, their assignments are revoked but the scope's data remains owned by the scope.
 
 ### 4.2 Soul layer and Profession layer at runtime
+
+**Triangulation:** Honours Recap **Section 2** (the two layers) and **Section 3** (voice). Implements production baseline; multi-vertical reuse at **Step 35**.
 
 Luciel's two-layer design (Section 2 of the canonical recap) is reflected in how a request is composed.
 
@@ -494,6 +524,8 @@ The **Profession layer** is loaded per scope: the deploying organization's domai
 At runtime, both layers are composed in a single foundation-model context, with the Soul layer placed structurally so it cannot be overridden by injected Profession-layer content. This is enforced both by the prompt structure and by output-side policy checks that catch a model trying to violate Soul-layer rules even if the prompt was somehow compromised. 🔧 Today, prompt assembly happens in `app/services/chat_service.py` rather than being consolidated in `app/runtime/context_assembler.py`, and the output-side policy guard does not yet exist — tracked as `DRIFTS.md` token `D-context-assembler-thin-2026-05-09`.
 
 ### 4.3 Immutable audit chain
+
+**Triangulation:** Answers **Q6** (audit log shows what happened). Honours Recap **Section 4**. Implements production baseline; widget application log stream added at **Step 31 sub-branch 1**.
 
 Every audit-bearing table in the database is append-only and hash-chained. New rows include a hash of the previous row's content; modifying a historical row breaks the chain on the next verification run.
 
@@ -509,6 +541,8 @@ A regulator-facing export merges all three streams ordered by timestamp, with bu
 
 ### 4.4 Soft-delete by default
 
+**Triangulation:** Answers **Q6** (no data loss on departure). Honours Recap **Section 4**. Implements production baseline.
+
 Every "delete" operation in production flips an `active=false` flag rather than removing the row. Hard purges happen only through the scheduled retention worker, after the contracted retention period.
 
 *Why:* two reasons.
@@ -520,17 +554,23 @@ The cost is that storage grows. The retention worker handles that, in batches si
 
 ### 4.5 Cascade-correct departure
 
+**Triangulation:** Answers **Q5** (Sarah-to-department — the re-parenting / inverse shape) and **Q6** (departure flow). Implements production baseline; live departure flow at **Step 33**; re-parenting at **Step 35** and **Step 38**.
+
 When a scope is deactivated, the cascade flips `active=false` atomically across every dependent resource at and below it. Deactivating a tenant cascades through its domains, agents, Luciel instances, memory records, keys, and scope assignments. Deactivating a domain cascades through its agents, instances, and memory. Deactivating an agent cascades through their instances and memory. The cascade runs in a single transaction at every level. Partial cascades are not possible.
 
 *Why:* the canonical recap (Section 13.2 T11) commits that a customer's offboarding is a clean, atomic event. If the cascade left half the customer's resources active, the brokerage's compliance officer cannot in good conscience tell their board "we exited cleanly." Atomicity is the architectural guarantee that makes the customer-facing commitment defensible — and the same guarantee applies whether the offboarding is a whole tenant cancelling, a domain being wound down, or an individual agent leaving.
 
 ### 4.6 Pattern E for secrets
 
+**Triangulation:** Operational prerequisite for **Q6** (rotation on role change). Implements **Step 28** (rotation foundation); rotation runbook lands at **Step 32**. Integrity questions: DRIFTS §3 `D-secret-disclosure-recurrence-2026-05-12`, `D-rotation-procedure-laptop-dependent-2026-05-12`, `D-prod-secrets-pattern-e-unverified-2026-05-09`.
+
 Every secret in production is created, rotated, and deactivated — never deleted. Rotated secrets remain in the secrets store with a deactivated flag and a timestamp.
 
 *Why:* an audit query needs to be able to reconstruct "what credential was active at this moment in the past?" Hard-deleting a rotated secret destroys that ability. Pattern E preserves it.
 
 ### 4.7 Three-layer scope enforcement
+
+**Triangulation:** Answers **Q1** (caller's scope dictates what they can create), **Q2** (dashboard reads bounded by scope), **Q8** (cross-session retriever refuses cross-scope reads). Implements production baseline; extended at **Step 24.5c** (retriever layer) and **Step 31** (dashboard layer); validated by **Step 29**.
 
 A request that asks for cross-scope data must be rejected, and we want that rejection to hold even if one of our defenses fails. So scope is enforced at three independent layers:
 
@@ -542,6 +582,8 @@ This is defense in depth. Each layer alone is sufficient most of the time; toget
 
 ### 4.8 Foundation-model agnosticism
 
+**Triangulation:** Honours Recap **Section 15** (what Luciel deliberately is not — not a wrapper around one model). Implements production baseline.
+
 Luciel calls foundation models through a model-agnostic interface. Switching from one provider to another is a configuration change, not a rewrite.
 
 *Why:* two reasons.
@@ -550,6 +592,8 @@ Luciel calls foundation models through a model-agnostic interface. Switching fro
 2. **Model fitness for purpose.** Different domains and different cognitive abilities (Section 7 of the canonical recap) may be better served by different models. An evaluation framework (roadmap Step 33) is what tells us which model fits which job; agnosticism is what lets us act on the evaluation.
 
 ### 4.9 Design choices we deliberately did not make
+
+**Triangulation:** Each bullet below names the **Q** or **Step** it explicitly does NOT take — read each rejected-alternative as a sibling of the corresponding Recap §11 answer or §12 closing tag. Mirrors Recap **Section 15**.
 
 These are alternatives we considered and rejected. Recording them here prevents them from being rediscovered as "new ideas."
 
