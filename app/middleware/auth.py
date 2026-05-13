@@ -61,6 +61,15 @@ SKIP_AUTH_PATHS = {
     "/openapi.json",
     "/redoc",
     "/api/v1/version",
+    # Step 30a -- subscription billing routes. These are callable by:
+    #   * the marketing site (no api key; relies on cookie or no auth)
+    #   * Stripe (no api key; signature-verified inside the route)
+    #   * the cookied buyer post-login (cookie verified inside the route)
+    # The api-key middleware is the wrong perimeter for any of those
+    # callers, so we exempt the billing namespace here and let each
+    # route enforce its own gate (Stripe signature, cookie validation,
+    # or none for the public-by-design checkout/claim endpoints).
+    "/api/v1/billing",
 }
 
 # Step 31 sub-branch 3: dashboard reads are admin-side observability.
