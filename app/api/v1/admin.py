@@ -47,6 +47,7 @@ from app.services.luciel_instance_service import (
     InstanceNotFoundError,
     LucielInstanceService,
     ParentScopeInactiveError,
+    TierScopeViolationError,
 )
 
 from app.policy.scope import ScopePolicy
@@ -1030,6 +1031,26 @@ def create_luciel_instance(
         target_domain_id=payload.scope_owner_domain_id,
         target_agent_id=payload.scope_owner_agent_id,
     )
+    # Step 30a.1 tier/scope guard. Runs BEFORE create_instance so a 402
+    # short-circuits the parent-scope-active validation (which would
+    # otherwise leak "this tenant exists" details on a denied request).
+    # platform_admin keys bypass tier enforcement -- they create on
+    # behalf of sales-assisted tenants whose subscription model is
+    # different.
+    if not ScopePolicy.is_platform_admin(request):
+        try:
+            service.admin._enforce_tier_scope(
+                tenant_id=payload.scope_owner_tenant_id,
+                requested_scope_level=payload.scope_level,
+            )
+        except TierScopeViolationError as exc:
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "message": str(exc),
+                    "reason": exc.reason,
+                },
+            ) from exc
     try:
         instance = service.create_instance(
             audit_ctx=audit_ctx,

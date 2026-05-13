@@ -1043,3 +1043,91 @@ class AdminService:
             raise
 
         return True
+
+    # ---------------------------------------------------------------
+    # Step 30a.1 — tier/scope guard
+    # ---------------------------------------------------------------
+    #
+    # Called from the POST /admin/luciel-instances route (the ONE
+    # self-serve creation chokepoint) BEFORE LucielInstanceService.
+    # create_instance. Service-layer enforcement is intentional:
+    #
+    #   * the schema layer cannot know the caller's active subscription
+    #     (subscriptions are loaded by tenant_id from a DB lookup);
+    #   * the policy layer (ScopePolicy) checks API-key authority, not
+    #     billing entitlement, and we want those concerns separate.
+    #
+    # Outcomes:
+    #   * tenant has no active subscription → 402 (treated as Individual
+    #     fall-through is too generous; we fail closed here so sales-
+    #     assisted tenants without a subscription row cannot use the
+    #     self-serve route at all -- they should call admin paths instead).
+    #   * requested scope_level not in tier's permitted set → 402
+    #   * tenant already at instance_count_cap → 402
+    #   * otherwise → silent.
+
+    def _enforce_tier_scope(
+        self,
+        *,
+        tenant_id: str,
+        requested_scope_level: str,
+    ) -> None:
+        """Step 30a.1: assert (tenant.active_subscription, requested_scope_level)
+        is a permitted pair AND that the tenant has not exceeded its cap.
+
+        Raises ``TierScopeViolationError`` (mapped to 402 by the route
+        layer). On success returns silently.
+        """
+        # Local imports keep AdminService importable from contexts that
+        # don't have the LucielInstance / Subscription stack loaded.
+        from app.models.subscription import (
+            Subscription,
+            TIER_PERMITTED_SCOPES,
+        )
+        from app.repositories.luciel_instance_repository import (
+            LucielInstanceRepository,
+        )
+        from app.services.luciel_instance_service import TierScopeViolationError
+
+        sub: Subscription | None = (
+            self.db.query(Subscription)
+            .filter(
+                Subscription.tenant_id == tenant_id,
+                Subscription.active.is_(True),
+            )
+            .order_by(Subscription.id.desc())
+            .first()
+        )
+        if sub is None:
+            # No active subscription -- fail closed. Sales-assisted /
+            # manually-provisioned tenants don't hit this path because
+            # they go through admin tooling that bypasses the self-serve
+            # cap; the route layer is the only caller of this guard.
+            raise TierScopeViolationError(
+                f"Tenant {tenant_id!r} has no active subscription; "
+                f"cannot create LucielInstance via self-serve path.",
+                reason=TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION,
+            )
+
+        permitted = TIER_PERMITTED_SCOPES.get(sub.tier, ())
+        if requested_scope_level not in permitted:
+            raise TierScopeViolationError(
+                f"Subscription tier {sub.tier!r} does not permit scope_level="
+                f"{requested_scope_level!r}. Permitted scope levels for this "
+                f"tier: {sorted(permitted)}. Upgrade to a higher tier to "
+                f"create {requested_scope_level}-scope LucielInstances.",
+                reason=TierScopeViolationError.REASON_SCOPE_NOT_PERMITTED,
+            )
+
+        cap = int(sub.instance_count_cap or 0)
+        if cap > 0:
+            used = LucielInstanceRepository(self.db).count_active_for_tenant(tenant_id)
+            if used >= cap:
+                raise TierScopeViolationError(
+                    f"Tenant {tenant_id!r} has reached its instance_count_cap="
+                    f"{cap} (currently {used} active LucielInstances). "
+                    f"Deactivate an existing Luciel or upgrade your tier.",
+                    reason=TierScopeViolationError.REASON_CAP_EXCEEDED,
+                )
+        # else: cap=0 means "unmetered" (used by sales-assisted tenants we
+        # backfill manually). We do not enforce here.

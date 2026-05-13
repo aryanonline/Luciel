@@ -72,6 +72,27 @@ class InstanceNotFoundError(LucielInstanceError):
     maps to 404."""
 
 
+class TierScopeViolationError(LucielInstanceError):
+    """Step 30a.1: raised when a tenant's active subscription tier does
+    NOT permit the requested scope level, or when the tenant has hit
+    its ``instance_count_cap``. Route layer maps to 402 Payment Required
+    so the caller distinguishes \"upgrade your tier\" from a 403
+    (\"this key is not allowed\") or 400 (\"payload is malformed\").
+
+    Two distinct sub-conditions share this error type because they both
+    resolve through the same user action (upgrade tier); the ``reason``
+    attribute and the human message disambiguate.
+    """
+
+    REASON_SCOPE_NOT_PERMITTED = "scope_not_permitted"
+    REASON_CAP_EXCEEDED = "cap_exceeded"
+    REASON_NO_ACTIVE_SUBSCRIPTION = "no_active_subscription"
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 # ---------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------
