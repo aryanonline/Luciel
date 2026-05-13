@@ -734,19 +734,77 @@ def create_embed_key(
                 detail="Domain-scoped key may only mint embed keys within its own domain",
             )
 
-    # Agent-scoped callers cannot mint embed keys at all (embed keys
-    # are tenant- or domain-scoped at v1; per-agent embed keys would
-    # require pinning to a luciel_instance, which is a Step 30c+
-    # follow-up). Refusing here keeps the v1 contract narrow.
+    # Agent-scoped callers cannot mint embed keys (embed keys are
+    # tenant-, domain-, or instance-scoped -- never agent-scoped). The
+    # agent-scope carve-out remains as a guardrail: an agent-bound key
+    # has no need to mint widget credentials.
     caller_agent = getattr(request.state, "agent_id", None)
     if caller_agent and not ScopePolicy.is_platform_admin(request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "Agent-scoped keys cannot mint embed keys at v1. "
-                "Use a tenant- or domain-scoped admin key."
+                "Agent-scoped keys cannot mint embed keys. Use a "
+                "tenant- or domain-scoped admin key (or the customer's "
+                "cookied dashboard session)."
             ),
         )
+
+    # Step 31.2 commit B: lift the v1 luciel_instance_id carve-out.
+    # When the caller passes luciel_instance_id, validate the instance
+    # belongs to the same tenant (+ domain, if domain-scoped) as the
+    # key being minted. Without this check a tenant-admin could mint
+    # an embed key pinned to another tenant's instance, which would
+    # silently cross the scope boundary at chat time.
+    if payload.luciel_instance_id is not None:
+        from app.repositories.luciel_instance_repository import (
+            LucielInstanceRepository,
+        )
+        instance_repo = LucielInstanceRepository(db)
+        instance = instance_repo.get_by_pk(payload.luciel_instance_id)
+        if instance is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"Luciel instance pk={payload.luciel_instance_id} "
+                    "not found."
+                ),
+            )
+        if instance.scope_owner_tenant_id != payload.tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Luciel instance belongs to a different tenant. "
+                    "Embed keys may only pin instances within their own "
+                    "tenant scope."
+                ),
+            )
+        # When the embed key is domain-scoped, the instance must either
+        # match that domain or be tenant-wide (domain=NULL). When the
+        # embed key is tenant-wide, ANY instance under the tenant is
+        # acceptable; chat-time resolution will use the instance's own
+        # domain context.
+        if (
+            payload.domain_id is not None
+            and instance.scope_owner_domain_id is not None
+            and instance.scope_owner_domain_id != payload.domain_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Luciel instance belongs to a different domain. "
+                    "A domain-scoped embed key may only pin instances "
+                    "in its own domain (or tenant-wide instances)."
+                ),
+            )
+        if not instance.active:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Luciel instance is inactive (soft-deleted). Mint "
+                    "the embed key against an active instance, or "
+                    "reactivate this instance first."
+                ),
+            )
 
     # --- Scope-prompt preflight (Step 30d Deliverable A) ------------
     # For domain-scoped mints, verify the target domain_configs row
@@ -799,7 +857,7 @@ def create_embed_key(
         tenant_id=payload.tenant_id,
         domain_id=payload.domain_id,
         agent_id=None,
-        luciel_instance_id=None,
+        luciel_instance_id=payload.luciel_instance_id,
         display_name=payload.display_name,
         # Server-set: the schema does not accept these from the client.
         permissions=["chat"],

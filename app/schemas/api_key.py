@@ -267,11 +267,18 @@ class EmbedKeyCreate(BaseModel):
 
     Notice what is NOT in this schema: ``key_kind`` (server forces
     'embed'), ``permissions`` (server forces ['chat']), ``rate_limit``
-    (admin-key per-day cap, irrelevant to embed keys), ``agent_id`` and
-    ``luciel_instance_id`` (embed keys are tenant- or domain-scoped at
-    v1; per-Luciel pinning lands in a later step). The narrowness of
-    the request surface is the point: the operator chooses where the
-    key applies and how it brands, never what credential class it is.
+    (admin-key per-day cap, irrelevant to embed keys), ``agent_id``
+    (embed keys are tenant-, domain-, or instance-scoped -- never
+    agent-scoped at v1). The narrowness of the request surface is the
+    point: the operator chooses where the key applies and how it
+    brands, never what credential class it is.
+
+    Step 31.2 commit B: ``luciel_instance_id`` is now accepted. When
+    set, the embed key resolves chat to that specific Luciel instance
+    (its system prompt, tools, knowledge base, provider). When NULL,
+    chat falls back to tenant/domain defaults as before. The instance
+    MUST belong to the same tenant (+ domain if domain-scoped) as the
+    key; the route validates this before mint.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -292,6 +299,19 @@ class EmbedKeyCreate(BaseModel):
         description=(
             "Optional. When set, the key only resolves chat for that "
             "domain within the tenant."
+        ),
+    )
+    luciel_instance_id: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional. When set, the embed key pins chat resolution "
+            "to a specific Luciel instance (its system prompt, tools, "
+            "knowledge base). When NULL, the key resolves to the "
+            "tenant or domain default. The route validates that the "
+            "instance belongs to the same tenant (+ domain if domain-"
+            "scoped) before minting. Step 31.2 commit B lifted the "
+            "v1 carve-out that previously rejected this field."
         ),
     )
     display_name: str = Field(
@@ -400,8 +420,10 @@ class EmbedKeyRead(BaseModel):
     """Read-side projection of an embed key.
 
     Distinct from ApiKeyRead because the embed-key shape exposes the
-    four widget columns and omits agent_id / luciel_instance_id which
-    are always NULL on embed keys at v1.
+    four widget columns. ``agent_id`` is always NULL on embed keys at
+    v1 (the issuance route rejects it). ``luciel_instance_id`` MAY be
+    set per Step 31.2 commit B; we surface it on the read so the UI
+    can show 'this key is pinned to instance X'.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -410,6 +432,7 @@ class EmbedKeyRead(BaseModel):
     key_prefix: str
     tenant_id: str
     domain_id: str | None
+    luciel_instance_id: int | None
     display_name: str
     key_kind: str
     allowed_origins: list[str]

@@ -27,6 +27,7 @@ from slowapi.errors import RateLimitExceeded
 from app.api.router import api_router
 from app.core.config import settings
 from app.middleware.auth import ApiKeyAuthMiddleware
+from app.middleware.session_cookie_auth import SessionCookieAuthMiddleware
 from app.middleware.rate_limit import (
     limiter,
     rate_limit_exceeded_handler,
@@ -66,8 +67,21 @@ app.state.limiter = limiter
 # Register the clean 429 handler for normal rate limit violations
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
-# Add API key authentication middleware
+# Middleware mount order:
+#   - Starlette/FastAPI runs LAST-ADDED OUTERMOST, so the request
+#     dispatch order on the way in is the REVERSE of the add order.
+#   - We want: RateLimitFallback (outermost) -> SessionCookieAuth ->
+#     ApiKeyAuth -> route. That requires the ADD order below.
+#
+# Step 31.2 commit A: SessionCookieAuthMiddleware bridges the Step 30a
+# session cookie into request.state on /api/v1/admin/* and
+# /api/v1/dashboard/*, tagging the request with auth_method="cookie".
+# When ApiKeyAuthMiddleware runs after it, it checks that tag and
+# short-circuits if cookie auth already populated state. Cookie auth
+# falls through silently for non-cookied requests, preserving the
+# existing API-key contract for every server-to-server caller.
 app.add_middleware(ApiKeyAuthMiddleware)
+app.add_middleware(SessionCookieAuthMiddleware)
 
 # Add the fallback middleware — catches Redis outages and fails open
 RateLimitFallbackMiddleware = create_rate_limit_middleware()
