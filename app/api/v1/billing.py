@@ -1,6 +1,6 @@
 """Step 30a: billing API routes.
 
-Public surface for the self-serve subscription flow. Six routes:
+Public surface for the self-serve subscription flow. Seven routes:
 
   POST /api/v1/billing/checkout           -- create a Stripe Checkout session
   POST /api/v1/billing/webhook            -- Stripe webhook receiver
@@ -8,6 +8,7 @@ Public surface for the self-serve subscription flow. Six routes:
   GET  /api/v1/billing/login              -- exchange magic-link token for cookie
   POST /api/v1/billing/portal             -- Stripe Customer Portal session
   GET  /api/v1/billing/me                 -- read current subscription state
+  POST /api/v1/billing/logout             -- clear the session cookie
 
 Auth model:
 
@@ -16,10 +17,16 @@ Auth model:
     /checkout + /onboarding/claim are public-by-design (the marketing site
     calls them anonymously).
   * /portal, /me -- require the session cookie minted by /login.
+  * /logout -- idempotent and credential-free; safe to call when already
+    logged out (clears the cookie if present).
 
 All routes return 501 when Stripe is not configured (empty
-``stripe_secret_key`` etc.). That keeps CI / dev environments boot-safe
-without needing the billing surface live.
+``stripe_secret_key`` etc.) for the routes that talk to Stripe. That keeps
+CI / dev environments boot-safe without needing the billing surface live.
+
+Full architecture: see docs/ARCHITECTURE.md §3.2.13 (Billing surface).
+Roadmap row: docs/CANONICAL_RECAP.md §12 Step 30a (closing tag
+`step-30a-subscription-billing-complete`).
 """
 from __future__ import annotations
 
