@@ -289,7 +289,7 @@ end-to-end.
 # 4.A.1 Run the migrate task with a no-op command that just opens a
 #       connection to RDS and exits. The task definition already has
 #       /luciel/database-url wired into DATABASE_URL.
-$cluster = "luciel-prod"   # confirm via: aws ecs list-clusters
+$cluster = "luciel-cluster"   # confirm via: aws ecs list-clusters
 $migrateTd = aws ecs describe-task-definition `
   --task-definition luciel-backend-migrate `
   --query "taskDefinition.taskDefinitionArn" --output text
