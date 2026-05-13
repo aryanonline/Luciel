@@ -627,7 +627,7 @@ The two important things this diagram shows:
 - Surgical edits only. When a design decision changes, update the relevant section in place and log the prior decision in `DRIFTS.md`.
 - When the repository catches up to a section, an implementation marker is added to that section (per the marker scheme adopted in `DRIFTS.md` Phase 2).
 - No version-history sediment. The document reflects the current design.
-- One source of truth per fact. If a fact appears in two sections, delete one.
+- One source of truth per fact **within this document**. If a fact appears in two sections of `ARCHITECTURE.md`, delete one. (This rule is scoped to a single document. Across `ARCHITECTURE.md`, `CANONICAL_RECAP.md`, and `DRIFTS.md`, the same fact stated from each document's own angle is the **triangulation discipline** — see Section 8 and `DRIFTS.md` §8 — and is required, not duplicated.)
 - The diagrams are part of the design, not decoration. When a diagram disagrees with the prose, both are wrong until they agree.
 
 ---
@@ -635,3 +635,23 @@ The two important things this diagram shows:
 ## Section 7 — Source-of-truth rule
 
 If a chat summary, a session recap, a slide, or any other artifact contradicts this document, **this document wins**. Update the document; do not produce contradicting versions in flight.
+
+---
+
+## Section 8 — Triangulation discipline (three-document doctrine)
+
+Luciel's design is held by three documents — `CANONICAL_RECAP.md` (the **business view**), this document (`ARCHITECTURE.md`, the **system view**), and `DRIFTS.md` (the **integrity / audit view**). Each is an independent substantive view of the same business from a different angle, and each must be readable cold on its own.
+
+**Why this section exists in the architecture document.** Design-document discipline is part of the system's integrity surface. A system that claims scope-bounded access, audit-logged write paths, and honest divergence-tracking only deserves that claim if the design documents themselves are held with the same discipline. A reviewer who finds the documents contradicting each other, going stale on closing commits, or being deduplicated into pointers has found a defect in the system's integrity surface — not a documentation problem. That is why the doctrine is pinned here, not only in `DRIFTS.md`.
+
+**The doctrine, stated from the system-design angle:**
+
+- This document is the **system view**: how the two environments, the components, the cross-cutting properties (scope, identity, audit, secrets, isolation, observability), and the conceptual model fit together to deliver what `CANONICAL_RECAP.md` says Luciel is. Its implementation markers (✅ / 🔧 / 📋 / 🔬) connect each substantive claim to a known state, and the gaps are tracked in `DRIFTS.md`.
+- A design change is not landed until all three documents reflect it. A new architectural property added here must have a business reason traceable to `CANONICAL_RECAP.md` and, if it represents a divergence from prior design, a closing drift entry in `DRIFTS.md` §5 with the closing commit and tag. A marker flipped here must correspond to a closed drift (✅) or remain accurate (🔧 / 📋 / 🔬).
+- Redundancy across the three documents is **feature, not bug**. The cross-cutting property of scope-bounded access, for example, is stated as a business commitment in `CANONICAL_RECAP.md` §10, as a system mechanism in this document's §4, and as a series of closed drifts (🔧 → ✅ progression on widget identity, embed-key denial, dashboard scope filtering) in `DRIFTS.md` §5. That triangulation is what makes the property defensible to a security reviewer. We do not collapse it into one place.
+- The intra-document rule — "one source of truth per fact within this document" (§6) — still applies inside this doc to prevent the same mechanism being described in two sections. The cross-document rule is the opposite: triangulate.
+- When the three documents contradict each other on a system fact ("recap says X, architecture says Y, prod actually does Z"), the contradiction is logged as a drift in `DRIFTS.md` §3 and resolved in a single commit that closes the drift.
+
+**Volume.** This document will grow as the system grows, and so will the other two. A reader who finds the same property stated in the business view, the system view, and the integrity view is reading the triangulation working correctly, not reading sediment. Volume itself is not a failure mode; contradiction, unreachability, and staleness are.
+
+The canonical statement of this doctrine, including its failure modes and the worked Step 31 example, is in `DRIFTS.md` §8. The business-view mirror is `CANONICAL_RECAP.md` §18. This section is the system-view mirror; all three are substantive by design.

@@ -293,4 +293,22 @@ If a chat summary, a session recap, a slide, or a pitch contradicts this documen
 - This document is business and product only. Code and infrastructure detail belong in `ARCHITECTURE.md`. Open and resolved deviations belong in `DRIFTS.md`.
 - Surgical edits only. When a strategic question moves status, update Section 11. When a roadmap step lands, update Section 12. When an end-to-end scenario passes for the first time in production, update Section 13. When a price changes or a tier is added, update Section 14.
 - No version-history sediment. The document reflects current state. Past state is in git and in `DRIFTS.md`.
-- One source of truth per fact. If a fact appears in two sections, delete one.
+- One source of truth per fact **within this document**. If a fact appears in two sections of `CANONICAL_RECAP.md`, delete one. (This rule is scoped to a single document. Across `CANONICAL_RECAP.md`, `ARCHITECTURE.md`, and `DRIFTS.md`, the same fact stated from each document's own angle is the **triangulation discipline** — see Section 18 and `DRIFTS.md` §8 — and is required, not duplicated.)
+
+---
+
+## Section 18 — Triangulation discipline (three-document doctrine)
+
+Luciel's design is held by three documents — this one (`CANONICAL_RECAP.md`, the **business view**), `ARCHITECTURE.md` (the **system view**), and `DRIFTS.md` (the **integrity / audit view**). Each is an independent substantive view of the same business from a different angle, and each must be readable cold on its own.
+
+As a business, we hold the design this way because the three views answer three different questions a serious counterparty will ask: a customer or advisor reading this document wants to know what Luciel is and what success looks like; a senior engineer or security reviewer reading `ARCHITECTURE.md` wants to know how it is built to deliver that; an investor, acquirer, or auditor reading `DRIFTS.md` wants to know whether we run the project with intellectual honesty when reality diverges from design. Any one of the three should be sufficient for its reader; the other two corroborate.
+
+**The doctrine, stated as a business commitment:**
+
+- A roadmap step is not closed until all three documents reflect the closure from their own angle. A recap row update without an architecture marker update without a drift closure entry is an incomplete close.
+- Redundancy across the three documents is **feature, not bug**. The same fact stated in the business view, the system view, and the integrity view — each in that document's voice — is the triangulation working. We do not collapse substantive facts in two docs into a pointer in one; volume across the three is the cost of having a real audit story.
+- The intra-document rule — "one source of truth per fact within this document" — still applies inside each doc. The cross-document rule is the opposite: triangulate.
+- When the three documents contradict each other on a fact, that contradiction is itself logged as a drift in `DRIFTS.md` §3 and fixed in a single commit that closes the drift.
+
+The canonical statement of this doctrine, including its failure modes and the worked Step 31 example, is in `DRIFTS.md` §8. This section is the business-view mirror of that doctrine; both are substantive by design.
+

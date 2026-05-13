@@ -499,3 +499,32 @@ Closed drifts are kept here permanently with a strikethrough heading. The closin
 ## Section 7 — Source-of-truth rule
 
 If a chat summary, a session recap, a slide, an email, or any other artifact contradicts this document about the status of a drift, **this document wins**. Update the document; do not let the contradicting artifact stand.
+
+---
+
+## Section 8 — Triangulation discipline (three-document doctrine)
+
+**This section is the canonical record of how the three design documents relate to each other.** It is pinned here because doctrine drift — the slow erosion of how we use our own documents — is itself the most dangerous kind of drift, and it belongs in the integrity register.
+
+**The three documents.** Luciel's design is held by three documents, each a complete and independent substantive view of the same business from a different angle:
+
+- **`CANONICAL_RECAP.md` — the business view.** What Luciel is, what it deliberately is not, who it is for, how it speaks, what success looks like, what the roadmap is, what is done, what is next, how it makes money. Readable cold by a founder, an advisor, an investor, or a thoughtful customer.
+- **`ARCHITECTURE.md` — the system view.** How Luciel is built to deliver the business — the two environments, the components, the cross-cutting properties (scope, identity, audit, secrets, isolation, observability), the conceptual model, and the implementation markers for each substantive claim. Readable cold by a senior engineer, a security reviewer, or a future hire.
+- **`DRIFTS.md` — the integrity / audit view.** Every divergence between design and reality, every breach of doctrine, every honest "we said X, actually Y" — open, production-pending, closed, with closing commits and tags. Readable cold by anyone doing due diligence on whether the project is being run with intellectual honesty.
+
+**Each must be readable cold on its own.** A reader who picks up any one of the three and reads only that document must come away with a coherent, complete picture of what that document is responsible for. They should not need to chase pointers into the other two to understand the section they are reading. This is the test.
+
+**Closing commits update all three together.** A roadmap-step closure, a drift closure, or a design lock is not finished until all three documents reflect it from their own angle — recap row updated (business view), architecture marker flipped or section added (system view), drift entry moved to §5 with strikethrough + closing commit + tag (integrity view). The doctrine that keeps the triangle taut is: **if a closing commit touches only one or two of the three docs, the close is incomplete.**
+
+**Redundancy across the three is FEATURE, not bug.** When the same fact appears in two or three of the documents stated in each document's own voice, that is the triangulation working correctly. The audit-story integrity of this project — the property that a reviewer can pick any one of the three docs, cross-check against the other two, and find them corroborating rather than contradicting — comes from exactly this redundancy. **Never collapse a substantive fact in two docs into a pointer in one.** The temptation to do so ("the docs are getting big, let's deduplicate") must be resisted; the three-angle reading IS the integrity.
+
+**The intra-document "one source per fact" rule still holds.** `CANONICAL_RECAP.md` §17 and `ARCHITECTURE.md` §6 each say "one source of truth per fact" — those rules are scoped **within a single document** and prevent a fact from being stated twice inside the same doc. They do not apply across documents. Across the three, redundancy is required.
+
+**Failure modes of the triangle.**
+
+- **Contradiction.** Two docs disagree about the same fact. This is logged as a new drift in §3, with the contradiction stated plainly, and the resolution is to fix one or both docs in a single commit that also closes the drift.
+- **Unreachability.** A closing commit touches one or two docs but not all three. Fix immediately in a follow-up commit; do not let the asymmetry stand overnight. The Step 31 doc-truthing arc (PRs #38, #39, this PR) is the canonical example: Step 31 closed in code at PR #28, but the docs only caught up across PRs #36→#39 as we found each missed angle.
+- **Staleness.** A marker that should have flipped on a closing commit but didn't. Example from this arc: the Q2 strategic-question marker in `CANONICAL_RECAP.md` §11 stayed "📋 Planned (Step 31)" through PRs #36, #37, and #38 even though Step 31 had landed; it was caught on user review and flipped in PR #39. The lesson: marker propagation is part of the closing commit, not a follow-up.
+- **Volume.** Volume itself is **not** a failure mode. The documents will grow. A reader who finds the same fact stated from three angles is reading the triangulation working; they are not reading sediment.
+
+**This doctrine is mirrored.** A substantive (not pointer-only) statement of this same triangulation discipline appears in `CANONICAL_RECAP.md` §18 (business-view framing: why we hold the design this way as a business) and in `ARCHITECTURE.md` §8 (system-view framing: why design-document discipline is part of the system's integrity surface). The doctrine itself triangulates. Reading any one of the three is sufficient; reading all three is the proof.
