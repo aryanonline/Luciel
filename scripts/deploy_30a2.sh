@@ -41,7 +41,12 @@ set -euo pipefail
 
 AWS_REGION="ca-central-1"
 ACCOUNT_ID="729005488042"
-ECR_REPO="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/luciel"
+# ECR repo name confirmed via `aws ecr describe-repositories` on 2026-05-14:
+# actual repo is `luciel-backend` (singular), not `luciel`. Earlier deploy
+# scripts (deploy_27c.sh) still reference `/luciel` -- they worked only
+# because the image was already pushed from a prior build. Source of truth
+# is the live AWS API.
+ECR_REPO="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/luciel-backend"
 CLUSTER="luciel-cluster"
 WEB_SERVICE="luciel-backend-service"
 WORKER_SERVICE="luciel-worker-service"
@@ -82,7 +87,7 @@ aws ecr get-login-password --region "${AWS_REGION}" \
 docker push "${IMAGE}"
 
 DIGEST="$(aws ecr describe-images \
-  --repository-name luciel \
+  --repository-name luciel-backend \
   --image-ids imageTag="${TAG}" \
   --region "${AWS_REGION}" \
   --query 'imageDetails[0].imageDigest' --output text)"
