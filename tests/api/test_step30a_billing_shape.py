@@ -431,6 +431,109 @@ class TestBillingWebhookDispatch:
             "checkout.session.completed must call OnboardingService.onboard_tenant"
         )
 
+    def test_period_helper_defined(self):
+        # Stripe API 2025-03-31.basil moved current_period_{start,end}
+        # from the Subscription top level to items.data[0]. The webhook
+        # service must expose a single read-site for these fields so
+        # both call sites stay in lock-step. See
+        # D-stripe-subscription-period-fields-moved-to-items-2026-05-14.
+        src = self.WEBHOOK_PATH.read_text()
+        assert "def _extract_period_fields" in src, (
+            "billing_webhook_service.py must define _extract_period_fields"
+        )
+
+    def test_period_helper_invoked_at_both_call_sites(self):
+        # The helper is only valuable if every read-site uses it. The
+        # subscription.updated handler is the load-bearing one; the
+        # checkout.session.completed handler is cosmetic (Subscription
+        # row gets overwritten by the very next subscription.updated)
+        # but we want both on the same code path to prevent shape drift.
+        src = self.WEBHOOK_PATH.read_text()
+        call_count = src.count("self._extract_period_fields(")
+        assert call_count >= 2, (
+            f"expected _extract_period_fields invoked at >=2 sites, found {call_count}"
+        )
+
+
+# ---------------------------------------------------------------------
+# 7b. Period-fields helper — basil/dahlia payload shape support
+# ---------------------------------------------------------------------
+
+class TestPeriodFieldsBasilSupport:
+    """Behavioral tests for BillingWebhookService._extract_period_fields.
+
+    The helper is a pure ``@staticmethod`` with no model / SQLAlchemy /
+    Stripe-SDK touchpoints, so we extract its source via AST and exec
+    it in an isolated namespace. This keeps the file's "AST + import
+    only — no Postgres, no FastAPI runtime, no Stripe network" pact
+    (see module docstring) while still pinning the basil-shape decision.
+    """
+
+    WEBHOOK_PATH = REPO_ROOT / "app" / "services" / "billing_webhook_service.py"
+
+    @pytest.fixture(scope="class")
+    def extract_period_fields(self):
+        tree = ast.parse(self.WEBHOOK_PATH.read_text())
+        fn_node = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "_extract_period_fields"
+            ):
+                fn_node = node
+                break
+        assert fn_node is not None, (
+            "_extract_period_fields must be defined in billing_webhook_service.py"
+        )
+        # Strip the @staticmethod decorator so the function body is
+        # callable as a plain module-level function.
+        fn_node.decorator_list = []
+        module = ast.Module(body=[fn_node], type_ignores=[])
+        ns: dict = {}
+        exec(compile(module, str(self.WEBHOOK_PATH), "exec"), ns)
+        return ns["_extract_period_fields"]
+
+    def test_basil_shape_reads_from_items(self, extract_period_fields):
+        # Stripe 2025-03-31.basil and later (including the account's
+        # current 2026-04-22.dahlia) deliver period fields at items[0].
+        payload = {
+            "items": {
+                "data": [
+                    {
+                        "current_period_start": 1_747_000_000,
+                        "current_period_end": 1_749_678_400,
+                        "price": {"id": "price_test"},
+                    }
+                ]
+            },
+            # Pre-basil top-level fields are absent on dahlia payloads.
+        }
+        start, end = extract_period_fields(payload)
+        assert start == 1_747_000_000
+        assert end == 1_749_678_400
+
+    def test_pre_basil_shape_falls_back_to_top_level(self, extract_period_fields):
+        # Defensive: replay of an archived pre-basil event, or a
+        # subscription payload that for any reason has no items array,
+        # must still resolve via the top-level fields.
+        payload = {
+            "current_period_start": 1_700_000_000,
+            "current_period_end": 1_702_678_400,
+        }
+        start, end = extract_period_fields(payload)
+        assert start == 1_700_000_000
+        assert end == 1_702_678_400
+
+    def test_empty_items_returns_none_pair(self, extract_period_fields):
+        # checkout.session.completed and similar non-subscription
+        # payloads have neither items[0] nor top-level period fields.
+        # The caller wraps the result with _ts(...) which tolerates
+        # None, so (None, None) is the safe contract.
+        for payload in ({}, {"items": {"data": []}}, {"items": {}}):
+            start, end = extract_period_fields(payload)
+            assert start is None
+            assert end is None
+
 
 # ---------------------------------------------------------------------
 # 8. Stripe client surface — what the rest of the code imports

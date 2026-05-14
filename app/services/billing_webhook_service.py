@@ -297,6 +297,13 @@ class BillingWebhookService:
 
             # Now write the Subscription row + its audit row.
             now_iso = datetime.now(timezone.utc).isoformat()
+            # Period fields live on subscription items in Stripe basil
+            # (2025-03-31) and later. They have never lived on the
+            # checkout.session object, so both reads return None here --
+            # subscription.updated backfills them. Helper kept for read-
+            # site uniformity with the load-bearing _on_subscription_updated
+            # path. See D-stripe-subscription-period-fields-moved-to-items-2026-05-14.
+            _period_start, _period_end = self._extract_period_fields(data_object)
             sub = Subscription(
                 tenant_id=tenant_id,
                 user_id=user.id,
@@ -309,8 +316,8 @@ class BillingWebhookService:
                 # Step 30a.1: new columns from webhook metadata + per-tier defaults.
                 billing_cadence=billing_cadence,
                 instance_count_cap=instance_count_cap,
-                current_period_start=_ts(data_object.get("current_period_start")),
-                current_period_end=_ts(data_object.get("current_period_end")),
+                current_period_start=_ts(_period_start),
+                current_period_end=_ts(_period_end),
                 trial_end=_ts(data_object.get("trial_end")),
                 cancel_at_period_end=bool(data_object.get("cancel_at_period_end") or False),
                 canceled_at=_ts(data_object.get("canceled_at")),
@@ -441,8 +448,15 @@ class BillingWebhookService:
         }
 
         sub.status = data_object.get("status") or sub.status
-        sub.current_period_start = _ts(data_object.get("current_period_start")) or sub.current_period_start
-        sub.current_period_end = _ts(data_object.get("current_period_end")) or sub.current_period_end
+        # Period fields moved from subscription-level to subscription-item-level
+        # in Stripe API version 2025-03-31.basil; the account's resolved API
+        # version on webhook delivery is what determines payload shape. The
+        # _extract_period_fields helper reads items[0] first, falls back to
+        # the old top-level fields. See D-stripe-subscription-period-fields-
+        # moved-to-items-2026-05-14.
+        _period_start, _period_end = self._extract_period_fields(data_object)
+        sub.current_period_start = _ts(_period_start) or sub.current_period_start
+        sub.current_period_end = _ts(_period_end) or sub.current_period_end
         sub.trial_end = _ts(data_object.get("trial_end")) or sub.trial_end
         sub.cancel_at_period_end = bool(data_object.get("cancel_at_period_end") or False)
         sub.canceled_at = _ts(data_object.get("canceled_at")) or sub.canceled_at
@@ -688,3 +702,42 @@ class BillingWebhookService:
         # checkout.session shape -- no items inline; we fall back to
         # the configured price (Step 30a is single-SKU).
         return settings.stripe_price_individual or None
+
+    @staticmethod
+    def _extract_period_fields(
+        data_object: dict,
+    ) -> tuple[int | None, int | None]:
+        """Pull current_period_{start,end} from a Stripe subscription payload.
+
+        Stripe API version 2025-03-31.basil moved these fields from the
+        top level of the Subscription resource to per-subscription-item
+        (`items.data[0].current_period_*`). The account's resolved API
+        version on webhook delivery is what determines the payload
+        shape, regardless of any `stripe.api_version` pin in the SDK.
+
+        We read items-level first (basil and later) and fall back to
+        the top-level fields (pre-basil), so the handler is correct
+        under either shape. For multi-item subscriptions (not Step 30a
+        v1, where each subscription has exactly one item), the first
+        item's period defines the subscription's period -- this matches
+        Stripe's documented guidance for the single-item case and is
+        the safest default for a hypothetical mixed-interval future.
+
+        Returns a tuple of unix-epoch ints (or Nones). The caller wraps
+        each value with ``_ts(...)`` to produce a ``datetime | None``.
+
+        See D-stripe-subscription-period-fields-moved-to-items-2026-05-14.
+        """
+        items = (data_object.get("items") or {}).get("data") or []
+        if items:
+            item0 = items[0] or {}
+            start = item0.get("current_period_start")
+            end = item0.get("current_period_end")
+            if start is not None or end is not None:
+                return start, end
+        # Pre-basil fallback (or non-subscription payloads like
+        # checkout.session, where both reads are None by design).
+        return (
+            data_object.get("current_period_start"),
+            data_object.get("current_period_end"),
+        )
