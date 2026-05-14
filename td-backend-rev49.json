@@ -1,0 +1,132 @@
+{
+    "containerDefinitions": [
+        {
+            "name": "luciel-backend",
+            "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend:step30a2-e8f6c5f-r3",
+            "cpu": 0,
+            "portMappings": [
+                {
+                    "containerPort": 8000,
+                    "hostPort": 8000,
+                    "protocol": "tcp",
+                    "name": "luciel-backend-8000-tcp"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "MEMORY_EXTRACTION_ASYNC",
+                    "value": "true"
+                },
+                {
+                    "name": "CELERY_BROKER_URL",
+                    "value": "sqs://"
+                },
+                {
+                    "name": "AWS_REGION",
+                    "value": "ca-central-1"
+                },
+                {
+                    "name": "SESSION_COOKIE_DOMAIN",
+                    "value": "vantagemind.ai"
+                },
+                {
+                    "name": "MARKETING_SITE_URL",
+                    "value": "https://www.vantagemind.ai"
+                },
+                {
+                    "name": "BILLING_SUCCESS_URL",
+                    "value": "https://www.vantagemind.ai/account/billing?status=success"
+                },
+                {
+                    "name": "BILLING_CANCEL_URL",
+                    "value": "https://www.vantagemind.ai/pricing?status=cancelled"
+                }
+            ],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "secrets": [
+                {
+                    "name": "ANTHROPIC_API_KEY",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/anthropic-api-key"
+                },
+                {
+                    "name": "DATABASE_URL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/database-url"
+                },
+                {
+                    "name": "MAGIC_LINK_SECRET",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/magic_link_secret"
+                },
+                {
+                    "name": "OPENAI_API_KEY",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/openai-api-key"
+                },
+                {
+                    "name": "REDIS_URL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/REDIS_URL"
+                },
+                {
+                    "name": "STRIPE_PRICE_COMPANY_ANNUAL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_price_company_annual"
+                },
+                {
+                    "name": "STRIPE_PRICE_COMPANY_MONTHLY",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_price_company_monthly"
+                },
+                {
+                    "name": "STRIPE_PRICE_INDIVIDUAL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_price_individual"
+                },
+                {
+                    "name": "STRIPE_PRICE_INDIVIDUAL_ANNUAL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_price_individual_annual"
+                },
+                {
+                    "name": "STRIPE_PRICE_INTRO_FEE",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_price_intro_fee"
+                },
+                {
+                    "name": "STRIPE_PRICE_TEAM_ANNUAL",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_price_team_annual"
+                },
+                {
+                    "name": "STRIPE_PRICE_TEAM_MONTHLY",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_price_team_monthly"
+                },
+                {
+                    "name": "STRIPE_SECRET_KEY",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_secret_key"
+                },
+                {
+                    "name": "STRIPE_WEBHOOK_SECRET",
+                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_webhook_secret"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/luciel-backend",
+                    "awslogs-region": "ca-central-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            },
+            "systemControls": []
+        }
+    ],
+    "family": "luciel-backend",
+    "taskRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-web-role",
+    "executionRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-execution-role",
+    "networkMode": "awsvpc",
+    "volumes": [],
+    "placementConstraints": [],
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "512",
+    "memory": "1024"
+}
