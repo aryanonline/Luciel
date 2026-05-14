@@ -12,7 +12,9 @@ for enterprise-grade auditability.
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, String, Text, Integer
+from datetime import datetime
+
+from sqlalchemy import JSON, Boolean, DateTime, String, Text, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -62,6 +64,21 @@ class TenantConfig(Base, TimestampMixin):
 
     # Whether this tenant is currently active.
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Step 30a.2 — deactivation timestamp for retention worker.
+    # Stamped by admin_service.deactivate_tenant_with_cascade in the
+    # same UPDATE that flips active=false. Read by the nightly Celery
+    # beat job (app.worker.tasks.retention.run_retention_purge) to
+    # compute the 90-day hard-purge cutoff. NULL on rows that have
+    # never been deactivated (the vast majority); NULL also on rows
+    # deactivated before Step 30a.2 — those tenants are intentionally
+    # excluded from automated purge until next deactivation. See
+    # ARCHITECTURE §3.2.13 (cascade extension) and the Step 30a.2
+    # design plan §2.
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     # --- Audit fields ---
     # Who created this config. Could be an admin user ID or "system".

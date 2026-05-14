@@ -148,6 +148,18 @@ class Conversation(Base):
         server_default=text("true"),
     )
 
+    # Step 30a.2: stamped alongside active=false during tenant cascade
+    # (admin_service.deactivate_tenant_with_cascade). Symmetric with
+    # tenant_configs.deactivated_at and identity_claims.deactivated_at.
+    # NULL on all rows that have never been deactivated (the vast
+    # majority). Currently load-bearing only for future per-conversation
+    # retention queries; the retention worker scans at tenant_configs
+    # granularity. See ARCHITECTURE §3.2.13 (cascade extension).
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

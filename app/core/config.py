@@ -187,15 +187,26 @@ class Settings(BaseSettings):
     stripe_price_team_annual: str = ""
     stripe_price_company_monthly: str = ""
     stripe_price_company_annual: str = ""
+    # --- Step 30a.2: one-time $100 CAD intro fee Price. ---
+    # Used by BillingService when the buyer's email is first-time-ever
+    # (see ``BillingService.is_first_time_customer``). Decoupled from the
+    # six recurring Price IDs because it is a Stripe Price with
+    # ``type=one_time`` rather than ``recurring`` — the same Price ID is
+    # appended as a SECOND line_item alongside whichever (tier, cadence)
+    # recurring Price the buyer is signing up for. Empty default keeps
+    # boot safe: a missing slot causes /billing/checkout to 501 for
+    # first-time buyers only; repeat customers (who skip the intro fee)
+    # continue to work even if this slot is unconfigured.
+    stripe_price_intro_fee: str = ""
     billing_success_url: str = "https://luciel.ai/onboarding?session_id={CHECKOUT_SESSION_ID}"
     billing_cancel_url: str = "https://luciel.ai/pricing?cancelled=1"
-    # billing_trial_days: legacy Step 30a single-value default. Step 30a.1
-    # introduces a (tier, cadence) -> trial_days lookup in BillingService
-    # (TRIAL_DAYS constant). This setting now only governs the v1
-    # Individual-monthly fallback for backward compatibility; the new
-    # tier-aware path overrides it when the (tier, cadence) pair is in
-    # TRIAL_DAYS.
-    billing_trial_days: int = 14
+    # billing_trial_days: legacy Step 30a single-value default. Step 30a.2
+    # superseded the free-trial model entirely with a uniform paid intro
+    # (INTRO_TRIAL_DAYS=90 + $100 intro fee, see app/services/billing_service.py).
+    # ``resolve_trial_days`` is now a no-op shim that always returns 0.
+    # This setting is preserved for back-compat with any external scripts
+    # that read it, but the application code path no longer consults it.
+    billing_trial_days: int = 0
 
     # --- Magic-link email auth (Step 30a) ---
     #

@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -78,26 +78,36 @@ PRICE_ID_KEY: dict[tuple[str, str], str] = {
 
 
 # ---------------------------------------------------------------------
-# Step 30a.1: (tier, cadence) → trial_period_days.
+# Step 30a.2: paid-intro trial replaces per-(tier,cadence) free trial.
 #
-# Per design doc §2:
-#   - Individual monthly: 14d (unchanged from Step 30a).
-#   - Team monthly:        7d.
-#   - Company monthly:     7d.
-#   - All annual cadences: 0d (no trial on a prepay commitment).
+# Design decision (locked 2026-05-14): every primitive — all 6
+# (tier, cadence) pairs, monthly AND annual — receives the SAME 90-day
+# trial gated on a single one-time $100 CAD intro fee charged at
+# checkout. Rationale:
 #
-# The webhook reads these onto Stripe's ``subscription_data.trial_period_days``
-# at Checkout-session creation time.
+#   * a paid trial filters tire-kickers (the 14-day free trial in
+#     Step 30a.1 produced zero conversions in v1, see DRIFTS
+#     D-trial-policy-mixed-per-tier-2026-05-14);
+#   * a 90-day window matches Luciel's real evaluation cycle for a
+#     real-estate brokerage (full lead-gen quarter);
+#   * a single uniform trial collapses 6 free-trial decisions into 1
+#     paid-intro decision, simplifying the marketing-page copy and
+#     the Stripe Price catalog (1 intro_fee Price for all 6 plans).
+#
+# First-time semantics (locked 2026-05-14): "first-time" means
+# customer_email has NEVER appeared on a Subscription row before
+# (active=True OR active=False). A canceled customer who rejoins
+# pays the plan rate immediately, no second intro fee. See
+# ``is_first_time_customer`` below.
+#
+# Migration from Step 30a.1: ``TRIAL_DAYS`` is removed. ``resolve_trial_days``
+# stays for any in-flight test fixtures but always returns 0 (no free
+# trial). Tests asserting the old dict shape are updated to assert the
+# new constant + first-time gate behaviour.
 # ---------------------------------------------------------------------
 
-TRIAL_DAYS: dict[tuple[str, str], int] = {
-    (TIER_INDIVIDUAL, BILLING_CADENCE_MONTHLY): 14,
-    (TIER_INDIVIDUAL, BILLING_CADENCE_ANNUAL):  0,
-    (TIER_TEAM,       BILLING_CADENCE_MONTHLY): 7,
-    (TIER_TEAM,       BILLING_CADENCE_ANNUAL):  0,
-    (TIER_COMPANY,    BILLING_CADENCE_MONTHLY): 7,
-    (TIER_COMPANY,    BILLING_CADENCE_ANNUAL):  0,
-}
+INTRO_TRIAL_DAYS: int = 90
+INTRO_FEE_PRICE_KEY: str = "stripe_price_intro_fee"
 
 
 class BillingService:
@@ -153,18 +163,73 @@ class BillingService:
 
     @staticmethod
     def resolve_trial_days(*, tier: str, cadence: str) -> int:
-        """Return the trial_period_days for the requested (tier, cadence).
+        """Step 30a.2 stub — always returns 0 (no FREE trial).
 
-        Falls back to ``settings.billing_trial_days`` for the Individual-
-        monthly path (preserves Step 30a behaviour); 0 for anything not
-        in TRIAL_DAYS (annual + unknown).
+        Free trials were removed in favour of a uniform $100/90d paid
+        intro for all primitives (see module docstring). This method is
+        kept as a no-op shim so any out-of-tree test fixtures still call
+        it without exploding; the real trial wiring lives in
+        ``_compute_trial_and_intro_for_checkout`` below.
         """
-        if (tier, cadence) in TRIAL_DAYS:
-            return TRIAL_DAYS[(tier, cadence)]
-        # Defensive fallback — should be unreachable in practice.
-        return settings.billing_trial_days if (
-            tier == TIER_INDIVIDUAL and cadence == BILLING_CADENCE_MONTHLY
-        ) else 0
+        del tier, cadence  # explicitly unused
+        return 0
+
+    def resolve_intro_fee_price_id(self) -> str:
+        """Return the Stripe Price ID for the one-time $100 CAD intro fee.
+
+        Raises ``BillingNotConfiguredError`` if the
+        ``stripe_price_intro_fee`` setting is empty — the route layer
+        maps this to 501 just like any other missing-Price case.
+        """
+        price_id = getattr(settings, INTRO_FEE_PRICE_KEY, "") or ""
+        if not price_id:
+            raise BillingNotConfiguredError(
+                f"Stripe price id setting '{INTRO_FEE_PRICE_KEY}' is empty; "
+                f"cannot start checkout with intro fee."
+            )
+        return price_id
+
+    def is_first_time_customer(self, *, email: str) -> bool:
+        """Return True iff ``email`` has never been on ANY Subscription row.
+
+        "First-time" is locked to a tenant-identity-once-ever policy
+        (cancel+rejoin yields False so the rejoiner pays plan rate, no
+        second intro). We implement this by joining against the entire
+        ``subscriptions`` table on ``customer_email`` regardless of
+        ``active`` — even a soft-deleted row counts as a prior touch.
+
+        Both sides of the comparison are lower-cased via SQL ``LOWER()``
+        so the lookup is symmetric with however the webhook writer stored
+        the email (it preserves whatever came in via Stripe metadata, see
+        ``billing_webhook_service.py``). Stripe itself is case-insensitive
+        on customer_email but our column is plain VARCHAR(320), so
+        "Foo@example.com" must match a row stored as "foo@example.com".
+
+        Performance: a functional ``LOWER()`` index on customer_email is
+        NOT in place; this query becomes a sequential scan in the limit
+        of large ``subscriptions`` tables. Acceptable at Luciel's current
+        scale (subscriptions are O(tenants), tens to low thousands). If
+        the table grows past ~50k rows, add
+        ``CREATE INDEX ix_subscriptions_customer_email_lower
+         ON subscriptions (LOWER(customer_email));``
+        in a follow-up migration and Postgres will pick it up
+        automatically without code change.
+        """
+        normalized = (email or "").strip().lower()
+        if not normalized:
+            # Empty email cannot be "first-time" because we cannot
+            # correlate it to anything; treat as not-first-time so a
+            # caller bug never accidentally hands out a free intro to
+            # everyone. The route layer's schema validates email is
+            # non-empty before we reach here.
+            return False
+        stmt = (
+            select(Subscription.id)
+            .where(func.lower(Subscription.customer_email) == normalized)
+            .limit(1)
+        )
+        existing = self.db.execute(stmt).scalars().first()
+        return existing is None
 
     @staticmethod
     def resolve_instance_count_cap(*, tier: str) -> int:
@@ -224,7 +289,19 @@ class BillingService:
             )
 
         price_id = self.resolve_price_id(tier=tier, cadence=billing_cadence)
-        trial_days = self.resolve_trial_days(tier=tier, cadence=billing_cadence)
+
+        # Step 30a.2: first-time gate. Resolve the recurring Price ID
+        # FIRST so a missing recurring config fails 501 before we touch
+        # the intro fee path; only then check first-time and resolve the
+        # intro fee. Order matters because the recurring miss is the
+        # higher-impact error (no checkout possible at all) and we want
+        # callers to see it before a missing intro fee Price ID.
+        first_time = self.is_first_time_customer(email=email)
+        intro_fee_price_id: str | None = None
+        trial_days: int = 0
+        if first_time:
+            intro_fee_price_id = self.resolve_intro_fee_price_id()
+            trial_days = INTRO_TRIAL_DAYS
 
         # Build the redirect URLs. We accept {CHECKOUT_SESSION_ID} as
         # a Stripe placeholder in billing_success_url; Stripe substitutes
@@ -237,6 +314,12 @@ class BillingService:
             "luciel_display_name": display_name,
             "luciel_tier": tier,
             "luciel_billing_cadence": billing_cadence,
+            # Step 30a.2: stamp the intro decision into Stripe metadata
+            # so the webhook handler can later audit "this Subscription
+            # was created on the intro path" without re-deriving from
+            # the line_items array. Boolean serialized as 'true'/'false'
+            # because Stripe metadata values must be strings.
+            "luciel_intro_applied": "true" if first_time else "false",
         }
 
         session = self.stripe.create_checkout_session(
@@ -246,14 +329,18 @@ class BillingService:
             cancel_url=cancel_url,
             trial_period_days=trial_days or None,
             metadata=metadata,
+            intro_fee_price_id=intro_fee_price_id,
         )
 
         logger.info(
-            "billing: checkout session created stripe_id=%s email=%s tier=%s cadence=%s trial_days=%s",
+            "billing: checkout session created stripe_id=%s email=%s tier=%s cadence=%s "
+            "first_time=%s intro_fee=%s trial_days=%s",
             getattr(session, "id", "?"),
             email,
             tier,
             billing_cadence,
+            first_time,
+            bool(intro_fee_price_id),
             trial_days,
         )
         return {

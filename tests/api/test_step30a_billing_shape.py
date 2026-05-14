@@ -347,9 +347,17 @@ class TestBillingConfig:
             assert hasattr(settings, f), f"settings.{f} not declared"
 
     def test_billing_trial_days_default(self):
-        # The pricing page promises "14 days free" — defend that copy.
+        # Step 30a.2 retired the free-trial model in favour of a uniform
+        # $100 CAD paid intro (90 days, first-time customers only). The
+        # legacy ``billing_trial_days`` setting is preserved for
+        # back-compat with external scripts but the application code
+        # path no longer reads it; default flipped from 14 to 0 so a
+        # mis-wired caller that DID read it would get "no trial"
+        # rather than silently reintroducing the old 14-day free trial.
+        # See app/services/billing_service.py:INTRO_TRIAL_DAYS for the
+        # real source of truth.
         from app.core.config import settings
-        assert settings.billing_trial_days == 14
+        assert settings.billing_trial_days == 0
 
     def test_session_cookie_fields_present(self):
         from app.core.config import settings

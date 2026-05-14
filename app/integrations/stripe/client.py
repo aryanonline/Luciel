@@ -95,6 +95,7 @@ class StripeClient:
         trial_period_days: int | None = None,
         metadata: dict[str, str] | None = None,
         idempotency_key: str | None = None,
+        intro_fee_price_id: str | None = None,
     ) -> Any:
         """Create a Stripe Checkout session in subscription mode.
 
@@ -107,12 +108,31 @@ class StripeClient:
         buyer is prospective at this point; if checkout is abandoned,
         we want zero Stripe-side artifacts to clean up. Stripe will
         create a Customer for us on a successful charge.
+
+        Step 30a.2 — intro_fee_price_id ("Stripe Option A"):
+          When passed, a SECOND line item is appended for the one-time
+          $100 CAD intro fee Price (type=one_time). Combined with
+          ``trial_period_days=90`` on the recurring line, Stripe Checkout
+          renders "$100 due today, then $X/mo starting in 90 days". Stripe
+          charges the one-time line at checkout and starts the recurring
+          line's trial clock immediately; the first recurring invoice
+          (at full rate) fires when the trial expires. The caller — and
+          ONLY the caller — owns the first-time gate (see
+          ``BillingService.is_first_time_customer``); passing a non-None
+          intro_fee_price_id to a repeat customer is a programmer error.
         """
         stripe.api_key = self._api_key
+        line_items: list[dict[str, Any]] = [{"price": price_id, "quantity": 1}]
+        if intro_fee_price_id:
+            # Order matters only for human readability in the Stripe-hosted
+            # checkout UI; the intro fee renders first because buyers expect
+            # to see the today-charge at the top.
+            line_items.insert(0, {"price": intro_fee_price_id, "quantity": 1})
+
         params: dict[str, Any] = dict(
             mode="subscription",
             customer_email=customer_email,
-            line_items=[{"price": price_id, "quantity": 1}],
+            line_items=line_items,
             success_url=success_url,
             cancel_url=cancel_url,
             # Stripe-managed tax for CAD/GST/HST/PST/QST without us

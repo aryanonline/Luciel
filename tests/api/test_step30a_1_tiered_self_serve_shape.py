@@ -231,14 +231,33 @@ class TestBillingServiceResolvers:
                 f"PRICE_ID_KEY[{pair!r}] -> {attr!r} not declared on settings"
             )
 
-    def test_trial_days_table_has_individual_monthly(self):
-        # Step 30a's 14-day trial must carry over to Individual+monthly.
-        from app.services.billing_service import TRIAL_DAYS
-        assert TRIAL_DAYS[("individual", "monthly")] == 14
+    def test_intro_trial_days_is_ninety(self):
+        # Step 30a.2 replaced the per-(tier,cadence) free trial with a
+        # single uniform paid intro: 90 days, $100 CAD up front, applied
+        # to every (tier, cadence) primitive when the buyer is
+        # first-time. The legacy TRIAL_DAYS dict no longer exists.
+        from app.services.billing_service import INTRO_TRIAL_DAYS
+        assert INTRO_TRIAL_DAYS == 90
 
-    def test_trial_days_for_team_monthly_is_seven(self):
-        from app.services.billing_service import TRIAL_DAYS
-        assert TRIAL_DAYS[("team", "monthly")] == 7
+    def test_resolve_trial_days_is_zero_for_all_primitives(self):
+        # The legacy resolve_trial_days() shim must report 0 for every
+        # primitive (no free trial under the paid-intro model). Tests
+        # for the paid-intro path itself live in test_first_time_gate.py.
+        from app.services.billing_service import BillingService
+        for tier in ("individual", "team", "company"):
+            for cadence in ("monthly", "annual"):
+                assert BillingService.resolve_trial_days(
+                    tier=tier, cadence=cadence
+                ) == 0, f"({tier},{cadence}) must report 0 (no free trial)"
+
+    def test_intro_fee_price_key_constant(self):
+        # The intro fee settings attribute name is the single source of
+        # truth for which env var holds the one-time $100 Price ID;
+        # config.py must declare exactly this attribute.
+        from app.core.config import settings
+        from app.services.billing_service import INTRO_FEE_PRICE_KEY
+        assert INTRO_FEE_PRICE_KEY == "stripe_price_intro_fee"
+        assert hasattr(settings, INTRO_FEE_PRICE_KEY)
 
     def test_resolve_instance_count_cap_uses_tier_table(self):
         # The resolver is a thin wrapper over TIER_INSTANCE_CAPS, but

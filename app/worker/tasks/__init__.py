@@ -6,5 +6,6 @@ Task modules are auto-discovered via the `include` list in
 add it to that `include` list AND import it here.
 """
 from app.worker.tasks import memory_extraction  # noqa: F401
+from app.worker.tasks import retention  # noqa: F401  # Step 30a.2
 
-__all__ = ["memory_extraction"]
+__all__ = ["memory_extraction", "retention"]

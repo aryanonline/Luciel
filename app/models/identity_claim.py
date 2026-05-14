@@ -232,6 +232,17 @@ class IdentityClaim(Base):
         server_default=text("true"),
     )
 
+    # Step 30a.2: stamped alongside active=false during tenant cascade.
+    # claim_value may be PII (email / phone) so per-row deactivation
+    # time is the right granularity for future PIPEDA audits. NULL on
+    # rows that have never been deactivated. See
+    # admin_service.deactivate_tenant_with_cascade and ARCHITECTURE
+    # §3.2.13 (cascade extension).
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

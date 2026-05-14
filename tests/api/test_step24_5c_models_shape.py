@@ -134,6 +134,10 @@ class TestConversationTableShape:
             "last_activity_at",
             "active",
             "created_at",
+            # Step 30a.2: cascade-deactivation timestamp. ARCHITECTURE
+            # §3.2.11 row was updated in the same commit that added the
+            # alembic migration dfea1a04e037; this row is intentional.
+            "deactivated_at",
         }
         unexpected = cols - expected
         assert not unexpected, (
@@ -260,6 +264,11 @@ class TestIdentityClaimTableShape:
             "verified_at",
             "active",
             "created_at",
+            # Step 30a.2: cascade-deactivation timestamp. Same source
+            # of truth as Conversation.deactivated_at above; both flip
+            # in lockstep when AdminService.deactivate_tenant_with_cascade
+            # tears a tenant down.
+            "deactivated_at",
         }
         unexpected = cols - expected
         assert not unexpected, (

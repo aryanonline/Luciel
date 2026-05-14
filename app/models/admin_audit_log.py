@@ -172,6 +172,11 @@ ACTION_SUBSCRIPTION_CANCEL = "subscription_cancel"
 ACTION_SUBSCRIPTION_REACTIVATE = "subscription_reactivate"
 ACTION_BILLING_WEBHOOK_REPLAY_REJECTED = "billing_webhook_replay_rejected"
 
+# Step 30a.2 -- retention worker hard-purge action. See ALLOWED_ACTIONS
+# entry for full rationale. Defined here (above ALLOWED_ACTIONS) so the
+# whitelist tuple can reference it.
+ACTION_TENANT_HARD_PURGED = "tenant_hard_purged"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -211,6 +216,13 @@ ALLOWED_ACTIONS = (
     ACTION_SUBSCRIPTION_CANCEL,
     ACTION_SUBSCRIPTION_REACTIVATE,
     ACTION_BILLING_WEBHOOK_REPLAY_REJECTED,
+    # Step 30a.2 -- retention worker hard-purge action. Distinct from
+    # ACTION_RETENTION_ENFORCE (which the existing retention policy code
+    # uses for per-record TTL expiry on memory_items) because tenant-
+    # level hard-purge crosses ten tables atomically and the row count
+    # + table manifest belongs in a structurally distinct action so
+    # dashboards can tell them apart at-a-glance.
+    ACTION_TENANT_HARD_PURGED,
 )
 
 
@@ -254,6 +266,19 @@ ACTION_KNOWLEDGE_DELETE = "knowledge_delete"
 # row + an active row, both pointing at the same tenant_id).
 RESOURCE_SUBSCRIPTION = "subscription"
 
+# Step 30a.2 -- cascade extension closes
+# D-cancellation-cascade-incomplete-conversations-claims-2026-05-14.
+# Both rows are PII-bearing under PIPEDA Principle 5: a conversation
+# carries the full chat history surface; an identity_claim carries
+# (claim_type, claim_value) where claim_value may be an email address
+# or phone number. Soft-deactivation must be audited per the same
+# rules as luciel_instances and api_keys; hard-purge at retention
+# time emits ACTION_RETENTION_ENFORCE rows referencing these resource
+# types so the audit chain remains complete after the data itself is
+# gone.
+RESOURCE_CONVERSATION = "conversation"
+RESOURCE_IDENTITY_CLAIM = "identity_claim"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -272,6 +297,9 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_SESSION,
     # Step 30a -- subscription billing
     RESOURCE_SUBSCRIPTION,
+    # Step 30a.2 -- cascade extension + retention worker
+    RESOURCE_CONVERSATION,
+    RESOURCE_IDENTITY_CLAIM,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):

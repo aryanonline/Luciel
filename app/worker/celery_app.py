@@ -23,6 +23,7 @@ import ssl
 import threading
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import worker_ready, worker_shutdown
 
 from app.core.config import settings
@@ -170,7 +171,13 @@ elif BROKER_URL.startswith("rediss://"):
 celery_app = Celery(
     "luciel",
     broker=BROKER_URL,
-    include=["app.worker.tasks.memory_extraction"],
+    # Step 30a.2: retention purge worker added alongside memory_extraction.
+    # Both modules must be importable at worker boot so Celery's task
+    # registry resolves `run_retention_purge` when beat enqueues it.
+    include=[
+        "app.worker.tasks.memory_extraction",
+        "app.worker.tasks.retention",
+    ],
 )
 
 # Step 29.y gap-fix C17 (D-celery-app-set-default-or-import-order-2026-05-08):
@@ -231,6 +238,32 @@ celery_app.conf.update(
     # ----- worker runtime -----
     worker_send_task_events=True,
     task_send_sent_event=True,
+
+    # ----- Step 30a.2: embedded beat schedule -----
+    # Single-replica luciel-worker container runs `celery worker --beat`
+    # so the beat tick lives in the same process as the worker. This is
+    # OK for our current 1-replica deploy; if we ever scale worker > 1
+    # we must migrate to redbeat or split beat into its own service to
+    # avoid duplicate enqueues. Tracked as
+    # D-celery-beat-single-replica-coupling-2026-05-14.
+    #
+    # Timing: 08:00 UTC nightly = 04:00 EDT (DST summer) / 03:00 EST
+    # (winter). Chosen to avoid the 09:00 UTC AWS maintenance window
+    # and overlap with the lowest CA-Central-1 chat traffic band.
+    # PIPEDA Principle 5 (retention): we have until end-of-day to
+    # complete each day's hard-purge cycle.
+    beat_schedule={
+        "retention-purge-nightly": {
+            "task": "app.worker.tasks.retention.run_retention_purge",
+            "schedule": crontab(hour=8, minute=0),
+            "options": {
+                # Beat-enqueued tasks land on the same queue as chat-path
+                # producers; the worker's prefetch=1 ensures retention
+                # work never starves user-facing memory_extraction.
+                "queue": "luciel-memory-tasks",
+            },
+        },
+    },
 )
 
 # Step 28 P3-E.2 / Pillar 23: install the audit-log hash-chain

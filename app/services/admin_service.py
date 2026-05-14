@@ -834,13 +834,15 @@ class AdminService:
         """Soft-deactivate a tenant and cascade leaf-first to every child.
 
         Cascade order (all in a single transaction):
-          1. memory_items (broadest -- soft-deactivate every active row)
-          2. api_keys
-          3. luciel_instances (all scope levels: tenant/domain/agent)
-          4. agents (new-table, Step 24.5)
-          5. agent_configs (legacy)
-          6. domain_configs
-          7. tenant_config itself (active=False)
+          1. conversations  (NEW Step 30a.2 -- soft-delete, stamp deactivated_at)
+          2. identity_claims (NEW Step 30a.2 -- soft-delete, stamp deactivated_at)
+          3. memory_items (broadest leaf below)
+          4. api_keys
+          5. luciel_instances (all scope levels: tenant/domain/agent)
+          6. agents (new-table, Step 24.5)
+          7. agent_configs (legacy)
+          8. domain_configs
+          9. tenant_config itself (active=False, deactivated_at=now())
 
         Each step emits its own audit row(s). Any step failure rolls back
         the entire cascade -- no partial deactivation is possible.
@@ -861,16 +863,37 @@ class AdminService:
         autocommit=True by default for standalone callers (admin route).
         Future callers that wrap this in a larger transaction (Stripe
         billing webhook, GDPR deletion endpoint) can pass autocommit=False.
+
+        Step 30a.2 -- closes
+        D-cancellation-cascade-incomplete-conversations-claims-2026-05-14:
+        the cascade now also visits ``conversations`` and
+        ``identity_claims`` (both have ``tenant_id`` + ``active`` columns
+        and were unreachable in the old 7-layer walk). And the tenant_config
+        step itself now stamps ``deactivated_at = now()`` so the retention
+        worker can compute the 90d purge cutoff.
+
+        Step 30a.2 -- NOTE on sessions / messages:
+        ``sessions`` carries no soft-delete shape (no ``active`` column)
+        and ``messages`` has no ``active`` column either. Both are handled
+        at retention-time hard-purge via ``hard_delete_tenant_after_retention``
+        and SQL FK CASCADE on ``messages.session_id``. See the Step 30a.2
+        design plan §2 for the full trace.
         """
+        from sqlalchemy import func
+
         from app.models.agent_config import AgentConfig
+        from app.models.conversation import Conversation
         from app.models.domain_config import DomainConfig
+        from app.models.identity_claim import IdentityClaim
         from app.services.api_key_service import ApiKeyService
         from app.repositories.admin_audit_repository import AdminAuditRepository
         from app.models.admin_audit_log import (
             ACTION_CASCADE_DEACTIVATE,
             ACTION_DEACTIVATE,
             RESOURCE_AGENT,
+            RESOURCE_CONVERSATION,
             RESOURCE_DOMAIN,
+            RESOURCE_IDENTITY_CLAIM,
             RESOURCE_TENANT,
         )
 
@@ -887,7 +910,113 @@ class AdminService:
         was_active = bool(tenant.active)
 
         try:
-            # --- 1. memory_items cascade (broadest leaf) ---------------
+            # --- 1. conversations cascade (NEW Step 30a.2) -------------
+            # Soft-deactivate every active conversation under this tenant.
+            # Stamp deactivated_at = now() in the same UPDATE so future
+            # per-conversation retention queries have the timestamp.
+            # Uses Conversation directly (no separate repo method) for
+            # symmetry with the agent_configs / domain_configs inline
+            # cascades below; the table is conceptually identical in
+            # treatment (soft-delete + audit row + count).
+            affected_conversations = (
+                self.db.query(Conversation.id)
+                .filter(
+                    Conversation.tenant_id == tenant_id,
+                    Conversation.active.is_(True),
+                )
+                .all()
+            )
+            conv_ids = [str(pk) for (pk,) in affected_conversations]
+            conv_updated = (
+                self.db.query(Conversation)
+                .filter(
+                    Conversation.tenant_id == tenant_id,
+                    Conversation.active.is_(True),
+                )
+                .update(
+                    {
+                        Conversation.active: False,
+                        Conversation.deactivated_at: func.now(),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if conv_updated:
+                AdminAuditRepository(self.db).record(
+                    ctx=audit_ctx,
+                    tenant_id=tenant_id,
+                    action=ACTION_CASCADE_DEACTIVATE,
+                    resource_type=RESOURCE_CONVERSATION,
+                    resource_pk=None,
+                    resource_natural_id=None,
+                    after={
+                        "count": int(conv_updated),
+                        "affected_conversation_ids": conv_ids,
+                        "table": "conversations",
+                        "trigger": "tenant_deactivate",
+                    },
+                    note=(
+                        f"Cascade conversations from tenant "
+                        f"{tenant_id} deactivation (Step 30a.2)"
+                    ),
+                    autocommit=False,
+                )
+
+            # --- 2. identity_claims cascade (NEW Step 30a.2) -----------
+            # Soft-deactivate every active identity_claim under this
+            # tenant. claim_value is PII (email / phone) so this row
+            # must be honored under PIPEDA Principle 5. Audit row
+            # records affected count + claim row pks (NOT claim_value,
+            # to avoid duplicating PII into the audit chain). The
+            # underlying row itself stays in the DB until retention
+            # hard-purge -- soft-delete is the PIPEDA-respecting
+            # "limited use" shape, hard-delete is the "limited
+            # retention" shape.
+            affected_claims = (
+                self.db.query(IdentityClaim.id)
+                .filter(
+                    IdentityClaim.tenant_id == tenant_id,
+                    IdentityClaim.active.is_(True),
+                )
+                .all()
+            )
+            claim_pks = [str(pk) for (pk,) in affected_claims]
+            claims_updated = (
+                self.db.query(IdentityClaim)
+                .filter(
+                    IdentityClaim.tenant_id == tenant_id,
+                    IdentityClaim.active.is_(True),
+                )
+                .update(
+                    {
+                        IdentityClaim.active: False,
+                        IdentityClaim.deactivated_at: func.now(),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if claims_updated:
+                AdminAuditRepository(self.db).record(
+                    ctx=audit_ctx,
+                    tenant_id=tenant_id,
+                    action=ACTION_CASCADE_DEACTIVATE,
+                    resource_type=RESOURCE_IDENTITY_CLAIM,
+                    resource_pk=None,
+                    resource_natural_id=None,
+                    after={
+                        "count": int(claims_updated),
+                        "affected_claim_pks": claim_pks,
+                        "table": "identity_claims",
+                        "trigger": "tenant_deactivate",
+                    },
+                    note=(
+                        f"Cascade identity_claims from tenant "
+                        f"{tenant_id} deactivation (Step 30a.2)"
+                    ),
+                    autocommit=False,
+                )
+
+            # --- 3. memory_items cascade (broadest leaf) ---------------
             self.bulk_soft_deactivate_memory_items_for_tenant(
                 tenant_id=tenant_id,
                 audit_ctx=audit_ctx,
@@ -1013,8 +1142,14 @@ class AdminService:
                     autocommit=False,
                 )
 
-            # --- 7. tenant_config itself -------------------------------
+            # --- 9. tenant_config itself -------------------------------
+            # Step 30a.2: also stamp deactivated_at = now() so the
+            # retention worker can compute the 90d purge cutoff. Only
+            # set when was_active=True (idempotent re-runs don't
+            # re-stamp -- preserves the original deactivation moment).
             tenant.active = False
+            if was_active:
+                tenant.deactivated_at = func.now()
             if updated_by is not None:
                 tenant.updated_by = updated_by
 
@@ -1027,10 +1162,16 @@ class AdminService:
                     resource_pk=tenant.id,
                     resource_natural_id=tenant_id,
                     before={"active": True},
-                    after={"active": False},
+                    after={
+                        "active": False,
+                        # "deactivated_at" left as a server-stamped
+                        # marker; the actual timestamp lives in the row
+                        # itself. Including "now" here would create a
+                        # second source of truth that could drift.
+                    },
                     note=(
                         f"Tenant {tenant_id} deactivated with full cascade "
-                        f"(PIPEDA P5 retention)"
+                        f"(PIPEDA P5 retention; Step 30a.2 9-layer)"
                     ),
                     autocommit=False,
                 )
@@ -1043,6 +1184,231 @@ class AdminService:
             raise
 
         return True
+
+    # ---------------------------------------------------------------
+    # Step 30a.2 — retention hard-purge (PIPEDA Principle 5)
+    # ---------------------------------------------------------------
+    #
+    # Companion to deactivate_tenant_with_cascade. The cascade does
+    # soft-deletion (active=false + deactivated_at=now); this method
+    # does HARD-deletion of every row scoped to a tenant after the
+    # 90-day retention window has elapsed.
+    #
+    # Called by the nightly Celery beat job in
+    # app/worker/tasks/retention.py::run_retention_purge.
+    #
+    # Order matters: we delete leaf-first to satisfy the FK RESTRICT
+    # constraints that protect tenant_configs.tenant_id from cascade-
+    # delete. ``conversations.tenant_id`` and
+    # ``identity_claims.tenant_id`` both have ON DELETE RESTRICT to
+    # tenant_configs.tenant_id, so we MUST delete them before the
+    # parent tenant_configs row. Same for any other FK-RESTRICT
+    # children that may exist; we delete them all explicitly rather
+    # than relying on FK behavior so the row-count audit is honest.
+
+    def hard_delete_tenant_after_retention(
+        self,
+        tenant_id: str,
+        *,
+        retention_window_days: int = 90,
+    ) -> dict[str, int]:
+        """Hard-delete every row scoped to ``tenant_id`` after retention.
+
+        Re-verifies the retention predicate (active=false AND
+        deactivated_at < now - N days) inside this transaction as an
+        idempotency guard. If the row is not eligible (already purged,
+        re-activated, or insufficient retention age), returns an empty
+        dict and makes no DB changes.
+
+        Order of deletion (leaf-first, RESTRICT-safe):
+           1. messages          (via sessions FK CASCADE -- implicit)
+           2. sessions          WHERE tenant_id=:tid
+           3. conversations     WHERE tenant_id=:tid
+           4. identity_claims   WHERE tenant_id=:tid
+           5. memory_items      WHERE tenant_id=:tid
+           6. api_keys          WHERE tenant_id=:tid
+           7. luciel_instances  WHERE tenant_id=:tid
+           8. agents            WHERE tenant_id=:tid
+           9. agent_configs     WHERE tenant_id=:tid
+          10. domain_configs    WHERE tenant_id=:tid
+          11. tenant_configs    WHERE tenant_id=:tid
+          12. AdminAuditLog row recording the purge (action=
+              ACTION_TENANT_HARD_PURGED) with per-table row-count map.
+
+        Subscriptions are intentionally NOT purged -- they carry
+        billing history needed for tax/accounting retention which
+        has its own clock.
+
+        Returns a dict mapping table name -> row count deleted.
+        Empty dict means the row was not eligible (idempotency guard
+        fired). The caller (Celery task) is responsible for the
+        outer transaction commit; this method does NOT commit -- it
+        runs in the caller's transaction so the audit row + DELETEs
+        are atomic.
+
+        Raises if the tenant_configs row exists but is still active
+        or has NULL deactivated_at -- those are safety-net conditions
+        that should never happen if the cascade is the only writer.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import text as sql_text
+
+        from app.models.admin_audit_log import (
+            ACTION_TENANT_HARD_PURGED,
+            RESOURCE_TENANT,
+        )
+        from app.models.tenant import TenantConfig
+        from app.repositories.admin_audit_repository import AdminAuditRepository
+
+        # ---- Idempotency guard: re-verify retention predicate ----
+        # This is intentionally done inside the same transaction as
+        # the DELETEs (not as a pre-flight) so a concurrent reactivate
+        # cannot race past us.
+        tenant = self.get_tenant_config(tenant_id)
+        if tenant is None:
+            # Already hard-purged on a prior run, or never existed.
+            return {}
+
+        if tenant.active:
+            raise RuntimeError(
+                f"hard_delete_tenant_after_retention called on ACTIVE "
+                f"tenant {tenant_id!r} -- this should never happen. "
+                f"The cascade is the only writer of tenant_configs."
+                f"active=false; reactivation must roll back deactivated_at."
+            )
+
+        if tenant.deactivated_at is None:
+            raise RuntimeError(
+                f"hard_delete_tenant_after_retention called on tenant "
+                f"{tenant_id!r} with NULL deactivated_at -- this row "
+                f"was deactivated before Step 30a.2 and is excluded "
+                f"from automated purge by design. Manual purge only."
+            )
+
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=retention_window_days
+        )
+        # tenant.deactivated_at is timezone-aware (timestamptz) so the
+        # comparison is well-defined; mixing tz-aware and naive would
+        # raise TypeError, which is the correct behavior.
+        if tenant.deactivated_at >= cutoff:
+            # Eligible per the scan but raced -- another beat or a
+            # bug shrank the window. Defensive skip.
+            return {}
+
+        # ---- Hard-delete chain ----
+        row_counts: dict[str, int] = {}
+
+        # Each DELETE returns an estimated row count via .rowcount;
+        # for some dialects this is -1 when the driver can't tell.
+        # We coerce to int and store; the audit row reflects what we
+        # actually saw, even if -1.
+        def _delete(sql: str) -> int:
+            res = self.db.execute(sql_text(sql), {"tid": tenant_id})
+            return int(res.rowcount or 0)
+
+        # 1. messages cascade via SQL FK on sessions (implicit). We
+        #    don't issue a DELETE here -- step 2's DELETE FROM sessions
+        #    cascades to messages via ON DELETE CASCADE. We record the
+        #    pre-count for the audit row's row-count map though.
+        pre_msg_count = int(
+            self.db.execute(
+                sql_text(
+                    "SELECT COUNT(*) FROM messages m "
+                    "JOIN sessions s ON s.id = m.session_id "
+                    "WHERE s.tenant_id = :tid"
+                ),
+                {"tid": tenant_id},
+            ).scalar()
+            or 0
+        )
+        row_counts["messages"] = pre_msg_count
+
+        # 2. sessions (cascades to messages via FK)
+        row_counts["sessions"] = _delete(
+            "DELETE FROM sessions WHERE tenant_id = :tid"
+        )
+
+        # 3. conversations
+        row_counts["conversations"] = _delete(
+            "DELETE FROM conversations WHERE tenant_id = :tid"
+        )
+
+        # 4. identity_claims
+        row_counts["identity_claims"] = _delete(
+            "DELETE FROM identity_claims WHERE tenant_id = :tid"
+        )
+
+        # 5. memory_items
+        row_counts["memory_items"] = _delete(
+            "DELETE FROM memory_items WHERE tenant_id = :tid"
+        )
+
+        # 6. api_keys
+        row_counts["api_keys"] = _delete(
+            "DELETE FROM api_keys WHERE tenant_id = :tid"
+        )
+
+        # 7. luciel_instances
+        row_counts["luciel_instances"] = _delete(
+            "DELETE FROM luciel_instances WHERE tenant_id = :tid"
+        )
+
+        # 8. agents (new-table, Step 24.5)
+        row_counts["agents"] = _delete(
+            "DELETE FROM agents WHERE tenant_id = :tid"
+        )
+
+        # 9. agent_configs (legacy)
+        row_counts["agent_configs"] = _delete(
+            "DELETE FROM agent_configs WHERE tenant_id = :tid"
+        )
+
+        # 10. domain_configs
+        row_counts["domain_configs"] = _delete(
+            "DELETE FROM domain_configs WHERE tenant_id = :tid"
+        )
+
+        # 11. tenant_configs (the parent row itself)
+        row_counts["tenant_configs"] = _delete(
+            "DELETE FROM tenant_configs WHERE tenant_id = :tid"
+        )
+
+        # 12. Audit row -- write to AdminAuditLog with full row-count
+        # manifest. The audit row uses the resource_natural_id field
+        # to preserve tenant_id as a searchable string AFTER the
+        # tenant_configs row itself is gone; the row_hash chain stays
+        # walkable because AdminAuditLog rows are never FK'd to
+        # tenant_configs.
+        # Note: audit row is written through AuditContext.system()
+        # because this is a background-task action with no HTTP caller.
+        # The system() factory tags actor_permissions=('system',) and
+        # actor_tenant_id=SYSTEM_ACTOR_TENANT so retention rows are
+        # distinguishable from worker-task rows (which use ('worker',)).
+        from app.repositories.admin_audit_repository import AuditContext
+
+        system_ctx = AuditContext.system(label="retention_worker")
+        AdminAuditRepository(self.db).record(
+            ctx=system_ctx,
+            tenant_id=tenant_id,
+            action=ACTION_TENANT_HARD_PURGED,
+            resource_type=RESOURCE_TENANT,
+            resource_pk=None,
+            resource_natural_id=tenant_id,
+            after={
+                "row_counts": row_counts,
+                "retention_window_days": retention_window_days,
+                "trigger": "retention_worker",
+            },
+            note=(
+                f"Hard-purge of tenant {tenant_id} after "
+                f"{retention_window_days}d retention (PIPEDA P5)"
+            ),
+            autocommit=False,
+        )
+
+        return row_counts
 
     # ---------------------------------------------------------------
     # Step 30a.1 — tier/scope guard
