@@ -64,14 +64,14 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 
 echo "==> [0/6] Preflight: confirm alembic head is dfea1a04e037 in tree"
-HEAD_REV="$(cd "$(git rev-parse --show-toplevel)" && \
-  grep -lE 'down_revision\s*=\s*' alembic/versions/*.py | \
-  xargs grep -l "step30a_2_deactivated_at_and_retention" | head -1)"
-if [[ -z "${HEAD_REV}" ]]; then
-  echo "ERROR: step30a_2 migration file not found in alembic/versions/."
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+MIGRATION_FILE="${REPO_ROOT}/alembic/versions/dfea1a04e037_step30a_2_deactivated_at_and_retention.py"
+if [[ ! -f "${MIGRATION_FILE}" ]]; then
+  echo "ERROR: expected migration file not found:"
+  echo "       ${MIGRATION_FILE}"
   exit 1
 fi
-echo "    migration:  ${HEAD_REV}"
+echo "    migration:  ${MIGRATION_FILE#${REPO_ROOT}/}"
 
 echo "==> [1/6] Building image"
 docker build -t "${IMAGE}" .
