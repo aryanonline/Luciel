@@ -1,6 +1,8 @@
-# Stripe Live-Mode Activation Scaffold — 2026-05-14
+# Stripe Live-Mode Activation Scaffold — 2026-05-14 (v2 — Step 30a.2 refresh)
 
 **Purpose.** A pre-filled document for the Stripe activation form. Drafted by your AI partner from session memory, codebase source-of-truth, and the user-background context. Fields with verifiable answers from system context are filled. Fields requiring private input from you are marked `<<<YOU>>>`. Fields requiring a business decision from you are marked `<<<DECIDE>>>`.
+
+**v2 refresh (2026-05-14, post Step 30a.2):** trial copy refreshed to match the uniform 90-day paid-intro policy that shipped today (replaces per-tier 14/7/0d). Pricing table extended to seven entries (six recurring + one one-time intro fee). Cancellation copy verified truthful against the now-shipped retention worker.
 
 **Workflow.** Read top to bottom. Fill `<<<YOU>>>` fields inline (your information, never leaves your machine — this file is in `_session_notes/` which we'll gitignore). Resolve `<<<DECIDE>>>` fields with me before opening the Stripe form. Then copy-paste into Stripe.
 
@@ -19,7 +21,7 @@ This is the legal entity Stripe will pay out to. Canadian sole-prop on your pers
 | Legal business name | Aryan Singh | user_background (`Name: Aryan Singh`) |
 | Doing-business-as (DBA) | Luciel | working brand name |
 | Industry | Software / SaaS | per product description |
-| MCC (Merchant Category Code) | **5734 — Computer Software Stores** OR **7372 — Computer Programming, Data Processing** | both are commonly accepted for B2B SaaS; Stripe usually auto-suggests. If asked to choose, 7372 is more precise for subscription software-as-a-service. |
+| MCC (Merchant Category Code) | **7372 — Computer Programming, Data Processing** | most precise for a multi-vertical B2B subscription SaaS platform (5734 — Computer Software Stores — leans retail / boxed-software and is less aligned with the cross-vertical judgment-layer product). Stripe usually auto-suggests; if it offers a list, pick 7372. |
 | Business website | `<<<DECIDE>>>` — see note below | — |
 
 **Business-website note.** You have two candidate URLs:
@@ -61,31 +63,31 @@ These are the prose fields Stripe's underwriting team reads. They drive risk cla
 
 ### "Describe what your business sells / what your product does"
 
-> Luciel is a B2B SaaS platform that provides AI-powered lead qualification, follow-up, and appointment-booking automation for licensed real estate agents in Canada. The platform integrates with agents' existing CRM systems and MLS data feeds, and uses an AI conversational layer (delivered via embeddable chat widget, SMS, and email) to qualify inbound leads, follow up on stale leads, and schedule showings. Customers are licensed real estate professionals operating individually or as small teams (typical customer: 20-60 deals per year). Subscription pricing with a flat base fee per tier plus usage-based fees for conversations and workflows.
+> Luciel is a B2B SaaS platform that delivers a domain-adaptive AI judgment layer for knowledge-work professionals and the teams and companies they belong to. The product is a single core intelligence with a fixed reasoning and trust-discipline layer (the "Soul") and a configurable knowledge / tools / workflow layer (the "Profession") that adapts the same intelligence to each customer's vertical. Customers deploy Luciel through three scope tiers — Individual (one professional), Team (small team / department), and Company (whole organization) — and interact through an embeddable chat widget and a programmatic API, with additional channels (SMS, email, voice) on the near-term roadmap. The first vertical we sell into is residential real estate in Canada, where Luciel helps licensed agents and small teams qualify leads, follow up on stale leads, and prepare for client conversations; legal, mortgage, and other professional-services verticals are on the published roadmap and reuse the same core platform. Pricing is subscription-based per scope tier with monthly and annual cadences.
 
 ### "Who are your customers?"
 
-> Licensed real estate agents and small real estate teams operating in Canada. Customers are vetted at signup (we collect their brokerage affiliation and provincial license number). No consumer-facing transactions — Luciel is strictly B2B.
+> B2B knowledge-work professionals and the teams / companies they work in. At launch (today), the active beachhead is licensed real estate agents and small real estate teams operating in Canada — vetted at signup via brokerage affiliation and provincial license number where applicable. The Team and Company tiers extend the same platform to multi-seat real estate teams and brokerages, and the platform is designed to expand into adjacent professional-services verticals (legal, mortgage, etc.) over the next 12 months as additional Profession layers ship. No consumer-facing transactions — Luciel is strictly B2B.
 
 ### "How do customers find you and sign up?"
 
-> Direct outbound sales (founder-led), referrals from existing customers, and inbound from the marketing website (vantagemind.ai). Signup is self-serve via Stripe Checkout with email verification. No anonymous purchases.
+> Direct outbound sales (founder-led) into the real-estate beachhead, referrals from existing customers, and inbound from the marketing website (www.vantagemind.ai). Signup is self-serve via Stripe Checkout with email verification — a customer picks a tier (Individual, Team, or Company) and a cadence (monthly or annual), pays the one-time intro fee, and starts their 90-day evaluation window. No anonymous purchases.
 
 ### "What is your refund / cancellation policy?"
 
-> Customers can cancel their subscription at any time from the account portal. Cancellation takes effect at the end of the current billing period (the monthly or annual cadence the customer chose at checkout). After cancellation, customer access is revoked and the customer's tenant is deactivated. Customer data is retained in deactivated form for audit and reactivation purposes and is purged per our data retention policy. No prorated refunds for partial billing periods — this is standard for SaaS subscriptions and is disclosed at checkout.
+> Customers can cancel their subscription at any time from the account portal. Cancellation takes effect at the end of the current billing period (the monthly or annual cadence the customer chose at checkout). After cancellation, customer access is revoked and the customer's tenant is deactivated across all scope-bearing layers (tenant, domains, agents, sessions, conversations, identity claims, messages, embed keys, scope assignments, Luciel instances). Customer data is retained in deactivated form for 90 days for audit and reactivation purposes, after which it is hard-purged by an automated retention worker that runs nightly at 08:00 UTC. Audit logs are retained beyond the purge for regulatory compliance. The one-time $100 CAD intro fee charged at signup is non-refundable. No prorated refunds for partial billing periods — this is standard for SaaS subscriptions and is disclosed at checkout.
 
-> *Sourced honestly against today's code: see `2026-05-14-cascade-purge-gap.md` for the full trace. Cancellation revokes access at period-end and cascade-deactivates the tenant + 6 child layers; conversations / identity_claims / messages are application-layer-unreachable post-cancel but not yet hard-purged (that's Step 30a.2). The wording above does not over-promise — it says "retained in deactivated form" and "purged per our data retention policy," both of which are true. Future Step 30a.2 work tightens this to "purged within N days of cancellation."*
+> *Sourced honestly against today's code (post Step 30a.2, 2026-05-14): cancellation cascade now covers ten layers atomically (`AdminService.deactivate_tenant_with_cascade`); the retention worker (`run_retention_purge` on Celery beat at 08:00 UTC) hard-deletes tenants whose `deactivated_at` timestamp is older than 90 days, walking leaf-first through the FK graph. AdminAuditLog survives the purge by design. The wording above is now fully truthful against code — the prior "not yet hard-purged" caveat from v1 of this scaffold is closed.*
 
-> *Decision point: do we offer any annual-subscription refund window (e.g. 14-day money-back guarantee on annual prepay)? `<<<DECIDE>>>`. Note: today's code does NOT have an annual-trial — all annual cadences are `trial_period_days=0` per `BillingService.TRIAL_DAYS`. If we want a money-back window on annual, that's an operational policy (handled via Stripe Dashboard refund or a portal Stripe button), not a code change.*
+> *Decision point: do we offer any annual-subscription refund window (e.g. 14-day money-back guarantee on annual prepay), on top of the 90-day paid-intro trial that already exists? `<<<DECIDE>>>`. The 90-day trial gives the customer a long evaluation window where the recurring rate has not yet charged; an additional annual-refund window is a separate operational policy (handled via Stripe Dashboard refund), not a code change.*
 
 ### "Do you offer trials?"
 
-> Yes — free trials at signup. Trial length varies by tier and billing cadence: 14 days for Individual monthly, 7 days for Team and Company monthly. Annual subscriptions do not include a trial (they are a prepay commitment). No credit card required upfront, but a card is collected at checkout and charged when the trial ends.
+> Yes — paid-intro trials at signup. First-time customers pay a one-time $100 CAD intro fee at checkout, then receive a uniform 90-day trial on the recurring subscription of any of the six (tier, cadence) pairs (Individual / Team / Company × monthly / annual). The trial converts to the recurring rate on day 91 unless the customer cancels. A payment method is required at checkout and is charged for the intro fee immediately; the recurring rate is not charged until the trial converts. Customers who cancel and later rejoin do not receive the intro offer again — the standard recurring rate applies from day one of any second subscription.
 
-> *Source-of-truth: `app/services/billing_service.py` lines 93-100, `TRIAL_DAYS` dict. The previous scaffold draft incorrectly said "14-day trial on all tiers" — fixed to match the live code.*
+> *Source-of-truth: `app/services/billing_service.py` post Step 30a.2 (2026-05-14) — `INTRO_TRIAL_DAYS=90`, `BillingService.is_first_time_customer(email)` case-insensitive gate via `func.lower()`, Stripe Option A line-item assembly in `create_checkout_session` (first-timers get intro_fee Price + recurring Price w/ trial_period_days=90; rejoiners get recurring Price only, no trial, no intro). Replaces the v1 per-tier trial policy (14d Individual-monthly / 7d Team-Company monthly / 0d annual) that v1 of this scaffold described.*
 
-> *Decision point: are we comfortable with the current asymmetric policy (Individual gets more trial than Team/Company; annual gets no trial)? Or do we want to change before activation? `<<<DECIDE>>>`. Either path is fine for the activation form — Stripe doesn't care about trial length, they care about disclosure consistency. Whatever we put here must match the trial copy on vantagemind.ai and at the checkout page.*
+> *No decision needed — the uniform 90d paid-intro policy is the activation-form copy. Whatever this scaffold says must match the trial copy on vantagemind.ai and at the checkout page.*
 
 ### "Estimated annual revenue / processing volume"
 
@@ -114,26 +116,30 @@ These are the prose fields Stripe's underwriting team reads. They drive risk cla
 
 ---
 
-## Section 5 — Stripe Prices (Phase 1 of today's slice)
+## Section 5 — Stripe Prices (Phase 1 of today's slice — seven Prices post Step 30a.2)
 
 This is what we'll do **after** activation approves. Listed here so the activation-form numbers align with the Prices we'll create.
 
-Each Price is created in Stripe live mode and its `price_xxx` ID gets written to the corresponding SSM key. Six (tier, cadence) pairs, six Prices, six SSM keys.
+Each Price is created in Stripe live mode and its `price_xxx` ID gets written to the corresponding SSM key. Six recurring Prices (tier × cadence) + one one-time intro-fee Price = seven Prices, seven SSM keys.
 
-| Tier | Cadence | Instance Cap | Stripe Price (CAD) | SSM key |
-|---|---|---|---|---|
-| Individual | monthly | 3 | `<<<DECIDE>>>` / month | `stripe_price_individual` |
-| Individual | annual | 3 | `<<<DECIDE>>>` / year (~17% prepay discount) | `stripe_price_individual_annual` |
-| Team | monthly | 10 | `<<<DECIDE>>>` / month | `stripe_price_team_monthly` |
-| Team | annual | 10 | `<<<DECIDE>>>` / year (~17% prepay discount) | `stripe_price_team_annual` |
-| Company | monthly | 50 | `<<<DECIDE>>>` / month | `stripe_price_company_monthly` |
-| Company | annual | 50 | `<<<DECIDE>>>` / year (~17% prepay discount) | `stripe_price_company_annual` |
+| # | Tier | Cadence | Type | Instance Cap | Stripe Price (CAD) | SSM key |
+|---|---|---|---|---|---|---|
+| 1 | Individual | monthly | recurring | 3 | `<<<DECIDE>>>` / month | `/luciel/prod/stripe/price_id/individual` |
+| 2 | Individual | annual | recurring | 3 | `<<<DECIDE>>>` / year (~17% prepay discount) | `/luciel/prod/stripe/price_id/individual_annual` |
+| 3 | Team | monthly | recurring | 10 | `<<<DECIDE>>>` / month | `/luciel/prod/stripe/price_id/team_monthly` |
+| 4 | Team | annual | recurring | 10 | `<<<DECIDE>>>` / year (~17% prepay discount) | `/luciel/prod/stripe/price_id/team_annual` |
+| 5 | Company | monthly | recurring | 50 | `<<<DECIDE>>>` / month | `/luciel/prod/stripe/price_id/company_monthly` |
+| 6 | Company | annual | recurring | 50 | `<<<DECIDE>>>` / year (~17% prepay discount) | `/luciel/prod/stripe/price_id/company_annual` |
+| 7 | (none — applies to all first-timers) | one-time | one-time | — | **$100 CAD** (locked) | `/luciel/prod/stripe/price_id/intro_fee` |
+
+**Price #7 — intro fee — is locked to $100 CAD by the Step 30a.2 design.** All six recurring Prices need a `<<<DECIDE>>>` answer; only #7 is fixed. Create the recurring Prices with `trial_period_days=90` configured at the Stripe Price level OR at the Subscription level (Stripe Option A — we'll attach `trial_period_days=90` via the `subscription_data` block in `BillingService.create_checkout_session` at checkout time, so the Price itself can be created without a trial and the trial is applied per-subscription).
 
 **Source citations:**
 - Tier names and instance caps: `app/models/subscription.py` (TIER_INDIVIDUAL, TIER_TEAM, TIER_COMPANY; TIER_INSTANCE_CAPS = 3/10/50)
 - Cadence values: `app/models/subscription.py::BILLING_CADENCE_*`
-- SSM key mapping: `app/services/billing_service.py` lines 71-76 (the `PRICE_ID_KEY` lookup table)
-- Annual discount target: `app/models/subscription.py` line ~67 ("~17% prepay incentive" — the v1 design intent)
+- SSM key mapping (post Step 30a.2): `app/services/billing_service.py` (the `PRICE_ID_KEY` lookup table now seven entries) and `app/core/config.py` (`stripe_price_intro_fee` setting added at Step 30a.2)
+- Annual discount target: `app/models/subscription.py` ("~17% prepay incentive" — the v1 design intent)
+- Intro fee + 90d trial: Step 30a.2 design — `INTRO_TRIAL_DAYS=90`, uniform across all (tier, cadence) pairs; first-time-customer gate via `BillingService.is_first_time_customer(email)`
 
 **Annual-discount math note.** A "17% prepay discount" expressed as 12-month savings is roughly equivalent to "pay for 10 months, get 12" (10/12 = 0.833, i.e. 16.7% off). The actual annual Price you enter in Stripe is monthly × 10, not monthly × 12 × 0.83 — both are close, but the "× 10" framing is cleaner for marketing copy ("get 2 months free") and matches the v1 design intent recorded in the migration. Pick the framing that you'd rather defend on a sales call.
 
@@ -169,7 +175,7 @@ Before you click submit on the Stripe activation form:
 - [ ] Section 2: All `<<<YOU>>>` fields filled in your head (or on paper next to you) ready to type into Stripe. SIN should NOT be typed into this scaffold.
 - [ ] Section 3: All `<<<DECIDE>>>` decisions resolved (refund window, trial length, annual revenue estimate, transaction size range).
 - [ ] Section 4: Banking details confirmed against your actual chequing account; account name matches "Aryan Singh" exactly.
-- [ ] Section 5: All six tier prices decided (we will not enter these into the activation form, but we want them decided so Section 3's "transaction size" answer aligns).
+- [ ] Section 5: All six recurring tier prices decided (we will not enter these into the activation form, but we want them decided so Section 3's "transaction size" answer aligns). The seventh Price (intro fee) is locked at $100 CAD by design.
 - [ ] Section 6: No surprises (any "Yes" answer on a regulated-product question triggers extra review).
 - [ ] You're awake, alert, and not under time pressure. Stripe activation is not the form to rush.
 
@@ -191,11 +197,11 @@ These are the `<<<DECIDE>>>` and `<<<YOU>>>` markers consolidated for fast revie
 
 **Business decisions (`<<<DECIDE>>>`):**
 1. Section 1: Business website URL — confirmed as `https://www.vantagemind.ai` (real underwriting-quality landing page exists). Apex `https://vantagemind.ai` serves a parked page; that's a separate DNS drift to fix later. Use `www.vantagemind.ai` for the activation form.
-2. Section 3: Annual-subscription money-back window — yes/no? (Not a code change either way; operational policy only.)
-3. Section 3: Trial-policy review — keep today's asymmetric policy (14d Individual-monthly / 7d Team-Company monthly / 0d annual), or revise before activation? Either is fine; whatever we say must match marketing copy.
+2. Section 3: Annual-subscription money-back window — yes/no, on top of the 90-day paid-intro trial that already exists? (Not a code change either way; operational policy only.)
+3. ~~Section 3: Trial-policy review~~ — **resolved at Step 30a.2.** Uniform 90-day paid-intro trial ($100 CAD one-time + 90d trial on recurring) replaces the v1 per-tier policy. No decision needed; the activation-form copy in §3 above matches code.
 4. Section 3: Estimated annual revenue first 12 months (CAD)?
 5. Section 3: Average transaction size range, monthly and annual (depends on Section 5 pricing)?
-6. Section 5: Six tier prices in CAD (Individual/Team/Company × monthly/annual)?
+6. Section 5: Six recurring tier prices in CAD (Individual/Team/Company × monthly/annual)? Intro fee Price #7 is locked at $100 CAD.
 
 **Personal inputs (`<<<YOU>>>` — fill at form-submit time, not here):**
 1. Date of birth
@@ -204,10 +210,9 @@ These are the `<<<DECIDE>>>` and `<<<YOU>>>` markers consolidated for fast revie
 4. SIN (type directly into Stripe, never into any file)
 5. Bank account details (institution / transit / account numbers)
 
-**Known drift discovered while drafting this scaffold:**
-- `D-vantagemind-apex-www-split-2026-05-14` — apex vantagemind.ai serves a parked page, www serves the real site. Submit www to Stripe today, fix DNS in a future slice.
-- `D-cancellation-cascade-incomplete-conversations-claims-2026-05-14` — cancellation cascade does not visit conversations / identity_claims / messages; data is application-layer-unreachable but not hard-purged. Full trace in `2026-05-14-cascade-purge-gap.md`. Resolution path is Step 30a.2.
+**Drift status (drifts discovered while drafting v1 of this scaffold):**
+- `D-vantagemind-apex-www-split-2026-05-14` — apex vantagemind.ai serves a parked page, www serves the real site. **Still open.** Submit www to Stripe today, fix DNS in a future slice.
+- ~~`D-cancellation-cascade-incomplete-conversations-claims-2026-05-14`~~ — **RESOLVED at Step 30a.2 (2026-05-14).** Cascade now covers ten layers (tenants → domains → agents → scope_assignments → embed_keys → luciel_instances → sessions → conversations → identity_claims → messages), and the retention worker hard-purges after 90 days.
+- ~~Retention purge missing~~ — **RESOLVED at Step 30a.2 (2026-05-14)** via the nightly Celery beat worker.
 
-Both drifts will be opened in `docs/DRIFTS.md` §3 in tomorrow's doc-truthing commit (or in today's closing commit if scope stays clean).
-
-Once you've thought about the `<<<DECIDE>>>` items, tell me your answers and I'll lock the scaffold. Then you open the Stripe form with `<<<YOU>>>` items ready and copy-paste from the scaffold for everything else.
+Once you've answered the 5 remaining `<<<DECIDE>>>` items (website confirmation already locked to www.vantagemind.ai; refund window; revenue estimate; transaction size; six recurring tier prices), tell me your answers and I'll lock the scaffold. Then you open the Stripe form with `<<<YOU>>>` items ready and copy-paste from the scaffold for everything else.
