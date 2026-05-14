@@ -1,34 +1,60 @@
-# Step 30a.1 — Production deploy (Stripe Prices first, then schema, then code)
+# Step 30a.1 — Production deploy (split: Tonight schema+code; Tomorrow Stripe surface)
 
-**Scope:** Land the Step 30a.1 tiered-self-serve work onto production in
-one rollout, closing
-`D-billing-team-company-not-self-serve-2026-05-13` end-to-end.
+**Scope:** Land the Step 30a.1 tiered-self-serve work onto production.
+The runbook is **bisected** because Stripe live-mode account activation
+on Aryan's sole-prop identity is not yet complete (see
+`D-stripe-live-account-not-yet-activated-2026-05-13`). Closing
+`D-billing-team-company-not-self-serve-2026-05-13` end-to-end requires
+both slices below; tonight lands the code-and-schema half, tomorrow
+lands the Stripe-surface half.
 
-Three sequential phases, in this order:
+**Tonight's slice (this session):**
 
-1. **Stripe Prices** — operator creates 5 new Stripe Prices in the live
-   Stripe dashboard (Individual annual; Team monthly + annual; Company
-   monthly + annual). The pre-existing Individual monthly price stays
-   put. Each price-id lands in SSM Parameter Store under the matching
-   `STRIPE_PRICE_*` key. **No code on prod yet — this phase only
-   populates secrets the new image will read.**
-2. **Alembic migration `c2a1b9f30e15`** — advances production RDS from
+1. **Alembic migration `c2a1b9f30e15`** — advances production RDS from
    `b8e74a3c1d52` (Step 30a head) to `c2a1b9f30e15` (Step 30a.1 head),
    adding `subscriptions.billing_cadence` and
    `subscriptions.instance_count_cap`. Additive only. Default values
    backfill cleanly (`billing_cadence='monthly'`,
    `instance_count_cap=3`) so the existing Individual-monthly customer
    row is consistent without touching it.
-3. **Application image roll** — new task-definition revisions
-   `luciel-backend:43` and `luciel-worker:21` roll in. The new image
-   carries (a) `BillingService.resolve_price_id(tier, cadence)`, (b)
-   `TierProvisioningService.pre_mint_for_tier(tenant_id, tier)`, (c)
-   `AdminService._enforce_tier_scope` 402 guard, (d) the
-   teammate-invite path on `/admin/luciel-instances` POST. The website
-   is already on `main` via Luciel-Website PR #3 — Amplify build is
-   green, the apex domain CloudFront cache is stale per
-   `D-vantagemind-dns-cloudfront-mismatch-2026-05-13` (operator-side
-   manual invalidation step is in Phase 5).
+2. **Application image roll** — new task-definition revisions
+   `luciel-backend:43` and `luciel-worker:21` roll in **with the
+   secrets block UNCHANGED from `:42`/`:20`** (no new SSM entries
+   tonight — tomorrow's slice adds them). The new image carries (a)
+   `BillingService.resolve_price_id(tier, cadence)` which evaluates
+   lazily per-checkout (boot is unaffected by empty `STRIPE_PRICE_*`
+   keys), (b) `TierProvisioningService.pre_mint_for_tier(tenant_id,
+   tier)`, (c) `AdminService._enforce_tier_scope` 402 guard, (d) the
+   teammate-invite path on `/admin/luciel-instances` POST.
+3. **Closing tag** — `step-30a-1-tiered-self-serve-complete` is cut on
+   tonight's doc-truthing commit, attesting code-complete on prod.
+   Stripe surface deferred remains tracked in the open drift.
+
+**Tomorrow's slice (next session):**
+
+4. **Stripe live-mode activation** — Aryan completes the activation
+   form on his personal sole-prop identity (legal name, Markham ON
+   address, DOB, last-4 SIN, personal CAD bank account, statement
+   descriptor, business description for AI/automation manual-review
+   queue, GST/HST = not registered, Stripe Tax = off).
+5. **Stripe Prices** — operator creates 6 new Stripe Prices in the
+   live Stripe dashboard (Individual monthly + annual; Team monthly +
+   annual; Company monthly + annual). Each price-id lands in SSM
+   Parameter Store under the matching `STRIPE_PRICE_*` key.
+6. **Service force-redeploy** — `aws ecs update-service
+   --force-new-deployment` on both services so the running `:43`
+   containers re-read SSM and pick up the new price-ids. No new
+   task-def revisions; the `:43` secrets block will be amended
+   in-place on tomorrow's commit and a new revision pair cut then.
+7. **Marketing-site CloudFront invalidation** — apex domain catches up
+   to the Amplify-deployed Pricing page per
+   `D-vantagemind-dns-cloudfront-mismatch-2026-05-13`. The website is
+   already on `main` via Luciel-Website PR #3, Amplify build is
+   green; manual invalidation is the bridge until the
+   marketing-site-cloudfront-invalidation-on-deploy drift closes.
+8. **Three-flow smoke** — Sarah (Individual annual), Marcus (Team
+   monthly with teammate invite), Diane (Company monthly) against the
+   ALB direct URL + Amplify-issued marketing URL.
 
 **Pre-deploy state (presumed, verified at Step 1):**
 
@@ -94,7 +120,7 @@ downtime.
 
 ---
 
-## Step 0 — Sanity check from operator workstation
+## [TONIGHT] Step 0 — Sanity check from operator workstation
 
 ```powershell
 cd C:\Users\aryan\Projects\Business\Luciel
@@ -114,17 +140,22 @@ aws configure list-profiles
 # expect exactly: default
 
 # Confirm Stripe CLI authenticated to the live mode account
-stripe config --list | Select-String -Pattern 'live_mode|account_id'
-# expect: live_mode = true, account_id = acct_... (the Luciel production Stripe account)
+# >>> DEFERRED to D-stripe-live-account-not-yet-activated-2026-05-13 <<<
+# Tonight: skip this check. The Stripe live account does not exist yet;
+# the `:43` image's BillingService.resolve_price_id is lazy and tolerates
+# empty STRIPE_PRICE_* keys at boot. Re-run this check in tomorrow's
+# slice once Stripe live-mode activation completes.
+# stripe config --list | Select-String -Pattern 'live_mode|account_id'
+# expect (tomorrow): live_mode = true, account_id = acct_... (the Luciel production Stripe account)
 ```
 
-## Step 1 — Verify presumed production state
+## [TONIGHT] Step 1 — Verify presumed production state
 
 Three independent checks. All three must match presumption before any
 forward action. If any does not match, **stop and revise the runbook**
 before continuing.
 
-### Step 1a — Verify production ECS task-def revisions
+### [TONIGHT] Step 1a — Verify production ECS task-def revisions
 
 ```powershell
 aws ecs describe-services `
@@ -136,7 +167,7 @@ aws ecs describe-services `
 # expect: luciel-backend:42 desired=running, luciel-worker:20 desired=running
 ```
 
-### Step 1b — Verify production RDS Alembic revision (load-bearing)
+### [TONIGHT] Step 1b — Verify production RDS Alembic revision (load-bearing)
 
 From inside a one-shot Fargate task with Alembic and the RDS
 credentials (the operator-patterns.md "bastion task" pattern):
@@ -158,7 +189,12 @@ If the output is `3dbbc70d0105`, the prior runbook
 `step-30a-and-31-2-prod-deploy.md` did not land its migration —
 **stop and run that runbook first**.
 
-### Step 1c — Verify production Stripe Customer Portal configured
+### [TOMORROW] Step 1c — Verify production Stripe Customer Portal configured
+
+> **Deferred to** `D-stripe-live-account-not-yet-activated-2026-05-13`.
+> No live Stripe account exists tonight; the Customer Portal is not
+> reachable. Re-run this check after tomorrow's slice completes Stripe
+> live-mode activation and Phase 1 Prices.
 
 ```powershell
 stripe billing_portal configurations list --limit 1
@@ -171,7 +207,16 @@ dashboard first.
 
 ---
 
-## Phase 1 — Create 5 new Stripe Prices
+## [TOMORROW] Phase 1 — Create 5 new Stripe Prices
+
+> **Entire phase deferred to** `D-stripe-live-account-not-yet-activated-2026-05-13`.
+> Tonight's slice ships the new image with the `STRIPE_PRICE_*` secrets
+> block **unchanged** from `:42` (only `STRIPE_PRICE_INDIVIDUAL_MONTHLY`
+> as it has been); tomorrow's slice adds all six entries to the secrets
+> block and force-redeploys. The Prices listed below remain the
+> canonical target list for tomorrow's execution.
+
+### Original Phase 1 — Create 5 new Stripe Prices
 
 For each price below, run in PowerShell with the Stripe CLI in live
 mode. Each command prints the new `price_id`; capture all 5 before
@@ -244,7 +289,15 @@ Company), then re-run the price-create commands with the resulting
 **Capture the 5 new `price_id` values into a local note. They are the
 input to Phase 2.**
 
-## Phase 2 — Populate SSM Parameter Store
+## [TOMORROW] Phase 2 — Populate SSM Parameter Store
+
+> **Entire phase deferred to** `D-stripe-live-account-not-yet-activated-2026-05-13`.
+> SSM put-parameter calls require the price-ids from Phase 1, which
+> require the Stripe live-mode account. Tomorrow's slice executes both
+> in sequence. The SSM key names below remain canonical and the `:43`
+> task-def will reference them in tomorrow's amended secrets block.
+
+### Original Phase 2 — Populate SSM Parameter Store
 
 For each captured price-id, write the corresponding SSM parameter.
 Use `SecureString` to match the existing Stripe-secret discipline
@@ -309,7 +362,7 @@ The new task-def revision in Phase 4 will reference these parameters
 via the `secrets` block. The currently-running `:42` image does not
 read them and will not be disturbed.
 
-## Phase 3 — Run Alembic migration `c2a1b9f30e15`
+## [TONIGHT] Phase 3 — Run Alembic migration `c2a1b9f30e15`
 
 The same one-shot Fargate-task pattern as Step 1b, but with
 `alembic upgrade head` as the command. Use the `:42` task definition
@@ -382,12 +435,24 @@ forward, re-run. **Never** issue a manual `ALTER TABLE`; a future
 `alembic upgrade head` won't know the column exists and will fail
 non-deterministically.
 
-## Phase 4 — Roll new task-def revisions
+## [TONIGHT] Phase 4 — Roll new task-def revisions
+
+> **Tonight's secrets-block discipline:** the `:43`/`:21` task-defs
+> tonight are byte-identical to `:42`/`:20` in their `secrets` block
+> — image digest is the only thing that changes. The 5 new SSM
+> entries listed below are **deferred to tomorrow's slice** per
+> `D-stripe-live-account-not-yet-activated-2026-05-13`. Tomorrow a
+> new revision pair (likely `:44`/`:22`) will be cut with the amended
+> secrets block; the running `:43` containers will be force-redeployed
+> onto it so they pick up the new SSM entries at start.
+
+### Tomorrow's amended secrets block (do NOT add tonight)
 
 Author `td-backend-rev43.json` and `td-worker-rev21.json` from the
 current `:42` / `:20` JSON dumps, swapping the image digest to the
-Phase 3 digest and appending the 5 new SSM keys to the `secrets`
-block:
+Phase 3 digest **and appending the 5 new SSM keys to the `secrets`
+block** (the appending step is tomorrow; tonight register revisions
+with image-digest swap only):
 
 ```json
 {
@@ -465,7 +530,15 @@ aws logs tail /ecs/luciel-backend --since 10m --region ca-central-1 `
 # expect: no matches
 ```
 
-## Phase 5 — Manual CloudFront invalidation (marketing site)
+## [TOMORROW] Phase 5 — Manual CloudFront invalidation (marketing site)
+
+> **Deferred to** `D-stripe-live-account-not-yet-activated-2026-05-13`
+> tomorrow's slice. Invalidating the apex domain tonight would point
+> visitors at a Pricing page whose CTAs land on a `/billing/checkout`
+> that returns 501 — the same state that has been live since Step
+> 30a's deploy on 2026-05-08, but visible-by-cache-flush instead of
+> hidden-by-staleness. Hold the invalidation for after tomorrow's
+> Phase 1+2 lands the live Prices and the SSM entries.
 
 Per `D-vantagemind-dns-cloudfront-mismatch-2026-05-13`, the apex
 domain `vantagemind.ai` serves stale CloudFront-cached assets after
@@ -489,7 +562,14 @@ aws cloudfront create-invalidation `
 # expect: Invalidation created with Status=InProgress; takes ~5min
 ```
 
-## Phase 6 — Smoke tests against ALB direct URL
+## [TOMORROW] Phase 6 — Smoke tests against ALB direct URL
+
+> **Entire phase deferred to** `D-stripe-live-account-not-yet-activated-2026-05-13`.
+> All three smoke flows exercise `/billing/checkout`, which returns
+> 501 tonight (no live Stripe price-id in SSM). Tonight's verification
+> is the schema + boot-clean check at the end of Phase 4 (zero
+> ERROR/Traceback/CRITICAL in CloudWatch for 5 minutes post-roll);
+> customer-flow smoke runs tomorrow once the Stripe surface lands.
 
 Run three smoke flows against
 `https://luciel-alb-1617994381.ca-central-1.elb.amazonaws.com` (the
@@ -566,7 +646,20 @@ If any of the three smoke flows fails, **roll back per Phase 7**.
 Capture the failure mode and the CloudWatch log range; open an
 incident-grade drift on the spot.
 
-## Phase 7 — Rollback (only if Phase 6 fails)
+## [TONIGHT/TOMORROW] Phase 7 — Rollback
+
+> **Tonight's applicable rollback:** if the Phase 3 migration fails,
+> Alembic transactional DDL rolls back automatically (no operator
+> action). If the Phase 4 ECS roll fails, ECS
+> `deploymentCircuitBreaker` reverts to `:42`/`:20` automatically;
+> manual revert below is for partial-state failures.
+>
+> **Tomorrow's applicable rollback:** if any of Phase 6's three smoke
+> flows fails, manual revert below restores `:42`/`:20`. The 5 Stripe
+> Prices and 5 SSM entries are not rolled back — see the post-rollback
+> notes at the end of this phase.
+
+### Manual rollback procedure (if Phase 6 fails)
 
 ECS rolling deploy with circuit breaker is the first-line auto-fix; a
 hard-stuck deploy reverts to `:42` / `:20` without operator action.
@@ -606,12 +699,17 @@ Customer Portal pending a re-deploy. The new image refusing to roll
 does not cause Stripe to charge anyone — no customer can reach
 `/checkout` for the new tiers until `:43` is live.
 
-## Phase 8 — Post-deploy doc-truthing
+## [TONIGHT] Phase 8 — Post-deploy doc-truthing + closing tag
 
 Already landed on the deploy commit per the agent-side doc-truthing
 pass:
 
-- `CANONICAL_RECAP.md` §12 — new Step 30a.1 row (Billing category).
+- `CANONICAL_RECAP.md` §12 — new Step 30a.1 row (Billing category),
+  annotated as code-complete-on-prod with Stripe-surface deferred per
+  `D-stripe-live-account-not-yet-activated-2026-05-13`.
+- `CANONICAL_RECAP.md` §12 Step 30a row — flipped ✅→🔧 with explicit
+  note that the original 2026-05-08 closure was presumptive; the
+  `/billing/checkout` 501 surface is acknowledged honestly.
 - `CANONICAL_RECAP.md` §14 — price table promoted from "reserved" to
   "shipped" with all 6 SKUs and the per-tier cap.
 - `ARCHITECTURE.md` §3.2.13 — "Annual pricing, multi-SKU… out of
@@ -619,21 +717,29 @@ pass:
   tier↔scope mapping paragraph added.
 - `DRIFTS.md` §3 —
   `D-billing-team-company-not-self-serve-2026-05-13` full-close
-  stanza; two new derivative drifts opened
+  stanza; three new derivative drifts opened
   (`D-tier-scope-mapping-service-layer-only-2026-05-13`,
-  `D-vantagemind-dns-cloudfront-mismatch-2026-05-13`).
+  `D-vantagemind-dns-cloudfront-mismatch-2026-05-13`,
+  `D-stripe-live-account-not-yet-activated-2026-05-13`).
 
-Final operator action after a clean Phase 6:
+Final operator action after a clean Phase 4 (ECS roll steady-state +
+5-minute CloudWatch-clean window):
 
 ```powershell
-# Cut the closing tag on the doc-truthing commit (the merge of PR #49 + docs)
+# Cut the closing tag on the doc-truthing commit (the merge of PR #49 + tonight's docs)
 git checkout main
 git pull --ff-only origin main
 git tag -a step-30a-1-tiered-self-serve-complete `
-  -m "Step 30a.1 — Tiered self-serve (Individual + Team + Company)"
+  -m "Step 30a.1 — Tiered self-serve (code+schema on prod; Stripe surface deferred per D-stripe-live-account-not-yet-activated-2026-05-13)"
 git push origin step-30a-1-tiered-self-serve-complete
 ```
 
+The closing tag attests **code-complete on prod** — the schema is
+advanced, the new image is running, the tier-fanout code paths are
+live on `:43`. The Stripe surface (live Prices, SSM entries,
+customer-flow smoke) is the deferred half, tracked openly in
+`D-stripe-live-account-not-yet-activated-2026-05-13` and re-cut
+forward onto tomorrow's doc-truthing commit when that drift closes.
 The closing tag is the deploy attestation referenced in
 `CANONICAL_RECAP.md` §12, `ARCHITECTURE.md` §3.2.13, and
 `DRIFTS.md` §3.
