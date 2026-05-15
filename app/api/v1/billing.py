@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -520,13 +521,28 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
     # cheap and dependency-free. If we ever change the metadata key,
     # update both this site and ``BillingService.process_pilot_refund``
     # together.
+    #
+    # Commit 3f: ``is_pilot`` is now driven by the metadata flag ALONE.
+    # Earlier code additionally required ``sub.trial_end is not None``,
+    # but that conflated *"sold as a pilot"* (metadata) with *"Stripe
+    # stamped a trial_end on the Subscription object"* (which depends on
+    # the Subscription having been retrieved at checkout time -- see
+    # drift D-stripe-webhook-checkout-vs-subscription-field-source-2026-05-15).
+    # ``pilot_window_end`` still prefers ``trial_end`` when populated
+    # (canonical), and falls back to ``created_at + 90 days`` when it
+    # is null so older Commit-3e rows display the right deadline.
     snapshot = sub.provider_snapshot if isinstance(sub.provider_snapshot, dict) else {}
     snapshot_meta = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
-    is_pilot = (
-        str(snapshot_meta.get("luciel_intro_applied", "")).lower() == "true"
-        and sub.trial_end is not None
-    )
-    pilot_window_end = sub.trial_end if is_pilot else None
+    is_pilot = str(snapshot_meta.get("luciel_intro_applied", "")).lower() == "true"
+    if is_pilot:
+        if sub.trial_end is not None:
+            pilot_window_end = sub.trial_end
+        elif sub.created_at is not None:
+            pilot_window_end = sub.created_at + timedelta(days=90)
+        else:
+            pilot_window_end = None
+    else:
+        pilot_window_end = None
 
     return SubscriptionStatusResponse(
         tenant_id=sub.tenant_id,

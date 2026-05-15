@@ -171,6 +171,26 @@ class StripeClient:
             expand=["subscription", "customer"],
         )
 
+    def retrieve_subscription(self, subscription_id: str) -> Any:
+        """Retrieve the canonical Stripe Subscription by id.
+
+        Step 30a.2-pilot Commit 3f: ``checkout.session.completed`` only
+        carries the subscription id as a string plus an unreliable
+        ``status`` field (it stores the *session* status, not the
+        Subscription's). The Subscription object itself is the source
+        of truth for ``status``, ``trial_end``, and
+        ``current_period_start/end``. ``billing_webhook_service``
+        uses this immediately after locating the sub id on the
+        session, before writing the Subscription row, so the row is
+        accurate on creation rather than waiting for the eventual
+        ``customer.subscription.updated`` backfill.
+
+        See drift
+        ``D-stripe-webhook-checkout-vs-subscription-field-source-2026-05-15``.
+        """
+        stripe.api_key = self._api_key
+        return stripe.Subscription.retrieve(subscription_id)
+
     # -----------------------------------------------------------------
     # Customer Portal
     # -----------------------------------------------------------------

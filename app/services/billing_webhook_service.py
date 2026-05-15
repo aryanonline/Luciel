@@ -299,11 +299,48 @@ class BillingWebhookService:
             now_iso = datetime.now(timezone.utc).isoformat()
             # Period fields live on subscription items in Stripe basil
             # (2025-03-31) and later. They have never lived on the
-            # checkout.session object, so both reads return None here --
-            # subscription.updated backfills them. Helper kept for read-
-            # site uniformity with the load-bearing _on_subscription_updated
-            # path. See D-stripe-subscription-period-fields-moved-to-items-2026-05-14.
+            # checkout.session object, so reads off ``data_object`` return
+            # None. Step 30a.2-pilot Commit 3f introduces an authoritative
+            # fetch of the Subscription object itself (below) so we read
+            # ``status``, ``trial_end``, and ``current_period_*`` from the
+            # source of truth rather than from the unrelated
+            # ``checkout.session.status`` field. Helper kept for read-site
+            # uniformity with the load-bearing _on_subscription_updated
+            # path. See D-stripe-subscription-period-fields-moved-to-items-2026-05-14
+            # and D-stripe-webhook-checkout-vs-subscription-field-source-2026-05-15.
             _period_start, _period_end = self._extract_period_fields(data_object)
+
+            # Fetch the canonical Subscription object. checkout.session
+            # only carries the id; status/trial_end/period live on the
+            # Subscription. If Stripe is unreachable we degrade to the
+            # inline data so we still 200 the webhook (Stripe MUST get
+            # a 200 to stop redelivering), and the subsequent
+            # ``customer.subscription.updated`` event will backfill.
+            stripe_subscription_obj = None
+            try:
+                stripe_subscription_obj = self.stripe.retrieve_subscription(
+                    stripe_subscription_id
+                )
+            except Exception as fetch_exc:  # noqa: BLE001 -- graceful degrade
+                logger.warning(
+                    "billing-webhook: retrieve_subscription failed sub=%s err=%s; "
+                    "falling back to checkout.session fields",
+                    stripe_subscription_id, fetch_exc,
+                )
+
+            def _from_sub(field: str, default=None):
+                """Read field from the Subscription object if available,
+                else from the inline checkout.session data_object."""
+                if stripe_subscription_obj is not None:
+                    val = (
+                        stripe_subscription_obj.get(field)
+                        if hasattr(stripe_subscription_obj, "get")
+                        else getattr(stripe_subscription_obj, field, default)
+                    )
+                    if val is not None:
+                        return val
+                return data_object.get(field, default)
+
             sub = Subscription(
                 tenant_id=tenant_id,
                 user_id=user.id,
@@ -312,15 +349,18 @@ class BillingWebhookService:
                 stripe_subscription_id=stripe_subscription_id,
                 stripe_price_id=self._extract_price_id(data_object),
                 tier=tier,
-                status=data_object.get("status") or "incomplete",
+                # Commit 3f: read status from Subscription, not from
+                # checkout.session (whose ``status`` field is the SESSION
+                # status, e.g. 'complete', not a subscription status).
+                status=_from_sub("status") or "incomplete",
                 # Step 30a.1: new columns from webhook metadata + per-tier defaults.
                 billing_cadence=billing_cadence,
                 instance_count_cap=instance_count_cap,
-                current_period_start=_ts(_period_start),
-                current_period_end=_ts(_period_end),
-                trial_end=_ts(data_object.get("trial_end")),
-                cancel_at_period_end=bool(data_object.get("cancel_at_period_end") or False),
-                canceled_at=_ts(data_object.get("canceled_at")),
+                current_period_start=_ts(_from_sub("current_period_start", _period_start)),
+                current_period_end=_ts(_from_sub("current_period_end", _period_end)),
+                trial_end=_ts(_from_sub("trial_end")),
+                cancel_at_period_end=bool(_from_sub("cancel_at_period_end") or False),
+                canceled_at=_ts(_from_sub("canceled_at")),
                 active=True,
                 last_event_id=event_id,
                 provider_snapshot=dict(data_object),
