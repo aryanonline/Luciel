@@ -172,6 +172,26 @@ ACTION_SUBSCRIPTION_CANCEL = "subscription_cancel"
 ACTION_SUBSCRIPTION_REACTIVATE = "subscription_reactivate"
 ACTION_BILLING_WEBHOOK_REPLAY_REJECTED = "billing_webhook_replay_rejected"
 
+# Step 30a.2-pilot -- self-serve refund of the one-time $100 CAD intro
+# fee charged at signup. Distinct from ACTION_SUBSCRIPTION_CANCEL
+# because:
+#   (a) the actor is the buyer (a cookied User), NOT the Stripe webhook,
+#       so an auditor can answer "who initiated this teardown -- the
+#       customer or Stripe?" by filtering on actor_label;
+#   (b) the financial side effect is a refund row in Stripe AND a
+#       cancel, not just a cancel -- the after_json carries
+#       stripe_refund_id + intro_charge_id + refunded_amount_cents +
+#       currency so the audit trail is the single source of truth for
+#       the $100 returning to the buyer's card;
+#   (c) only the FIRST-TIME path is eligible (see
+#       BillingService.process_pilot_refund eligibility predicate); the
+#       distinct verb makes that policy auditable at the verb level
+#       rather than only inside note/JSON.
+# The action string is 28 chars and fits in the existing
+# admin_audit_logs.action String(64) column (Step 29x widened from 30
+# to 64). No schema migration required.
+ACTION_SUBSCRIPTION_PILOT_REFUNDED = "subscription_pilot_refunded"
+
 # Step 30a.2 -- retention worker hard-purge action. See ALLOWED_ACTIONS
 # entry for full rationale. Defined here (above ALLOWED_ACTIONS) so the
 # whitelist tuple can reference it.
@@ -216,6 +236,8 @@ ALLOWED_ACTIONS = (
     ACTION_SUBSCRIPTION_CANCEL,
     ACTION_SUBSCRIPTION_REACTIVATE,
     ACTION_BILLING_WEBHOOK_REPLAY_REJECTED,
+    # Step 30a.2-pilot -- self-serve refund of the one-time intro fee.
+    ACTION_SUBSCRIPTION_PILOT_REFUNDED,
     # Step 30a.2 -- retention worker hard-purge action. Distinct from
     # ACTION_RETENTION_ENFORCE (which the existing retention policy code
     # uses for per-record TTL expiry on memory_items) because tenant-

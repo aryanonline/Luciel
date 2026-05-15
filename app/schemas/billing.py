@@ -166,3 +166,45 @@ class SubscriptionStatusResponse(BaseModel):
     # Step 30a.1 additions.
     billing_cadence: str
     instance_count_cap: int
+
+
+# ---------------------------------------------------------------------
+# POST /api/v1/billing/pilot-refund   (Step 30a.2-pilot)
+# ---------------------------------------------------------------------
+
+class PilotRefundResponse(BaseModel):
+    """Result of a self-serve pilot-refund.
+
+    All fields are confirmation values the marketing site can render
+    immediately ("$100 refunded to your card, pilot canceled"). The
+    underlying Stripe Refund row + audit log entry are the durable
+    source of truth; this response is for the UX, not the audit.
+
+    Fields:
+      refund_id            -- Stripe Refund id (re_...). Surfaced so a
+                              support ticket can quote it back to the
+                              buyer without a Stripe dashboard lookup.
+      charge_id            -- Stripe Charge id that was refunded (ch_/py_).
+      refunded_amount_cents-- Always 10000 by the locked policy; carried
+                              explicitly so the marketing site does not
+                              hardcode the cents value.
+      currency             -- Lowercased ISO-4217. Always 'cad' today;
+                              field exists so a future currency expansion
+                              doesn't change the response shape.
+      tenant_id            -- The tenant that just cascaded to inactive.
+                              Surfaced so the marketing site can purge
+                              the cookied session state correctly.
+      deactivated_at       -- Server-side timestamp the cascade ran.
+    """
+    refund_id: str | None = Field(
+        default=None,
+        description="Stripe Refund id (re_...). Nullable in the rare "
+                    "case where Stripe returns a Refund with no id.",
+    )
+    charge_id: str = Field(..., description="Stripe Charge id that was refunded.")
+    refunded_amount_cents: int = Field(
+        ..., description="Amount refunded in the smallest currency unit (cents for CAD).",
+    )
+    currency: str = Field(..., description="ISO-4217 currency, lowercased (e.g. 'cad').")
+    tenant_id: str = Field(..., description="Tenant that was cascade-deactivated.")
+    deactivated_at: datetime = Field(..., description="UTC time the cascade ran.")

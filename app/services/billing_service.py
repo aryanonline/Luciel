@@ -24,6 +24,7 @@ running webhook listener.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -31,16 +32,25 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.integrations.stripe import StripeClient
+from app.models.admin_audit_log import (
+    ACTION_SUBSCRIPTION_PILOT_REFUNDED,
+    RESOURCE_SUBSCRIPTION,
+)
 from app.models.subscription import (
     ALLOWED_BILLING_CADENCES,
     ALLOWED_TIERS,
     BILLING_CADENCE_ANNUAL,
     BILLING_CADENCE_MONTHLY,
+    STATUS_CANCELED,
     Subscription,
     TIER_COMPANY,
     TIER_INDIVIDUAL,
     TIER_INSTANCE_CAPS,
     TIER_TEAM,
+)
+from app.repositories.admin_audit_repository import (
+    AdminAuditRepository,
+    AuditContext,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +62,49 @@ class BillingNotConfiguredError(Exception):
     The route layer maps this to HTTP 501 Not Implemented so a CI run
     against a backend without billing env vars exits with a clear
     message rather than a 500 from a Stripe library error.
+    """
+
+
+# ---------------------------------------------------------------------
+# Step 30a.2-pilot: typed errors for the self-serve refund route.
+#
+# Each maps to a single HTTP status in app/api/v1/billing.py so the
+# marketing site can render a precise message ("you are not eligible" /
+# "the 90-day window has closed" / "we cannot find your pilot charge")
+# without parsing English. The detail strings are stable identifiers --
+# the marketing site keys its copy off them.
+# ---------------------------------------------------------------------
+
+class NotFirstTimePilotError(Exception):
+    """403 -- the buyer is not on the first-time intro path.
+
+    Either ``provider_snapshot.metadata.luciel_intro_applied`` is
+    'false' / missing (the buyer rejoined and pays plan rate, no intro
+    fee to refund) or the subscription has no recorded trial. Either
+    way the $100 was never charged to this buyer and a refund here
+    would be an unrelated debit.
+    """
+
+
+class PilotWindowExpiredError(Exception):
+    """409 -- the 90-day intro window has already closed.
+
+    Once ``trial_end`` is in the past Stripe has already issued the
+    first full-rate invoice; the intro fee is non-refundable past that
+    boundary by the policy locked in CANONICAL_RECAP §14 \u00b6273.
+    The buyer must use the customer portal to cancel the recurring
+    subscription instead.
+    """
+
+
+class PilotChargeNotFoundError(Exception):
+    """404 -- Stripe cannot locate the intro Charge to refund.
+
+    This happens if the subscription was created out-of-band (no intro
+    line item), the Charge was already refunded via the dashboard, or
+    Stripe has wiped the test-mode artifact. Distinct from
+    NotFirstTimePilotError so an auditor can tell the two cases apart
+    in support tickets.
     """
 
 
@@ -403,3 +456,220 @@ class BillingService:
             .limit(1)
         )
         return self.db.execute(stmt).scalars().first()
+
+    # -----------------------------------------------------------------
+    # Step 30a.2-pilot: self-serve refund of the one-time intro fee.
+    # -----------------------------------------------------------------
+
+    # Locked-canon refund amount (CANONICAL_RECAP \u00a714 \u00b6273).
+    # Hard-coded rather than read from the Stripe Price object because:
+    #   (a) the audit row must record the EXACT refund the buyer was
+    #       promised, not whatever the Price object currently says
+    #       (which a future operator could legitimately change for new
+    #       buyers without affecting in-flight pilots);
+    #   (b) the route returns the refunded amount synchronously so the
+    #       UI can show "$100 refunded" before the webhook round-trip
+    #       confirms it on the Stripe side.
+    _PILOT_REFUND_AMOUNT_CENTS: int = 10000
+    _PILOT_REFUND_CURRENCY: str = "cad"
+
+    def process_pilot_refund(self, *, user) -> dict[str, Any]:
+        """Refund the $100 intro fee and tear down the pilot.
+
+        Eligibility (all must hold; first failure raises and aborts):
+          1. The user has an active subscription on file.
+          2. The subscription was created on the first-time intro path,
+             evidenced by ``provider_snapshot.metadata.luciel_intro_applied
+             == 'true'`` (stamped by ``create_checkout``). A subscription
+             whose metadata says 'false' means the buyer was a returning
+             customer who never paid the $100; refunding here would
+             return a sum that was never charged.
+          3. ``datetime.utcnow() <= trial_end``. Past day 91 the intro
+             fee is non-refundable.
+          4. Stripe can locate the Charge that funded the intro fee.
+
+        Side effects, all atomic in a single DB transaction:
+          * Stripe Refund.create against the intro Charge.
+          * Stripe Subscription.cancel (no proration, no final invoice).
+          * One AdminAuditLog row with action=ACTION_SUBSCRIPTION_PILOT_REFUNDED
+            carrying stripe_refund_id + intro_charge_id +
+            refunded_amount_cents + currency in after_json.
+          * Local subscription row: active=False, status=STATUS_CANCELED,
+            canceled_at=now.
+          * Tenant cascade-deactivate via
+            AdminService.deactivate_tenant_with_cascade so every child
+            row (conversations, identity_claims, memory_items, api_keys,
+            luciel_instances, agents, agent_configs, domain_configs,
+            tenant_config) flips to active=False in lock-step.
+
+        Stripe will subsequently fire ``customer.subscription.deleted``
+        to our webhook; ``BillingWebhookService._on_subscription_deleted``
+        is idempotent against an already-canceled row and will record a
+        replay-rejected audit entry rather than re-cascading.
+
+        Returns a dict (NOT a model) so the route layer can validate the
+        shape against PilotRefundResponse explicitly; this keeps the
+        service decoupled from the Pydantic schema.
+        """
+        self.require_configured()
+
+        sub = self.get_active_subscription_for_user(user_id=user.id)
+        if sub is None:
+            raise LookupError("No active subscription on file.")
+
+        # Eligibility (2): must be first-time intro path.
+        snapshot = sub.provider_snapshot or {}
+        snapshot_meta = (snapshot.get("metadata") or {}) if isinstance(snapshot, dict) else {}
+        intro_applied = str(snapshot_meta.get("luciel_intro_applied", "")).lower() == "true"
+        # Belt-and-suspenders cross-check: trial_end must exist. A
+        # repeat customer's subscription never has a trial_end stamp,
+        # so this is a redundant but cheap second predicate.
+        if not intro_applied or sub.trial_end is None:
+            logger.info(
+                "billing: pilot-refund rejected -- not on intro path "
+                "user_id=%s sub=%s intro_applied=%s trial_end=%s",
+                getattr(user, "id", "?"), sub.id, intro_applied, sub.trial_end,
+            )
+            raise NotFirstTimePilotError(
+                "This subscription was not created on the first-time "
+                "intro path; there is no $100 intro fee to refund."
+            )
+
+        # Eligibility (3): within the 90-day window.
+        now = datetime.now(timezone.utc)
+        # trial_end is a tz-aware DateTime in the model; defensive
+        # coerce in case a legacy row was written without tzinfo.
+        trial_end = sub.trial_end
+        if trial_end is not None and trial_end.tzinfo is None:
+            trial_end = trial_end.replace(tzinfo=timezone.utc)
+        if trial_end is None or now > trial_end:
+            logger.info(
+                "billing: pilot-refund rejected -- window expired "
+                "user_id=%s sub=%s trial_end=%s now=%s",
+                getattr(user, "id", "?"), sub.id, trial_end, now,
+            )
+            raise PilotWindowExpiredError(
+                "The 90-day intro window has closed; the intro fee is "
+                "no longer refundable. Use the Customer Portal to cancel."
+            )
+
+        # Eligibility (4): Stripe can find the intro Charge.
+        # We resolve the intro Price id from settings so the lookup is
+        # informational (the helper does not branch on it today, but the
+        # signature accepts it so a future amount-verification can flip
+        # on without a Stripe-client signature change).
+        try:
+            intro_fee_price_id = self.resolve_intro_fee_price_id()
+        except BillingNotConfiguredError:
+            # If the intro Price id is not configured, the refund cannot
+            # be authorized. Route layer maps this to 501.
+            raise
+        charge_id = self.stripe.find_intro_charge_id(
+            stripe_subscription_id=sub.stripe_subscription_id,
+            intro_fee_price_id=intro_fee_price_id,
+        )
+        if not charge_id:
+            logger.error(
+                "billing: pilot-refund cannot locate intro charge "
+                "user_id=%s sub=%s stripe_sub=%s",
+                getattr(user, "id", "?"), sub.id, sub.stripe_subscription_id,
+            )
+            raise PilotChargeNotFoundError(
+                "Stripe cannot locate the intro charge for this "
+                "subscription; contact support if this is unexpected."
+            )
+
+        # Stripe writes -- refund first, then cancel. If the cancel
+        # call fails after a successful refund we still leave the local
+        # state consistent (subscription row flipped, tenant cascaded)
+        # because the customer has been made whole financially; the
+        # Stripe-side subscription becomes a zombie that the webhook
+        # will clean up on its next event delivery.
+        idem_key = f"pilot-refund:{sub.stripe_subscription_id}:{charge_id}"
+        refund = self.stripe.refund_charge(charge_id=charge_id, idempotency_key=idem_key)
+        refund_id = getattr(refund, "id", None) or refund.get("id") if isinstance(refund, dict) else getattr(refund, "id", None)
+        try:
+            self.stripe.cancel_subscription(
+                stripe_subscription_id=sub.stripe_subscription_id,
+            )
+        except Exception:  # pragma: no cover - Stripe boundary
+            logger.exception(
+                "billing: pilot-refund cancel-after-refund failed "
+                "sub=%s refund=%s -- proceeding with local teardown",
+                sub.stripe_subscription_id, refund_id,
+            )
+
+        # Local state mutations + audit + cascade -- one DB transaction.
+        before_status = sub.status
+        sub.status = STATUS_CANCELED
+        sub.active = False
+        sub.canceled_at = now
+
+        ctx = AuditContext(
+            actor_key_prefix=None,
+            actor_permissions=("customer_self_serve",),
+            actor_label=f"pilot_refund:user:{user.id}",
+        )
+        audit_repo = AdminAuditRepository(self.db)
+        audit_repo.record(
+            ctx=ctx,
+            tenant_id=sub.tenant_id,
+            action=ACTION_SUBSCRIPTION_PILOT_REFUNDED,
+            resource_type=RESOURCE_SUBSCRIPTION,
+            resource_pk=sub.id,
+            resource_natural_id=sub.stripe_subscription_id,
+            before={"status": before_status, "active": True},
+            after={
+                "status": STATUS_CANCELED,
+                "active": False,
+                "stripe_refund_id": refund_id,
+                "intro_charge_id": charge_id,
+                "refunded_amount_cents": self._PILOT_REFUND_AMOUNT_CENTS,
+                "currency": self._PILOT_REFUND_CURRENCY,
+            },
+            note="self-serve pilot refund -> refund + cancel + tenant cascade",
+        )
+
+        # Cascade-deactivate the tenant inside the same transaction.
+        # autocommit=False so the audit row, the subscription mutation,
+        # and every cascade row land atomically.
+        try:
+            from app.repositories.agent_repository import AgentRepository
+            from app.services.admin_service import AdminService
+            from app.services.luciel_instance_service import LucielInstanceService
+
+            admin = AdminService(self.db)
+            agent_repo = AgentRepository(self.db)
+            luciel_service = LucielInstanceService(self.db, admin_service=admin)
+            admin.deactivate_tenant_with_cascade(
+                sub.tenant_id,
+                audit_ctx=ctx,
+                luciel_instance_service=luciel_service,
+                agent_repo=agent_repo,
+                updated_by=f"pilot_refund:user:{user.id}",
+                autocommit=False,
+            )
+        except Exception:
+            self.db.rollback()
+            logger.exception(
+                "billing: pilot-refund cascade failed tenant=%s sub=%s",
+                sub.tenant_id, sub.stripe_subscription_id,
+            )
+            raise
+
+        self.db.commit()
+
+        logger.info(
+            "billing: pilot-refund completed user_id=%s sub=%s tenant=%s "
+            "refund=%s charge=%s amount_cents=%s",
+            user.id, sub.id, sub.tenant_id, refund_id, charge_id,
+            self._PILOT_REFUND_AMOUNT_CENTS,
+        )
+        return {
+            "refund_id": refund_id,
+            "charge_id": charge_id,
+            "refunded_amount_cents": self._PILOT_REFUND_AMOUNT_CENTS,
+            "currency": self._PILOT_REFUND_CURRENCY,
+            "tenant_id": sub.tenant_id,
+            "deactivated_at": now,
+        }

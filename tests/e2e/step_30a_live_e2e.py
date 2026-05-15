@@ -428,6 +428,218 @@ def scenario_6_cancel_flips_active_and_cascades():
         record("CANCEL audit row recorded", len(cancels) >= 1)
 
 
+# Step 30a.2-pilot: e2e coverage for the self-serve pilot-refund
+# endpoint. We split into two scenarios:
+#
+#   8a — Eligibility gating (NotFirstTimePilotError / PilotWindowExpiredError)
+#        with a freshly-minted Subscription row whose provider_snapshot
+#        either lacks the intro stamp or whose trial_end is in the past.
+#        This exercises the pure-policy branches without a real refund.
+#   8b — Stripe-side refund + cancel + cascade against Stripe TEST mode.
+#        Opt-in via PILOT_REFUND_LIVE_SMOKE=1 so an accidental harness
+#        run does not move money. When enabled it requires a Customer +
+#        Subscription seeded via Stripe test-clock travel to day 91 minus
+#        epsilon; the runbook in scripts/deploy_30a2_pilot.sh covers the
+#        setup.
+#
+# The eligibility scenario uses a separate buyer email so it does not
+# collide with scenarios 4-6 (which terminate the original tenant in
+# scenario 6 via the cancel cascade).
+
+PILOT_HARNESS_EMAIL = f"step30a2pilot+{uuid.uuid4().hex[:8]}@example.com"
+
+
+def _seed_pilot_subscription(
+    db,
+    *,
+    email: str,
+    intro_applied: bool,
+    trial_end_offset_days: int,
+) -> int:
+    """Insert a synthetic Subscription row for the pilot-refund harness.
+
+    Returns the row's PK. The shape mirrors what
+    BillingWebhookService._on_checkout_completed would produce for an
+    intro-applied buyer, so process_pilot_refund's eligibility branches
+    can be exercised without driving a real Stripe Checkout.
+    """
+    from datetime import datetime, timedelta, timezone
+    from app.models.subscription import (
+        BILLING_CADENCE_MONTHLY,
+        STATUS_TRIALING,
+        Subscription,
+        TIER_INDIVIDUAL,
+        TIER_INSTANCE_CAPS,
+    )
+    from app.models.user import User
+    from sqlalchemy import func, select
+
+    user = (
+        db.execute(select(User).where(func.lower(User.email) == email.lower()))
+        .scalars()
+        .first()
+    )
+    if user is None:
+        user = User(email=email, display_name="Pilot Refund Harness", synthetic=False, active=True)
+        db.add(user)
+        db.flush()
+
+    now = datetime.now(timezone.utc)
+    sub = Subscription(
+        user_id=user.id,
+        tenant_id=f"t_pilot_{uuid.uuid4().hex[:8]}",
+        customer_email=email,
+        stripe_customer_id=f"cus_pilot_{uuid.uuid4().hex[:16]}",
+        stripe_subscription_id=f"sub_pilot_{uuid.uuid4().hex[:16]}",
+        tier=TIER_INDIVIDUAL,
+        billing_cadence=BILLING_CADENCE_MONTHLY,
+        instance_count_cap=TIER_INSTANCE_CAPS[TIER_INDIVIDUAL],
+        status=STATUS_TRIALING,
+        active=True,
+        current_period_start=now,
+        current_period_end=now + timedelta(days=90),
+        trial_end=now + timedelta(days=trial_end_offset_days),
+        provider_snapshot={
+            "metadata": {
+                "luciel_intro_applied": "true" if intro_applied else "false",
+            }
+        },
+    )
+    db.add(sub)
+    db.flush()
+    return sub.id
+
+
+def scenario_8a_pilot_refund_eligibility_gates():
+    """Claim: process_pilot_refund raises NotFirstTimePilotError when the
+    subscription is not on the intro path, and PilotWindowExpiredError
+    when trial_end is in the past. Both branches abort BEFORE any
+    Stripe call so no live refund is initiated."""
+    header("Scenario 8a — pilot-refund eligibility gates (policy-only)")
+    from app.services.billing_service import (
+        BillingService,
+        NotFirstTimePilotError,
+        PilotWindowExpiredError,
+    )
+
+    # Sub A: intro_applied=False. Should raise NotFirstTimePilotError.
+    email_a = f"pilot-not-first+{uuid.uuid4().hex[:8]}@example.com"
+    with SessionLocal() as db:
+        sub_id_a = _seed_pilot_subscription(
+            db, email=email_a, intro_applied=False, trial_end_offset_days=30,
+        )
+        db.commit()
+
+        from app.models.user import User
+        from sqlalchemy import select, func
+        user_a = (
+            db.execute(select(User).where(func.lower(User.email) == email_a.lower()))
+            .scalars()
+            .first()
+        )
+        svc = BillingService(db, get_stripe_client())
+        raised = None
+        try:
+            svc.process_pilot_refund(user=user_a)
+        except NotFirstTimePilotError as exc:
+            raised = exc
+        except Exception as exc:  # noqa: BLE001
+            raised = exc
+        record(
+            "not-first-time raises NotFirstTimePilotError",
+            isinstance(raised, NotFirstTimePilotError),
+            detail=f"raised={type(raised).__name__ if raised else 'None'}",
+        )
+
+    # Sub B: intro_applied=True but trial_end is in the past.
+    email_b = f"pilot-expired+{uuid.uuid4().hex[:8]}@example.com"
+    with SessionLocal() as db:
+        sub_id_b = _seed_pilot_subscription(
+            db, email=email_b, intro_applied=True, trial_end_offset_days=-1,
+        )
+        db.commit()
+
+        from app.models.user import User
+        from sqlalchemy import select, func
+        user_b = (
+            db.execute(select(User).where(func.lower(User.email) == email_b.lower()))
+            .scalars()
+            .first()
+        )
+        svc = BillingService(db, get_stripe_client())
+        raised = None
+        try:
+            svc.process_pilot_refund(user=user_b)
+        except PilotWindowExpiredError as exc:
+            raised = exc
+        except Exception as exc:  # noqa: BLE001
+            raised = exc
+        record(
+            "window-expired raises PilotWindowExpiredError",
+            isinstance(raised, PilotWindowExpiredError),
+            detail=f"raised={type(raised).__name__ if raised else 'None'}",
+        )
+
+
+def scenario_8b_pilot_refund_live_smoke():
+    """OPT-IN: drives a real $100 refund against Stripe TEST mode.
+
+    Skipped unless PILOT_REFUND_LIVE_SMOKE=1 is set in the environment.
+    Requires a Customer + Subscription seeded with a successful intro
+    charge (the runbook in scripts/deploy_30a2_pilot.sh §G4 documents
+    the test-clock + price-id setup). The harness reads the
+    pre-seeded sub id from PILOT_REFUND_LIVE_SUB_ID."""
+    header("Scenario 8b — pilot-refund LIVE smoke (opt-in)")
+    if os.getenv("PILOT_REFUND_LIVE_SMOKE", "").strip() not in {"1", "true", "yes"}:
+        record("live smoke skipped (PILOT_REFUND_LIVE_SMOKE not set)", True,
+               detail="set PILOT_REFUND_LIVE_SMOKE=1 + PILOT_REFUND_LIVE_SUB_ID=sub_... to enable")
+        return
+    sub_id_str = os.getenv("PILOT_REFUND_LIVE_SUB_ID", "").strip()
+    if not sub_id_str:
+        record("live smoke missing PILOT_REFUND_LIVE_SUB_ID", False)
+        return
+    try:
+        sub_id = int(sub_id_str)
+    except ValueError:
+        record("live smoke PILOT_REFUND_LIVE_SUB_ID parses as int", False)
+        return
+
+    from app.services.billing_service import BillingService
+    with SessionLocal() as db:
+        sub = db.get(Subscription, sub_id)
+        if sub is None:
+            record("live smoke prereq: subscription row exists", False)
+            return
+        user = db.get(User, sub.user_id)
+        if user is None:
+            record("live smoke prereq: user row exists", False)
+            return
+        svc = BillingService(db, get_stripe_client())
+        try:
+            result = svc.process_pilot_refund(user=user)
+            record("refund completed end-to-end", True,
+                   detail=f"refund={result.get('refund_id')} charge={result.get('charge_id')}")
+            record("amount == 10000 cad",
+                   result.get("refunded_amount_cents") == 10000 and result.get("currency") == "cad")
+            sub_after = db.get(Subscription, sub_id)
+            record("subscription flipped to active=False",
+                   sub_after is not None and sub_after.active is False)
+            audits = (
+                db.execute(
+                    select(AdminAuditLog).where(
+                        AdminAuditLog.resource_type == RESOURCE_SUBSCRIPTION,
+                        AdminAuditLog.resource_pk == sub_id,
+                        AdminAuditLog.action == "subscription_pilot_refunded",
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            record("SUBSCRIPTION_PILOT_REFUNDED audit row recorded", len(audits) >= 1)
+        except Exception as exc:  # noqa: BLE001
+            record("refund completed end-to-end", False, detail=f"{type(exc).__name__}: {exc}")
+
+
 def scenario_7_magic_link_roundtrip():
     """Claim: a magic link minted by the webhook path can be consumed
     by /login and produces a session JWT that validate_session_token
@@ -476,6 +688,9 @@ def main() -> int:
     safe("scenario_5", scenario_5_webhook_idempotent_replay)
     safe("scenario_6", scenario_6_cancel_flips_active_and_cascades)
     safe("scenario_7", scenario_7_magic_link_roundtrip)
+    # Step 30a.2-pilot scenarios
+    safe("scenario_8a", scenario_8a_pilot_refund_eligibility_gates)
+    safe("scenario_8b", scenario_8b_pilot_refund_live_smoke)
 
     header("Summary")
     passed = sum(1 for r in results if r.passed)

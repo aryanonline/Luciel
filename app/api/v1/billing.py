@@ -1,12 +1,15 @@
 """Step 30a: billing API routes.
 
-Public surface for the self-serve subscription flow. Seven routes:
+Public surface for the self-serve subscription flow. Eight routes
+(seventh route /pilot-refund added in Step 30a.2-pilot):
 
   POST /api/v1/billing/checkout           -- create a Stripe Checkout session
   POST /api/v1/billing/webhook            -- Stripe webhook receiver
   POST /api/v1/billing/onboarding/claim   -- post-checkout email-link mint
   GET  /api/v1/billing/login              -- exchange magic-link token for cookie
   POST /api/v1/billing/portal             -- Stripe Customer Portal session
+  POST /api/v1/billing/pilot-refund       -- Step 30a.2-pilot: self-serve
+                                             $100 refund + cancel in 90-day window
   GET  /api/v1/billing/me                 -- read current subscription state
   POST /api/v1/billing/logout             -- clear the session cookie
 
@@ -16,7 +19,7 @@ Auth model:
     required. /webhook verifies a Stripe signature; /login validates a JWT;
     /checkout + /onboarding/claim are public-by-design (the marketing site
     calls them anonymously).
-  * /portal, /me -- require the session cookie minted by /login.
+  * /portal, /pilot-refund, /me -- require the session cookie minted by /login.
   * /logout -- idempotent and credential-free; safe to call when already
     logged out (clears the cookie if present).
 
@@ -44,10 +47,17 @@ from app.schemas.billing import (
     CheckoutSessionResponse,
     OnboardingClaimRequest,
     OnboardingClaimResponse,
+    PilotRefundResponse,
     PortalSessionResponse,
     SubscriptionStatusResponse,
 )
-from app.services.billing_service import BillingNotConfiguredError, BillingService
+from app.services.billing_service import (
+    BillingNotConfiguredError,
+    BillingService,
+    NotFirstTimePilotError,
+    PilotChargeNotFoundError,
+    PilotWindowExpiredError,
+)
 from app.services.billing_webhook_service import BillingWebhookService
 from app.services.magic_link_service import (
     MagicLinkError,
@@ -352,6 +362,57 @@ def create_portal(request: Request, db: DbSession) -> PortalSessionResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return PortalSessionResponse(portal_url=url)
+
+
+# ---------------------------------------------------------------------
+# POST /pilot-refund   (Step 30a.2-pilot)
+# ---------------------------------------------------------------------
+
+@router.post(
+    "/pilot-refund",
+    response_model=PilotRefundResponse,
+    status_code=status.HTTP_200_OK,
+)
+def pilot_refund(request: Request, db: DbSession) -> PilotRefundResponse:
+    """Self-serve $100 intro-fee refund + immediate pilot teardown.
+
+    Locked policy (CANONICAL_RECAP §14 ¶273, Step 30a.2-pilot):
+      * Eligible during the 90-day intro window only.
+      * Only first-time customers ever paid the $100; repeat customers
+        get 403.
+      * Refund cancels the subscription and cascades the tenant in the
+        same database transaction. There is no separate "refund without
+        cancel" affordance -- by policy, the refund IS the cancel.
+      * Past day 91 the intro fee is non-refundable; the buyer must
+        cancel via the Customer Portal instead (recurring rate applies).
+
+    HTTP mapping:
+      200  -- refund + cancel + cascade succeeded; PilotRefundResponse body.
+      401  -- no valid session cookie.
+      403  -- not on the first-time intro path (NotFirstTimePilotError).
+      404  -- no active subscription on file OR Stripe cannot locate the
+              intro charge (PilotChargeNotFoundError / LookupError).
+      409  -- 90-day window has closed (PilotWindowExpiredError).
+      501  -- Stripe / intro fee Price not configured on this backend.
+    """
+    cookie = request.cookies.get(settings.session_cookie_name)
+    user = _resolve_cookied_user(db=db, session_cookie=cookie)
+
+    svc = _service(db)
+    try:
+        result = svc.process_pilot_refund(user=user)
+    except BillingNotConfiguredError as exc:
+        raise _501_if_billing_not_ready(exc) from exc
+    except NotFirstTimePilotError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except PilotWindowExpiredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PilotChargeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return PilotRefundResponse(**result)
 
 
 # ---------------------------------------------------------------------

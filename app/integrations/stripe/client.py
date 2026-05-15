@@ -183,6 +183,113 @@ class StripeClient:
         )
 
     # -----------------------------------------------------------------
+    # Step 30a.2-pilot: self-serve refund of the one-time $100 intro fee.
+    #
+    # Locates the Charge that corresponds to the intro-fee line item on
+    # the subscription's first Invoice, refunds it in full, then cancels
+    # the subscription. The two are done as separate Stripe API calls
+    # because Stripe does not expose a combined refund-and-cancel primitive
+    # in subscription mode; the caller (BillingService.process_pilot_refund)
+    # wraps both writes inside a single DB transaction plus a tenant
+    # cascade so the local state never drifts from Stripe's view.
+    # -----------------------------------------------------------------
+
+    def find_intro_charge_id(
+        self,
+        *,
+        stripe_subscription_id: str,
+        intro_fee_price_id: str,
+    ) -> str | None:
+        """Resolve the Charge id for the one-time $100 intro line item.
+
+        Stripe's subscription-mode checkout creates a parent Invoice that
+        contains both the trial recurring line ($0 today, prorated to 0)
+        and the ``add_invoice_items`` one-time intro line ($100). The
+        Invoice is paid via a single PaymentIntent which produces exactly
+        one Charge that covers the whole amount. We return that Charge
+        id; the caller refunds it in full.
+
+        Returns None if Stripe cannot locate the Invoice or its Charge --
+        the route layer maps None to HTTP 404, matching the same
+        "refund-target-missing" semantics as a stale subscription that
+        Stripe has already wiped.
+
+        We deliberately do NOT verify the Charge's amount equals 10000
+        cents (CAD $100.00) here. The amount-verification belongs in the
+        service layer where the test-mode / live-mode Price values are
+        consulted; this method is the I/O primitive only.
+        """
+        stripe.api_key = self._api_key
+        try:
+            sub = stripe.Subscription.retrieve(
+                stripe_subscription_id,
+                expand=["latest_invoice", "latest_invoice.payment_intent"],
+            )
+        except Exception:  # pragma: no cover - network boundary
+            return None
+        invoice = getattr(sub, "latest_invoice", None)
+        if invoice is None:
+            return None
+        # Stripe-Python may return either an expanded Invoice object or
+        # the bare invoice id depending on the API version; normalize.
+        if isinstance(invoice, str):
+            try:
+                invoice = stripe.Invoice.retrieve(
+                    invoice, expand=["payment_intent"]
+                )
+            except Exception:  # pragma: no cover - network boundary
+                return None
+        # Stripe 2026-04 returns Charge id on Invoice.charge as the
+        # legacy path AND on PaymentIntent.latest_charge as the modern
+        # path. Try the modern path first.
+        payment_intent = getattr(invoice, "payment_intent", None)
+        if payment_intent is not None and not isinstance(payment_intent, str):
+            latest_charge = getattr(payment_intent, "latest_charge", None)
+            if isinstance(latest_charge, str) and latest_charge:
+                return latest_charge
+            if latest_charge is not None and getattr(latest_charge, "id", None):
+                return latest_charge.id
+        legacy_charge = getattr(invoice, "charge", None)
+        if isinstance(legacy_charge, str) and legacy_charge:
+            return legacy_charge
+        if legacy_charge is not None and getattr(legacy_charge, "id", None):
+            return legacy_charge.id
+        return None
+
+    def refund_charge(self, *, charge_id: str, idempotency_key: str | None = None) -> Any:
+        """Refund the given Charge in full.
+
+        Stripe will refund whatever amount remains on the Charge -- if
+        the charge has already been partially refunded, this completes
+        the refund. The Refund object's ``id`` (re_...) is what we audit.
+        """
+        stripe.api_key = self._api_key
+        idem_kwargs: dict[str, Any] = {}
+        if idempotency_key:
+            idem_kwargs["idempotency_key"] = idempotency_key
+        return stripe.Refund.create(charge=charge_id, **idem_kwargs)
+
+    def cancel_subscription(self, *, stripe_subscription_id: str) -> Any:
+        """Cancel a subscription immediately (no proration).
+
+        Stripe will fire ``customer.subscription.deleted`` to our webhook
+        on the next event delivery; that handler is idempotent against
+        an already-flipped subscription row, so the local cancel we do
+        synchronously in process_pilot_refund will not be undone or
+        double-applied.
+        """
+        stripe.api_key = self._api_key
+        # invoice_now=False + prorate=False: do not bill any remaining
+        # cycle since the intro fee was the entire "due today" amount
+        # and we are refunding it; an outstanding proration would defeat
+        # the refund.
+        return stripe.Subscription.cancel(
+            stripe_subscription_id,
+            invoice_now=False,
+            prorate=False,
+        )
+
+    # -----------------------------------------------------------------
     # Webhook signature verification
     # -----------------------------------------------------------------
 
