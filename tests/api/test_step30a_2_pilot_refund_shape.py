@@ -228,3 +228,125 @@ class TestRouteErrorMapping:
         client = self._client_with_cookied_user(monkeypatch, fake)
         resp = client.post("/api/v1/billing/pilot-refund")
         assert resp.status_code == 404, resp.text
+
+
+# ---------------------------------------------------------------------
+# /me pilot-signal surface (Step 30a.2-pilot Commit 3c-backend)
+# ---------------------------------------------------------------------
+
+class TestMePilotSignal:
+    """Pin the new `is_pilot` + `pilot_window_end` fields on
+    SubscriptionStatusResponse and the derivation in the /me handler.
+
+    The Account UI uses these to decide whether to render the
+    self-serve refund button; if the schema regresses, the button
+    either disappears (false negative) or appears for non-pilots
+    (false positive). Both are user-visible bugs.
+    """
+
+    def test_status_response_has_pilot_fields(self):
+        from app.schemas.billing import SubscriptionStatusResponse
+        fields = set(SubscriptionStatusResponse.model_fields.keys())
+        assert "is_pilot" in fields, "SubscriptionStatusResponse missing is_pilot"
+        assert "pilot_window_end" in fields, "SubscriptionStatusResponse missing pilot_window_end"
+
+    def test_status_response_pilot_fields_default_safe(self):
+        # Defaults must be the "not a pilot" shape so a hypothetical
+        # older builder that omits these fields still produces a
+        # well-formed (non-pilot) response.
+        from app.schemas.billing import SubscriptionStatusResponse
+        from datetime import datetime, timezone
+        resp = SubscriptionStatusResponse(
+            tenant_id="t_x", tier="individual", status="active",
+            active=True, is_entitled=True,
+            current_period_start=datetime.now(timezone.utc),
+            current_period_end=None, trial_end=None,
+            cancel_at_period_end=False, canceled_at=None,
+            customer_email="x@y.com",
+            billing_cadence="monthly", instance_count_cap=1,
+        )
+        assert resp.is_pilot is False
+        assert resp.pilot_window_end is None
+
+    def test_me_derives_is_pilot_from_snapshot_metadata(self, monkeypatch):
+        """End-to-end derivation: pilot metadata + trial_end → is_pilot=True."""
+        from datetime import datetime, timedelta, timezone
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.api.v1 import billing as billing_api
+        from app.core.config import settings
+
+        future = datetime.now(timezone.utc) + timedelta(days=45)
+        fake_sub = MagicMock()
+        fake_sub.tenant_id = "t_pilot"
+        fake_sub.tier = "individual"
+        fake_sub.status = "trialing"
+        fake_sub.active = True
+        fake_sub.is_entitled = True
+        fake_sub.current_period_start = datetime.now(timezone.utc)
+        fake_sub.current_period_end = future
+        fake_sub.trial_end = future
+        fake_sub.cancel_at_period_end = False
+        fake_sub.canceled_at = None
+        fake_sub.customer_email = "pilot@example.com"
+        fake_sub.billing_cadence = "monthly"
+        fake_sub.instance_count_cap = 1
+        fake_sub.provider_snapshot = {"metadata": {"luciel_intro_applied": "true"}}
+
+        fake_user = MagicMock()
+        fake_user.id = 42
+        fake_svc = MagicMock()
+        fake_svc.get_active_subscription_for_user.return_value = fake_sub
+
+        monkeypatch.setattr(billing_api, "_resolve_cookied_user", lambda **kw: fake_user)
+        monkeypatch.setattr(billing_api, "_service", lambda db: fake_svc)
+
+        client = TestClient(app)
+        client.cookies.set(settings.session_cookie_name, "x", domain="testserver")
+        resp = client.get("/api/v1/billing/me")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["is_pilot"] is True
+        assert body["pilot_window_end"] is not None
+
+    def test_me_returns_is_pilot_false_for_regular_trial(self, monkeypatch):
+        """Regular trialing subscription (no luciel_intro_applied) → is_pilot=False."""
+        from datetime import datetime, timedelta, timezone
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.api.v1 import billing as billing_api
+        from app.core.config import settings
+
+        future = datetime.now(timezone.utc) + timedelta(days=10)
+        fake_sub = MagicMock()
+        fake_sub.tenant_id = "t_normal"
+        fake_sub.tier = "individual"
+        fake_sub.status = "trialing"
+        fake_sub.active = True
+        fake_sub.is_entitled = True
+        fake_sub.current_period_start = datetime.now(timezone.utc)
+        fake_sub.current_period_end = future
+        fake_sub.trial_end = future
+        fake_sub.cancel_at_period_end = False
+        fake_sub.canceled_at = None
+        fake_sub.customer_email = "regular@example.com"
+        fake_sub.billing_cadence = "monthly"
+        fake_sub.instance_count_cap = 1
+        # No luciel_intro_applied — a regular 14-day trial.
+        fake_sub.provider_snapshot = {"metadata": {}}
+
+        fake_user = MagicMock()
+        fake_user.id = 7
+        fake_svc = MagicMock()
+        fake_svc.get_active_subscription_for_user.return_value = fake_sub
+
+        monkeypatch.setattr(billing_api, "_resolve_cookied_user", lambda **kw: fake_user)
+        monkeypatch.setattr(billing_api, "_service", lambda db: fake_svc)
+
+        client = TestClient(app)
+        client.cookies.set(settings.session_cookie_name, "x", domain="testserver")
+        resp = client.get("/api/v1/billing/me")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["is_pilot"] is False
+        assert body["pilot_window_end"] is None

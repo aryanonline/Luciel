@@ -166,6 +166,28 @@ class SubscriptionStatusResponse(BaseModel):
     # Step 30a.1 additions.
     billing_cadence: str
     instance_count_cap: int
+    # Step 30a.2-pilot additions: surface the pilot signal so the
+    # Account UI can decide whether to render the self-serve refund
+    # button without speculatively POSTing /pilot-refund. The pilot
+    # status is derived from ``provider_snapshot.metadata.luciel_intro_applied``
+    # ("true" iff the subscription was minted under the $100 CAD intro
+    # offer) and ``trial_end`` (the day-91 conversion point, which is
+    # also the refund-window cliff). Refer to the eligibility logic in
+    # ``BillingService.process_pilot_refund`` -- the API must match.
+    is_pilot: bool = Field(
+        default=False,
+        description="True iff this subscription was created under the "
+                    "$100 CAD 90-day pilot offer (Step 30a.2-pilot). "
+                    "Distinct from `status=='trialing'` because pilots "
+                    "and normal trials share the trialing status.",
+    )
+    pilot_window_end: datetime | None = Field(
+        default=None,
+        description="UTC instant the 90-day pilot refund window closes. "
+                    "Always equal to ``trial_end`` when ``is_pilot=True``; "
+                    "None otherwise. Surfaced as its own field so the UI "
+                    "can ignore ``trial_end`` when not in a pilot.",
+    )
 
 
 # ---------------------------------------------------------------------

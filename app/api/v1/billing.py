@@ -438,6 +438,22 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
     if sub is None:
         raise HTTPException(status_code=404, detail="No subscription on file.")
 
+    # Step 30a.2-pilot: derive pilot signal from the same source the
+    # refund-eligibility check uses (``provider_snapshot.metadata.
+    # luciel_intro_applied``). The Account UI uses ``is_pilot`` to
+    # decide whether to render the self-serve refund button; keeping
+    # the derivation here (not in the service) so the read path stays
+    # cheap and dependency-free. If we ever change the metadata key,
+    # update both this site and ``BillingService.process_pilot_refund``
+    # together.
+    snapshot = sub.provider_snapshot if isinstance(sub.provider_snapshot, dict) else {}
+    snapshot_meta = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
+    is_pilot = (
+        str(snapshot_meta.get("luciel_intro_applied", "")).lower() == "true"
+        and sub.trial_end is not None
+    )
+    pilot_window_end = sub.trial_end if is_pilot else None
+
     return SubscriptionStatusResponse(
         tenant_id=sub.tenant_id,
         tier=sub.tier,
@@ -453,6 +469,9 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
         # Step 30a.1 additions.
         billing_cadence=sub.billing_cadence,
         instance_count_cap=sub.instance_count_cap,
+        # Step 30a.2-pilot additions.
+        is_pilot=is_pilot,
+        pilot_window_end=pilot_window_end,
     )
 
 
