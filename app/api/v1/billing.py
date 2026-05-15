@@ -33,6 +33,7 @@ Roadmap row: docs/CANONICAL_RECAP.md §12 Step 30a (closing tag
 """
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -197,8 +198,81 @@ async def stripe_webhook(request: Request, db: DbSession) -> JSONResponse:
             logger.exception("billing-webhook: failed to record bad-sig audit row")
         raise HTTPException(status_code=400, detail="Invalid signature.") from exc
 
+    # Step 30a.2-pilot Commit 3e: convert the Stripe Event StripeObject
+    # into a plain nested ``dict`` BEFORE handing it to
+    # ``BillingWebhookService.handle()``.
+    #
+    # D-stripe-event-dict-conversion-python314-2026-05-15:
+    #   On 2026-05-15 the live GATE 4 Path B smoke produced two webhook
+    #   500s with the traceback:
+    #
+    #     File "/app/app/api/v1/billing.py", line 201, in stripe_webhook
+    #       result = BillingWebhookService(db).handle(dict(event))
+    #     File ".../stripe/_stripe_object.py", line 203, in __getitem__
+    #     File ".../stripe/_stripe_object.py", line 224, in __getitem__
+    #     KeyError: 0
+    #
+    #   The Stripe SDK's ``StripeObject.__getitem__`` raises ``KeyError``
+    #   on missing keys. On Python 3.14 (the version pinned by the
+    #   production image, ``python:3.14-slim``), one of the
+    #   dict-construction code paths probes positional index ``0``
+    #   during iteration, which ``StripeObject`` correctly rejects --
+    #   so ``dict(event)`` raises. The defect did not surface on
+    #   Python 3.13 because the older iteration protocol only called
+    #   ``__getitem__`` for the string keys yielded by ``__iter__``.
+    #
+    #   The materialisation method name has shifted between SDK majors:
+    #     stripe 10.x-12.x: ``event.to_dict_recursive()`` (public)
+    #     stripe 13.x+   : ``event._to_dict_recursive()`` (underscored)
+    #   The currently installed prod SDK is **15.1.0** (verified by
+    #   ``docker run --rm <image> python -c "import stripe; ..."`` on
+    #   2026-05-15) which only exposes the underscored form.
+    #
+    #   Rather than couple to either private name, we round-trip through
+    #   ``json.loads(str(event))``. ``StripeObject.__str__`` has emitted
+    #   valid JSON via the SDK's own recursive serializer since v1.x,
+    #   so this is the most version-resilient public path. The result
+    #   is a plain nested ``dict`` satisfying every access
+    #   ``BillingWebhookService.handle()`` makes:
+    #     - ``event.get("id")``
+    #     - ``event.get("type")``
+    #     - ``(event.get("data") or {}).get("object")``
+    #     - ``data_object.get("metadata")`` and its nested ``.get`` calls
+    #
+    #   Belt-and-suspenders: ``pyproject.toml`` is also being pinned to
+    #   ``stripe>=10.0.0,<16`` in the same commit so a future SDK
+    #   major rev cannot silently break this again.
     try:
-        result = BillingWebhookService(db).handle(dict(event))
+        event_dict = json.loads(str(event))
+    except (TypeError, ValueError):
+        # ``str(event)`` should always be JSON for a real Stripe Event,
+        # but if a future SDK ever breaks that contract we fall back to
+        # the documented (currently underscored in 15.x) recursive
+        # serializer. We deliberately probe both the public and the
+        # underscored name so the fallback works on every published
+        # SDK major from 1.x to 15.x.
+        logger.warning(
+            "billing-webhook: json.loads(str(event)) failed; "
+            "falling back to _to_dict_recursive/to_dict_recursive",
+        )
+        recursive = getattr(
+            event,
+            "to_dict_recursive",
+            getattr(event, "_to_dict_recursive", None),
+        )
+        if recursive is None:  # pragma: no cover -- last-ditch defence
+            logger.exception(
+                "billing-webhook: cannot materialise Stripe Event into "
+                "a plain dict; SDK surface unrecognised",
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Stripe event materialisation failed.",
+            )
+        event_dict = recursive()
+
+    try:
+        result = BillingWebhookService(db).handle(event_dict)
     except Exception:
         # Genuine server-side failure -- let it bubble so Stripe retries.
         logger.exception("billing-webhook: handler raised")

@@ -31,7 +31,12 @@ dependencies = [
     # Step 30a -- self-serve subscription billing. Stripe-hosted Checkout +
     # Customer Portal. The library is import-only safe (no network at
     # import time), so adding it does not change cold-start behavior.
-    "stripe>=10.0.0",
+    # Pinned upper bound: Stripe SDK 13.x renamed ``to_dict_recursive`` to
+    # ``_to_dict_recursive`` (underscored). Step 30a.2-pilot Commit 3e
+    # neutralises that via ``json.loads(str(event))``, but we still cap
+    # below the next major so a future API rename cannot silently bite us.
+    # D-stripe-sdk-major-pin-2026-05-15.
+    "stripe>=10.0.0,<16",
     # Step 30a -- HS256-signed magic-link tokens for the post-checkout
     # email-only login flow. PyJWT is the standard, well-audited choice;
     # we use exclusively HS256 with a server-side shared secret (see
