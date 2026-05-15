@@ -549,7 +549,11 @@ class BillingWebhookService:
 
             admin = AdminService(self.db)
             agent_repo = AgentRepository(self.db)
-            luciel_service = LucielInstanceService(self.db)
+            # D-webhook-luciel-instance-service-missing-kwarg-2026-05-14:
+            # LucielInstanceService.__init__ is (self, db, *, admin_service).
+            # The kwarg is keyword-only and required; without it the
+            # constructor raises TypeError during the cancel-webhook cascade.
+            luciel_service = LucielInstanceService(self.db, admin_service=admin)
 
             admin.deactivate_tenant_with_cascade(
                 sub.tenant_id,

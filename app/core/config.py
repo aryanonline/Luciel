@@ -241,20 +241,25 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = True
     session_cookie_domain: str = ""
 
-    # --- Outbound transactional email (Step 30a) ---
+    # --- Outbound transactional email (Step 30a / 30a.2) ---
     #
-    # At v1 we don't ship a full email service abstraction; the magic-link
-    # email is logged + emitted via a single FROM address. A future Step
-    # 32 commit can swap the sender for SES/Postmark/etc. behind the same
-    # interface (see app/services/email_service.py).
+    # As of Step 30a.2 Phase D, the magic-link email is delivered through
+    # Amazon SES v2 in the ca-central-1 region. The task's IAM role
+    # (luciel-ecs-web-role) carries the LucielSESSendEmail inline policy
+    # scoped to the verified vantagemind.ai SES identity, so no
+    # credentials are read from this config. The transport is selected
+    # at runtime by app/services/email_service.py via the
+    # LUCIEL_EMAIL_TRANSPORT env var ("ses" in prod, "log" in local dev).
     #
-    # from_email:           the From address on magic-link emails.
+    # from_email:           the From address on magic-link emails. Must
+    #                       be an address on the verified SES identity
+    #                       (vantagemind.ai) in production.
     # marketing_site_url:   used to build login-link URLs that go through
     #                       the marketing site (not the backend), so the
     #                       click lands on the React app where the cookie
     #                       can be set on the apex domain.
-    from_email: str = "no-reply@luciel.ai"
-    marketing_site_url: str = "https://luciel.ai"
+    from_email: str = "noreply@vantagemind.ai"
+    marketing_site_url: str = "https://www.vantagemind.ai"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
