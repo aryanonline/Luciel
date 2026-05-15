@@ -261,6 +261,37 @@ class Settings(BaseSettings):
     from_email: str = "noreply@vantagemind.ai"
     marketing_site_url: str = "https://www.vantagemind.ai"
 
+    # --- CORS (Step 30a.2-pilot Commit 3d) ---
+    #
+    # D-cors-middleware-missing-on-checkout-preflight-2026-05-15:
+    #   The first cross-origin POST in the app (POST /api/v1/billing/checkout
+    #   with Content-Type: application/json from https://www.vantagemind.ai)
+    #   triggered a CORS preflight that returned 405 Method Not Allowed because
+    #   no CORSMiddleware was installed in app/main.py. Every prior cross-origin
+    #   path was either simple-request shaped (no preflight) or same-origin, so
+    #   this defect was latent until the Step 30a.2-pilot live smoke. Commit 3d
+    #   mounts fastapi.middleware.cors.CORSMiddleware in app/main.py with this
+    #   allowlist as its origin set.
+    #
+    # cors_allowed_origins:
+    #   The exact list of Origin: header values that the backend honors
+    #   pre-flight checks for. Both apex and www are included because the
+    #   apex domain still serves an Amplify redirect-only host that may
+    #   forward to www but a directly-issued fetch from a script running on
+    #   the apex would otherwise fail the preflight. Add staging / preview
+    #   origins here when those environments come online.
+    #
+    #   Defaults are hardcoded inside the codebase (not in SSM) so a deploy
+    #   that loses its env-var injection cannot regress the production CORS
+    #   allowlist. Override via env var CORS_ALLOWED_ORIGINS or future SSM
+    #   when we need to widen the list without a code change.
+    cors_allowed_origins: list[str] = Field(
+        default_factory=lambda: [
+            "https://www.vantagemind.ai",
+            "https://vantagemind.ai",
+        ]
+    )
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

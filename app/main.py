@@ -22,6 +22,7 @@ logging.basicConfig(
 )
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 
 from app.api.router import api_router
@@ -86,6 +87,41 @@ app.add_middleware(SessionCookieAuthMiddleware)
 # Add the fallback middleware — catches Redis outages and fails open
 RateLimitFallbackMiddleware = create_rate_limit_middleware()
 app.add_middleware(RateLimitFallbackMiddleware)
+
+# Step 30a.2-pilot Commit 3d — CORSMiddleware mounted LAST so it ends up
+# OUTERMOST in the dispatch chain. The browser's CORS preflight
+# (OPTIONS + Access-Control-Request-Method header) must short-circuit
+# BEFORE auth middleware runs, otherwise SessionCookieAuthMiddleware /
+# ApiKeyAuthMiddleware will 401 the preflight and the browser will refuse
+# to send the real request. starlette's CORSMiddleware answers preflight
+# directly without forwarding downstream.
+#
+# Settings:
+#   allow_origins        — settings.cors_allowed_origins. Both apex and www
+#                          vantagemind.ai are in the default list so the
+#                          marketing site and any apex-issued fetch both work.
+#   allow_credentials    — True. Required because the SPA uses
+#                          credentials: "include" on every billing call so the
+#                          Step 30a session cookie is sent (GET /me, POST
+#                          /portal, POST /logout, POST /pilot-refund).
+#                          Per the CORS spec, allow_credentials=True forbids
+#                          a wildcard origin — which is fine, we use an
+#                          explicit allowlist.
+#   allow_methods        — narrow set actually used by the SPA (GET/POST/OPTIONS).
+#                          Not '*' because allow_credentials=True forbids that too.
+#   allow_headers        — narrow set actually sent by the SPA. "Authorization"
+#                          is included for the admin-key-via-bearer pattern
+#                          (currently unused by the SPA but kept future-safe).
+#   max_age              — 600s. Lets the browser cache the preflight result
+#                          so repeat checkout submits don't pay an extra RTT.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "Authorization"],
+    max_age=600,
+)
 
 # Register all API routes
 app.include_router(api_router, prefix=settings.api_v1_prefix)
