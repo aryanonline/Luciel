@@ -192,6 +192,17 @@ ACTION_BILLING_WEBHOOK_REPLAY_REJECTED = "billing_webhook_replay_rejected"
 # to 64). No schema migration required.
 ACTION_SUBSCRIPTION_PILOT_REFUNDED = "subscription_pilot_refunded"
 
+# Step 30a.2-pilot Commit 3j -- post-refund customer-email send failure.
+# Written as a follow-up audit row by BillingService.process_pilot_refund
+# when the courtesy SES send to the buyer's customer_email raises
+# RefundEmailError. The refund / cancel / cascade have ALREADY been
+# committed at this point -- the email is the out-of-band confirmation
+# leg, NOT a transactional leg -- so this row exists to give an operator
+# a paper trail to manually retry the email without ambiguity about
+# whether the financial refund itself fired. after_json carries
+# {stripe_refund_id, error_class, error_message_truncated, to_email}.
+ACTION_PILOT_REFUND_EMAIL_SEND_FAILED = "pilot_refund_email_send_failed"
+
 # Step 30a.2 -- retention worker hard-purge action. See ALLOWED_ACTIONS
 # entry for full rationale. Defined here (above ALLOWED_ACTIONS) so the
 # whitelist tuple can reference it.
@@ -238,6 +249,8 @@ ALLOWED_ACTIONS = (
     ACTION_BILLING_WEBHOOK_REPLAY_REJECTED,
     # Step 30a.2-pilot -- self-serve refund of the one-time intro fee.
     ACTION_SUBSCRIPTION_PILOT_REFUNDED,
+    # Step 30a.2-pilot Commit 3j -- best-effort courtesy email failure row.
+    ACTION_PILOT_REFUND_EMAIL_SEND_FAILED,
     # Step 30a.2 -- retention worker hard-purge action. Distinct from
     # ACTION_RETENTION_ENFORCE (which the existing retention policy code
     # uses for per-record TTL expiry on memory_items) because tenant-

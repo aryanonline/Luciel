@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.integrations.stripe import StripeClient
 from app.models.admin_audit_log import (
+    ACTION_PILOT_REFUND_EMAIL_SEND_FAILED,
     ACTION_SUBSCRIPTION_PILOT_REFUNDED,
     RESOURCE_SUBSCRIPTION,
 )
@@ -51,6 +52,10 @@ from app.models.subscription import (
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
+)
+from app.services.email_service import (
+    RefundEmailError,
+    send_pilot_refund_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -687,6 +692,78 @@ class BillingService:
             raise
 
         self.db.commit()
+
+        # Step 30a.2-pilot Commit 3j -- best-effort courtesy email to the
+        # buyer. The refund, cancel, and cascade have ALREADY been committed
+        # above; this email is the third confirmation leg (the first two
+        # being the on-page success surface and Stripe's optional account-
+        # level refund receipt). A SES failure here MUST NOT roll back the
+        # cascade -- the customer has been made whole financially and the
+        # audit row at action=ACTION_SUBSCRIPTION_PILOT_REFUNDED is the
+        # single source of truth for the refund. On SES failure we log
+        # loudly, write a follow-up audit row with
+        # action=ACTION_PILOT_REFUND_EMAIL_SEND_FAILED so an operator can
+        # manually retry, and swallow the exception so the route layer
+        # returns the locked success payload unchanged. This mirrors the
+        # swallow-and-audit posture the webhook handlers use against Stripe.
+        try:
+            send_pilot_refund_email(
+                to_email=sub.customer_email,
+                refund_id=refund_id,
+                amount_cents=self._PILOT_REFUND_AMOUNT_CENTS,
+                currency=self._PILOT_REFUND_CURRENCY,
+                display_name=getattr(user, "display_name", None),
+            )
+        except RefundEmailError as email_exc:
+            logger.warning(
+                "billing: pilot-refund email send FAILED user_id=%s sub=%s "
+                "refund=%s to_email=%s error=%s -- refund cascade already "
+                "committed; writing follow-up audit row",
+                user.id, sub.id, refund_id, sub.customer_email, email_exc,
+            )
+            try:
+                followup_repo = AdminAuditRepository(self.db)
+                followup_repo.record(
+                    ctx=ctx,
+                    tenant_id=sub.tenant_id,
+                    action=ACTION_PILOT_REFUND_EMAIL_SEND_FAILED,
+                    resource_type=RESOURCE_SUBSCRIPTION,
+                    resource_pk=sub.id,
+                    resource_natural_id=sub.stripe_subscription_id,
+                    before=None,
+                    after={
+                        "stripe_refund_id": refund_id,
+                        "error_class": type(email_exc).__name__,
+                        "error_message_truncated": str(email_exc)[:200],
+                        "to_email": sub.customer_email,
+                    },
+                    note=(
+                        "pilot-refund cascade committed successfully; "
+                        "courtesy email to customer FAILED -- operator "
+                        "must manually relay refund confirmation"
+                    ),
+                )
+                self.db.commit()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "billing: pilot-refund email-failure audit row write also "
+                    "FAILED user_id=%s sub=%s refund=%s -- the financial "
+                    "refund still succeeded; check CloudWatch for the "
+                    "[pilot-refund-email] log line for manual relay",
+                    user.id, sub.id, refund_id,
+                )
+                # Do NOT re-raise: the financial refund succeeded, the
+                # route layer must still return the success payload.
+        except Exception:  # pragma: no cover - any non-Refund exception
+            # An unexpected exception from the email helper (e.g. import
+            # error, programmer error). Log and swallow; the refund cascade
+            # already committed and must not be rolled back.
+            logger.exception(
+                "billing: pilot-refund email send raised UNEXPECTED "
+                "exception user_id=%s sub=%s refund=%s -- swallowed; "
+                "refund cascade already committed",
+                user.id, sub.id, refund_id,
+            )
 
         logger.info(
             "billing: pilot-refund completed user_id=%s sub=%s tenant=%s "
