@@ -24,7 +24,7 @@ running webhook listener.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -518,13 +518,26 @@ class BillingService:
             raise LookupError("No active subscription on file.")
 
         # Eligibility (2): must be first-time intro path.
+        #
+        # Commit 3g: the eligibility signal is the metadata flag ALONE,
+        # mirroring Commit 3f's read-path derivation in /api/v1/billing/me.
+        # The earlier code had a belt-and-suspenders `or sub.trial_end is None`
+        # clause that was intended to catch repeat customers, but it created
+        # an asymmetry with the read path: degraded rows where the checkout.
+        # session webhook landed before the Subscription was fully retrieved
+        # (see drift D-stripe-webhook-checkout-vs-subscription-field-source-
+        # 2026-05-15) have luciel_intro_applied=true + trial_end=null. The
+        # read path now renders the refund CTA on those rows; the write path
+        # MUST accept them too, or the user clicks a button that always 403s.
+        #
+        # Repeat-customer protection is still enforced upstream at checkout:
+        # BillingService.is_first_time_customer guards create_checkout, so a
+        # subscription with luciel_intro_applied=true can only exist if the
+        # buyer truly was first-time at purchase time.
         snapshot = sub.provider_snapshot or {}
         snapshot_meta = (snapshot.get("metadata") or {}) if isinstance(snapshot, dict) else {}
         intro_applied = str(snapshot_meta.get("luciel_intro_applied", "")).lower() == "true"
-        # Belt-and-suspenders cross-check: trial_end must exist. A
-        # repeat customer's subscription never has a trial_end stamp,
-        # so this is a redundant but cheap second predicate.
-        if not intro_applied or sub.trial_end is None:
+        if not intro_applied:
             logger.info(
                 "billing: pilot-refund rejected -- not on intro path "
                 "user_id=%s sub=%s intro_applied=%s trial_end=%s",
@@ -536,17 +549,33 @@ class BillingService:
             )
 
         # Eligibility (3): within the 90-day window.
+        #
+        # Commit 3g: window-end falls back to created_at + 90 days when
+        # trial_end is null, mirroring the read-path's pilot_window_end
+        # derivation. The fallback is deterministic from a column the row
+        # always has (created_at is server-default NOT NULL), so it works
+        # for every historical row including the Commit-3e degraded ones.
         now = datetime.now(timezone.utc)
         # trial_end is a tz-aware DateTime in the model; defensive
         # coerce in case a legacy row was written without tzinfo.
         trial_end = sub.trial_end
         if trial_end is not None and trial_end.tzinfo is None:
             trial_end = trial_end.replace(tzinfo=timezone.utc)
-        if trial_end is None or now > trial_end:
+        if trial_end is not None:
+            effective_window_end = trial_end
+        elif sub.created_at is not None:
+            sub_created = sub.created_at
+            if sub_created.tzinfo is None:
+                sub_created = sub_created.replace(tzinfo=timezone.utc)
+            effective_window_end = sub_created + timedelta(days=90)
+        else:
+            # No timestamps at all -- treat as expired.
+            effective_window_end = None
+        if effective_window_end is None or now > effective_window_end:
             logger.info(
                 "billing: pilot-refund rejected -- window expired "
-                "user_id=%s sub=%s trial_end=%s now=%s",
-                getattr(user, "id", "?"), sub.id, trial_end, now,
+                "user_id=%s sub=%s trial_end=%s window_end=%s now=%s",
+                getattr(user, "id", "?"), sub.id, trial_end, effective_window_end, now,
             )
             raise PilotWindowExpiredError(
                 "The 90-day intro window has closed; the intro fee is "
