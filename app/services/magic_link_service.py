@@ -37,11 +37,28 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
-# The two token classes the service mints. Distinct ``typ`` claims so a
+# The token classes the service mints. Distinct ``typ`` claims so a
 # magic link cannot be passed off as a session cookie (and vice versa)
-# in the event of a misrouted Authorization header.
+# in the event of a misrouted Authorization header. Step 30a.3 adds two
+# more typed classes for the password-auth flow (`set_password` and
+# `reset_password`) so the existing magic-link cookie redeem path cannot
+# be tricked into accepting a token minted for a password-set surface
+# (and vice versa) -- the route layer's `expected_typ` check is the
+# enforcement seam.
 TOKEN_TYPE_MAGIC_LINK: Literal["magic_link"] = "magic_link"
 TOKEN_TYPE_SESSION: Literal["session"] = "session"
+# Step 30a.3: token minted at User-creation time in the Stripe webhook,
+# emailed in the welcome message, consumed by the marketing-site
+# /auth/set-password page to authenticate the first password-set event.
+# Same TTL as the magic-link class (24h) -- if a customer doesn't set
+# a password within 24h of paying, the /forgot-password recovery path
+# handles them with a fresh `reset_password` token.
+TOKEN_TYPE_SET_PASSWORD: Literal["set_password"] = "set_password"
+# Step 30a.3: token minted by POST /api/v1/auth/forgot-password, emailed
+# to the user, consumed by the same /auth/set-password page. The two
+# token classes share the redeem surface but carry distinct `typ` claims
+# so the audit row can record WHY the password was set (signup vs reset).
+TOKEN_TYPE_RESET_PASSWORD: Literal["reset_password"] = "reset_password"
 
 JWT_ALGORITHM = "HS256"
 JWT_ISSUER = "luciel-backend"
@@ -171,3 +188,118 @@ def build_magic_link_url(token: str) -> str:
     """
     base = settings.marketing_site_url.rstrip("/")
     return f"{base}/login?token={token}"
+
+
+# ---------------------------------------------------------------------
+# Step 30a.3 -- password-auth token primitives
+# ---------------------------------------------------------------------
+
+
+def mint_set_password_token(
+    *,
+    user_id: uuid.UUID,
+    email: str,
+    tenant_id: str,
+    purpose: Literal["signup", "invite"] = "signup",
+) -> str:
+    """Mint a short-TTL ``set_password``-class JWT.
+
+    Used at two surfaces:
+      * **Signup (Option B welcome-email mechanic, the default).**
+        The Stripe ``checkout.session.completed`` webhook mints the
+        User row, commits, then calls this with ``purpose="signup"``
+        and emails the buyer a welcome link of shape
+        ``<MARKETING>/auth/set-password?token=...``. This is the
+        load-bearing claim of "password mandatory at signup" --
+        until the buyer redeems this token, there is no path to a
+        cookied ``/app`` session for them.
+      * **Invite acceptance (Step 30a.4 / 30a.5).**
+        ``purpose="invite"`` is reserved for the invitee-onboarding
+        flow that lands in those steps. The token shape is identical;
+        only the audit-row classification differs.
+
+    Same 24h TTL as the magic-link class. The ``purpose`` claim is
+    propagated through to the audit row at consume time so we can
+    answer "did this password come from a signup or an invite?" without
+    a second probe.
+    """
+    secret = _secret_or_fail()
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(hours=settings.magic_link_ttl_hours)
+    payload = {
+        "iss": JWT_ISSUER,
+        "sub": str(user_id),
+        "email": email,
+        "tenant_id": tenant_id,
+        "typ": TOKEN_TYPE_SET_PASSWORD,
+        "purpose": purpose,
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
+        "jti": str(uuid.uuid4()),
+    }
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
+
+
+def mint_reset_password_token(
+    *,
+    user_id: uuid.UUID,
+    email: str,
+    tenant_id: str,
+) -> str:
+    """Mint a short-TTL ``reset_password``-class JWT.
+
+    Used exclusively by ``POST /api/v1/auth/forgot-password``. The
+    redeem surface is the same ``/auth/set-password`` page the signup
+    welcome flow uses; the page POSTs back to the same backend route.
+    The token class is distinct so the audit-row records reset vs
+    initial-set unambiguously, and so a leaked signup token cannot be
+    replayed as a reset (and vice versa) after the original consume.
+    """
+    secret = _secret_or_fail()
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(hours=settings.magic_link_ttl_hours)
+    payload = {
+        "iss": JWT_ISSUER,
+        "sub": str(user_id),
+        "email": email,
+        "tenant_id": tenant_id,
+        "typ": TOKEN_TYPE_RESET_PASSWORD,
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
+        "jti": str(uuid.uuid4()),
+    }
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
+
+
+def consume_set_password_token(token: str) -> dict:
+    """Validate a ``set_password``-class JWT and return its payload.
+
+    The redeem path lives in ``POST /api/v1/auth/set-password`` -- it
+    calls this, then ``AuthService.set_password``, then mints the
+    session cookie. The token is one-shot by convention (same as the
+    magic-link class); a stricter blacklist lands with Step 32a.
+    """
+    return _decode(token, expected_typ=TOKEN_TYPE_SET_PASSWORD)
+
+
+def consume_reset_password_token(token: str) -> dict:
+    """Validate a ``reset_password``-class JWT and return its payload.
+
+    Same redeem path as ``consume_set_password_token``; distinct typ
+    so the cross-class replay attack is blocked.
+    """
+    return _decode(token, expected_typ=TOKEN_TYPE_RESET_PASSWORD)
+
+
+def build_set_password_url(token: str) -> str:
+    """Construct the click-through URL the welcome / reset email carries.
+
+    Points at the marketing-site ``/auth/set-password`` page which:
+      1. Reads the token from the query string.
+      2. Renders a password input.
+      3. POSTs the password + token to
+         ``POST /api/v1/auth/set-password``.
+      4. On 200, follows the response's ``redirect`` field to ``/app``.
+    """
+    base = settings.marketing_site_url.rstrip("/")
+    return f"{base}/auth/set-password?token={token}"

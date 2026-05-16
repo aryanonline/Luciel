@@ -45,6 +45,14 @@ logger = logging.getLogger(__name__)
 
 SUBJECT_MAGIC_LINK: Final[str] = "Your VantageMind login link"
 SUBJECT_PILOT_REFUND: Final[str] = "Your VantageMind pilot has been refunded"
+# Step 30a.3: subject lines for the three first-password-set surfaces.
+# Subject differs by purpose so a buyer who pays $100 and immediately
+# pays $300 (signup -> upgrade) does not see two identical-looking
+# "set your password" emails in their inbox. Subject copy is locked to
+# the CANONICAL_RECAP §12 Step 30a.3 row.
+SUBJECT_WELCOME_SET_PASSWORD: Final[str] = "Welcome to VantageMind — set your password"
+SUBJECT_INVITE_SET_PASSWORD: Final[str] = "You’ve been invited to VantageMind — set your password"
+SUBJECT_RESET_PASSWORD: Final[str] = "Reset your VantageMind password"
 _LOG_TRANSPORT: Final[str] = "log"
 _SES_TRANSPORT: Final[str] = "ses"
 
@@ -55,6 +63,24 @@ class MagicLinkError(RuntimeError):
     Callers in the webhook path catch this and record an audit row while
     still returning 200 to Stripe; callers in the synchronous API path
     surface it as a 5xx so the caller's UI can show a retry affordance.
+    """
+
+
+class WelcomeEmailError(RuntimeError):
+    """Raised when the welcome / set-password / reset email cannot be delivered.
+
+    Step 30a.3: the email is the load-bearing claim of "password mandatory
+    at signup" -- if SES is unreachable when the Stripe webhook commits
+    the User row, the buyer never receives the welcome link and cannot
+    set a password. The webhook handler catches this AFTER ``db.commit()``
+    (same swallow-and-audit posture as ``send_magic_link_email``) so the
+    payment + subscription rows stay correct; on the next backend boot
+    the on-call dashboard surfaces the missed delivery and the operator
+    can manually relay a ``/forgot-password`` link from CloudWatch.
+
+    The API-path caller (``POST /api/v1/auth/forgot-password``) catches
+    this and returns the same generic 200 it always returns -- the SES
+    failure is invisible to a probing client.
     """
 
 
@@ -189,6 +215,176 @@ def send_magic_link_email(
             body,
         )
         raise MagicLinkError(f"SES send_email failed: {exc}") from exc
+
+
+def _build_welcome_set_password_body(
+    *,
+    to_email: str,
+    set_password_url: str,
+    display_name: str | None,
+    purpose: str,
+) -> str:
+    """Render the plaintext body for the welcome / invite / reset email.
+
+    Body copy varies by ``purpose``:
+
+      * ``signup``  -- the post-Checkout welcome. Frames the link as the
+        final step of account setup so the buyer understands why they
+        need to click it.
+      * ``invite``  -- the team / company invite-acceptance. Frames the
+        link as "you've been invited" so the recipient knows what
+        organisation they are joining.
+      * ``reset``   -- the /forgot-password recovery. Frames the link
+        as a password reset and reminds the user that the link expires.
+
+    All three variants point at the same ``/auth/set-password`` page;
+    the page reads the token's ``typ`` claim and (in the invite case)
+    the ``purpose`` claim to render the right header.
+    """
+    salutation = display_name or to_email
+    if purpose == "signup":
+        opener = (
+            "Welcome to VantageMind. Your subscription is active. To finish "
+            "setting up your account, choose a password using the link below:"
+        )
+        closer = (
+            "After you set a password you'll be signed in automatically. "
+            "From then on, you can log in any time at "
+            f"{settings.marketing_site_url.rstrip('/')}/login with your email "
+            "and password \u2014 no inbox round-trip required."
+        )
+    elif purpose == "invite":
+        opener = (
+            "You've been invited to VantageMind. To accept the invitation, "
+            "choose a password using the link below:"
+        )
+        closer = (
+            "After you set a password you'll be signed in automatically and "
+            "land on your team's workspace."
+        )
+    else:  # reset (or any unknown purpose, defensive)
+        opener = (
+            "We received a request to reset your VantageMind password. "
+            "To choose a new password, use the link below:"
+        )
+        closer = (
+            "If you did not request a password reset, you can safely "
+            "ignore this email \u2014 your current password remains in effect."
+        )
+
+    return (
+        f"Hi {salutation},\n\n"
+        f"{opener}\n\n"
+        f"  {set_password_url}\n\n"
+        f"This link expires in {settings.magic_link_ttl_hours} hours.\n\n"
+        f"{closer}\n\n"
+        f"-- The VantageMind team\n"
+    )
+
+
+def send_welcome_set_password_email(
+    *,
+    to_email: str,
+    set_password_url: str,
+    display_name: str | None = None,
+    purpose: str = "signup",
+) -> None:
+    """Send (or log) the welcome / invite / reset email for password set.
+
+    Step 30a.3 Option-B welcome-email mechanic. The webhook path calls
+    this with ``purpose='signup'`` after committing the User row; the
+    Step 30a.4 / 30a.5 invite flows call it with ``purpose='invite'``;
+    the ``POST /api/v1/auth/forgot-password`` route calls it with
+    ``purpose='reset'``.
+
+    Behaviour mirrors :func:`send_magic_link_email` and
+    :func:`send_pilot_refund_email` exactly:
+      * Transport selection via ``LUCIEL_EMAIL_TRANSPORT=ses|log``.
+      * Log-only transport emits the stable marker
+        ``[welcome-set-password-email]`` for e2e harness scraping.
+      * SES delivery uses sesv2 ``send_email`` from the task IAM role's
+        SES inline policy on the ``vantagemind.ai`` identity.
+      * On SES failure: logs the full body at WARNING + raises
+        :class:`WelcomeEmailError`.
+    """
+    body = _build_welcome_set_password_body(
+        to_email=to_email,
+        set_password_url=set_password_url,
+        display_name=display_name,
+        purpose=purpose,
+    )
+    transport = _transport()
+
+    if purpose == "signup":
+        subject = SUBJECT_WELCOME_SET_PASSWORD
+    elif purpose == "invite":
+        subject = SUBJECT_INVITE_SET_PASSWORD
+    else:
+        subject = SUBJECT_RESET_PASSWORD
+
+    if transport == _LOG_TRANSPORT:
+        logger.warning(
+            "[welcome-set-password-email] (log-only transport) "
+            "from=%s to=%s subject=%r purpose=%s url=%s\n%s",
+            settings.from_email,
+            to_email,
+            subject,
+            purpose,
+            set_password_url,
+            body,
+        )
+        return
+
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as exc:  # pragma: no cover
+        logger.exception("[welcome-set-password-email] boto3 unavailable")
+        raise WelcomeEmailError("boto3 is not installed") from exc
+
+    region = (
+        os.getenv("SES_REGION")
+        or os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or "ca-central-1"
+    )
+
+    try:
+        client = boto3.client("sesv2", region_name=region)
+        response = client.send_email(
+            FromEmailAddress=settings.from_email,
+            Destination={"ToAddresses": [to_email]},
+            Content={
+                "Simple": {
+                    "Subject": {"Data": subject, "Charset": "UTF-8"},
+                    "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
+                },
+            },
+        )
+        message_id = response.get("MessageId", "<unknown>")
+        logger.info(
+            "[welcome-set-password-email] sent via SES from=%s to=%s "
+            "subject=%r purpose=%s url=%s message_id=%s",
+            settings.from_email,
+            to_email,
+            subject,
+            purpose,
+            set_password_url,
+            message_id,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning(
+            "[welcome-set-password-email] SES send FAILED from=%s to=%s "
+            "subject=%r purpose=%s url=%s error=%s\n%s",
+            settings.from_email,
+            to_email,
+            subject,
+            purpose,
+            set_password_url,
+            exc,
+            body,
+        )
+        raise WelcomeEmailError(f"SES send_email failed: {exc}") from exc
 
 
 def _format_amount(amount_cents: int, currency: str) -> str:

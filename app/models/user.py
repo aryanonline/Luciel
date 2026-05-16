@@ -101,6 +101,26 @@ class User(Base):
         server_default=text("true"),
     )
 
+    # Step 30a.3: argon2id-hashed password digest. Nullable because:
+    #   1. The post-Stripe-Checkout flow mints the User row in the webhook,
+    #      THEN emails a welcome link containing a `set_password`-class
+    #      magic-link token. Between those two events the User exists
+    #      without a password by design (the welcome-email mechanic is
+    #      the load-bearing claim of "password mandatory at signup" --
+    #      the user cannot reach a cookied /app session without first
+    #      setting one via the welcome email).
+    #   2. Backward compat: Step 30a / 30a.1 users minted before this
+    #      column existed have NULL here until they next log in (at
+    #      which point /forgot-password walks them through a set).
+    # The column is varchar(255) because argon2-cffi serialises
+    # parameters + salt + digest into a single $argon2id$... string
+    # that fits comfortably under 200 chars even at the highest cost
+    # parameters we would ever ship. We never store a raw password.
+    password_hash: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

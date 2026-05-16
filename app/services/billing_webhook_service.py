@@ -72,8 +72,17 @@ from app.models.subscription import (
 )
 from app.models.user import User
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
-from app.services.email_service import send_magic_link_email
-from app.services.magic_link_service import build_magic_link_url, mint_magic_link_token
+# Step 30a.3: signup welcome-email mechanic (Option B). The webhook no
+# longer mints a one-shot magic-link cookie post-checkout; instead it
+# mints a ``set_password`` token and emails the buyer a link to
+# ``/auth/set-password``. The buyer must redeem that link before any
+# cookied /app session exists for them -- that is the load-bearing
+# enforcement of "password mandatory at signup".
+from app.services.email_service import send_welcome_set_password_email
+from app.services.magic_link_service import (
+    build_set_password_url,
+    mint_set_password_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -427,21 +436,35 @@ class BillingWebhookService:
             )
             raise
 
-        # Email the magic link AFTER commit so a transient send failure
-        # cannot roll back the subscription row. The email service
-        # logs+sends synchronously; if it raises we catch and audit
-        # but still return success to Stripe.
+        # Step 30a.3 (Option B): mint a set-password token and email the
+        # buyer a welcome link to ``/auth/set-password``. This REPLACES
+        # the pre-30a.3 one-shot magic-link cookie path. The buyer
+        # cannot reach a cookied /app session until they click this
+        # link and type a password -- that is the enforcement point of
+        # "password mandatory at signup".
+        #
+        # Sent AFTER commit so a transient SES failure cannot roll back
+        # the subscription row. Email is best-effort; if it raises we
+        # catch+audit but still ACK Stripe (the buyer can recover via
+        # POST /api/v1/auth/forgot-password against the same email).
         try:
-            token = mint_magic_link_token(
-                user_id=user.id, email=email, tenant_id=tenant_id,
+            token = mint_set_password_token(
+                user_id=user.id,
+                email=email,
+                tenant_id=tenant_id,
+                purpose="signup",
             )
-            url = build_magic_link_url(token)
-            send_magic_link_email(
-                to_email=email, magic_link_url=url, display_name=display_name,
+            url = build_set_password_url(token)
+            send_welcome_set_password_email(
+                to_email=email,
+                set_password_url=url,
+                display_name=display_name,
+                purpose="signup",
             )
         except Exception:  # pragma: no cover - email is best-effort post-commit
             logger.exception(
-                "billing-webhook: magic-link email send failed (tenant minted ok) tenant=%s",
+                "billing-webhook: welcome-set-password email send failed "
+                "(tenant minted ok) tenant=%s",
                 tenant_id,
             )
 

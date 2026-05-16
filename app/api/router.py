@@ -10,6 +10,7 @@ from app.api.v1 import admin_forensics  # Step 29 Commit C.1
 from app.api.v1 import chat_widget  # Step 30b commit (c)
 from app.api.v1 import dashboard  # Step 31 sub-branch 3
 from app.api.v1 import billing  # Step 30a
+from app.api.v1 import auth  # Step 30a.3 -- password auth, mandatory at signup
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -25,3 +26,4 @@ api_router.include_router(admin_forensics.router)  # Step 29 Commit C.1
 api_router.include_router(chat_widget.router)  # Step 30b commit (c)
 api_router.include_router(dashboard.router)  # Step 31 sub-branch 3
 api_router.include_router(billing.router)  # Step 30a
+api_router.include_router(auth.router)  # Step 30a.3 -- password auth

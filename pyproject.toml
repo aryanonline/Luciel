@@ -42,6 +42,19 @@ dependencies = [
     # we use exclusively HS256 with a server-side shared secret (see
     # app/services/magic_link_service.py).
     "pyjwt>=2.8.0",
+    # Step 30a.3 -- password authentication. argon2-cffi is the reference
+    # binding for the Argon2 hash family, with argon2id as the OWASP-recommended
+    # variant (memory-hard, side-channel resistant). The library exposes a
+    # PasswordHasher class with sensible defaults (m=65536, t=3, p=4) that
+    # we use unchanged at v1; see app/services/auth_service.py for the
+    # hash/verify discipline. We deliberately do NOT use bcrypt -- bcrypt's
+    # 72-byte password truncation is a footgun and its iteration count is
+    # the only knob, whereas argon2id has independent memory and time
+    # parameters that adapt to commodity GPU advances without library
+    # changes. The argon2-cffi wheel is built against libargon2 and is
+    # widely-deployed (Django, Flask-Security, FastAPI-Users all default
+    # to it). Pinned with a permissive floor.
+    "argon2-cffi>=23.1.0",
 ]
 
 [project.optional-dependencies]
