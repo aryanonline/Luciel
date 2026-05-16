@@ -81,6 +81,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
 from app.db.session import SessionLocal
+from app.integrations.stripe import get_stripe_client
 from app.models.user import User
 from app.services.billing_service import BillingService
 from app.services.magic_link_service import MagicLinkError, validate_session_token
@@ -164,7 +165,24 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
                     content={"detail": "Session user not found or inactive."},
                 )
 
-            svc = BillingService(db)
+            # BillingService requires (db, stripe_client). The stripe
+            # client is a process-singleton via get_stripe_client(); the
+            # subscription read below does not actually touch Stripe (it
+            # is a pure DB lookup), but the constructor contract is what
+            # it is and we honor it. Mirror the canonical construction
+            # pattern in app/api/v1/billing.py:_service.
+            #
+            # D-cookie-middleware-billingservice-missing-stripe-client-
+            # 2026-05-16: prior to this commit the middleware passed
+            # only `db` and hit `TypeError: BillingService.__init__()
+            # missing 1 required positional argument: 'stripe_client'`,
+            # which the broad `except Exception` below swallowed and
+            # logged as ERROR. The fall-through let ApiKeyAuthMiddleware
+            # return its 'Missing Bearer' 401 to every cookied dashboard
+            # / admin request -- silently breaking the entire cookied
+            # browser flow since whenever BillingService gained the
+            # required arg. T9 leg 5 surfaced it on prod.
+            svc = BillingService(db, get_stripe_client())
             sub = svc.get_active_subscription_for_user(user_id=user.id)
             if sub is None:
                 # User exists but has no active subscription. Possible
