@@ -70,6 +70,14 @@ SKIP_AUTH_PATHS = {
     # route enforce its own gate (Stripe signature, cookie validation,
     # or none for the public-by-design checkout/claim endpoints).
     "/api/v1/billing",
+    # Step 30a.3 -- password-auth routes (login, set-password,
+    # forgot-password). Same exemption rationale as /api/v1/billing:
+    # these routes are reachable by an anonymous client (the buyer
+    # who has not yet been issued a session cookie), and each route
+    # enforces its own gate inside the handler (password verify,
+    # JWT token-class consume, or always-200 for forgot-password).
+    # The api-key middleware is the wrong perimeter here.
+    "/api/v1/auth",
 }
 
 # Step 31 sub-branch 3: dashboard reads are admin-side observability.
