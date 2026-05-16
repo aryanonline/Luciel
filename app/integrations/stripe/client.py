@@ -238,6 +238,21 @@ class StripeClient:
         cents (CAD $100.00) here. The amount-verification belongs in the
         service layer where the test-mode / live-mode Price values are
         consulted; this method is the I/O primitive only.
+
+        Commit 3h: traversal order updated for Stripe basil 2025+ /
+        ``2026-04-22.dahlia``. The Invoice object no longer carries
+        ``payment_intent`` or ``charge`` fields on its top level for
+        subscription-create invoices; those fields moved to a separate
+        ``InvoicePayment`` resource that links the invoice to the
+        PaymentIntent that funded it. The new primary traversal is:
+
+            sub.latest_invoice -> stripe.InvoicePayment.list(invoice=...)
+            -> ip.payment.payment_intent -> PaymentIntent.latest_charge
+
+        Legacy paths (``invoice.payment_intent``, ``invoice.charge``)
+        are kept as fallbacks so older test fixtures and older API
+        versions continue to work. The first non-None match wins; the
+        method returns None only when every path is exhausted.
         """
         stripe.api_key = self._api_key
         try:
@@ -252,24 +267,59 @@ class StripeClient:
             return None
         # Stripe-Python may return either an expanded Invoice object or
         # the bare invoice id depending on the API version; normalize.
+        invoice_id: str | None
         if isinstance(invoice, str):
+            invoice_id = invoice
             try:
                 invoice = stripe.Invoice.retrieve(
                     invoice, expand=["payment_intent"]
                 )
             except Exception:  # pragma: no cover - network boundary
-                return None
-        # Stripe 2026-04 returns Charge id on Invoice.charge as the
-        # legacy path AND on PaymentIntent.latest_charge as the modern
-        # path. Try the modern path first.
-        payment_intent = getattr(invoice, "payment_intent", None)
+                invoice = None
+        else:
+            invoice_id = getattr(invoice, "id", None)
+
+        # ---- Commit 3h primary path: basil 2025+ InvoicePayment resource.
+        # Walk every InvoicePayment row for this invoice; the first one
+        # with a payment_intent reference is the one that funded the
+        # intro line. The InvoicePayment object exposes the linkage via
+        # ``payment.payment_intent`` (a string id) -- we then fetch the
+        # PaymentIntent and return its ``latest_charge``.
+        if invoice_id:
+            try:
+                ips = stripe.InvoicePayment.list(invoice=invoice_id, limit=10)
+            except Exception:  # pragma: no cover - network or SDK boundary
+                ips = None
+            if ips is not None:
+                for ip in getattr(ips, "data", []) or []:
+                    ip_dict = ip.to_dict() if hasattr(ip, "to_dict") else {}
+                    payment_block = ip_dict.get("payment") or {}
+                    pi_id = payment_block.get("payment_intent")
+                    if not pi_id or not isinstance(pi_id, str):
+                        continue
+                    try:
+                        pi_obj = stripe.PaymentIntent.retrieve(pi_id)
+                    except Exception:  # pragma: no cover - network boundary
+                        continue
+                    latest_charge = getattr(pi_obj, "latest_charge", None)
+                    if isinstance(latest_charge, str) and latest_charge:
+                        return latest_charge
+                    if latest_charge is not None and getattr(latest_charge, "id", None):
+                        return latest_charge.id
+
+        # ---- Pre-3h modern legacy path: invoice.payment_intent.latest_charge.
+        # Older Stripe API versions and many test fixtures populate the
+        # invoice.payment_intent field directly.
+        payment_intent = getattr(invoice, "payment_intent", None) if invoice is not None else None
         if payment_intent is not None and not isinstance(payment_intent, str):
             latest_charge = getattr(payment_intent, "latest_charge", None)
             if isinstance(latest_charge, str) and latest_charge:
                 return latest_charge
             if latest_charge is not None and getattr(latest_charge, "id", None):
                 return latest_charge.id
-        legacy_charge = getattr(invoice, "charge", None)
+
+        # ---- Pre-3h oldest legacy path: invoice.charge.
+        legacy_charge = getattr(invoice, "charge", None) if invoice is not None else None
         if isinstance(legacy_charge, str) and legacy_charge:
             return legacy_charge
         if legacy_charge is not None and getattr(legacy_charge, "id", None):
