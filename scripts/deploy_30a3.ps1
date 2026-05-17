@@ -108,44 +108,55 @@ Write-Host "==> [2/6] Registering luciel-backend:NEW (image swap only)" -Foregro
 $currentJsonPath = Join-Path $env:TEMP "backend-current-30a3.json"
 $newJsonPath     = Join-Path $env:TEMP "backend-30a3.json"
 
+# Pull the current task-def via the AWS CLI's native JSON output and
+# write it to disk byte-for-byte (no PS object round-trip).
 aws ecs describe-task-definition `
     --task-definition luciel-backend `
     --region $AwsRegion `
-    --query 'taskDefinition' > $currentJsonPath
+    --query 'taskDefinition' `
+    --output json | Out-File -FilePath $currentJsonPath -Encoding ascii
 if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: describe-task-definition failed" -ForegroundColor Red; exit 1 }
 
-# Filter to the fields register-task-definition accepts (drop revision,
-# status, arn, etc), then swap the web container's image.
-$currentTd = Get-Content $currentJsonPath -Raw | ConvertFrom-Json
+# Field-filter + image swap via Python instead of PowerShell's
+# ConvertTo-Json. Rationale: PS's serializer collapses empty arrays
+# (placementConstraints=[]) to nothing on round-trip, drops type
+# information on nested objects, and Set-Content -Encoding utf8 on
+# Windows PowerShell 5.1 emits a BOM that aws-cli rejects with the
+# opaque 'Invalid JSON received' message. Python json round-trips
+# the shape losslessly and writes plain UTF-8.
+$pythonExe = if ($env:VIRTUAL_ENV) { Join-Path $env:VIRTUAL_ENV "Scripts\python.exe" } else { "python" }
+if (-not (Test-Path $pythonExe)) { $pythonExe = "python" }
 
-$newContainerDefs = @($currentTd.containerDefinitions | ForEach-Object {
-    if ($_.name -eq $ContainerName) {
-        $_.image = $PinnedImage
-    }
-    $_
-})
+$pyScript = @"
+import json, sys
+current_path = sys.argv[1]
+out_path     = sys.argv[2]
+container    = sys.argv[3]
+image        = sys.argv[4]
 
-$newTd = [ordered]@{
-    family                  = $currentTd.family
-    taskRoleArn             = $currentTd.taskRoleArn
-    executionRoleArn        = $currentTd.executionRoleArn
-    networkMode             = $currentTd.networkMode
-    containerDefinitions    = $newContainerDefs
-    volumes                 = $currentTd.volumes
-    placementConstraints    = $currentTd.placementConstraints
-    requiresCompatibilities = $currentTd.requiresCompatibilities
-    cpu                     = $currentTd.cpu
-    memory                  = $currentTd.memory
-    runtimePlatform         = $currentTd.runtimePlatform
-}
+with open(current_path, 'r', encoding='utf-8-sig') as f:
+    td = json.load(f)
 
-# Strip null fields so the API doesn't reject them. PowerShell's
-# ConvertTo-Json keeps explicit $null entries, which ECS rejects for
-# fields like runtimePlatform on EC2 task-defs.
-$newTdHash = @{}
-foreach ($k in $newTd.Keys) { if ($null -ne $newTd[$k]) { $newTdHash[$k] = $newTd[$k] } }
+KEEP = (
+    'family','taskRoleArn','executionRoleArn','networkMode',
+    'containerDefinitions','volumes','placementConstraints',
+    'requiresCompatibilities','cpu','memory','runtimePlatform',
+)
+filtered = {k: td[k] for k in KEEP if k in td and td[k] is not None}
 
-$newTdHash | ConvertTo-Json -Depth 50 | Set-Content -Path $newJsonPath -Encoding utf8
+for c in filtered.get('containerDefinitions', []):
+    if c.get('name') == container:
+        c['image'] = image
+
+with open(out_path, 'w', encoding='utf-8', newline='') as f:
+    json.dump(filtered, f)
+"@
+
+$pyScriptPath = Join-Path $env:TEMP "backend-30a3-rewrite.py"
+Set-Content -Path $pyScriptPath -Value $pyScript -Encoding ascii
+
+& $pythonExe $pyScriptPath $currentJsonPath $newJsonPath $ContainerName $PinnedImage
+if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: JSON rewrite failed" -ForegroundColor Red; exit 1 }
 
 $BackendNewArn = aws ecs register-task-definition `
     --cli-input-json "file://$newJsonPath" `
