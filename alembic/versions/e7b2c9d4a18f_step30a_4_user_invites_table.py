@@ -145,19 +145,24 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Create user_invites table, the user_invite_status enum, and indexes."""
-    # ENUM first -- referenced by the table's status column.
-    user_invite_status = sa.Enum(
-        "pending",
-        "accepted",
-        "expired",
-        "revoked",
-        name="user_invite_status",
-        create_constraint=True,
-        validate_strings=True,
-    )
-    user_invite_status.create(op.get_bind(), checkfirst=True)
+    """Create user_invites table, the user_invite_status enum, and indexes.
 
+    Enum-creation idiom: we deliberately do NOT call
+    `sa.Enum(...).create(bind, checkfirst=True)` standalone before
+    `op.create_table`. SQLAlchemy's PG dialect already attaches a
+    `before_create` event hook to the column-level Enum that emits
+    `CREATE TYPE` once when the table is being created. A standalone
+    `.create()` call AHEAD of `op.create_table` creates the type a first
+    time, then `op.create_table`'s event hook tries to emit `CREATE TYPE`
+    a second time and trips `DuplicateObject` -- which is what happened
+    on prod 2026-05-17 (first deploy attempt + second deploy attempt,
+    both rolled back cleanly via the migration transaction). The
+    `create_type=False` kwarg on `sa.Enum` does NOT suppress the event
+    hook because that kwarg only exists on `postgresql.ENUM`, not on
+    the generic `sa.Enum` (verified locally against SQLAlchemy 2.0.49 --
+    `sa.Enum(..., create_type=False).__dict__` does not contain the
+    attribute, it is silently dropped into **kw).
+    """
     op.create_table(
         "user_invites",
         sa.Column(
@@ -221,17 +226,12 @@ def upgrade() -> None:
                 "expired",
                 "revoked",
                 name="user_invite_status",
-                # The PG type was created explicitly above (line 159) via
-                # user_invite_status.create(checkfirst=True). create_type=False
-                # tells SQLAlchemy's pg dialect NOT to emit a second CREATE TYPE
-                # via the before_create event hook on this column-level Enum --
-                # without it, the table-create fires a duplicate CREATE TYPE
-                # statement and trips DuplicateObject. (Verified 2026-05-17 against
-                # prod, where the first deploy attempt errored with
-                # 'type "user_invite_status" already exists' on this line.)
-                # create_constraint=False suppresses the CHECK constraint
-                # only -- it is unrelated to the CREATE TYPE emission.
-                create_type=False,
+                # Native PG enum -- the column-level event hook emits
+                # CREATE TYPE before the table is created (see the upgrade()
+                # docstring above for why we do NOT also call .create()
+                # standalone). create_constraint=False is the CHECK-constraint
+                # suppressor, which we don't want on a native-enum column
+                # because the type itself constrains the values.
                 create_constraint=False,
                 validate_strings=True,
             ),
