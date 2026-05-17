@@ -57,6 +57,7 @@ from app.models.subscription import (
 )
 from app.models.tenant import TenantConfig
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
+from app.repositories.scope_assignment_repository import ScopeAssignmentRepository
 from app.services.admin_service import AdminService
 from app.services.luciel_instance_service import LucielInstanceService
 
@@ -85,6 +86,14 @@ _INSTANCE_ID_TENANT_COMPANY = "company-luciel"
 
 # Audit / created_by label.
 _CREATED_BY = "tier_provisioning"
+
+# Role string on the owner-side ScopeAssignment minted at self-serve checkout.
+# Sibling to the v1 default "teammate" role (Step 30a.4 invite_service.py:210)
+# and the Step-30a.5-incoming "department_lead". No existing "owner" rows
+# pre-date this constant -- this is the introduction point for the role string
+# (greenlit by Aryan 2026-05-17 during the D-step-30a-owner-scopeassignment-
+# missing-self-serve-checkout-2026-05-17 drift work).
+_OWNER_ROLE = "owner"
 
 
 # ---------------------------------------------------------------------
@@ -192,6 +201,22 @@ class TierProvisioningService:
             audit_ctx=audit_ctx,
         )
         created["agent_id"] = agent.agent_id
+
+        # 1.5. Mint the owner-side ScopeAssignment binding the buyer to
+        #      (tenant, default-domain, role="owner"). Without this row
+        #      the buyer has no tenant binding -- every cookied admin
+        #      route fails 403 "Cookied user has no active scope
+        #      assignment" because the auth dependency requires an
+        #      active ScopeAssignment to resolve the inviter's tenant.
+        #      Caught manually 2026-05-17 when the first real owner hit
+        #      "Send invite" on /app/team. Drift:
+        #      D-step-30a-owner-scopeassignment-missing-self-serve-
+        #      checkout-2026-05-17.
+        self._ensure_owner_scope_assignment(
+            tenant=tenant,
+            primary_user=primary_user,
+            audit_ctx=audit_ctx,
+        )
 
         # 2. Mint the agent-scope Luciel -- the "your Luciel" the buyer
         #    chats with from day one. Every tier gets this.
@@ -368,3 +393,70 @@ class TierProvisioningService:
             tenant.tenant_id, candidate, primary_user.id,
         )
         return agent
+
+    # -----------------------------------------------------------------
+    # Owner ScopeAssignment provisioning
+    # -----------------------------------------------------------------
+
+    def _ensure_owner_scope_assignment(
+        self,
+        *,
+        tenant: TenantConfig,
+        primary_user: "User",
+        audit_ctx: AuditContext,
+    ) -> None:
+        """Resolve-or-create the owner-role ScopeAssignment for the buyer.
+
+        Idempotent on retry: a Stripe webhook redeliver after a partial
+        success must not create a second active assignment. We look up
+        any currently-active assignment for (user, tenant) first -- the
+        ScopeAssignmentService doctrine says there should be at most one
+        per (user, tenant) in steady state (commented at
+        scope_assignment_repository.get_active_for_user_in_tenant:226).
+        If we find one, we log and return without touching it.
+
+        Writes an ACTION_CREATE / RESOURCE_SCOPE_ASSIGNMENT audit row in
+        the same transaction as the INSERT (Invariant 4), via the repo's
+        audit_ctx-passthrough path.
+
+        Commits so the immediate subsequent agent-scope LucielInstance
+        create sees the same transactional state as the primary Agent
+        commit just above -- mirrors _ensure_primary_agent's commit
+        discipline. Re-fetch is not needed; we don't return the row.
+        """
+        sar = ScopeAssignmentRepository(self.db)
+
+        existing = sar.get_active_for_user_in_tenant(
+            user_id=primary_user.id,
+            tenant_id=tenant.tenant_id,
+        )
+        if existing is not None:
+            logger.info(
+                "tier_provisioning: reusing existing owner scope assignment "
+                "tenant=%s user=%s assignment_id=%s role=%s",
+                tenant.tenant_id,
+                primary_user.id,
+                existing.id,
+                existing.role,
+            )
+            return
+
+        sar.create(
+            user_id=primary_user.id,
+            tenant_id=tenant.tenant_id,
+            domain_id=DEFAULT_DOMAIN_ID,
+            role=_OWNER_ROLE,
+            autocommit=False,  # we commit below, after the audit row lands
+            audit_ctx=audit_ctx,
+        )
+
+        # Same-txn commit discipline as _ensure_primary_agent above.
+        self.db.commit()
+        logger.info(
+            "tier_provisioning: created owner scope assignment tenant=%s "
+            "user=%s domain=%s role=%s",
+            tenant.tenant_id,
+            primary_user.id,
+            DEFAULT_DOMAIN_ID,
+            _OWNER_ROLE,
+        )

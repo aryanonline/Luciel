@@ -402,6 +402,51 @@ class TestTierProvisioningServiceShape:
         # Local part too short -> falls back to safe slug.
         assert _slugify_agent_id_from_email("a@b.com") == "primary"
 
+    # -----------------------------------------------------------------
+    # Owner-scope provisioning (D-step-30a-owner-scopeassignment-
+    # missing-self-serve-checkout-2026-05-17)
+    # -----------------------------------------------------------------
+
+    def test_owner_role_constant_exposed(self):
+        # The role string on the owner-side ScopeAssignment minted at
+        # self-serve checkout. Sibling to the v1 default "teammate" role
+        # (Step 30a.4 invite_service.py:210). Pinned so a future refactor
+        # cannot silently rename to e.g. "admin" or "tenant_admin" --
+        # the auth-gate on /admin/invites doesn't filter on role today
+        # (any active scope passes the 403 check) but ScopeAssignment-
+        # consumers downstream will start to once role-based gating
+        # lands. Keeping the string stable is a soft contract.
+        from app.services.tier_provisioning_service import _OWNER_ROLE
+        assert _OWNER_ROLE == "owner"
+
+    def test_class_has_ensure_owner_scope_assignment(self):
+        from app.services.tier_provisioning_service import (
+            TierProvisioningService,
+        )
+        assert hasattr(
+            TierProvisioningService, "_ensure_owner_scope_assignment"
+        )
+        sig = inspect.signature(
+            TierProvisioningService._ensure_owner_scope_assignment
+        )
+        kw = set(sig.parameters.keys())
+        for required in ("tenant", "primary_user", "audit_ctx"):
+            assert required in kw, (
+                f"_ensure_owner_scope_assignment missing kw {required!r}"
+            )
+
+    def test_premint_for_tier_calls_ensure_owner_scope(self):
+        # AST-grep premint_for_tier's body for the call. Catches the
+        # case where someone reorders / drops the call in a refactor --
+        # the integration test in tests/integration/ exercises the
+        # behavioral side, this one pins the call-site itself.
+        from app.services import tier_provisioning_service as tps_mod
+        src = inspect.getsource(tps_mod.TierProvisioningService.premint_for_tier)
+        assert "_ensure_owner_scope_assignment" in src, (
+            "premint_for_tier must call _ensure_owner_scope_assignment "
+            "so every self-serve buyer gets an owner-role scope row"
+        )
+
 
 # ---------------------------------------------------------------------
 # 9. AdminService — tier/scope guard
