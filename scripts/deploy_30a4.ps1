@@ -180,9 +180,41 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($BackendNewArn)) {
 }
 Write-Host "    registered: $BackendNewArn" -ForegroundColor Gray
 
-# ----- [3/6] Alembic migration (OPERATOR-RUN via ECS exec) -----
+# ----- [3/6] Update backend service to new task-def -----
+# Migration order note: we deploy the new image FIRST, then run alembic
+# from the new task. The original sequence (migrate before service swap)
+# does not work because alembic reads migration files from the container
+# filesystem -- the old image does not contain alembic/versions/e7b2c9d4a18f_*.
+# Running 'alembic upgrade head' against the old container is a silent
+# no-op (head still resolves to a3c1f08b9d42). The new code is forward-safe
+# against the old schema during the 2-4 minute rolling deploy: the four new
+# /admin/invites routes are cookie-gated to Team-tier admin sessions and
+# would only 500 if hit before the migration runs (near-zero hit rate;
+# no auto-traffic).
 Write-Host ""
-Write-Host "==> [3/6] Alembic migration e7b2c9d4a18f -- OPERATOR-RUN" -ForegroundColor Yellow
+Write-Host "==> [3/6] Updating backend service to $BackendNewArn" -ForegroundColor Cyan
+$updatedTd = aws ecs update-service `
+    --cluster $Cluster `
+    --service $WebService `
+    --task-definition $BackendNewArn `
+    --region $AwsRegion `
+    --query 'service.taskDefinition' --output text
+if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: update-service failed" -ForegroundColor Red; exit 1 }
+Write-Host "    service now on: $updatedTd" -ForegroundColor Gray
+
+# ----- [4/6] Wait for service to stabilize -----
+Write-Host ""
+Write-Host "==> [4/6] Waiting for backend service to stabilize" -ForegroundColor Cyan
+Write-Host "    (ECS rolling deploy + ALB health checks -- typically 2-4 min)" -ForegroundColor Gray
+aws ecs wait services-stable `
+    --cluster $Cluster `
+    --services $WebService `
+    --region $AwsRegion
+if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: services-stable wait failed" -ForegroundColor Red; exit 1 }
+
+# ----- [5/6] Alembic migration on NEW container (OPERATOR-RUN via ECS exec) -----
+Write-Host ""
+Write-Host "==> [5/6] Alembic migration e7b2c9d4a18f -- OPERATOR-RUN on NEW image" -ForegroundColor Yellow
 
 $RunningTaskArn = aws ecs list-tasks `
     --cluster $Cluster `
@@ -195,10 +227,10 @@ if ([string]::IsNullOrWhiteSpace($RunningTaskArn) -or $RunningTaskArn -eq "None"
 }
 
 Write-Host ""
-Write-Host "    PAUSE: run the migration BEFORE updating the service." -ForegroundColor Yellow
-Write-Host "    The currently-running task is on the OLD image; that's fine --" -ForegroundColor Yellow
-Write-Host "    alembic only needs DATABASE_URL, which is identical across" -ForegroundColor Yellow
-Write-Host "    revisions. New code on the OLD container is harmless." -ForegroundColor Yellow
+Write-Host "    PAUSE: run the migration NOW on the new task ($RunningTaskArn)." -ForegroundColor Yellow
+Write-Host "    The new image ships alembic/versions/e7b2c9d4a18f_*.py, so" -ForegroundColor Yellow
+Write-Host "    'alembic upgrade head' will apply the new revision and" -ForegroundColor Yellow
+Write-Host "    'alembic current' will report e7b2c9d4a18f (head)." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "    Command (run from this PowerShell window):" -ForegroundColor Yellow
 Write-Host ""
@@ -219,29 +251,7 @@ Write-Host "        --command 'alembic current' --region $AwsRegion" -Foreground
 Write-Host ""
 $null = Read-Host "    Press ENTER only after 'alembic current' reports e7b2c9d4a18f (head) (or Ctrl-C to abort)"
 
-# ----- [4/6] Update backend service to new task-def -----
-Write-Host ""
-Write-Host "==> [4/6] Updating backend service to $BackendNewArn" -ForegroundColor Cyan
-$updatedTd = aws ecs update-service `
-    --cluster $Cluster `
-    --service $WebService `
-    --task-definition $BackendNewArn `
-    --region $AwsRegion `
-    --query 'service.taskDefinition' --output text
-if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: update-service failed" -ForegroundColor Red; exit 1 }
-Write-Host "    service now on: $updatedTd" -ForegroundColor Gray
-
-# ----- [5/6] Wait for service to stabilize -----
-Write-Host ""
-Write-Host "==> [5/6] Waiting for backend service to stabilize" -ForegroundColor Cyan
-Write-Host "    (ECS rolling deploy + ALB health checks -- typically 2-4 min)" -ForegroundColor Gray
-aws ecs wait services-stable `
-    --cluster $Cluster `
-    --services $WebService `
-    --region $AwsRegion
-if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: services-stable wait failed" -ForegroundColor Red; exit 1 }
-
-# ----- [6/6] Smoke -----
+# ----- [6/6] Smoke (post-migration) -----
 Write-Host ""
 Write-Host "==> [6/6] Smoke: probing /api/v1/admin/invites with no cookie (must 401)" -ForegroundColor Cyan
 # A 401 (no session cookie) proves the new admin/invites router is
