@@ -126,3 +126,41 @@ verify_*.log
 *-probe-*.json
 *-probe-*.log
 *-snapshot-*.log
+
+# Step 30a.2-3 reconciliation: third wave of operator scratch. The T9
+# closure leg, the post-checkout cookie debugging spree, the SES policy
+# fix cycle, and the Amplify custom-rules tuning all left per-session
+# JSON / PS1 / py shrapnel at repo root. None of these are referenced
+# from any committed script; canonical record lives in DRIFTS.md and
+# CloudWatch. Patterns below are surgical -- they intentionally do NOT
+# catch alembic migrations, app/ code, scripts/deploy_*.{sh,ps1}, or
+# scripts/td-backend-snapshot-*.json (if we ever need a tracked example).
+
+# T9 (GATE 5 closure) operator scratch -- PS1 probes, py probes, etc.
+t9_*.ps1
+t9_*.py
+
+# Ad-hoc task-def JSON dumps (deploy scripts write to $env:TEMP, not
+# repo root, so anything matching these at repo root is sediment).
+backend-[0-9]*.json
+backend-td-*.json
+worker-td-*.json
+td[0-9]*.json
+td-backend-rev*.json
+scripts/td-backend-rev*.json
+scripts/td-backend-*-snapshot.json
+
+# SES policy fix cycle (pre-Step 30a.2 email-delivery hardening).
+luciel_ses_policy*.json
+ses_send_policy.json
+
+# Amplify custom-rules + envvars patch sediment.
+amplify_*.json
+
+# One-off operator scripts that were never meant to be tracked.
+add_beat.py
+prod_safety_check.py
+register_r2.py
+
+# Pytest log dumps from local-only debug runs.
+pytest_*.log
