@@ -1093,32 +1093,48 @@ def create_luciel_instance(
     except DuplicateInstanceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    # Step 30a.1 — in invite mode, fire the magic-link AFTER the Luciel
-    # has been committed so the teammate's first sign-in lands them on
-    # an already-existing Luciel. Email send is best-effort; a transient
-    # SMTP failure does NOT roll back the invite (the Luciel is paid for
-    # and the inviter can resend from the dashboard).
+    # Step 30a.1 -> Step 30a.4 token-class fix.
+    #
+    # Originally minted a daily-login magic-link token (wrong class for
+    # an invitee who has no password yet) and shipped it via
+    # send_magic_link_email. The teammate flow is structurally a
+    # set_password event -- the invitee MUST set a password to gain
+    # /app access -- so the correct token is set_password / purpose=
+    # invite, dispatched via send_welcome_set_password_email.
+    #
+    # This path is DEPRECATED in favor of POST /admin/invites (Step
+    # 30a.4 C3). It remains here so existing test scaffolding that
+    # POSTs teammate_email onto /admin/luciel-instances doesn't 500
+    # mid-deploy. Removal scheduled for Step 30a.5; see DRIFTS for the
+    # closing entry.
     if invited_email is not None:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "[DEPRECATED] /admin/luciel-instances teammate_email overload: "
+            "use POST /admin/invites instead (Step 30a.4). tenant=%s teammate=%s",
+            payload.scope_owner_tenant_id, invited_email,
+        )
         try:
-            from app.services.email_service import send_magic_link_email
+            from app.services.email_service import send_welcome_set_password_email
             from app.services.magic_link_service import (
-                build_magic_link_url,
-                mint_magic_link_token,
+                build_set_password_url,
+                mint_set_password_token,
             )
-            token = mint_magic_link_token(
+            token = mint_set_password_token(
                 user_id=invited_user_id,
                 email=invited_email,
                 tenant_id=payload.scope_owner_tenant_id,
+                purpose="invite",
             )
-            send_magic_link_email(
+            send_welcome_set_password_email(
                 to_email=invited_email,
-                magic_link_url=build_magic_link_url(token),
+                set_password_url=build_set_password_url(token),
                 display_name=None,
+                purpose="invite",
             )
         except Exception:  # pragma: no cover -- email is best-effort
-            import logging as _logging
             _logging.getLogger(__name__).exception(
-                "create_luciel_instance: teammate magic-link send failed "
+                "create_luciel_instance: teammate set-password email send failed "
                 "tenant=%s teammate=%s",
                 payload.scope_owner_tenant_id, invited_email,
             )
