@@ -294,14 +294,28 @@ async def stripe_webhook(request: Request, db: DbSession) -> JSONResponse:
 def onboarding_claim(payload: OnboardingClaimRequest, db: DbSession) -> OnboardingClaimResponse:
     """Inspect a checkout session id and either:
 
-      * if the webhook already minted the subscription, mint a fresh
-        magic link and email it (idempotent: each claim re-sends the
-        link, so a buyer who closed the email tab can re-trigger from
-        the marketing site without sales involvement).
+      * if the webhook already minted the subscription AND the user
+        has not yet set a password, mint a fresh **welcome-set-password**
+        link and email it (idempotent: each claim re-sends the link,
+        so a buyer who closed the email tab can re-trigger from the
+        marketing site without sales involvement).
       * if the webhook has not arrived yet, return 'pending' so the
         marketing site can show "we'll email you shortly" and the
         webhook drives the eventual email send.
       * if Stripe does not recognize the session_id, return 'unknown'.
+
+    Step 30a.3 (Option B welcome-email mechanic): this route was the
+    post-Checkout magic-link resender pre-30a.3; it is now the
+    post-Checkout welcome-set-password resender. The cookie-issuance-
+    without-password-set anti-pattern of the magic-link resend path is
+    removed -- the resent link lands on /auth/set-password just like
+    the original welcome email, and the buyer must type a password
+    before a session cookie mints. If the user already has a password
+    hash on file (e.g. the buyer redeemed the welcome from a different
+    device and is now revisiting /onboarding from the original tab),
+    the resend mints a reset_password-class token instead so the
+    surface degrades gracefully into a password-reset rather than
+    silently re-overwriting their hash.
     """
     stripe_client = get_stripe_client()
     if not stripe_client.is_configured:
@@ -342,21 +356,52 @@ def onboarding_claim(payload: OnboardingClaimRequest, db: DbSession) -> Onboardi
             email_sent_to=customer_email or None,
         )
 
-    # Subscription exists -- send a fresh magic link.
+    # Subscription exists -- resend the welcome-set-password email.
+    # Step 30a.3 (Option B): we mint a set_password-class token when
+    # the user has not yet redeemed their welcome, OR a reset_password-
+    # class token when they have. Both consume through the same
+    # /auth/set-password route on the marketing site.
     user = db.get(User, sub.user_id)
     if user is None:  # pragma: no cover - referential integrity guarantees this
         return OnboardingClaimResponse(state="unknown", email_sent_to=None)
 
+    from app.services.email_service import (
+        EmailDeliveryError,
+        send_welcome_set_password_email,
+    )
+    from app.services.magic_link_service import (
+        build_set_password_url,
+        mint_reset_password_token,
+        mint_set_password_token,
+    )
+
     try:
-        token = mint_magic_link_token(user_id=user.id, email=user.email, tenant_id=sub.tenant_id)
-        url = build_magic_link_url(token)
-        # Reuse the email service from the webhook path.
-        from app.services.email_service import send_magic_link_email
-        send_magic_link_email(to_email=user.email, magic_link_url=url, display_name=user.display_name)
-    except MagicLinkError as exc:
+        if user.password_hash:
+            # Password already set -- degrade to a reset link so we
+            # do not silently overwrite their hash on a resend.
+            token = mint_reset_password_token(
+                user_id=user.id, email=user.email, tenant_id=sub.tenant_id,
+            )
+            purpose = "reset"
+        else:
+            token = mint_set_password_token(
+                user_id=user.id,
+                email=user.email,
+                tenant_id=sub.tenant_id,
+                purpose="signup",
+            )
+            purpose = "signup"
+        url = build_set_password_url(token)
+        send_welcome_set_password_email(
+            to_email=user.email,
+            set_password_url=url,
+            display_name=user.display_name,
+            purpose=purpose,
+        )
+    except (MagicLinkError, EmailDeliveryError) as exc:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=str(exc),
+            detail=str(exc) or "Email delivery failed.",
         ) from exc
 
     return OnboardingClaimResponse(state="ready", email_sent_to=user.email)
