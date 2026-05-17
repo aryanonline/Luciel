@@ -32,7 +32,12 @@
 #   number, same image+command). The service-update at the end is what
 #   actually triggers placement.
 #
-# Container-name convention: backend task-def container is "web".
+# Container-name convention: backend task-def container is "luciel-backend"
+# (verified against luciel-backend:64 + :65 on 2026-05-17). The earlier deploy
+# scripts (deploy_27c.sh, deploy_30a2.sh, deploy_30a3.ps1) all hardcoded "web"
+# but the Python patcher silently no-op'd on missing container, registering
+# image-name-only copies of the source task-def. This script hard-fails if the
+# container is not found in the source task-def -- see [2/6] patcher guard.
 
 $ErrorActionPreference = "Stop"
 
@@ -42,7 +47,7 @@ $AccountId     = "729005488042"
 $EcrRepo       = "$AccountId.dkr.ecr.$AwsRegion.amazonaws.com/luciel-backend"
 $Cluster       = "luciel-cluster"
 $WebService    = "luciel-backend-service"
-$ContainerName = "web"
+$ContainerName = "luciel-backend"
 
 # ----- Preflight 0a: clean workspace -----
 Write-Host "==> [0/6] Preflight: confirm workspace is clean" -ForegroundColor Cyan
@@ -142,9 +147,18 @@ KEEP = (
 )
 filtered = {k: td[k] for k in KEEP if k in td and td[k] is not None}
 
+matched = 0
 for c in filtered.get('containerDefinitions', []):
     if c.get('name') == container:
         c['image'] = image
+        matched += 1
+if matched != 1:
+    names = [c.get('name') for c in filtered.get('containerDefinitions', [])]
+    sys.stderr.write(
+        f"ERROR: expected exactly 1 container named {container!r} in source task-def, "
+        f"matched {matched}. Found containers: {names}\n"
+    )
+    sys.exit(2)
 
 with open(out_path, 'w', encoding='utf-8', newline='') as f:
     json.dump(filtered, f)
