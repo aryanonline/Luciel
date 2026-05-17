@@ -201,7 +201,13 @@ Write-Host "        --region $AwsRegion" -ForegroundColor White
 Write-Host ""
 Write-Host "    Expected: 'Running upgrade dfea1a04e037 -> a3c1f08b9d42'." -ForegroundColor Yellow
 Write-Host ""
-$null = Read-Host "    Press ENTER once the upgrade reports the new revision (or Ctrl-C to abort)"
+Write-Host "    Then VERIFY with (must print 'a3c1f08b9d42 (head)'):" -ForegroundColor Yellow
+Write-Host "      aws ecs execute-command ``" -ForegroundColor White
+Write-Host "        --cluster $Cluster --task $RunningTaskArn ``" -ForegroundColor White
+Write-Host "        --container $ContainerName --interactive ``" -ForegroundColor White
+Write-Host "        --command 'alembic current' --region $AwsRegion" -ForegroundColor White
+Write-Host ""
+$null = Read-Host "    Press ENTER only after 'alembic current' reports a3c1f08b9d42 (head) (or Ctrl-C to abort)"
 
 # ----- [4/6] Update backend service to new task-def -----
 Write-Host ""
