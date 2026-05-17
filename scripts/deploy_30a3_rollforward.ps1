@@ -194,7 +194,9 @@ $null = Read-Host "    Press ENTER only after 'alembic current' reports a3c1f08b
 # ----- [5/5] Smoke -----
 Write-Host ""
 Write-Host "==> [5/5] Smoke: /api/v1/auth/forgot-password (must 200)" -ForegroundColor Cyan
-$smokeEmail = "rf-smoke-30a3@vantagemind.invalid"
+# Pydantic EmailStr rejects reserved TLDs (.invalid/.test). Use real domain;
+# backend response is neutral 200 either way (no enumeration leak).
+$smokeEmail = "rf-smoke-30a3@vantagemind.ai"
 try {
     $resp = Invoke-WebRequest `
         -Uri "https://api.vantagemind.ai/api/v1/auth/forgot-password" `

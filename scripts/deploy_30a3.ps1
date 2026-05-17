@@ -239,7 +239,9 @@ Write-Host "==> [6/6] Smoke: probing /api/v1/auth/forgot-password (must 200)" -F
 # not (no enumeration). A 200 here proves the new router is mounted,
 # the SKIP_AUTH_PATHS exemption works, and argon2id+JWT init didn't
 # crash the container.
-$smokeProbeEmail = "deploy-smoke-30a3-$Sha@vantagemind.invalid"
+# NOTE: Pydantic EmailStr (email-validator) rejects reserved TLDs like .invalid/.test.
+# Use a real domain we own; backend returns neutral 200 either way (no enumeration leak).
+$smokeProbeEmail = "deploy-smoke-30a3-$Sha@vantagemind.ai"
 try {
     $smokeResp = Invoke-WebRequest `
         -Uri "https://api.vantagemind.ai/api/v1/auth/forgot-password" `
