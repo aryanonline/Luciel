@@ -1286,6 +1286,297 @@ def _invite_teammate(
     return agent_slug, user.id, email_norm
 
 
+# =====================================================================
+# Step 30a.4 -- /admin/invites: first-class invite lifecycle
+# =====================================================================
+#
+# These routes are COOKIE-gated (not API-key-gated like the rest of
+# admin.py) because the call site is the /app/team UI, which is a
+# cookied React surface. The actor is the cookied User; the inviting
+# tenant + domain default to the cookied User's active ScopeAssignment.
+#
+# All four routes delegate to app.services.invite_service.* -- the
+# audit row and DB transaction discipline live there, not here.
+
+import uuid as _step_30a_4_uuid  # local alias to avoid colliding with line-2575 import
+
+from app.schemas.invite import (
+    UserInviteCreate,
+    UserInviteRead,
+    UserInviteResendResponse,
+    UserInviteRevokeResponse,
+)
+from app.services import invite_service
+from app.services.invite_service import (
+    DuplicatePendingInviteError,
+    InviteError,
+    InviteExpiredError,
+    InviteNotFoundError,
+    InviteNotPendingError,
+    InvitePendingCapExceededError,
+)
+
+
+def _resolve_invite_actor(
+    *,
+    request: Request,
+    db,
+) -> tuple["User", str, str]:
+    """Resolve (cookied_user, tenant_id, default_domain_id) for invite routes.
+
+    Reads the session cookie off the Request directly (same pattern as
+    billing routes). Returns the cookied User, their active tenant_id
+    (from the session JWT), and the domain_id of their currently-active
+    ScopeAssignment within that tenant.
+
+    Raises HTTPException:
+      * 401 -- no valid session cookie, or User row inactive.
+      * 403 -- cookied user has no active ScopeAssignment under any
+               tenant (cannot invite without a home scope).
+    """
+    from app.core.config import settings
+    from app.models.user import User
+    from app.repositories.scope_assignment_repository import (
+        ScopeAssignmentRepository,
+    )
+    from app.services.magic_link_service import (
+        MagicLinkError,
+        validate_session_token,
+    )
+
+    cookie = request.cookies.get(settings.session_cookie_name)
+    if not cookie:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    try:
+        payload = validate_session_token(cookie)
+    except MagicLinkError as exc:
+        raise HTTPException(
+            status_code=401, detail=str(exc) or "Invalid session."
+        ) from exc
+
+    user_id = payload.get("sub")
+    session_tenant_id = payload.get("tenant_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Malformed session.")
+
+    user = db.get(User, user_id)
+    if user is None or not user.active:
+        raise HTTPException(
+            status_code=401, detail="User not found or inactive."
+        )
+
+    # Find the cookied user's active ScopeAssignment to source
+    # (tenant_id, domain_id) when the caller omits them on the payload.
+    sar = ScopeAssignmentRepository(db)
+    active_assignments = sar.list_for_user(user.id, active_only=True)
+    if not active_assignments:
+        raise HTTPException(
+            status_code=403,
+            detail="Cookied user has no active scope assignment.",
+        )
+
+    # Prefer the assignment matching the session JWT's tenant_id; fall
+    # back to the first active assignment (single-tenant common case).
+    chosen = next(
+        (a for a in active_assignments if a.tenant_id == session_tenant_id),
+        active_assignments[0],
+    )
+    return user, chosen.tenant_id, chosen.domain_id
+
+
+def _map_invite_error(exc: InviteError) -> HTTPException:
+    """Translate InviteService errors into HTTP responses."""
+    if isinstance(exc, InviteNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, InviteNotPendingError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, InviteExpiredError):
+        return HTTPException(status_code=410, detail=str(exc))
+    if isinstance(exc, DuplicatePendingInviteError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, InvitePendingCapExceededError):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post(
+    "/invites",
+    response_model=UserInviteRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_invite_route(  # noqa: D401
+    payload: UserInviteCreate,
+    request: Request,
+    db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> UserInviteRead:
+    """Mint a UserInvite + welcome-set-password email (Step 30a.4).
+
+    Cookied route. The cookied User is the inviter; tenant + domain
+    default to the cookied user's active scope when omitted.
+    """
+    inviter, default_tenant_id, default_domain_id = _resolve_invite_actor(
+        request=request, db=db
+    )
+    tenant_id = payload.tenant_id or default_tenant_id
+    domain_id = payload.domain_id or default_domain_id
+
+    # Cross-tenant safety: a cookied user can only invite into their own
+    # tenant unless they hold platform_admin (which a cookied session
+    # does not carry today). Tenant mismatch is 403 rather than 422 so
+    # the audit chain reads as an authz event.
+    if tenant_id != default_tenant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Cookied user cannot invite into a tenant they do not belong to.",
+        )
+
+    try:
+        invite, _token = invite_service.create_invite(
+            db=db,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            inviter_user_id=inviter.id,
+            inviter_email=inviter.email,
+            invited_email=str(payload.invited_email),
+            role=payload.role,
+            audit_ctx=audit_ctx,
+        )
+    except InviteError as exc:
+        raise _map_invite_error(exc) from exc
+    except IntegrityError as exc:
+        # Race: another request landed the partial-unique-index INSERT
+        # between our pre-flight and the actual INSERT. Surface as 409.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="A pending invite for this email already exists under this tenant.",
+        ) from exc
+
+    return UserInviteRead.model_validate(invite)
+
+
+@router.get(
+    "/invites",
+    response_model=list[UserInviteRead],
+)
+def list_invites_route(
+    request: Request,
+    db: DbSession,
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        description=(
+            "Filter by status. Pass 'pending', 'accepted', 'expired', "
+            "'revoked', or omit for all statuses."
+        ),
+    ),
+) -> list[UserInviteRead]:
+    """List invites under the cookied user's tenant (Step 30a.4).
+
+    Default order: descending created_at (newest first).
+    """
+    from app.models.user_invite import InviteStatus
+    from app.repositories.user_invites import UserInviteRepository
+
+    _user, tenant_id, _domain_id = _resolve_invite_actor(
+        request=request, db=db
+    )
+
+    statuses: tuple[InviteStatus, ...] | None = None
+    if status_filter is not None:
+        try:
+            statuses = (InviteStatus(status_filter.strip().lower()),)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown invite status: {status_filter!r}",
+            ) from exc
+
+    repo = UserInviteRepository(db)
+    invites = repo.list_for_tenant(tenant_id=tenant_id, statuses=statuses)
+    return [UserInviteRead.model_validate(i) for i in invites]
+
+
+@router.post(
+    "/invites/{invite_id}/resend",
+    response_model=UserInviteResendResponse,
+    status_code=status.HTTP_200_OK,
+)
+def resend_invite_route(
+    invite_id: _step_30a_4_uuid.UUID,
+    request: Request,
+    db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> UserInviteResendResponse:
+    """Rotate token_jti and re-mint the welcome email (Step 30a.4)."""
+    inviter, tenant_id, _domain_id = _resolve_invite_actor(
+        request=request, db=db
+    )
+
+    try:
+        invite, _new_token = invite_service.resend_invite(
+            db=db,
+            invite_id=invite_id,
+            inviter_user_id=inviter.id,
+            audit_ctx=audit_ctx,
+        )
+    except InviteError as exc:
+        raise _map_invite_error(exc) from exc
+
+    # Cross-tenant safety: resending an invite under a tenant the
+    # cookied user does not belong to is a 403. Done AFTER the lookup
+    # so a 404 wins over a 403 for non-existent invite ids (no info
+    # leakage about which ids exist).
+    if invite.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Cookied user cannot resend invites under a foreign tenant.",
+        )
+
+    return UserInviteResendResponse(invite=UserInviteRead.model_validate(invite))
+
+
+@router.delete(
+    "/invites/{invite_id}",
+    response_model=UserInviteRevokeResponse,
+    status_code=status.HTTP_200_OK,
+)
+def revoke_invite_route(
+    invite_id: _step_30a_4_uuid.UUID,
+    request: Request,
+    db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> UserInviteRevokeResponse:
+    """Flip a still-pending invite to REVOKED (Step 30a.4)."""
+    from app.repositories.user_invites import UserInviteRepository
+
+    _inviter, tenant_id, _domain_id = _resolve_invite_actor(
+        request=request, db=db
+    )
+
+    # Cross-tenant safety: same as resend.
+    pre = UserInviteRepository(db).get_by_pk(invite_id)
+    if pre is None:
+        raise HTTPException(status_code=404, detail="Invite not found.")
+    if pre.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Cookied user cannot revoke invites under a foreign tenant.",
+        )
+
+    try:
+        invite_service.revoke_invite(
+            db=db,
+            invite_id=invite_id,
+            audit_ctx=audit_ctx,
+        )
+    except InviteError as exc:
+        raise _map_invite_error(exc) from exc
+
+    return UserInviteRevokeResponse(invite_id=invite_id)
+
+
 @router.get(
     "/luciel-instances",
     response_model=list[LucielInstanceRead],

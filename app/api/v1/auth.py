@@ -230,6 +230,59 @@ def set_password(
                 detail="Invalid or expired link.",
             ) from exc
 
+    # Step 30a.4 -- if the token's purpose is "invite", route to the
+    # InviteService.redeem_invite path rather than the bare set-password
+    # path. That path provisions User + Agent + ScopeAssignment from the
+    # UserInvite row, sets the password, marks the invite accepted, and
+    # emits ACTION_INVITE_REDEEMED -- all in one transaction. We then
+    # mint the session cookie against the freshly-provisioned User.
+    purpose = claims.get("purpose")
+    if token_class == "set_password" and purpose == "invite":
+        from app.repositories.admin_audit_repository import AuditContext
+        from app.services import invite_service as _invite_service
+
+        audit_ctx = AuditContext.system(label="invite_redemption")
+        try:
+            _invite, user = _invite_service.redeem_invite(
+                db=db,
+                token=payload.token,
+                payload=claims,
+                password=payload.password,
+                audit_ctx=audit_ctx,
+            )
+        except _invite_service.InviteExpiredError as exc:
+            logger.info("auth: invite redemption expired: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="Invite has expired. Ask your admin to resend.",
+            ) from exc
+        except _invite_service.InviteNotPendingError as exc:
+            logger.info("auth: invite redemption non-pending: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This invite has already been used or revoked.",
+            ) from exc
+        except _invite_service.InviteNotFoundError as exc:
+            logger.info("auth: invite redemption not found: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired link.",
+            ) from exc
+        except PasswordTooShortError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"message": str(exc), "code": "password_too_short"},
+            ) from exc
+
+        _mint_and_set_session(
+            response=response, db=db, user_id=user.id, email=user.email,
+        )
+        logger.info(
+            "auth: invite redeemed via set-password token user_id=%s",
+            user.id,
+        )
+        return SetPasswordResponse()
+
     user_id = claims.get("sub")
     email = claims.get("email")
     if not user_id or not email:
