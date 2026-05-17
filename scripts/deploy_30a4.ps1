@@ -258,6 +258,11 @@ Write-Host "==> [6/6] Smoke: probing /api/v1/admin/invites with no cookie (must 
 # mounted and cookie-gated. We deliberately do NOT smoke-test the
 # happy path here -- that requires a real cookied session and is
 # covered by the live e2e harness against dev-Postgres, not prod.
+# PowerShell 5.1 compatibility: -SkipHttpErrorCheck is PS 7+ only. In 5.1,
+# Invoke-WebRequest throws on any 4xx/5xx, so we let the 401 raise into the
+# catch and read $_.Exception.Response.StatusCode there. A 200 (which would
+# be the bug) falls through the try -- we treat that as failure explicitly.
+$smokeStatus = $null
 try {
     $smokeResp = Invoke-WebRequest `
         -Uri "https://api.vantagemind.ai/api/v1/admin/invites" `
@@ -265,18 +270,21 @@ try {
         -ContentType "application/json" `
         -Body '{"invited_email":"deploy-smoke-30a4@vantagemind.ai","role":"teammate"}' `
         -UseBasicParsing `
-        -TimeoutSec 15 `
-        -SkipHttpErrorCheck
-    if ($smokeResp.StatusCode -ne 401) {
-        Write-Host "    SMOKE FAILED: status $($smokeResp.StatusCode) (want 401)" -ForegroundColor Red
-        Write-Host "    body: $($smokeResp.Content)" -ForegroundColor Red
+        -TimeoutSec 15
+    $smokeStatus = [int]$smokeResp.StatusCode
+} catch {
+    if ($_.Exception.Response) {
+        $smokeStatus = [int]$_.Exception.Response.StatusCode
+    } else {
+        Write-Host "    SMOKE FAILED (no HTTP response): $($_.Exception.Message)" -ForegroundColor Red
         exit 1
     }
-    Write-Host "    smoke OK: 401 on POST /api/v1/admin/invites (no cookie, route mounted)" -ForegroundColor Green
-} catch {
-    Write-Host "    SMOKE FAILED with exception: $($_.Exception.Message)" -ForegroundColor Red
+}
+if ($smokeStatus -ne 401) {
+    Write-Host "    SMOKE FAILED: status $smokeStatus (want 401)" -ForegroundColor Red
     exit 1
 }
+Write-Host "    smoke OK: 401 on POST /api/v1/admin/invites (no cookie, route mounted)" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "==> Step 30a.4 rollout COMPLETE" -ForegroundColor Green
