@@ -107,7 +107,19 @@ app.add_middleware(RateLimitFallbackMiddleware)
 #                          Per the CORS spec, allow_credentials=True forbids
 #                          a wildcard origin — which is fine, we use an
 #                          explicit allowlist.
-#   allow_methods        — narrow set actually used by the SPA (GET/POST/OPTIONS).
+#   allow_methods        — narrow set actually used by the SPA (GET/POST/PATCH/
+#                          DELETE/OPTIONS). Step 30a.4 hot-fix (D-cors-delete-
+#                          method-blocked-2026-05-17): DELETE and PATCH added
+#                          because /app/team's Revoke button calls DELETE
+#                          /api/v1/admin/invites/{id} cross-origin; the
+#                          browser preflight was returning 'GET, POST, OPTIONS'
+#                          and refusing to send the real DELETE, producing
+#                          the generic 'Couldn't revoke invite' toast (the
+#                          non-AdminApiError branch in src/lib/admin.ts).
+#                          PATCH is included pre-emptively because
+#                          /admin/tenants/{id} and /admin/domains/{...} use
+#                          PATCH and may be wired into cookied admin UIs in
+#                          a follow-up step.
 #                          Not '*' because allow_credentials=True forbids that too.
 #   allow_headers        — narrow set actually sent by the SPA. "Authorization"
 #                          is included for the admin-key-via-bearer pattern
@@ -118,7 +130,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Accept", "Authorization"],
     max_age=600,
 )
