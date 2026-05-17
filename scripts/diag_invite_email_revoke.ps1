@@ -82,7 +82,10 @@ Invoke-SingleTermFilter "(2g) WelcomeEmailError"      "WelcomeEmailError"
 # (3) invite_service create-side log lines
 # ----------------------------------------------------------------------
 Invoke-SingleTermFilter "(3a) Invite created tenant"        "Invite created tenant"
-Invoke-SingleTermFilter "(3b) create_invite email failure"  "create_invite: invite email send failed"
+# (3b): original term contained ':' which CloudWatch rejects with
+# InvalidParameterException. Drop the colon and the prose suffix --
+# 'invite email send failed' is unique enough across the codebase.
+Invoke-SingleTermFilter "(3b) create_invite email failure"  "invite email send failed"
 
 # ----------------------------------------------------------------------
 # (4) revoke-side log lines
