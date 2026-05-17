@@ -208,6 +208,37 @@ ACTION_PILOT_REFUND_EMAIL_SEND_FAILED = "pilot_refund_email_send_failed"
 # whitelist tuple can reference it.
 ACTION_TENANT_HARD_PURGED = "tenant_hard_purged"
 
+# Step 30a.4 -- first-class invite lifecycle for Team and Company tiers.
+#
+# These verbs are deliberately separate from ACTION_CREATE / ACTION_UPDATE /
+# ACTION_DEACTIVATE so that a compliance auditor scanning the audit chain
+# for invite events can filter on the verb alone. The four-event invite
+# arc -- issue, redeem, resend (rotate token), revoke -- is structurally
+# distinct from the generic CRUD verbs:
+#
+# ACTION_USER_INVITED       -- a tenant admin minted a UserInvite row,
+#                              triggering the welcome-set-password email.
+#                              actor_label = the inviting User's email.
+# ACTION_INVITE_REDEEMED    -- invitee redeemed the set_password token,
+#                              provisioning User + Agent + ScopeAssignment
+#                              in the same DB transaction.
+# ACTION_INVITE_RESENT      -- the tenant admin clicked Resend on a
+#                              still-pending invite; token_jti rotated,
+#                              new 24h JWT minted, same invite row.
+#                              Distinct from ACTION_UPDATE because the
+#                              row mutation is purely a security rotation,
+#                              not a content edit.
+# ACTION_INVITE_REVOKED     -- the tenant admin cancelled a still-pending
+#                              invite. Distinct from ACTION_DEACTIVATE
+#                              because invites are single-use and have
+#                              their own status enum (pending -> revoked
+#                              is a terminal transition, not a soft-delete
+#                              of an active record).
+ACTION_USER_INVITED = "user_invited"
+ACTION_INVITE_REDEEMED = "invite_redeemed"
+ACTION_INVITE_RESENT = "invite_resent"
+ACTION_INVITE_REVOKED = "invite_revoked"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -258,6 +289,11 @@ ALLOWED_ACTIONS = (
     # + table manifest belongs in a structurally distinct action so
     # dashboards can tell them apart at-a-glance.
     ACTION_TENANT_HARD_PURGED,
+    # Step 30a.4 -- first-class invite lifecycle for Team and Company tiers.
+    ACTION_USER_INVITED,
+    ACTION_INVITE_REDEEMED,
+    ACTION_INVITE_RESENT,
+    ACTION_INVITE_REVOKED,
 )
 
 
@@ -314,6 +350,15 @@ RESOURCE_SUBSCRIPTION = "subscription"
 RESOURCE_CONVERSATION = "conversation"
 RESOURCE_IDENTITY_CLAIM = "identity_claim"
 
+# Step 30a.4 -- user_invites row is the auditable resource for the
+# four-event invite arc (issue, redeem, resend, revoke). Distinct from
+# RESOURCE_USER because the invite predates the User row (User is
+# provisioned only at redemption time) and from RESOURCE_SCOPE_ASSIGNMENT
+# because the invite is the intent to provision, not the provisioning
+# itself. resource_natural_id = invited_email so an auditor can answer
+# "every event involving jane@brokerage.com" with a single filter.
+RESOURCE_USER_INVITE = "user_invite"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -335,6 +380,8 @@ ALLOWED_RESOURCE_TYPES = (
     # Step 30a.2 -- cascade extension + retention worker
     RESOURCE_CONVERSATION,
     RESOURCE_IDENTITY_CLAIM,
+    # Step 30a.4 -- first-class invite lifecycle
+    RESOURCE_USER_INVITE,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
