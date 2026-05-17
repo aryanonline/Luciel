@@ -221,7 +221,18 @@ def upgrade() -> None:
                 "expired",
                 "revoked",
                 name="user_invite_status",
-                create_constraint=False,  # already created above
+                # The PG type was created explicitly above (line 159) via
+                # user_invite_status.create(checkfirst=True). create_type=False
+                # tells SQLAlchemy's pg dialect NOT to emit a second CREATE TYPE
+                # via the before_create event hook on this column-level Enum --
+                # without it, the table-create fires a duplicate CREATE TYPE
+                # statement and trips DuplicateObject. (Verified 2026-05-17 against
+                # prod, where the first deploy attempt errored with
+                # 'type "user_invite_status" already exists' on this line.)
+                # create_constraint=False suppresses the CHECK constraint
+                # only -- it is unrelated to the CREATE TYPE emission.
+                create_type=False,
+                create_constraint=False,
                 validate_strings=True,
             ),
             nullable=False,
