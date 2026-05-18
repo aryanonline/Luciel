@@ -14,8 +14,11 @@ from app.api.deps import (
 from app.models.admin_audit_log import (
     ACTION_CREATE,
     ACTION_DEACTIVATE,
+    ACTION_DOMAIN_CREATED,
+    ACTION_DOMAIN_DEACTIVATED,
     ACTION_UPDATE,
     RESOURCE_AGENT,
+    RESOURCE_DOMAIN,
     RESOURCE_LUCIEL_INSTANCE,
 )
 from fastapi import UploadFile, File, Form
@@ -80,6 +83,7 @@ from app.schemas.admin import (
     AgentConfigUpdate,
     DomainConfigCreate,
     DomainConfigRead,
+    DomainConfigSelfServeCreate,
     DomainConfigUpdate,
     KnowledgeIngestRequest,
     KnowledgeIngestResponse,
@@ -346,6 +350,175 @@ def create_domain(
 
     config = service.create_domain_config(**payload.model_dump())
     return DomainConfigRead.model_validate(config)
+
+
+# Step 30a.5 -- cookied self-serve sibling of POST /admin/domains.
+# The existing admin-key route above is kept for operator use; this
+# route is what the Company-tier CompanyTab in Dashboard.tsx calls
+# when a customer clicks "Create Domain".
+#
+# Tenant_id is derived from the cookied user's active ScopeAssignment;
+# the payload only carries slug, display_name, and an optional one-line
+# description. The per-tier Domain cap (DOMAIN_COUNT_CAP_BY_TIER) is
+# enforced via AdminService.enforce_domain_cap and surfaces as a 402.
+@router.post(
+    "/domains/self-serve",
+    response_model=DomainConfigRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_domain_self_serve(
+    payload: DomainConfigSelfServeCreate,
+    request: Request,
+    db: DbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> DomainConfigRead:
+    """Cookied self-serve Domain creation for Team and Company tiers (Step 30a.5)."""
+    from app.services.luciel_instance_service import TierScopeViolationError
+
+    inviter, tenant_id, _default_domain_id = _resolve_invite_actor(
+        request=request, db=db
+    )
+
+    service = AdminService(db)
+
+    # Step 30a.5 design §3.5: enforce the per-tier Domain cap BEFORE the
+    # slug-collision check so a Team-tier caller hitting the cap with a
+    # duplicate slug sees the 402 (the actionable error) rather than a
+    # 409 they cannot resolve without an upgrade.
+    try:
+        service.enforce_domain_cap(tenant_id=tenant_id)
+    except TierScopeViolationError as exc:
+        code = {
+            TierScopeViolationError.REASON_DOMAIN_CAP_EXCEEDED: "domain_cap_reached",
+            TierScopeViolationError.REASON_SCOPE_NOT_PERMITTED: "tier_scope_not_allowed",
+            TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION: "no_active_subscription",
+        }.get(exc.reason, "tier_scope_not_allowed")
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={"code": code, "message": str(exc)},
+        ) from exc
+
+    existing = service.get_domain_config(tenant_id, payload.domain_id)
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "domain_slug_taken",
+                "message": (
+                    f"Domain {payload.domain_id!r} already exists under "
+                    f"this tenant."
+                ),
+            },
+        )
+
+    # Count BEFORE creation so the audit row records the cap pressure at
+    # the moment of customer action -- dashboards filter on this to
+    # surface tenants approaching their cap.
+    used_before = service.count_active_domains_for_tenant(tenant_id)
+
+    config = service.create_domain_config(
+        tenant_id=tenant_id,
+        domain_id=payload.domain_id,
+        display_name=payload.display_name,
+        description=payload.description,
+        created_by=inviter.email,
+    )
+
+    AdminAuditRepository(db).record(
+        ctx=audit_ctx,
+        tenant_id=tenant_id,
+        action=ACTION_DOMAIN_CREATED,
+        resource_type=RESOURCE_DOMAIN,
+        resource_pk=config.id,
+        resource_natural_id=config.domain_id,
+        domain_id=config.domain_id,
+        before=None,
+        after={
+            "domain_id": config.domain_id,
+            "display_name": config.display_name,
+            "active": True,
+            "used_after": used_before + 1,
+        },
+        autocommit=True,
+    )
+
+    return DomainConfigRead.model_validate(config)
+
+
+@router.get(
+    "/domains/self-serve",
+    response_model=list[DomainConfigRead],
+)
+def list_domains_self_serve(
+    request: Request,
+    db: DbSession,
+) -> list[DomainConfigRead]:
+    """Cookied list of Domains under the caller's tenant (Step 30a.5).
+
+    Scoped strictly to the cookied user's tenant; never reads a
+    tenant_id from query string. Returns active and inactive Domains
+    so the CompanyTab can render historical cap pressure.
+    """
+    _user, tenant_id, _domain_id = _resolve_invite_actor(
+        request=request, db=db
+    )
+    service = AdminService(db)
+    configs = service.list_domain_configs(tenant_id=tenant_id)
+    return [DomainConfigRead.model_validate(c) for c in configs]
+
+
+@router.delete(
+    "/domains/self-serve/{domain_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def deactivate_domain_self_serve(
+    domain_id: str,
+    request: Request,
+    db: DbSession,
+    luciel_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> None:
+    """Cookied Domain deactivation (Step 30a.5).
+
+    Reuses the existing AdminService.deactivate_domain cascade so any
+    Luciels and Agents under the Domain are also deactivated. Adds a
+    customer-visible ACTION_DOMAIN_DEACTIVATED audit row on top of the
+    generic ACTION_DEACTIVATE the cascade already emits.
+    """
+    inviter, tenant_id, _domain_id = _resolve_invite_actor(
+        request=request, db=db
+    )
+    service = AdminService(db)
+    existing = service.get_domain_config(tenant_id, domain_id)
+    if existing is None or not existing.active:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Domain not found.",
+        )
+    success = service.deactivate_domain(
+        tenant_id,
+        domain_id,
+        audit_ctx=audit_ctx,
+        luciel_instance_service=luciel_service,
+        updated_by=inviter.email,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Domain not found.",
+        )
+    AdminAuditRepository(db).record(
+        ctx=audit_ctx,
+        tenant_id=tenant_id,
+        action=ACTION_DOMAIN_DEACTIVATED,
+        resource_type=RESOURCE_DOMAIN,
+        resource_pk=existing.id,
+        resource_natural_id=domain_id,
+        domain_id=domain_id,
+        before={"active": True},
+        after={"active": False},
+        autocommit=True,
+    )
 
 
 @router.get("/domains", response_model=list[DomainConfigRead])
