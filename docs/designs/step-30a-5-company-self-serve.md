@@ -417,3 +417,49 @@ A small set, deliberately surfaced for partner judgment before implementation be
    - CompanyTab's own data endpoint (the Domain list) returns 403 if the caller's `scope_assignment.role NOT IN ('tenant_admin', 'owner')`, regardless of tier (1 test, backend).
 
 All five open questions are now resolved. Implementation proceeds against this design as the source of truth; any deviation from it becomes a drift to log in DRIFTS §3.
+
+---
+
+## 12. T1 walk evidence (post-smoke addendum, 2026-05-18)
+
+This section captures what actually happened when the design hit prod, the bugs surfaced by the live $1,000 walk, the fixes applied, and the new drifts that opened during deploy. It exists so future readers can see the full closure arc — design → implementation → live evidence → second-pass fixes → tag — without cross-referencing four other docs.
+
+### 12.1 Implementation arc
+
+- **PR #50** (Luciel backend, merged 2026-05-18 ≈14:20 EDT) — Domain model + DomainConfigSelfServe schema + CompanyTab API surface + cascading invite resolver + scope-first enforcement + initial test suite. Alembic head unchanged at `b4d8a2e7c1f3` (Step 30a.4) — Domain table piggybacks on existing schema infrastructure with no migration delta.
+- **PR #4** (Luciel-Website, merged 2026-05-18 ≈14:25 EDT) — Dashboard.tsx CompanyTab gate (tier AND role per §11 Q5), Domain creation form with disabled-at-Team state, 402 toast handler, invitee acceptance UX.
+- **First prod deploy** — image tag `step30a5-37e29f8`, task-defs `:70` / `:25` / `:14` rolled out.
+
+### 12.2 Live $1,000 walk — three bugs surfaced
+
+The partner walked a real $1,000 Company-tier checkout end-to-end against tenant `co-354c5056` to validate the closure. Three concrete bugs surfaced that the test suite had not caught:
+
+1. **Invitee "no subscription on file" bug.** Invited user redeemed token, hit `/app`, got a hard error because the resolver looked up subscription by `user_id` first, but the invitee's subscription record is the *tenant's* subscription reached via `scope_assignment.tenant_id`. Root cause: resolver order was user-first, scope-second. Fix: flipped to scope-first resolver — read `scope_assignment` for the active cookie, walk to `tenant_id`, then read subscription on tenant. Lands the invitee on `/app` with the inviter's Company tier surface immediately.
+2. **Domain rollup counts wrong.** CompanyTab's Domain list showed `instance_count` and `member_count` as zero for every Domain after invite redemption. Root cause: the rollup query joined on a stale `domain_id` reference that the cascading-invite path did not populate. Fix: rollup query rewritten to count via `scope_assignment.domain_id` directly, with both fields typed as integers in `DomainConfigSelfServeRead` (verified live in `/openapi.json`).
+3. **Invite-row badges missing.** Pending-invite rows in the TeamTab roster did not visually distinguish themselves from active members. Fix: added a `status` discriminator on the row payload (`pending` | `active` | `revoked`) and a corresponding badge in the React row component.
+
+### 12.3 Post-smoke fix triple
+
+- **PR #51** (Luciel backend, merged 2026-05-18 ≈17:50 EDT, SHA `dba6a755`) — Scope-first resolver + Domain rollup integer typing + invite-row status discriminator + **19 new tests** locking each fix as a regression guard (scope-first resolution ordering, rollup integer contract, invite status state machine).
+- **PR #5** (Luciel-Website, merged 2026-05-18 ≈18:00 EDT, SHA `6ac47c0e`) — Invite-row badge component + TeamTab roster status rendering + frontend bundle markers for the three fixes.
+- **Prod redeploy** — image tag `step30a5-dba6a75`, digest `sha256:8b5020d7745c3ae681e1083f2cc2407793e69b9f8250bfba08fef327dfeb4692`, task-defs revised to `:72` (backend) / `:27` (worker) / `:16` (migrate). Migrate probe ran clean (`exitCode: 0`) — Alembic head still `b4d8a2e7c1f3`, confirming no schema drift in the second wave.
+
+### 12.4 Three new drifts opened during deploy
+
+The deploy itself surfaced three issues orthogonal to Step 30a.5's scope. They are logged as new opens in DRIFTS §3 rather than blocking closure:
+
+1. **`D-luciel-ecs-web-role-missing-ses-send-permission-2026-05-18`** — Invite-email send failed with IAM AccessDenied. SES is still in sandbox and the ECS web-role IAM policy does not yet grant `ses:SendEmail`. Workaround: invite token is logged and the partner relays it manually. Resolution path: SES sandbox exit + IAM policy widening, tracked separately.
+2. **`D-billing-webhook-service-stripe-attribute-error-2026-05-18`** — `BillingWebhookService.stripe` attribute access raised on a Stripe webhook event during the walk. Did not block checkout (the checkout path uses a different code path), but pollutes logs and risks future webhook handlers. Resolution path: fix the attribute access in the webhook service.
+3. **`D-stripe-checkout-no-email-validation-2026-05-18`** — Stripe checkout accepted the placeholder typo `aryan+smoke-30a5@yourdomain.com` without bouncing. Not a Step 30a.5 bug per se — Stripe's checkout collects whatever the customer types — but worth a deliverability check on the post-checkout email path. Resolution path: add email-format validation to the checkout success handler or rely on SES bounce handling once SES is live.
+
+### 12.5 Closure state
+
+- Parent drift `D-company-self-serve-incomplete-org-building-ui-missing-2026-05-16` flipped to **CLOSED** in DRIFTS §3 with full §5 mirror.
+- CANONICAL_RECAP §12 Step 30a.5 row flipped from 📋 Planned to ✅ Closed (2026-05-18) with comprehensive Status cell citing PRs #50/#4/#51/#5 and deploy SHAs `dba6a755` / `6ac47c0e`.
+- ARCHITECTURE §3.2.13 Team-invite-path header updated and "What Step 30a.5 lands on top" paragraph appended; Step 32 wave 2 paragraph reflects the closure.
+- Closing tag `step-30a-5-company-self-serve-complete` cut on both `aryanonline/Luciel:main` (at `dba6a755`) and `aryanonline/Luciel-Website:main` (at `6ac47c0e`).
+
+### 12.6 Pending re-smoke
+
+One live verification remains: deactivate the existing invitee `ScopeAssignment` on tenant `co-354c5056`, re-invite from a fresh state, redeem the new token, and confirm `/app` renders the Company-tier surface end-to-end against the redeployed `:72` / `:27` task-defs. This re-smoke is the final evidence that the post-smoke fix triple holds against a clean redemption path. It is tracked as TODO step 12, separate from this doc-truth closure.
+
