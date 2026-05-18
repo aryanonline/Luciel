@@ -83,6 +83,7 @@ from app.schemas.admin import (
     AgentConfigUpdate,
     DomainConfigCreate,
     DomainConfigRead,
+    DomainConfigSelfServeRead,
     DomainConfigSelfServeCreate,
     DomainConfigUpdate,
     KnowledgeIngestRequest,
@@ -447,24 +448,76 @@ def create_domain_self_serve(
 
 @router.get(
     "/domains/self-serve",
-    response_model=list[DomainConfigRead],
+    response_model=list[DomainConfigSelfServeRead],
 )
 def list_domains_self_serve(
     request: Request,
     db: DbSession,
-) -> list[DomainConfigRead]:
+) -> list[DomainConfigSelfServeRead]:
     """Cookied list of Domains under the caller's tenant (Step 30a.5).
 
     Scoped strictly to the cookied user's tenant; never reads a
     tenant_id from query string. Returns active and inactive Domains
     so the CompanyTab can render historical cap pressure.
+
+    Step 30a.5 §4.4 -- response includes two per-Domain rollups
+    (``pending_invites_count``, ``active_agents_count``) so the
+    CompanyTab can render the rollup line without a second fan-out.
+    The counts are computed at the route level, not on the
+    DomainConfig model, per the design's "no parallel constructs"
+    discipline. Drift on UI gap pre-fix:
+    D-company-tab-domain-rollup-fields-missing-2026-05-18.
     """
+    from sqlalchemy import func
+    from app.models.user_invite import InviteStatus, UserInvite
+    from app.models.agent import Agent
+
     _user, tenant_id, _domain_id = _resolve_invite_actor(
         request=request, db=db
     )
     service = AdminService(db)
     configs = service.list_domain_configs(tenant_id=tenant_id)
-    return [DomainConfigRead.model_validate(c) for c in configs]
+
+    # One grouped query per rollup -- N domains, two queries total, so
+    # we stay O(1) in roundtrips regardless of the Company tier's 50-
+    # domain cap. Both queries are tenant-scoped, never global.
+    pending_rows = (
+        db.query(UserInvite.domain_id, func.count(UserInvite.id))
+        .filter(
+            UserInvite.tenant_id == tenant_id,
+            UserInvite.status == InviteStatus.PENDING,
+        )
+        .group_by(UserInvite.domain_id)
+        .all()
+    )
+    pending_by_domain: dict[str, int] = {
+        row[0]: int(row[1]) for row in pending_rows
+    }
+
+    agent_rows = (
+        db.query(Agent.domain_id, func.count(Agent.id))
+        .filter(
+            Agent.tenant_id == tenant_id,
+            Agent.active.is_(True),
+        )
+        .group_by(Agent.domain_id)
+        .all()
+    )
+    agents_by_domain: dict[str, int] = {
+        row[0]: int(row[1]) for row in agent_rows
+    }
+
+    out: list[DomainConfigSelfServeRead] = []
+    for c in configs:
+        base = DomainConfigRead.model_validate(c)
+        out.append(
+            DomainConfigSelfServeRead(
+                **base.model_dump(),
+                pending_invites_count=pending_by_domain.get(c.domain_id, 0),
+                active_agents_count=agents_by_domain.get(c.domain_id, 0),
+            )
+        )
+    return out
 
 
 @router.delete(
