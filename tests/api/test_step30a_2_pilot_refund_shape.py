@@ -301,6 +301,22 @@ class TestMePilotSignal:
         monkeypatch.setattr(billing_api, "_resolve_cookied_user", lambda **kw: fake_user)
         monkeypatch.setattr(billing_api, "_service", lambda db: fake_svc)
 
+        # Step 30a.5: /billing/me now reads the cookied user's active
+        # ScopeAssignment to populate active_role. Stub the repo so the
+        # route does not hit the real database.
+        from app.repositories import scope_assignment_repository as sar_module
+        fake_sar = MagicMock()
+        fake_sar.list_for_user.return_value = []
+        monkeypatch.setattr(
+            sar_module, "ScopeAssignmentRepository", lambda db: fake_sar
+        )
+        # Also stub validate_session_token so the second-decode in me()
+        # returns a benign tenant_id without needing a real JWT.
+        monkeypatch.setattr(
+            billing_api, "validate_session_token",
+            lambda token: {"sub": "42", "tenant_id": "t_pilot"},
+        )
+
         client = TestClient(app)
         client.cookies.set(settings.session_cookie_name, "x", domain="testserver")
         resp = client.get("/api/v1/billing/me")
@@ -308,6 +324,8 @@ class TestMePilotSignal:
         body = resp.json()
         assert body["is_pilot"] is True
         assert body["pilot_window_end"] is not None
+        # Step 30a.5: active_role should be None when no assignments.
+        assert body["active_role"] is None
 
     def test_me_returns_is_pilot_false_for_regular_trial(self, monkeypatch):
         """Regular trialing subscription (no luciel_intro_applied) → is_pilot=False."""
@@ -343,6 +361,20 @@ class TestMePilotSignal:
         monkeypatch.setattr(billing_api, "_resolve_cookied_user", lambda **kw: fake_user)
         monkeypatch.setattr(billing_api, "_service", lambda db: fake_svc)
 
+        # Step 30a.5: stub ScopeAssignmentRepository + validate_session_token
+        # the same way as the prior test -- /billing/me now reads the
+        # cookied user's active assignment to populate active_role.
+        from app.repositories import scope_assignment_repository as sar_module
+        fake_sar = MagicMock()
+        fake_sar.list_for_user.return_value = []
+        monkeypatch.setattr(
+            sar_module, "ScopeAssignmentRepository", lambda db: fake_sar
+        )
+        monkeypatch.setattr(
+            billing_api, "validate_session_token",
+            lambda token: {"sub": "7", "tenant_id": "t_normal"},
+        )
+
         client = TestClient(app)
         client.cookies.set(settings.session_cookie_name, "x", domain="testserver")
         resp = client.get("/api/v1/billing/me")
@@ -350,3 +382,4 @@ class TestMePilotSignal:
         body = resp.json()
         assert body["is_pilot"] is False
         assert body["pilot_window_end"] is None
+        assert body["active_role"] is None
