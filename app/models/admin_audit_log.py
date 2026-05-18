@@ -239,6 +239,20 @@ ACTION_INVITE_REDEEMED = "invite_redeemed"
 ACTION_INVITE_RESENT = "invite_resent"
 ACTION_INVITE_REVOKED = "invite_revoked"
 
+# Step 30a.5 -- Company-tier org-building: Domain creation and
+# deactivation from the cookied self-serve route. Distinct from the
+# generic ACTION_CREATE/ACTION_DEACTIVATE on the admin-key route
+# (POST/DELETE /admin/domains) because:
+#   (a) the self-serve path enforces the per-tier Domain cap and the
+#       audit row's details field records {cap, used} at write time so
+#       dashboards can see cap pressure historically;
+#   (b) the actor_label resolves to the cookied User's email rather
+#       than an API-key id, and downstream dashboards filter on these
+#       verbs to surface customer-driven (not operator-driven) org
+#       changes.
+ACTION_DOMAIN_CREATED = "domain_created"
+ACTION_DOMAIN_DEACTIVATED = "domain_deactivated"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -294,6 +308,9 @@ ALLOWED_ACTIONS = (
     ACTION_INVITE_REDEEMED,
     ACTION_INVITE_RESENT,
     ACTION_INVITE_REVOKED,
+    # Step 30a.5 -- Company-tier Domain self-serve verbs.
+    ACTION_DOMAIN_CREATED,
+    ACTION_DOMAIN_DEACTIVATED,
 )
 
 

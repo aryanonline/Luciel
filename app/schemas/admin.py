@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --- Tenant Config ---
@@ -96,6 +96,42 @@ class DomainConfigRead(BaseModel):
     updated_by: str | None
     created_at: datetime
     updated_at: datetime
+
+
+# Step 30a.5 -- cookied self-serve Domain creation. Distinct from
+# DomainConfigCreate (operator/admin-key path) because:
+#   (a) the slug is locked to a hard regex (uppercase, leading hyphen,
+#       trailing hyphen, underscores all rejected) since the slug shows
+#       up in URLs and audit logs;
+#   (b) tenant_id is derived from the cookied user's active scope
+#       assignment, never accepted from the client (cross-tenant safety);
+#   (c) the only optional content field is description -- system prompt
+#       additions / tool allowlists / policy overrides remain operator-
+#       only territory in v1.
+class DomainConfigSelfServeCreate(BaseModel):
+    """Payload for POST /api/v1/admin/domains/self-serve."""
+
+    domain_id: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+        description=(
+            "URL-safe slug for the Domain. Lowercase letters, digits, "
+            "and internal hyphens only. Used in audit logs and URLs."
+        ),
+    )
+    display_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=120,
+        description="Human-readable name shown in the dashboard.",
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional one-line description.",
+    )
 
 
 # --- Agent Config ---

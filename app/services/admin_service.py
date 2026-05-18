@@ -66,6 +66,74 @@ class AdminService:
         )
         return config
 
+    def count_active_domains_for_tenant(self, tenant_id: str) -> int:
+        """Step 30a.5: count active DomainConfig rows under a tenant.
+
+        Used by the cookied self-serve route to enforce the per-tier
+        Domain cap (DOMAIN_COUNT_CAP_BY_TIER). Includes only active=True
+        rows so a deactivated Domain frees a slot for re-use.
+        """
+        from sqlalchemy import func
+
+        stmt = select(func.count(DomainConfig.id)).where(
+            DomainConfig.tenant_id == tenant_id,
+            DomainConfig.active.is_(True),
+        )
+        return int(self.db.scalar(stmt) or 0)
+
+    def enforce_domain_cap(self, *, tenant_id: str) -> None:
+        """Step 30a.5: assert the tenant has not exceeded its per-tier
+        Domain cap. Raises ``TierScopeViolationError`` (mapped to 402)
+        on cap breach; raises with reason=NO_ACTIVE_SUBSCRIPTION when
+        there is no active subscription.
+
+        Separate from ``_enforce_tier_scope`` (which checks the Luciel
+        instance cap) because Domains and Luciels are independent
+        scope-bearing resources; both caps can be at-pressure
+        independently and the audit verbs are distinct.
+        """
+        from app.models.subscription import (
+            DOMAIN_COUNT_CAP_BY_TIER,
+            Subscription,
+        )
+        from app.services.luciel_instance_service import TierScopeViolationError
+
+        sub: Subscription | None = (
+            self.db.query(Subscription)
+            .filter(
+                Subscription.tenant_id == tenant_id,
+                Subscription.active.is_(True),
+            )
+            .order_by(Subscription.id.desc())
+            .first()
+        )
+        if sub is None:
+            raise TierScopeViolationError(
+                f"Tenant {tenant_id!r} has no active subscription; "
+                f"cannot create Domain via self-serve path.",
+                reason=TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION,
+            )
+
+        cap = DOMAIN_COUNT_CAP_BY_TIER.get(sub.tier, 0)
+        if cap <= 0:
+            # Individual tier (or any tier we have not mapped) cannot
+            # create Domains via self-serve. Surface as scope violation
+            # so the route returns 402 with code=tier_scope_not_allowed
+            # (same shape as the Luciel-instance scope check).
+            raise TierScopeViolationError(
+                f"Subscription tier {sub.tier!r} does not permit "
+                f"customer-created Domains. Upgrade to Team or Company.",
+                reason=TierScopeViolationError.REASON_SCOPE_NOT_PERMITTED,
+            )
+        used = self.count_active_domains_for_tenant(tenant_id)
+        if used >= cap:
+            raise TierScopeViolationError(
+                f"Tenant {tenant_id!r} has reached its Domain cap="
+                f"{cap} (currently {used} active Domains). "
+                f"Deactivate an existing Domain or upgrade your tier.",
+                reason=TierScopeViolationError.REASON_DOMAIN_CAP_EXCEEDED,
+            )
+
     def get_domain_config(self, tenant_id: str, domain_id: str) -> DomainConfig | None:
         stmt = select(DomainConfig).where(
             DomainConfig.tenant_id == tenant_id,

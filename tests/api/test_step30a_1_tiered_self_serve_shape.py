@@ -491,52 +491,38 @@ class TestRepositoryCountHelper:
 
 
 # ---------------------------------------------------------------------
-# 11. LucielInstanceCreate — teammate_email invite mode
+# 11. LucielInstanceCreate — teammate_email REMOVED (Step 30a.5)
 # ---------------------------------------------------------------------
+#
+# The Step 30a.1 invite-mode overload was removed in Step 30a.5 in
+# favor of POST /admin/invites (Step 30a.4). These tests pin the
+# removal so any reintroduction is caught at CI time.
 
-class TestLucielInstanceCreateInviteMode:
-    def test_teammate_email_field_present(self):
+class TestLucielInstanceCreateInviteModeRemoved:
+    def test_teammate_email_field_removed(self):
         from app.schemas.luciel_instance import LucielInstanceCreate
-        assert "teammate_email" in LucielInstanceCreate.model_fields
+        assert "teammate_email" not in LucielInstanceCreate.model_fields
 
-    def test_invite_mode_requires_agent_scope(self):
+    def test_extra_teammate_email_rejected(self):
+        """With Pydantic's default model_config the unknown field is
+        either silently dropped or rejected; we accept either outcome
+        but pin that it does NOT round-trip as a model attribute.
+        """
         from app.schemas.luciel_instance import LucielInstanceCreate
-        with pytest.raises(Exception):
-            LucielInstanceCreate(
-                instance_id="x-luciel",
-                display_name="X",
-                scope_level="domain",  # invalid in invite mode
-                scope_owner_tenant_id="t1",
-                scope_owner_domain_id="d1",
-                teammate_email="t@example.com",
-            )
-
-    def test_invite_mode_rejects_explicit_agent_id(self):
-        from app.schemas.luciel_instance import LucielInstanceCreate
-        with pytest.raises(Exception):
-            LucielInstanceCreate(
+        try:
+            m = LucielInstanceCreate(
                 instance_id="x-luciel",
                 display_name="X",
                 scope_level="agent",
                 scope_owner_tenant_id="t1",
                 scope_owner_domain_id="d1",
-                scope_owner_agent_id="someone-else",  # invalid; route mints
-                teammate_email="t@example.com",
+                scope_owner_agent_id="a1",
+                teammate_email="t@example.com",  # extra; should not bind
             )
-
-    def test_invite_mode_accepts_minimum_shape(self):
-        from app.schemas.luciel_instance import LucielInstanceCreate
-        m = LucielInstanceCreate(
-            instance_id="x-luciel",
-            display_name="X",
-            scope_level="agent",
-            scope_owner_tenant_id="t1",
-            scope_owner_domain_id="d1",
-            teammate_email="t@example.com",
-        )
-        # The route fills scope_owner_agent_id after _invite_teammate runs.
-        assert m.scope_owner_agent_id is None
-        assert str(m.teammate_email) == "t@example.com"
+        except Exception:
+            # Strict mode: field rejection is also acceptable.
+            return
+        assert not hasattr(m, "teammate_email") or getattr(m, "teammate_email", None) is None
 
 
 # ---------------------------------------------------------------------
