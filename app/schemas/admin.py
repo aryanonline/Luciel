@@ -98,6 +98,46 @@ class DomainConfigRead(BaseModel):
     updated_at: datetime
 
 
+# Step 30a.5 §4.4 -- route-level rollup variant of DomainConfigRead.
+#
+# GET /api/v1/admin/domains/self-serve must surface two per-Domain
+# rollups so the website's CompanyTab can render "3 agents · 1 invite
+# pending" without a second N+1 fan-out. The two counts are NOT on
+# the DomainConfig model -- they are joins computed at the route
+# level and only meaningful for the self-serve list (the
+# admin-key /admin/domains route stays clean). Keeping the rollup on
+# a subclass preserves DomainConfigRead's role as the canonical
+# model serializer and matches design §4.4 verbatim ("two extra
+# rollup fields injected at the route level -- not on the model").
+#
+# pending_invites_count counts UserInvite rows under (tenant_id,
+# domain_id) with status='pending'. active_agents_count counts
+# Agent rows under (tenant_id, domain_id) with active=True. Both
+# are non-negative ints; zero is a legitimate value and renders as
+# "No agents yet" / "No invites pending" on the frontend.
+class DomainConfigSelfServeRead(DomainConfigRead):
+    """DomainConfigRead + per-Domain rollup counts for the CompanyTab."""
+
+    pending_invites_count: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Count of UserInvite rows under (tenant_id, domain_id) "
+            "with status='pending'. Rendered as the 'invites pending' "
+            "badge on the CompanyTab Domain card."
+        ),
+    )
+    active_agents_count: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Count of Agent rows under (tenant_id, domain_id) with "
+            "active=True. Rendered as the 'N agents' badge on the "
+            "CompanyTab Domain card."
+        ),
+    )
+
+
 # Step 30a.5 -- cookied self-serve Domain creation. Distinct from
 # DomainConfigCreate (operator/admin-key path) because:
 #   (a) the slug is locked to a hard regex (uppercase, leading hyphen,

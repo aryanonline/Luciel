@@ -105,14 +105,67 @@ class ForgotPasswordResponse(BaseModel):
 
 
 def _resolve_tenant_for_user(db, user_id) -> str:
-    """Return the tenant_id of the user's active subscription, else "".
+    """Return the tenant_id the cookied user belongs to, else "".
 
-    The session-cookie payload includes ``tenant_id`` so downstream
-    middleware can attribute requests without re-querying. If the user
-    has no active subscription (e.g. mid-flow during a re-subscribe
-    after cancel) we fall back to empty string; the middleware
-    re-resolves at request time.
+    Tenant binding is owned by ScopeAssignment, NOT by Stripe billing.
+    Owners satisfy both (a Stripe subscription on file *and* an
+    owner-role ScopeAssignment created by tier_provisioning_service),
+    so the pre-30a.5 billing-only resolver coincidentally returned the
+    right tenant_id for the paying user. The moment a non-paying role
+    (teammate / department_lead / tenant_admin) logged in after
+    redeeming an invite, the billing lookup returned ``None`` and the
+    cookie carried ``tenant_id=""``. The frontend then surfaced the
+    "No subscription on file" empty state to a fully-provisioned
+    teammate. Caught in the Step 30a.5 $1,000 live smoke walk.
+    Drift id: D-invite-redeemed-user-sees-no-subscription-on-file-2026-05-18.
+    Symmetric to the May-17 inviter-side fix at
+    tier_provisioning_service.py::_ensure_owner_scope_assignment.
+
+    Resolution order:
+      1. Active ScopeAssignment(s) for ``user_id`` via
+         ``ScopeAssignmentRepository.list_for_user``. Prefer
+         ``role='owner'`` (canonical primary scope), else fall back to
+         the most-recently-started active assignment among the rest.
+         Returns its ``tenant_id``. This is the path every
+         redeemed-invite login takes.
+      2. Fallback: ``BillingService.get_active_subscription_for_user``.
+         Preserves the narrow race window where a Stripe subscription
+         row exists but ``tier_provisioning_service`` has not yet
+         written the owner ScopeAssignment (mid-checkout, before the
+         post-payment provisioning leg runs). Without this, an owner
+         logging in during that ~1s window would see the same empty
+         state we just fixed.
+      3. Else ``""``. Downstream session middleware re-resolves on the
+         next request when a scope finally lands.
     """
+    # Local import keeps the module header unchanged and mirrors the
+    # already-established pattern used by the audit-context import at
+    # line ~241 below.
+    from app.repositories.scope_assignment_repository import (
+        ScopeAssignmentRepository,
+    )
+
+    sa_repo = ScopeAssignmentRepository(db)
+    assignments = sa_repo.list_for_user(user_id=user_id, active_only=True)
+    if assignments:
+        # 1a. Prefer the owner-role assignment if present (the canonical
+        #     primary scope). An owner always has exactly one.
+        owner_sa = next(
+            (a for a in assignments if a.role == "owner"), None
+        )
+        if owner_sa is not None:
+            return owner_sa.tenant_id
+        # 1b. No owner scope -- this user is a teammate / department
+        #     lead / tenant_admin. list_for_user orders started_at
+        #     ASC, so the most-recently-started active assignment is
+        #     the last element. If the user later belongs to multiple
+        #     tenants (e.g. a consultant on two companies), a future
+        #     "switch tenant" UI will let them override; for now this
+        #     deterministic pick is sufficient and audit-traceable.
+        return assignments[-1].tenant_id
+
+    # 2. Mid-checkout race fallback (preserves pre-30a.5 owner-only
+    #    behavior for that narrow window).
     svc = BillingService(db=db, stripe_client=None)  # type: ignore[arg-type]
     sub = svc.get_active_subscription_for_user(user_id=user_id)
     return sub.tenant_id if sub is not None else ""
