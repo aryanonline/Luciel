@@ -188,6 +188,22 @@ class SubscriptionStatusResponse(BaseModel):
                     "None otherwise. Surfaced as its own field so the UI "
                     "can ignore ``trial_end`` when not in a pilot.",
     )
+    # Step 30a.5 addition: surface the cookied user's role within their
+    # active scope_assignment so the dashboard can gate the CompanyTab
+    # (visible iff tier=='company' AND role in ('tenant_admin','owner'))
+    # and the TeamTab (visible iff tier in ('team','company') AND role
+    # in ('tenant_admin','owner','department_lead')). Gating on tier
+    # alone would leak Company-tier Domain visibility to invited
+    # department leads -- see design doc §11 Q5 (resolved 2026-05-18:
+    # tier AND role). The role is read off the cookied user's active
+    # ScopeAssignment; users with no active assignment surface as None.
+    active_role: str | None = Field(
+        default=None,
+        description="Role on the cookied user's active ScopeAssignment. "
+                    "Common values: 'owner', 'tenant_admin', "
+                    "'department_lead', 'teammate'. Used by the "
+                    "frontend to gate org-building UI surfaces.",
+    )
 
 
 # ---------------------------------------------------------------------

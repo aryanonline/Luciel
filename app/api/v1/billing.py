@@ -549,9 +549,50 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
 
     Returns 404 if the user has no subscription on file -- the
     Account/billing UI uses that to show the "subscribe" CTA.
+
+    Step 30a.5: also surfaces ``active_role`` -- the cookied user's
+    role on their active ScopeAssignment (preferring the assignment
+    matching the session JWT's tenant_id, falling back to the first
+    active assignment for single-tenant common case). The dashboard
+    gates the CompanyTab on (tier=='company' AND role in
+    ('tenant_admin','owner')) and the TeamTab on (tier in
+    ('team','company') AND role in ('tenant_admin','owner',
+    'department_lead')) -- see design doc §11 Q5.
     """
     cookie = request.cookies.get(settings.session_cookie_name)
     user = _resolve_cookied_user(db=db, session_cookie=cookie)
+
+    # Re-decode the JWT for tenant_id only. The cookie has already
+    # been validated above by _resolve_cookied_user (which raises 401
+    # on failure), so this second decode is safe; we accept the small
+    # duplication rather than reshape the helper's return type and
+    # touch every caller. Mirrors the pattern in _resolve_invite_actor
+    # in admin.py.
+    session_tenant_id: str | None = None
+    try:
+        payload = validate_session_token(cookie or "")
+        session_tenant_id = payload.get("tenant_id")
+    except MagicLinkError:
+        # Already validated upstream; if it somehow fails here we just
+        # leave session_tenant_id None and pick the first active scope.
+        session_tenant_id = None
+
+    # Resolve active_role off the cookied user's ScopeAssignment.
+    # Users with no active assignment surface as active_role=None
+    # (rather than 403), since /billing/me is a read-only status
+    # endpoint -- the dashboard simply hides org-building tabs.
+    from app.repositories.scope_assignment_repository import (
+        ScopeAssignmentRepository,
+    )
+    sar = ScopeAssignmentRepository(db)
+    active_assignments = sar.list_for_user(user.id, active_only=True)
+    active_role: str | None = None
+    if active_assignments:
+        chosen = next(
+            (a for a in active_assignments if a.tenant_id == session_tenant_id),
+            active_assignments[0],
+        )
+        active_role = chosen.role
 
     svc = _service(db)
     sub = svc.get_active_subscription_for_user(user_id=user.id)
@@ -607,6 +648,8 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
         # Step 30a.2-pilot additions.
         is_pilot=is_pilot,
         pilot_window_end=pilot_window_end,
+        # Step 30a.5 addition.
+        active_role=active_role,
     )
 
 
