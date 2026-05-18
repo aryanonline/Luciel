@@ -1198,27 +1198,12 @@ def create_luciel_instance(
     service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> LucielInstanceRead:
-    # Step 30a.1 invite-mode pre-flight. If teammate_email is set, we
-    # mint the User + Agent + ScopeAssignment first, then fill in the
-    # missing scope_owner_agent_id BEFORE policy / guard checks run.
-    # The policy + tier guard then see a fully-shaped agent-scope
-    # payload and check against the just-minted agent_id.
-    invited_user_id = None
-    invited_email = None
-    if payload.teammate_email is not None:
-        invited_agent_id, invited_user_id, invited_email = _invite_teammate(
-            db=service.db,
-            tenant_id=payload.scope_owner_tenant_id,
-            domain_id=payload.scope_owner_domain_id,  # validated non-null by schema
-            teammate_email=str(payload.teammate_email),
-            audit_ctx=audit_ctx,
-            request=request,
-        )
-        # Replace the agent_id slot for the LucielInstance create below.
-        payload = payload.model_copy(
-            update={"scope_owner_agent_id": invited_agent_id}
-        )
-
+    # Step 30a.5: the teammate_email invite-mode overload that lived
+    # here from Step 30a.1 was removed once POST /admin/invites (Step
+    # 30a.4) reached parity. /admin/luciel-instances is now strictly
+    # a Luciel-instance creation surface; invitations flow through
+    # /admin/invites. See docs/designs/step-30a-5-company-self-serve.md
+    # §8 for the removal rationale.
     ScopePolicy.enforce_luciel_creation_scope(
         request,
         target_scope_level=payload.scope_level,
@@ -1266,213 +1251,21 @@ def create_luciel_instance(
     except DuplicateInstanceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    # Step 30a.1 -> Step 30a.4 token-class fix.
-    #
-    # Originally minted a daily-login magic-link token (wrong class for
-    # an invitee who has no password yet) and shipped it via
-    # send_magic_link_email. The teammate flow is structurally a
-    # set_password event -- the invitee MUST set a password to gain
-    # /app access -- so the correct token is set_password / purpose=
-    # invite, dispatched via send_welcome_set_password_email.
-    #
-    # This path is DEPRECATED in favor of POST /admin/invites (Step
-    # 30a.4 C3). It remains here so existing test scaffolding that
-    # POSTs teammate_email onto /admin/luciel-instances doesn't 500
-    # mid-deploy. Removal scheduled for Step 30a.5; see DRIFTS for the
-    # closing entry.
-    if invited_email is not None:
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "[DEPRECATED] /admin/luciel-instances teammate_email overload: "
-            "use POST /admin/invites instead (Step 30a.4). tenant=%s teammate=%s",
-            payload.scope_owner_tenant_id, invited_email,
-        )
-        try:
-            from app.services.email_service import send_welcome_set_password_email
-            from app.services.magic_link_service import (
-                build_set_password_url,
-                mint_set_password_token,
-            )
-            token = mint_set_password_token(
-                user_id=invited_user_id,
-                email=invited_email,
-                tenant_id=payload.scope_owner_tenant_id,
-                purpose="invite",
-            )
-            send_welcome_set_password_email(
-                to_email=invited_email,
-                set_password_url=build_set_password_url(token),
-                display_name=None,
-                purpose="invite",
-            )
-        except Exception:  # pragma: no cover -- email is best-effort
-            _logging.getLogger(__name__).exception(
-                "create_luciel_instance: teammate set-password email send failed "
-                "tenant=%s teammate=%s",
-                payload.scope_owner_tenant_id, invited_email,
-            )
-
     return LucielInstanceRead.model_validate(instance)
 
 
 # =====================================================================
-# Step 30a.1 — teammate-invite helper
+# Step 30a.5 -- /admin/luciel-instances teammate_email overload removed
 # =====================================================================
 #
-# Lives at module scope (not in a service class) because it stitches
-# together three repositories (User, Agent, ScopeAssignment) for a
-# one-off route concern. Promoting it to a service would only earn its
-# keep if a second caller appeared; for now keeping it local keeps the
-# call graph readable.
-
-def _invite_teammate(
-    *,
-    db,
-    tenant_id: str,
-    domain_id: str | None,
-    teammate_email: str,
-    audit_ctx: AuditContext,
-    request: Request,  # reserved for future audit-actor sniffing
-) -> tuple[str, "uuid.UUID", str]:
-    """Resolve-or-create the User+Agent+ScopeAssignment for ``teammate_email``.
-
-    Returns ``(agent_id, user_id, normalized_email)`` so the caller can
-    fill in ``scope_owner_agent_id`` for the LucielInstance create and
-    dispatch the magic-link.
-
-    All writes commit atomically. Failures roll back and raise
-    HTTPException so the route shape (\"caller saw 4xx, nothing was
-    written\") matches non-invite mode.
-    """
-    from sqlalchemy import func, select
-
-    from app.models.agent import Agent
-    from app.models.scope_assignment import ScopeAssignment
-    from app.models.user import User
-    from app.services.tier_provisioning_service import (
-        _slugify_agent_id_from_email,
-    )
-
-    if domain_id is None:
-        # Defensive -- schema validator already enforced this for invite
-        # mode, but the route layer should never rely on a single guard.
-        raise HTTPException(
-            status_code=422,
-            detail="invite mode requires scope_owner_domain_id.",
-        )
-
-    email_norm = teammate_email.strip()
-    email_lc = email_norm.lower()
-
-    try:
-        # 1. Resolve-or-create User.
-        user = db.execute(
-            select(User).where(func.lower(User.email) == email_lc)
-        ).scalars().first()
-        if user is None:
-            user = User(
-                email=email_norm,
-                display_name=email_norm,
-                synthetic=False,
-                active=True,
-            )
-            db.add(user)
-            db.flush()
-
-        # 2. Resolve-or-create Agent under (tenant, domain) bound to this User.
-        agent_slug = _slugify_agent_id_from_email(email_norm)
-        existing_agent = db.execute(
-            select(Agent).where(
-                Agent.tenant_id == tenant_id,
-                Agent.domain_id == domain_id,
-                Agent.agent_id == agent_slug,
-            )
-        ).scalars().first()
-        if existing_agent is not None:
-            if existing_agent.user_id == user.id:
-                agent = existing_agent
-            else:
-                # Slug collision on a different user -- suffix.
-                agent_slug = f"{agent_slug}-{user.id.hex[:8]}"[:100]
-                agent = Agent(
-                    tenant_id=tenant_id,
-                    domain_id=domain_id,
-                    agent_id=agent_slug,
-                    display_name=email_norm,
-                    description="Teammate invited via /admin/luciel-instances.",
-                    contact_email=email_norm,
-                    user_id=user.id,
-                    active=True,
-                    created_by="team_invite",
-                )
-                db.add(agent)
-                db.flush()
-        else:
-            agent = Agent(
-                tenant_id=tenant_id,
-                domain_id=domain_id,
-                agent_id=agent_slug,
-                display_name=email_norm,
-                description="Teammate invited via /admin/luciel-instances.",
-                contact_email=email_norm,
-                user_id=user.id,
-                active=True,
-                created_by="team_invite",
-            )
-            db.add(agent)
-            db.flush()
-
-        # 3. Resolve-or-create active ScopeAssignment for the (user, tenant,
-        #    domain). Role defaults to "teammate" -- the inviter does not
-        #    pick a role here; promotion happens via a separate path.
-        existing_assignment = db.execute(
-            select(ScopeAssignment).where(
-                ScopeAssignment.user_id == user.id,
-                ScopeAssignment.tenant_id == tenant_id,
-                ScopeAssignment.domain_id == domain_id,
-                ScopeAssignment.ended_at.is_(None),
-                ScopeAssignment.active.is_(True),
-            )
-        ).scalars().first()
-        if existing_assignment is None:
-            assignment = ScopeAssignment(
-                user_id=user.id,
-                tenant_id=tenant_id,
-                domain_id=domain_id,
-                role="teammate",
-                active=True,
-            )
-            db.add(assignment)
-            db.flush()
-
-        # 4. Single audit row for the invite (the Agent INSERT). We use
-        #    ACTION_CREATE / RESOURCE_AGENT mirroring the pre-mint path.
-        AdminAuditRepository(db).record(
-            ctx=audit_ctx,
-            tenant_id=tenant_id,
-            domain_id=domain_id,
-            agent_id=agent_slug,
-            action=ACTION_CREATE,
-            resource_type=RESOURCE_AGENT,
-            resource_pk=agent.id,
-            resource_natural_id=agent_slug,
-            after={
-                "tenant_id": tenant_id,
-                "domain_id": domain_id,
-                "agent_id": agent_slug,
-                "user_id": str(user.id),
-                "email": email_norm,
-                "invite_path": "/admin/luciel-instances",
-            },
-            note="team_invite: created Agent + ScopeAssignment for teammate",
-        )
-
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-
-    return agent_slug, user.id, email_norm
+# The Step 30a.1 _invite_teammate helper that previously sat here was
+# deleted in Step 30a.5 along with the schema field and the deprecated
+# email-send block above. The first-class invite path is POST
+# /admin/invites (Step 30a.4) -- see docs/designs/step-30a-5-company-
+# self-serve.md §8 for the removal rationale and migration notes.
+# invite_service.create_invite() now carries the User + Agent +
+# ScopeAssignment provisioning logic that _invite_teammate used to
+# duplicate (see app/services/invite_service.py line 308+).
 
 
 # =====================================================================

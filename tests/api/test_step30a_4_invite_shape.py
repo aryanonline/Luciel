@@ -439,33 +439,30 @@ class TestInviteSchemas:
 
 
 # ---------------------------------------------------------------------
-# 9. Deprecation marker for the old /admin/luciel-instances overload
+# 9. /admin/luciel-instances teammate_email overload REMOVED (Step 30a.5)
 # ---------------------------------------------------------------------
+#
+# Step 30a.4 marked the overload DEPRECATED in admin.py with a stable
+# log marker. Step 30a.5 removed it outright now that POST
+# /admin/invites is the first-class invite path. These tests pin the
+# removal so any reintroduction lands as a CI failure rather than a
+# silent regression.
 
 
-class TestStep30a1TeammateOverloadDeprecated:
-    def test_admin_py_carries_deprecated_log_marker(self):
-        """Step 30a.1 commit G's teammate_email overload is marked
-        DEPRECATED with a stable log marker so any production traffic
-        against the old path is visible in CloudWatch. Removal happens
-        at Step 30a.5.
+class TestStep30a1TeammateOverloadRemoved:
+    def test_admin_py_no_longer_carries_deprecated_marker(self):
+        """The DEPRECATED log marker is gone because the overload itself
+        is gone. The replacement-removal marker references Step 30a.5
+        so grep traces back to the design doc.
         """
         admin_src = (REPO_ROOT / "app" / "api" / "v1" / "admin.py").read_text()
-        assert "[DEPRECATED] /admin/luciel-instances teammate_email overload" in admin_src
+        assert "[DEPRECATED] /admin/luciel-instances teammate_email overload" not in admin_src
+        assert "teammate_email overload removed" in admin_src
 
-    def test_admin_py_uses_set_password_token_not_magic_link(self):
-        """The drift was: minted mint_magic_link_token + sent
-        send_magic_link_email. Fix: mint_set_password_token(purpose='invite')
-        + send_welcome_set_password_email(purpose='invite').
-        Pin both signals at source level.
+    def test_invite_teammate_helper_removed(self):
+        """_invite_teammate was a module-scope helper called only by
+        the now-removed overload. The first-class path lives in
+        app/services/invite_service.py.
         """
         admin_src = (REPO_ROOT / "app" / "api" / "v1" / "admin.py").read_text()
-        # The DEPRECATED block uses set-password primitives.
-        marker = "[DEPRECATED] /admin/luciel-instances teammate_email overload"
-        idx = admin_src.find(marker)
-        assert idx > 0, "DEPRECATED block must be present"
-        # Scan the following 1200 chars for the corrected primitives.
-        window = admin_src[idx : idx + 1200]
-        assert "mint_set_password_token" in window
-        assert "send_welcome_set_password_email" in window
-        assert 'purpose="invite"' in window
+        assert "def _invite_teammate(" not in admin_src
