@@ -121,6 +121,29 @@ TIER_INSTANCE_CAPS: dict[str, int] = {
 
 
 # ---------------------------------------------------------------------
+# Per-tier Domain-count caps (Step 30a.5).
+#
+# Mirrors TIER_INSTANCE_CAPS shape. Individual tier has no domain scope
+# permitted by TIER_PERMITTED_SCOPES so 0 here is belt-and-suspenders;
+# the scope guard fires first. Team tier owns its pre-minted team-luciel
+# Domain only; a second Domain forces a Company upgrade. Company tier is
+# symmetric with the 50-Luciel instance cap (partner judgment 2026-05-18,
+# documented in docs/designs/step-30a-5-company-self-serve.md §11 Q1).
+#
+# The cap is enforced at the service layer only -- no DB-level CHECK
+# constraint or trigger. Tracked as
+# D-domain-count-cap-service-layer-only-2026-05-18 (mirror of
+# D-tier-scope-mapping-service-layer-only-2026-05-13) in DRIFTS §3.
+# ---------------------------------------------------------------------
+
+DOMAIN_COUNT_CAP_BY_TIER: dict[str, int] = {
+    TIER_INDIVIDUAL: 0,
+    TIER_TEAM: 1,
+    TIER_COMPANY: 50,
+}
+
+
+# ---------------------------------------------------------------------
 # Status constants — mirror Stripe's subscription status values exactly.
 # https://stripe.com/docs/api/subscriptions/object#subscription_object-status
 # Stored as a String so a future Stripe-side new status doesn't require

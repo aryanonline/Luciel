@@ -87,6 +87,9 @@ class TierScopeViolationError(LucielInstanceError):
     REASON_SCOPE_NOT_PERMITTED = "scope_not_permitted"
     REASON_CAP_EXCEEDED = "cap_exceeded"
     REASON_NO_ACTIVE_SUBSCRIPTION = "no_active_subscription"
+    # Step 30a.5: re-using this error type for the Domain-cap guard on
+    # POST /admin/domains/self-serve, mirroring the Luciel-cap shape.
+    REASON_DOMAIN_CAP_EXCEEDED = "domain_cap_exceeded"
 
     def __init__(self, message: str, *, reason: str) -> None:
         super().__init__(message)
