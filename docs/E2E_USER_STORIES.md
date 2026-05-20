@@ -6,6 +6,37 @@
 
 ---
 
+## Vision alignment (Step 30a.7, 2026-05-20)
+
+VantageMind is a **domain-agnostic, model-agnostic judgment layer** (CANONICAL_RECAP §1). The same core Luciel — one Soul, configurable Profession — instantiates for an individual agent, a flat team, or a multi-domain company. Every journey below is anchored to that vision and to the **six pillars** the partnership has locked: scalability, reliability, maintainability, traceability, security, simplicity.
+
+**Vision → Journey traceability:**
+
+| Vision commitment (CANONICAL_RECAP) | Anchoring journeys | What the journey proves |
+|---|---|---|
+| §1 "Single core intelligence, three shapes" | J1, J2, J4 | Three tiers reach parity at Pricing → Checkout → Provisioning → tier-correct Dashboard. |
+| §1/§14 "Individual professionals can instantiate" | J4 (S4.1), J7 (S7.2, S7.5) | **Widget embed is the PRIMARY delivery for Individual** — they paste a `<script>` snippet onto their own site; Sarah-class agent goes live without infra work. |
+| §2 "Soul fixed, Profession configurable" | J7, J10 | LucielInstance lifecycle + behavior contracts (T14–T19) — configuration changes Profession; Soul refuses coercion, invention, or scope-leak. |
+| §4 "What Luciel will never do" | J10 (S10.1–S10.6) | Bot does not invent, coerce, leak scope, or take consequential actions without confirmation. |
+| §14 Entitlement matrix (Step 30a.6) | J1, J4, J5, J6, J7 | Tier shapes — Individual `tenant→agent`, Team `tenant→agent×N` (flat), Company `tenant→domain×M→agent×N`. |
+| §14 "Refund-safe at every tier" (Step 30a.7) | J8 (S8.3), J11 | **13-layer cascade + middleware belt-and-suspenders gate** guarantee a clean exit at any tier, on any path (pilot refund, period-end cancel, manual deactivation). Zero orphan rows cluster-wide. |
+| §13 "End-to-end product acceptance" | J1–J11 (all) | Each story is one E2E acceptance hook; the proposed test sequence at the bottom is the live execution plan. |
+
+**Six-pillar enforcement (where each story carries its weight):**
+
+| Pillar | Enforcement surface in these journeys |
+|---|---|
+| **Scalability** | Tier caps (`TIER_INSTANCE_CAPS` 3/10/50) enforced at S7.4; invite-cap saturation S5.6; widget rate-limit per embed key S7.5. |
+| **Reliability** | Idempotent webhook S2.4; idempotent backfill (Step 30a.7 cascade reconciler); orphan-zero invariant verified at J11. |
+| **Maintainability** | Closing-tag-per-step on every drift; surgical edits only; one canonical artifact (this doc) + DRIFTS + ARCHITECTURE + CANONICAL_RECAP. |
+| **Traceability** | Hash-chained `AdminAuditLog` rows S11.2; every mutation in J2/J5/J6/J7/J8 emits a typed audit row; CloudWatch + CloudTrail correlation. |
+| **Security** | Three-layer scope (app / DB FK / DB grants) S9.4; **single-gate `tenant_active` belt-and-suspenders middleware** (Step 30a.7) blocks every authenticated request to a deactivated tenant; secret one-time reveal S7.2; password argon2id S3.1. |
+| **Simplicity** | One Soul, one cascade primitive, one provisioning service, one entitlements module. No tier-specific code branches outside the entitlement matrix. |
+
+**Step 30a.7 vision-impact summary:** The cascade integrity + privilege-revocation hardening shipped this session is what makes the vision *operationally true* at the refund boundary. Before 30a.7, deactivating a tenant left 7 row classes orphaned (scope_assignments, user_invites, sessions, synthetic_users, plus 3 already covered); a stale `ScopeAssignment` could let a revoked user re-enter via cookie. After 30a.7, all 13 cascade layers are sealed in one DB transaction and the middleware refuses any request whose tenant is `active=False`. Refund-safety is no longer a docstring claim — it's a verified invariant (199/199 sessions committed, 0 orphans across 138 tenants).
+
+---
+
 ## Cast of actors (used throughout)
 
 | Actor handle | Description | Auth state |
@@ -164,14 +195,21 @@
 ## Journey 4 — Dashboard, scoped per tier
 
 ### S4.1 Owner of an **Individual** tenant opens `/dashboard`
-- **Actor:** Owner, tier=individual
+- **Actor:** Owner, tier=individual (e.g. Sarah, a solo real-estate agent)
 - **Precondition:** Active subscription, valid cookie.
+- **Vision anchor (CANONICAL_RECAP §1/§14):** Individual tier is how a single professional embeds Luciel on **their own website**. The `/dashboard` is the **configuration surface**; the **widget is the product**. The Owner does not run Luciel inside `/app` for their end-users — their end-users see Luciel on the Owner's site via the embed snippet.
 - **Steps:** Navigate to `/dashboard`.
 - **Expected outcome:**
   - `GET /api/v1/billing/me` returns `{tier: "individual", active_role: "owner", instance_count_cap: 3, ...}`.
   - SPA renders the **Individual tab only**. TeamTab and CompanyTab are hidden (gated on tier).
-  - One Luciel listed: `primary` (the agent-scope one). Card shows display_name, scope_level=`agent`, embed snippet, "Create new Luciel" CTA (gated at the cap=3).
-- **Audit/side effects:** `DASHBOARD_VIEWED` (read-only, no chain mutation).
+  - One Luciel listed: `primary` (the agent-scope one). Card surface, in this order of prominence:
+    1. **"Get embed snippet" — the lead CTA.** Mints a public-safe embed key (`pk_...`) via `POST /api/v1/admin/api-keys/embed` and reveals the `<script>` tag Sarah pastes into her site. This is the moment Sarah's product goes live.
+    2. Configure Luciel (display_name, knowledge, persona scope).
+    3. "Create new Luciel" CTA (gated at cap=3).
+  - The card explicitly states scope_level=`agent`, the embed-key fingerprint, last-used timestamp, and the widget origin allowlist.
+- **Audit/side effects:** `DASHBOARD_VIEWED` (read-only, no chain mutation). When the Owner mints the embed key, `API_KEY_CREATED` (class=embed) is the *defining* event of Individual-tier activation — not the checkout or set-password steps.
+- **Cross-reference:** S7.2 (mint embed key) and S7.5 (widget loads on customer's website) are the operational completion of S4.1 for the Individual tier. The three stories form one user-value arc: provision → mint key → widget lives on Sarah's site.
+- **Drifts in scope:** None blocking. The embed/widget surface is the closed `D-prod-widget-bundle-cdn-unprovisioned-2026-05-09` (Step 30b) and `D-widget-no-content-safety-or-scope-guardrail-2026-05-10` (Step 30d).
 
 ### S4.2 Owner of a **Team** tenant opens `/dashboard`
 - **Actor:** Owner, tier=team
@@ -390,6 +428,7 @@
 
 ### S8.3 Owner does a pilot refund (within 90d window)
 - **Actor:** Owner on pilot subscription, day 1-90.
+- **Vision anchor (CANONICAL_RECAP §14 "Refund-safe at every tier"):** the pilot refund is the contract that makes the 90-day pilot trustworthy. After this returns 200, **no row anywhere in the system can be used to re-enter the tenant** and **no orphaned child row remains**. This is the single most security-sensitive path in the product.
 - **Steps:** Account → "Refund my pilot" → confirm modal.
 - **Expected outcome:**
   - `POST /api/v1/billing/pilot-refund` (`BillingService.process_pilot_refund`):
@@ -397,10 +436,12 @@
     - Re-validates `now ≤ trial_end` (409 if expired).
     - Looks up the $100 Charge via Stripe API; issues refund.
     - Cancels the Subscription (Stripe API + DB).
-    - Cascade-deactivates the tenant in the SAME DB transaction.
+    - **Cascade-deactivates the tenant across all 13 layers in the SAME DB transaction** (Step 30a.7 hardening). See S11.4 for the per-layer enumeration.
   - Returns `{refund_id, charge_id, refunded_amount_cents: 10000, currency: "cad", tenant_id, deactivated_at}`.
   - SPA shows confirmation + redirects to `/`.
-- **Audit/side effects:** `PILOT_REFUNDED` + `SUBSCRIPTION_CANCELED` + `TENANT_DEACTIVATED` + child cascades, all in one chain segment.
+  - **Belt-and-suspenders gate (Step 30a.7):** any subsequent authenticated request from this Owner (or from a stale teammate cookie on the same tenant) hits the `tenant_active` middleware and returns **403 `tenant_inactive`** without reaching the route handler — even if the cookie/session row was not yet evicted by the cascade. Refund safety does not depend on perfect cascade ordering.
+- **Audit/side effects:** `PILOT_REFUNDED` + `SUBSCRIPTION_CANCELED` + `TENANT_DEACTIVATED` + 13 layers of `*_DEACTIVATED` rows, all in one hash-chain segment.
+- **Drifts in scope:** All 9 Step 30a.7 cascade-and-gate drifts are *closed* (DRIFTS §5, 2026-05-20). The cascade reconciler `backfill_cascade_orphans.py` ran cluster-wide and committed 199/199 sessions across 138 tenants with **zero orphans remaining**. The pre-30a.7 historical drift `D-cancellation-cascade-incomplete-conversations-claims-2026-05-14` covers the conversations/identity-claims gap and is the only pre-existing item that still applies here.
 
 ### S8.4 Owner tries pilot refund past day 91
 - **Steps:** Same as S8.3 but on day 91+.
@@ -496,6 +537,38 @@
 - **Steps:** EndUser chats via widget on company A's site, then later returns from a different device.
 - **Expected outcome:** `IdentityResolver` links the two sessions if identity signals match (email/phone). Single conversation thread surfaces in the Luciel. Audit row `IDENTITY_CLAIM_RESOLVED`.
 
+### S11.4 Tenant-deactivation cascade — 13-layer enumeration (Step 30a.7)
+- **Trigger paths:** pilot refund (S8.3); period-end subscription cancel (S8.2); manual operator deactivation; admin script `backfill_cascade_orphans.py --apply`.
+- **Invariant:** after the cascade transaction commits, **every row keyed off the tenant has `active=False` and no descendant row is reachable through any code path**. Verified cluster-wide on 2026-05-20: 199/199 sessions committed across 138 tenants, **0 orphans**.
+- **The 13 layers (executed in dependency order in one DB transaction inside `admin_service.deactivate_tenant_cascade`):**
+
+| # | Layer | Row class | Why it must be in the cascade |
+|---|---|---|---|
+| 1 | Conversations | `conversations` | Soft-delete the chat history into the 90d retention window; prevents replay through any agent surface. |
+| 2 | Identity claims | `identity_claims` | Sever cross-channel identity links so a re-purchased tenant cannot accidentally inherit prior end-user threads. |
+| 3 | Memory items | `memory_items` | Mark agent/domain/tenant memory inactive so context-assembler never serves it after refund. |
+| 4 | **API keys (incl. embed keys)** | `api_keys` | **Refund-safety critical.** A live `pk_...` embed key would otherwise keep Sarah's widget answering on her site after refund. Flipping `active=False` is what makes the widget stop responding. |
+| 5 | Luciel instances | `luciel_instances` | All agent/domain/tenant-scope instances soft-deleted; counts re-credit against caps. |
+| 6 | Agents | `agents` | The per-seat surface is retired; future invites to the same tenant cannot inherit a stale agent. |
+| 7 | Agent configs | `agent_configs` | Persona/knowledge configuration deactivated; cannot be revived without explicit reactivation audit. |
+| 8 | Domain configs | `domain_configs` | Company-tier domain rows deactivated; the `general` default row is also flipped. |
+| 9 | **Scope assignments** | `scope_assignments` | **Privilege-revocation critical (Step 30a.7 Layer 9).** A surviving `ScopeAssignment` would let the Owner's cookie still satisfy `require_scope_role(...)` checks. Flipping `active=False` is what makes the cookie route to 403 inside the route handler. |
+| 10 | **User invites** | `user_invites` | **Privilege-revocation critical (Step 30a.7 Layer 10).** Pending invite links would otherwise still redeem and create new ScopeAssignments after refund. Status forced to `REVOKED`; `token_jti` invalidated. |
+| 11 | **Sessions** | `sessions` | **Privilege-revocation critical (Step 30a.7 Layer 11).** All `luciel_session` cookie rows for this tenant deactivated; even before the middleware gate fires, the session lookup fails. |
+| 12 | **Synthetic users** | `synthetic_users` | **Step 30a.7 Layer 12.** Synthetic-user rows minted by the agent (for cross-channel identity stand-ins) flipped inactive so the agent cannot re-author state through them after refund. |
+| 13 | **Tenant config** | `tenant_config` | The root row — flipped *last* in transaction order so that the middleware gate (which keys off `tenant_config.active`) only starts refusing requests once every descendant is already neutralized. Flipping this row is the single state change the belt-and-suspenders gate observes. |
+
+- **Belt-and-suspenders middleware gate (Step 30a.7, sibling to the cascade):** an authenticated request enters `app/middleware/tenant_active.py` before any route handler runs. The middleware resolves the cookie's tenant, reads `tenant_config.active`, and returns **403 `tenant_inactive`** if false. This means even if a single descendant row's deactivation flag were ever missed by a future code change, the request still cannot reach a route. Cascade + middleware are independent layers; both must fail for a refunded tenant to be re-entered.
+- **Idempotency:** the cascade is safe to re-run. `backfill_cascade_orphans.py --apply` is the reconciler; it only writes rows whose `active=True` for an `active=False` tenant. Running it on a clean cluster returns "0 orphans, 0 sessions written".
+- **Audit/side effects:** one chain segment per cascade run, ordered:
+  `TENANT_DEACTIVATED` (header) → N × `CONVERSATION_DEACTIVATED` → N × `IDENTITY_CLAIM_DEACTIVATED` → N × `MEMORY_ITEM_DEACTIVATED` → N × `API_KEY_DEACTIVATED` → N × `LUCIEL_INSTANCE_DEACTIVATED` → N × `AGENT_DEACTIVATED` → N × `AGENT_CONFIG_DEACTIVATED` → N × `DOMAIN_CONFIG_DEACTIVATED` → N × `SCOPE_ASSIGNMENT_DEACTIVATED` → N × `USER_INVITE_REVOKED` → N × `SESSION_DEACTIVATED` → N × `SYNTHETIC_USER_DEACTIVATED` → `TENANT_CONFIG_DEACTIVATED` (footer).
+- **Production verification (2026-05-20, rev 76):**
+  - Dry-run blast radius: 138 tenants, 199 rows requiring cascade closure.
+  - Apply run #1: 193/199 sessions OK; 6 failed on UUID JSON serializer (hotfix #2).
+  - Apply run #2 (post-hotfix): 6/6 remaining sessions committed.
+  - Verification probe: **0 orphans cluster-wide.**
+- **Drifts in scope:** All Step 30a.7 cascade-and-gate drifts are **closed** (DRIFTS §5): the umbrella `D-tenant-cascade-privilege-revocation-hardening-2026-05-20`, both hotfix sub-arcs, and the four sibling layer drifts (Layers 9–12) plus the middleware drift and the docstring-claim drift.
+
 ---
 
 ## Drifts that scope the E2E test plan (consolidated)
@@ -506,13 +579,24 @@
 - `D-channels-only-chat-implemented-2026-05-09` — voice/SMS/email channels will return 501.
 - `D-context-assembler-thin-2026-05-09` — bot may have thinner context than the design implies.
 - `D-stripe-checkout-no-email-validation-2026-05-18` — typo'd emails accepted server-side.
-- `D-cancellation-cascade-incomplete-conversations-claims-2026-05-14` — conversations/claims may not cascade.
+- `D-cancellation-cascade-incomplete-conversations-claims-2026-05-14` — conversations/claims may not cascade (note: Step 30a.7 sealed Layers 1–2 as part of the 13-layer cascade; the open part of this drift is now narrower than the original title implies — verify in E2E whether the historical row classes flagged here are now fully covered).
 
 **Should NOT surface (resolved or out of band):**
 - `D-prod-widget-bundle-cdn-unprovisioned-2026-05-09` (closed at 30b).
 - `D-retention-purge-worker-missing-2026-05-09` (closed at 30a.2).
 - `D-widget-no-content-safety-or-scope-guardrail-2026-05-10` (closed at 30d).
 - `D-marketing-product-boundary-soft-2026-05-16` (closed at 30a.5, pricing leg).
+
+**Closed this session by Step 30a.7 (2026-05-20) — should not surface as drift; expected behavior is the *new* sealed-cascade state:**
+- `D-tenant-cascade-privilege-revocation-hardening-2026-05-20` (umbrella) — cascade now covers 13 layers in one txn.
+- `D-cascade-missing-scope-assignments-layer-2026-05-20` (Layer 9) — stale `ScopeAssignment` rows can no longer satisfy `require_scope_role` after refund.
+- `D-cascade-missing-user-invites-revocation-2026-05-20` (Layer 10) — pending invites force-`REVOKED` on cascade.
+- `D-cascade-missing-sessions-revocation-2026-05-20` (Layer 11) — `luciel_session` rows deactivated on cascade.
+- `D-cascade-missing-synthetic-users-orphan-layer-2026-05-20` (Layer 12) — synthetic users deactivated on cascade.
+- `D-rbac-single-gate-tenant-active-belt-and-suspenders-2026-05-20` — middleware refuses every authenticated request to an inactive tenant.
+- `D-cascade-comment-drift-9-layer-claim-vs-13-layer-reality-2026-05-20` — docstring + this doc now reflect the true 13-layer enumeration (S11.4).
+- `D-step-30a-7-bad-tenant-config-import-path-hotfix-2026-05-20` — import path corrected; backend boots clean.
+- `D-jsonb-uuid-serializer-engine-default-2026-05-20` — engine-level JSON serializer plus caller-site UUID coercion; backfill committed cluster-wide.
 
 ---
 
