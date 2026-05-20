@@ -115,7 +115,7 @@ from app.models.subscription import (  # noqa: E402
     TIER_TEAM,
     TIER_INSTANCE_CAPS,
 )
-from app.models.tenant_config import TenantConfig  # noqa: E402
+from app.models.tenant import TenantConfig  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.models.user_invite import UserInvite, InviteStatus  # noqa: E402
 

@@ -96,7 +96,7 @@ from app.models.admin_audit_log import (  # noqa: E402
     AdminAuditLog,
 )
 from app.models.subscription import Subscription  # noqa: E402
-from app.models.tenant_config import TenantConfig  # noqa: E402
+from app.models.tenant import TenantConfig  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.services.billing_service import BillingService  # noqa: E402
 from app.services.billing_webhook_service import BillingWebhookService  # noqa: E402
