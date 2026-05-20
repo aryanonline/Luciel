@@ -1,3 +1,4 @@
+import json
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
@@ -5,9 +6,40 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 
+
+# Step 30a.7 gap-fix
+# (D-jsonb-uuid-serializer-engine-default-2026-05-20):
+#
+# SQLAlchemy's default JSONB column serializer is `json.dumps` with no
+# `default=` hook, which raises `TypeError: Object of type UUID is not
+# JSON serializable` the moment any caller stuffs a `uuid.UUID` instance
+# into a JSONB column value. The Step 30a.7 cascade in admin_service +
+# the cascade-orphan backfill script both build `after_json` payloads
+# containing `affected_pks=[uuid.UUID(...), ...]` (scope_assignments and
+# user_invites both have UUID primary keys). Without an engine-level
+# coercion hook, every audit emission for those two layers blows up at
+# INSERT time and rolls back the whole per-tenant transaction.
+#
+# We install `default=str` as the engine-wide JSON serializer fallback.
+# This is safe because:
+#   - `json.dumps` only invokes `default` for types it cannot serialize
+#     natively (so existing dict/list/int/bool/None payloads are
+#     unaffected, byte-for-byte);
+#   - `str(uuid.UUID(...))` is the canonical RFC-4122 hex form already
+#     used by every other audit caller that explicitly coerces UUIDs
+#     (e.g. sessions Layer 11 at backfill_cascade_orphans.py:368);
+#   - `str(datetime)` produces ISO-8601-ish output that audit-chain
+#     hashing already normalises before hashing (see
+#     audit_chain.canonical_row_hash at line 131-134).
+#
+# This is the structural choke point: every code path that uses the ORM
+# binds against this engine, so installing the serializer here closes
+# the gap for ALL current and future audit callers, not just the two
+# fixed at their call sites in the same commit.
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
+    json_serializer=lambda obj: json.dumps(obj, default=str),
 )
 
 SessionLocal = sessionmaker(

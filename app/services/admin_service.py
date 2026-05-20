@@ -1305,7 +1305,12 @@ class AdminService:
                     resource_natural_id=None,
                     after={
                         "count": int(sa_updated),
-                        "affected_pks": sa_pks,
+                        # Step 30a.7 caller-hygiene
+                        # (D-jsonb-uuid-serializer-engine-default-2026-05-20):
+                        # scope_assignments.id is uuid.UUID; coerce to str at
+                        # the call site for explicit traceability, even though
+                        # the engine-level json_serializer hook would catch it.
+                        "affected_pks": [str(pk) for pk in sa_pks],
                         "affected_user_ids": [str(uid) for uid in sa_user_ids],
                         "table": "scope_assignments",
                         "ended_reason": EndReason.DEACTIVATED.value,
@@ -1360,7 +1365,10 @@ class AdminService:
                     resource_natural_id=None,
                     after={
                         "count": int(ui_updated),
-                        "affected_pks": ui_pks,
+                        # Step 30a.7 caller-hygiene
+                        # (D-jsonb-uuid-serializer-engine-default-2026-05-20):
+                        # user_invites.id is uuid.UUID; coerce at call site.
+                        "affected_pks": [str(pk) for pk in ui_pks],
                         "table": "user_invites",
                         "revoked_via": "tenant_deactivate_cascade",
                         "trigger": "tenant_deactivate",

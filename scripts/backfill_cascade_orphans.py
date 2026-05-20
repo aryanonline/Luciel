@@ -263,7 +263,13 @@ def repair_tenant(
             resource_natural_id=None,
             after={
                 "count": int(sa_updated),
-                "affected_pks": sa_pks,
+                # Step 30a.7 caller-hygiene
+                # (D-jsonb-uuid-serializer-engine-default-2026-05-20):
+                # scope_assignments.id is uuid.UUID; coerce at call site
+                # (mirrors admin_service.py:1313). Engine-level
+                # json_serializer hook in app/db/session.py is the
+                # belt-and-suspenders backstop.
+                "affected_pks": [str(pk) for pk in sa_pks],
                 "affected_user_ids": [str(uid) for uid in sa_user_ids],
                 "table": "scope_assignments",
                 "ended_reason": EndReason.DEACTIVATED.value,
@@ -316,7 +322,10 @@ def repair_tenant(
             resource_natural_id=None,
             after={
                 "count": int(ui_updated),
-                "affected_pks": ui_pks,
+                # Step 30a.7 caller-hygiene
+                # (D-jsonb-uuid-serializer-engine-default-2026-05-20):
+                # user_invites.id is uuid.UUID; coerce at call site.
+                "affected_pks": [str(pk) for pk in ui_pks],
                 "table": "user_invites",
                 "revoked_via": "backfill_30a7",
                 "trigger": "backfill_30a7",
