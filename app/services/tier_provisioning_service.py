@@ -239,10 +239,22 @@ class TierProvisioningService:
             "pk": ind_instance.id,
         })
 
-        # 3. Team + Company tiers ALSO get the domain-scope Team Luciel
-        #    on the default domain -- this is the §14 differentiator
-        #    that makes a Team subscription not just "bigger Individual."
-        if tier in (TIER_TEAM, TIER_COMPANY):
+        # 3. Company tier ALSO gets the domain-scope Team Luciel on the
+        #    default domain -- the cross-teammate cohesion Luciel that
+        #    reads across everyone in a Domain.
+        #
+        #    Step 30a.6 (tier-hierarchy semantic realignment, 2026-05-20):
+        #    Team tier no longer mints a Domain-scope Luciel at signup.
+        #    Team is now flat -- one tenant.admin lead + N agent.admin
+        #    teammates directly under the tenant, no Domain layer. The
+        #    "Team Luciel that sees across teammates" promise on the Team
+        #    tier card on Pricing.tsx is satisfied by tenant-scope memory
+        #    sharing under the single default domain, not by a separate
+        #    Domain-scope instance. Multi-Domain remains a Company-only
+        #    value driver. See CANONICAL_RECAP §12 Step 30a.6 row, §14
+        #    Entitlement matrix row 3 (Domains cap: 0/0/50), and DRIFTS
+        #    `D-tier-semantics-realignment-2026-05-20`.
+        if tier == TIER_COMPANY:
             team_instance = self.luciel.create_instance(
                 audit_ctx=audit_ctx,
                 instance_id=_INSTANCE_ID_DOMAIN_TEAM,

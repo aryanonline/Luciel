@@ -1349,6 +1349,7 @@ from app.services.invite_service import (
     InviteNotFoundError,
     InviteNotPendingError,
     InvitePendingCapExceededError,
+    InviteRoleNotAllowedForTierError,
 )
 
 
@@ -1431,6 +1432,11 @@ def _map_invite_error(exc: InviteError) -> HTTPException:
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, InvitePendingCapExceededError):
         return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, InviteRoleNotAllowedForTierError):
+        # Step 30a.6 -- Team-tier callers cannot mint department_lead
+        # invites (Team is flat, no Domain layer). 422 because it is a
+        # request-shape error, not an auth event.
+        return HTTPException(status_code=422, detail=str(exc))
     return HTTPException(status_code=400, detail=str(exc))
 
 

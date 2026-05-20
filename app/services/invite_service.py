@@ -128,6 +128,18 @@ class InvitePendingCapExceededError(InviteError):
     """Surfaces as 409 -- too many pending invites already outstanding."""
 
 
+class InviteRoleNotAllowedForTierError(InviteError):
+    """Surfaces as 422 -- the requested role is not allowed at this tier.
+
+    Step 30a.6 (tier-hierarchy semantic realignment, 2026-05-20). Team is
+    now flat (one tenant.admin lead + N agent.admin teammates, no Domain
+    layer); a Team-tier `tenant.admin` therefore cannot mint a
+    `domain_lead` invite. Multi-Domain remains a Company-only value
+    driver. See DRIFTS `D-tier-semantics-realignment-2026-05-20` and
+    CANONICAL_RECAP §12 Step 30a.6 row.
+    """
+
+
 # ---------------------------------------------------------------------
 # Pending-invite cap
 # ---------------------------------------------------------------------
@@ -139,6 +151,34 @@ class InvitePendingCapExceededError(InviteError):
 # on each create_invite call and uses TIER_INSTANCE_CAPS as the bound.
 
 _DEFAULT_MAX_PENDING_INVITES = 100
+
+
+# ---------------------------------------------------------------------
+# Per-tier role matrix (Step 30a.6, 2026-05-20)
+# ---------------------------------------------------------------------
+#
+# Step 30a.6 (tier-hierarchy semantic realignment) tightens the invite
+# role matrix so a Team-tier `tenant.admin` can only invite `teammate`
+# roles -- no `department_lead` / `domain_lead` invite path exists at
+# Team because Team is now flat (no Domain layer). Company tier keeps
+# the full role surface (`teammate` + `department_lead`). Individual
+# tier has no invite path at all (seats=1; the cookied user IS the
+# tenant).
+#
+# Enforcement: a Team caller attempting to mint a non-allowed role at
+# `create_invite` raises ``InviteRoleNotAllowedForTierError`` which the
+# route layer maps to 422. The route is the only public ingress for
+# invite creation today (Step 30a.4 admin route), so a single check
+# here is sufficient.
+#
+# See CANONICAL_RECAP §12 Step 30a.6 row + §14 Entitlement matrix row 3
+# and DRIFTS `D-tier-semantics-realignment-2026-05-20`.
+
+_TEAM_ALLOWED_INVITE_ROLES: frozenset[str] = frozenset({"teammate"})
+_INDIVIDUAL_ALLOWED_INVITE_ROLES: frozenset[str] = frozenset()  # seats=1
+# Company tier accepts any role string -- v1 surfaces are `teammate`
+# and `department_lead`, but the matrix is permissive at Company so
+# future role-label additions don't require this constant to grow.
 
 
 def _resolve_max_pending_invites(*, tenant_id: str, db: Session) -> int:
@@ -163,6 +203,66 @@ def _resolve_max_pending_invites(*, tenant_id: str, db: Session) -> int:
     if sub is None or sub.instance_count_cap is None:
         return _DEFAULT_MAX_PENDING_INVITES
     return max(_DEFAULT_MAX_PENDING_INVITES, sub.instance_count_cap * 2)
+
+
+def _check_role_allowed_for_tier(
+    *, tenant_id: str, role: str, db: Session
+) -> None:
+    """Raise ``InviteRoleNotAllowedForTierError`` if role is not allowed.
+
+    Step 30a.6. The tier is read from the tenant's active subscription;
+    when there is no active sub (e.g. pre-webhook onboarding) the check
+    is permissive -- the cap layer + scope guard already prevent
+    runaway provisioning, and the role check fires once the subscription
+    lands.
+    """
+    from app.models.subscription import (
+        STATUS_ACTIVE,
+        STATUS_TRIALING,
+        Subscription,
+        TIER_COMPANY,
+        TIER_INDIVIDUAL,
+        TIER_TEAM,
+    )
+
+    sub = (
+        db.query(Subscription)
+        .filter(
+            Subscription.tenant_id == tenant_id,
+            Subscription.status.in_((STATUS_ACTIVE, STATUS_TRIALING)),
+            Subscription.active.is_(True),
+        )
+        .order_by(Subscription.created_at.desc())
+        .first()
+    )
+    if sub is None or sub.tier is None:
+        # Permissive during pre-subscription onboarding; the cap layer +
+        # scope guard still apply.
+        return
+
+    tier = sub.tier
+    if tier == TIER_COMPANY:
+        # Company is permissive: any role label flows through.
+        return
+    if tier == TIER_TEAM:
+        if role not in _TEAM_ALLOWED_INVITE_ROLES:
+            raise InviteRoleNotAllowedForTierError(
+                f"Team-tier tenants cannot mint role={role!r} invites; "
+                f"allowed roles: {sorted(_TEAM_ALLOWED_INVITE_ROLES)}. "
+                f"Upgrade to Company tier to invite a department lead."
+            )
+        return
+    if tier == TIER_INDIVIDUAL:
+        if role not in _INDIVIDUAL_ALLOWED_INVITE_ROLES:
+            raise InviteRoleNotAllowedForTierError(
+                f"Individual-tier tenants have seats=1 and cannot mint "
+                f"any invites (requested role={role!r}). Upgrade to Team "
+                f"or Company to invite teammates."
+            )
+        return
+    # Unknown tier label -- be permissive rather than 422 on a label
+    # we have not seen; the cap layer catches runaway provisioning.
+    return
 
 
 # ---------------------------------------------------------------------
@@ -230,6 +330,13 @@ def create_invite(
     repo = UserInviteRepository(db)
     email_norm = invited_email.strip()
     email_lc = email_norm.lower()
+
+    # 0. Per-tier role-matrix check (Step 30a.6). Team is flat (no
+    #    Domain layer at signup), so a Team-tier caller cannot mint a
+    #    `department_lead` / `domain_lead` invite. Individual tier has
+    #    no invite path at all (seats=1). Company tier is permissive
+    #    so v1 + future role labels both flow through.
+    _check_role_allowed_for_tier(tenant_id=tenant_id, role=role, db=db)
 
     # 1. Duplicate-pending pre-flight. The partial unique index would
     #    raise IntegrityError on race, but a clean 409 is friendlier.

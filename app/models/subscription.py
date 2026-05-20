@@ -121,24 +121,30 @@ TIER_INSTANCE_CAPS: dict[str, int] = {
 
 
 # ---------------------------------------------------------------------
-# Per-tier Domain-count caps (Step 30a.5).
+# Per-tier Domain-count caps (Step 30a.5, realigned at Step 30a.6).
 #
-# Mirrors TIER_INSTANCE_CAPS shape. Individual tier has no domain scope
-# permitted by TIER_PERMITTED_SCOPES so 0 here is belt-and-suspenders;
-# the scope guard fires first. Team tier owns its pre-minted team-luciel
-# Domain only; a second Domain forces a Company upgrade. Company tier is
-# symmetric with the 50-Luciel instance cap (partner judgment 2026-05-18,
-# documented in docs/designs/step-30a-5-company-self-serve.md §11 Q1).
+# Mirrors TIER_INSTANCE_CAPS shape. Step 30a.6 (tier-hierarchy semantic
+# realignment, 2026-05-20) flips Team `1 -> 0`: Team is now flat (one
+# tenant.admin lead + N agent.admin teammates directly under the tenant,
+# no Domain layer at all). Multi-Domain remains a Company-only value
+# driver. Individual tier was already 0 and stays 0 -- it has no Domain
+# scope permitted by TIER_PERMITTED_SCOPES so the entry is
+# belt-and-suspenders; the scope guard fires first. Company tier stays
+# at 50 (symmetric with the 50-Luciel instance cap, partner judgment
+# 2026-05-18, documented in docs/designs/step-30a-5-company-self-serve.md
+# §11 Q1 and re-annotated under §11 Q1 of CANONICAL_RECAP for Step 30a.6).
 #
 # The cap is enforced at the service layer only -- no DB-level CHECK
 # constraint or trigger. Tracked as
 # D-domain-count-cap-service-layer-only-2026-05-18 (mirror of
 # D-tier-scope-mapping-service-layer-only-2026-05-13) in DRIFTS §3.
+# See also CANONICAL_RECAP §12 Step 30a.6 row, §14 Entitlement matrix
+# row 3, and DRIFTS `D-tier-semantics-realignment-2026-05-20`.
 # ---------------------------------------------------------------------
 
 DOMAIN_COUNT_CAP_BY_TIER: dict[str, int] = {
     TIER_INDIVIDUAL: 0,
-    TIER_TEAM: 1,
+    TIER_TEAM: 0,
     TIER_COMPANY: 50,
 }
 
