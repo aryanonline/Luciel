@@ -82,6 +82,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.integrations.stripe import get_stripe_client
+from app.models.tenant_config import TenantConfig
 from app.models.user import User
 from app.services.billing_service import BillingService
 from app.services.magic_link_service import MagicLinkError, validate_session_token
@@ -200,6 +201,39 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
                 )
 
             tenant_id = sub.tenant_id
+
+            # ----------------------------------------------------------
+            # Step 30a.7 -- belt-and-suspenders tenant-active gate.
+            # ----------------------------------------------------------
+            # Closes D-rbac-single-gate-tenant-active-belt-and-suspenders-
+            # 2026-05-20. Defence-in-depth complement to the subscription
+            # gate above. The subscription gate is correct in the common
+            # case but is the ONLY gate against "this request is hitting
+            # a soft-deleted tenant." If the cascade ever fails to flip
+            # subscriptions.status in the same transaction as
+            # tenant_configs.active (future schema change, partially-
+            # applied transaction, ordering regression in a follow-on
+            # Step), a session-bearing request could still authenticate
+            # via the live subscription against a soft-deleted tenant.
+            # Two independent gates make that invariant unnecessary at
+            # this layer: a request must pass BOTH to proceed.
+            #
+            # Distinct error code 'TENANT_DEACTIVATED' so audit-log
+            # searches can distinguish "subscription expired" from
+            # "tenant cascaded" in the field.
+            tenant_config = (
+                db.query(TenantConfig)
+                .filter(TenantConfig.tenant_id == tenant_id)
+                .first()
+            )
+            if tenant_config is None or not tenant_config.active:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "Tenant is deactivated.",
+                        "code": "TENANT_DEACTIVATED",
+                    },
+                )
 
             # Cookied callers are tenant-admin. They never carry a
             # domain or agent scope at v1 -- those are concepts for
