@@ -46,11 +46,24 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
 import psycopg
-from psycopg import sql
+
+# SQLAlchemy stores DATABASE_URL in /luciel/database-url SSM as
+# 'postgresql+psycopg://...'. psycopg3's libpq parser does NOT accept
+# the '+psycopg' driver-hint suffix and raises ProgrammingError. The
+# normaliser strips ONLY the '+<driver>' segment between the scheme
+# and the '://' separator. Matches the same strip in
+# scripts/prod_readonly_query.py:_normalize_url.
+_SQLALCHEMY_DRIVER_RE = re.compile(r"^(postgres(?:ql)?)\+[a-z0-9_]+://", re.IGNORECASE)
+
+
+def _normalize_dsn(dsn: str) -> str:
+    return _SQLALCHEMY_DRIVER_RE.sub(r"\1://", dsn, count=1)
+
 
 PSV_HEADER_COLS = (
     "invite_id",
@@ -124,7 +137,10 @@ def main() -> int:
     print()
 
     # psycopg3: a single connection, single transaction, autocommit OFF.
-    with psycopg.connect(dsn, autocommit=False) as conn:
+    # Strip the SQLAlchemy '+psycopg' driver hint that the SSM-stored DSN
+    # carries; libpq does not understand it.
+    dsn_normalised = _normalize_dsn(dsn)
+    with psycopg.connect(dsn_normalised, autocommit=False) as conn:
         with conn.cursor() as cur:
             # (1) temp table + load
             cur.execute(
