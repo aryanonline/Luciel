@@ -189,70 +189,52 @@ function Invoke-OneShot {
     Write-Host "    Subnets   : $($netCfg.awsvpcConfiguration.subnets -join ',')"
     Write-Host "    SGs       : $($netCfg.awsvpcConfiguration.securityGroups -join ',')"
 
-    # Build the JSON for --overrides BY HAND. PowerShell 5.1's
-    # ConvertTo-Json has well-documented bugs with single-element array
-    # preservation in nested object graphs, and the workarounds
-    # (Write-Output -NoEnumerate, comma operator, ArrayList) are
-    # fragile. Since we control every input and the only variable
-    # content is the JTI list (all chars are JSON-safe: hyphens, UUIDs,
-    # newlines) and the small script bootstrap, we just emit the JSON
-    # as a string literal. The .NET JsonConvert via System.Web is the
-    # cleanest escaper for any user-provided values.
-    Add-Type -AssemblyName System.Web.Extensions
-    $jsonSer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-    $jsonSer.MaxJsonLength = [int]::MaxValue
-
-    # Build container override as a Hashtable; the JS serializer
-    # respects [object[]] / ArrayList for arrays without collapsing.
-    $envList = New-Object System.Collections.ArrayList
-    foreach ($e in $EnvOverrides) {
-        [void]$envList.Add(@{ name = $e.name; value = $e.value })
-    }
-    $cmdList = New-Object System.Collections.ArrayList
-    foreach ($c in $ContainerCmd) { [void]$cmdList.Add($c) }
-
-    $containerOv = @{
-        name        = 'luciel-prod-ops'
-        command     = $cmdList
-        environment = $envList
-    }
-    $coList = New-Object System.Collections.ArrayList
-    [void]$coList.Add($containerOv)
-    $overridesObj = @{ containerOverrides = $coList }
-
-    $overridesJson = $jsonSer.Serialize($overridesObj)
-    # Sanity-check: containerOverrides MUST be an array.
-    if ($overridesJson -notmatch '"containerOverrides"\s*:\s*\[') {
-        throw "overrides JSON did not preserve containerOverrides array; got: $overridesJson"
-    }
-
-    # Network config: same shape concerns, same approach.
-    $subnetList = New-Object System.Collections.ArrayList
-    foreach ($s in $netCfg.awsvpcConfiguration.subnets) { [void]$subnetList.Add($s) }
-    $sgList = New-Object System.Collections.ArrayList
-    foreach ($g in $netCfg.awsvpcConfiguration.securityGroups) { [void]$sgList.Add($g) }
-    $networkObj = @{
-        awsvpcConfiguration = @{
-            subnets         = $subnetList
-            securityGroups  = $sgList
-            assignPublicIp  = 'ENABLED'
-        }
-    }
-    $networkJson = $jsonSer.Serialize($networkObj)
-
-    # Windows has an ~32k command-line length limit. The JTI list +
-    # JSON escaping inside --overrides easily blows past that on a
-    # single argv. AWS CLI accepts file:// references for any string
-    # argument, so we stage both JSON payloads to disk and pass them
-    # by reference. Files are written BOM-less UTF-8 via .NET.
+    # Delegate the JSON build to Python. PowerShell 5.1's JSON layer
+    # (ConvertTo-Json AND System.Web.JavaScriptSerializer) has shown
+    # too many sharp edges in this arc: single-element array collapse,
+    # circular reference exceptions when hashtables contain PSObject
+    # values with hidden metadata, BOM handling, etc. Python's stdlib
+    # json is deterministic and bulletproof; we're already calling
+    # Python for everything else in this orchestrator.
     $tmpDir = Join-Path $env:TEMP "arc3-runtask-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $tmpDir | Out-Null
-    $overridesPath = Join-Path $tmpDir 'overrides.json'
-    $networkPath   = Join-Path $tmpDir 'network.json'
+
+    # Build the input file for the Python helper. Use ConvertTo-Json
+    # at this layer only — the helper will rebuild the actual run-task
+    # shape with proper arrays.
+    $envInput = @()
+    foreach ($e in $EnvOverrides) {
+        $envInput += ,@{ name = [string]$e.name; value = [string]$e.value }
+    }
+    $cmdInput = @()
+    foreach ($c in $ContainerCmd) { $cmdInput += ,[string]$c }
+    $subnetInput = @()
+    foreach ($s in $netCfg.awsvpcConfiguration.subnets) { $subnetInput += ,[string]$s }
+    $sgInput = @()
+    foreach ($g in $netCfg.awsvpcConfiguration.securityGroups) { $sgInput += ,[string]$g }
+
+    $helperInput = @{
+        container_name   = 'luciel-prod-ops'
+        command          = $cmdInput
+        environment      = $envInput
+        subnets          = $subnetInput
+        security_groups  = $sgInput
+        out_dir          = $tmpDir
+    }
+    $helperInputPath = Join-Path $tmpDir 'runtask-input.json'
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-    [System.IO.File]::WriteAllText($overridesPath, $overridesJson, $utf8NoBom)
-    [System.IO.File]::WriteAllText($networkPath,   $networkJson,   $utf8NoBom)
-    Write-Host "    overrides : $overridesPath ($(($overridesJson.Length)) chars)"
+    $helperInputJson = $helperInput | ConvertTo-Json -Depth 10
+    [System.IO.File]::WriteAllText($helperInputPath, $helperInputJson, $utf8NoBom)
+
+    Write-Host "==> Building run-task JSON via Python helper" -ForegroundColor Cyan
+    $helperOut = python scripts\arc3_build_runtask_json.py $helperInputPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "arc3_build_runtask_json.py failed (exit=$LASTEXITCODE)"
+    }
+    $helperLines = $helperOut -split "`n" | Where-Object { $_ }
+    $overridesPath = $helperLines[0].Trim()
+    $networkPath   = $helperLines[1].Trim()
+    Write-Host "    overrides : $overridesPath"
     Write-Host "    network   : $networkPath"
 
     Write-Host "==> aws ecs run-task" -ForegroundColor Cyan
