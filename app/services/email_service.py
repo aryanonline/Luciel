@@ -37,10 +37,87 @@ from __future__ import annotations
 import logging
 import os
 from typing import Final
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# Arc 2 (2026-05-20) -- D-set-password-token-logged-plaintext-2026-05-17 fix.
+# Every token-bearing URL emitted from this module passes through
+# `_redact_token_url` before being passed to `logger.info`/`logger.warning`.
+# The redacted form preserves the URL path (useful for ops debugging --
+# "was this a magic-link or a set-password link?") and strips the
+# `token` query param to the literal string `<redacted>`. Other query
+# params (if any) are preserved verbatim. The path-only URL never
+# carries the signed HS256 JWT, so a `logs:GetLogEvents` reader on the
+# CloudWatch log group cannot lift a usable invite/welcome/reset link.
+# The plaintext URL is still available in-process for the SES `Body`
+# field (which is the only legitimate carrier of the token: the
+# customer's inbox). See DRIFTS `~~D-set-password-token-logged-
+# plaintext-2026-05-17~~` for the closing stanza and full audit trail.
+def _redact_token_url(url: str) -> str:
+    """Strip the `token=...` query param from a URL for safe logging.
+
+    The returned URL is path-and-fragment identical to the input, with
+    the `token` query param replaced by the literal `<redacted>`. All
+    other query params are preserved verbatim. If the URL has no
+    `token` query param, the URL is returned unchanged.
+
+    This is a defensive emitter-layer redaction -- the in-process URL
+    value is unchanged, and the email body still carries the real
+    token-bearing link to the customer's inbox (the only legitimate
+    carrier). Only the CloudWatch log line is sanitized.
+    """
+    try:
+        parts = urlsplit(url)
+        query_pairs = parse_qsl(parts.query, keep_blank_values=True)
+        if not any(k == "token" for k, _ in query_pairs):
+            return url
+        redacted_pairs = [
+            (k, "<redacted>" if k == "token" else v) for k, v in query_pairs
+        ]
+        new_query = urlencode(redacted_pairs)
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)
+        )
+    except (ValueError, TypeError):
+        # If urllib chokes on a malformed URL (e.g. None, empty string,
+        # non-string input), fall back to the literal `<redacted-url>`
+        # rather than emit the original. Belt-and-suspenders: the
+        # caller never sees a logged secret even on a parse failure.
+        return "<redacted-url>"
+
+
+# Arc 2 (2026-05-20) -- the body-logging legs of the SES failure path
+# also need to be sanitized because the email body itself carries the
+# token-bearing link as plain text (the customer needs to click it).
+# `_redact_body` rewrites every URL-with-token-query in the body to its
+# `_redact_token_url` form. Conservative regex: matches `https://...?...`
+# strings up to the first whitespace or end-of-string, redacts each
+# match in place. Non-token URLs (e.g. the legal/support links in the
+# email footer, if any) are untouched because they have no `token=`
+# query param.
+import re
+
+_TOKEN_URL_PATTERN: Final = re.compile(
+    r"https?://[^\s]*[?&]token=[^\s&]+(?:&[^\s]*)?"
+)
+
+
+def _redact_body(body: str) -> str:
+    """Rewrite every token-bearing URL in an email body to its redacted form.
+
+    Used on the SES-failure log path where the full body is emitted so
+    on-call can manually relay. Body is logged with token query param
+    stripped; the in-process body sent to SES is unchanged.
+    """
+    if not body:
+        return body
+    return _TOKEN_URL_PATTERN.sub(
+        lambda m: _redact_token_url(m.group(0)), body
+    )
 
 
 SUBJECT_MAGIC_LINK: Final[str] = "Your VantageMind login link"
@@ -50,8 +127,15 @@ SUBJECT_PILOT_REFUND: Final[str] = "Your VantageMind pilot has been refunded"
 # pays $300 (signup -> upgrade) does not see two identical-looking
 # "set your password" emails in their inbox. Subject copy is locked to
 # the CANONICAL_RECAP §12 Step 30a.3 row.
-SUBJECT_WELCOME_SET_PASSWORD: Final[str] = "Welcome to VantageMind — set your password"
-SUBJECT_INVITE_SET_PASSWORD: Final[str] = "You’ve been invited to VantageMind — set your password"
+# Arc 2 (2026-05-20) -- D-welcome-email-subject-mojibake-2026-05-17: SES v2
+# `send_email` with `Simple.Subject` does not RFC-2047-wrap the header, so
+# any U+2019 (right-single-quote) or U+2014 (em-dash) in the subject
+# degrades to `Æ` / `ù` in Gmail's local-fallback decoding (Latin-1 path).
+# Per drift resolution path option (a), subjects are now ASCII-only;
+# body copy keeps typographer's quotes/dashes because Body.Text.Data is
+# carried with explicit `Charset="UTF-8"` and decodes correctly.
+SUBJECT_WELCOME_SET_PASSWORD: Final[str] = "Welcome to VantageMind - set your password"
+SUBJECT_INVITE_SET_PASSWORD: Final[str] = "You've been invited to VantageMind - set your password"
 SUBJECT_RESET_PASSWORD: Final[str] = "Reset your VantageMind password"
 _LOG_TRANSPORT: Final[str] = "log"
 _SES_TRANSPORT: Final[str] = "ses"
@@ -159,8 +243,8 @@ def send_magic_link_email(
             settings.from_email,
             to_email,
             SUBJECT_MAGIC_LINK,
-            magic_link_url,
-            body,
+            _redact_token_url(magic_link_url),
+            _redact_body(body),
         )
         return
 
@@ -199,20 +283,24 @@ def send_magic_link_email(
             settings.from_email,
             to_email,
             SUBJECT_MAGIC_LINK,
-            magic_link_url,
+            _redact_token_url(magic_link_url),
             message_id,
         )
     except (ClientError, BotoCoreError) as exc:
-        # Log the full body so on-call can manually relay if SES is down,
+        # Log the redacted body so on-call can manually relay (after
+        # re-minting the token via `/forgot-password`) if SES is down,
         # then raise so the caller's audit row records the failure.
+        # Arc 2 (2026-05-20): both url and body now pass through
+        # `_redact_token_url` / `_redact_body` before logging --
+        # CloudWatch never carries an unredeemed token.
         logger.warning(
             "[magic-link-email] SES send FAILED from=%s to=%s subject=%r url=%s error=%s\n%s",
             settings.from_email,
             to_email,
             SUBJECT_MAGIC_LINK,
-            magic_link_url,
+            _redact_token_url(magic_link_url),
             exc,
-            body,
+            _redact_body(body),
         )
         raise MagicLinkError(f"SES send_email failed: {exc}") from exc
 
@@ -330,8 +418,8 @@ def send_welcome_set_password_email(
             to_email,
             subject,
             purpose,
-            set_password_url,
-            body,
+            _redact_token_url(set_password_url),
+            _redact_body(body),
         )
         return
 
@@ -369,10 +457,14 @@ def send_welcome_set_password_email(
             to_email,
             subject,
             purpose,
-            set_password_url,
+            _redact_token_url(set_password_url),
             message_id,
         )
     except (ClientError, BotoCoreError) as exc:
+        # Arc 2 (2026-05-20): both url and body now pass through
+        # `_redact_token_url` / `_redact_body` before logging --
+        # CloudWatch never carries an unredeemed token. See
+        # `~~D-set-password-token-logged-plaintext-2026-05-17~~`.
         logger.warning(
             "[welcome-set-password-email] SES send FAILED from=%s to=%s "
             "subject=%r purpose=%s url=%s error=%s\n%s",
@@ -380,9 +472,9 @@ def send_welcome_set_password_email(
             to_email,
             subject,
             purpose,
-            set_password_url,
+            _redact_token_url(set_password_url),
             exc,
-            body,
+            _redact_body(body),
         )
         raise WelcomeEmailError(f"SES send_email failed: {exc}") from exc
 

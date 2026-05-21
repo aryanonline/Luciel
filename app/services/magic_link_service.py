@@ -180,7 +180,7 @@ def build_magic_link_url(token: str) -> str:
     """Construct the click-through URL the email body should carry.
 
     The URL points at the *marketing site* (not the backend) so the
-    cookie can be set on the apex domain (luciel.ai) and the React
+    cookie can be set on the apex domain (vantagemind.ai) and the React
     router can handle the subsequent navigation. The marketing site's
     ``/login`` route POSTs the token back to the backend's
     ``/api/v1/billing/login`` endpoint, which sets the cookie and

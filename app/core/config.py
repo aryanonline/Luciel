@@ -198,8 +198,17 @@ class Settings(BaseSettings):
     # first-time buyers only; repeat customers (who skip the intro fee)
     # continue to work even if this slot is unconfigured.
     stripe_price_intro_fee: str = ""
-    billing_success_url: str = "https://luciel.ai/onboarding?session_id={CHECKOUT_SESSION_ID}"
-    billing_cancel_url: str = "https://luciel.ai/pricing?cancelled=1"
+    # Arc 2 (2026-05-20) -- D-marketing-site-url-luciel-ai-stale-default-2026-05-14
+    # belt-and-suspenders sub-finding: production overrides these via the
+    # `BILLING_SUCCESS_URL` / `BILLING_CANCEL_URL` env entries injected by
+    # task-def rev49 (verified 2026-05-20 against the live :76 backend),
+    # but the source-level defaults were still pointing at the dead apex
+    # `luciel.ai` brand. If a future env-injection regression ever drops
+    # the override, the fallback now resolves to the live marketing host
+    # served via Amplify (`www.vantagemind.ai`, d1xf2f9605mosw) so a paid
+    # buyer would land on a real page rather than a dead domain.
+    billing_success_url: str = "https://www.vantagemind.ai/account/billing?status=success"
+    billing_cancel_url: str = "https://www.vantagemind.ai/pricing?status=cancelled"
     # billing_trial_days: legacy Step 30a single-value default. Step 30a.2
     # superseded the free-trial model entirely with a uniform paid intro
     # (INTRO_TRIAL_DAYS=90 + $100 intro fee, see app/services/billing_service.py).
@@ -231,7 +240,7 @@ class Settings(BaseSettings):
     # session_cookie_secure:  True in prod (HTTPS-only). False allowed in
     #                         dev so the cookie survives localhost.
     # session_cookie_domain:  set explicitly so the cookie is visible to
-    #                         both luciel.ai (marketing) and the api
+    #                         both vantagemind.ai (marketing) and the api
     #                         subdomain. Empty means "host-only" which is
     #                         the dev default.
     magic_link_secret: str = ""

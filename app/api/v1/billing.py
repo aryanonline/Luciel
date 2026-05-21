@@ -121,7 +121,7 @@ def _set_session_cookie(response: Response, token: str) -> None:
         samesite="lax",
         # An empty domain string falls back to a host-only cookie,
         # which is what we want in dev. In prod the domain is set
-        # explicitly so the apex domain (luciel.ai) sees it.
+        # explicitly so the apex domain (vantagemind.ai) sees it.
         domain=settings.session_cookie_domain or None,
         path="/",
     )
@@ -191,7 +191,10 @@ async def stripe_webhook(request: Request, db: DbSession) -> JSONResponse:
         # has the helper for it but expects to be inside its dispatch
         # path, so we record directly here via the same context.
         try:
-            BillingWebhookService(db)._record_unknown_event(
+            # Arc 2 (2026-05-20) -- D-billing-webhook-service-stripe-attribute-error-2026-05-18:
+            # Pass the singleton stripe_client through so the service's
+            # __init__ does not re-resolve it on the bad-signature audit path.
+            BillingWebhookService(db, stripe_client=stripe_client)._record_unknown_event(
                 event_id="<bad-signature>",
                 event_type="signature_verification_failed",
             )
@@ -273,7 +276,13 @@ async def stripe_webhook(request: Request, db: DbSession) -> JSONResponse:
         event_dict = recursive()
 
     try:
-        result = BillingWebhookService(db).handle(event_dict)
+        # Arc 2 (2026-05-20) -- D-billing-webhook-service-stripe-attribute-error-2026-05-18:
+        # Inject the singleton stripe_client so `_on_checkout_completed`
+        # can read the canonical Subscription object via
+        # `self.stripe.retrieve_subscription` instead of relying on the
+        # bare-AttributeError fallback path the prior implementation
+        # accidentally promoted to primary.
+        result = BillingWebhookService(db, stripe_client=stripe_client).handle(event_dict)
     except Exception:
         # Genuine server-side failure -- let it bubble so Stripe retries.
         logger.exception("billing-webhook: handler raised")

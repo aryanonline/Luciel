@@ -35,9 +35,26 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 from pathlib import Path
 
 import pytest
+
+
+# Arc 2 (2026-05-20) -- D-step-30a-billing-shape-test-moderation-config-failure-2026-05-13:
+# `test_router_registered_on_v1_aggregate` imports `app.api.router`, which
+# transitively imports `app/api/v1/chat_widget.py`, which calls
+# `ModerationGate.from_settings(settings)` at module-import time. The default
+# `settings.moderation_provider` is "openai"; with an empty `OPENAI_API_KEY`
+# (the common local-dev state) that factory raises `ConfigurationError` and
+# the entire test file fails to load.
+#
+# Per drift resolution path, set a benign default at module top BEFORE the
+# first `from app...` import in any test below. `null` returns
+# `NullModerationProvider()` cleanly and is the documented dev value.
+# Real test envs that override this (CI configures `keyword` / `openai` with
+# a stub key) still win because `setdefault` is non-destructive.
+os.environ.setdefault("MODERATION_PROVIDER", "null")
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

@@ -78,6 +78,7 @@ from app.repositories.admin_audit_repository import AdminAuditRepository, AuditC
 # ``/auth/set-password``. The buyer must redeem that link before any
 # cookied /app session exists for them -- that is the load-bearing
 # enforcement of "password mandatory at signup".
+from app.integrations.stripe import StripeClient, get_stripe_client
 from app.services.email_service import send_welcome_set_password_email
 from app.services.magic_link_service import (
     build_set_password_url,
@@ -155,8 +156,29 @@ class BillingWebhookService:
         does not redeliver indefinitely.
     """
 
-    def __init__(self, db: Session) -> None:
+    def __init__(
+        self,
+        db: Session,
+        stripe_client: StripeClient | None = None,
+    ) -> None:
         self.db = db
+        # Arc 2 (2026-05-20) -- D-billing-webhook-service-stripe-attribute-error-2026-05-18:
+        # `_on_checkout_completed` calls `self.stripe.retrieve_subscription(...)`
+        # to read the canonical Subscription object (status, period dates,
+        # trial_end) when the checkout.session inline data is insufficient.
+        # Prior to this fix, `__init__` set only `self.db`, so the first
+        # `self.stripe` read raised AttributeError; the surrounding
+        # try/except caught it and the fallback path silently became the
+        # de-facto primary on every checkout. We now ALWAYS bind
+        # `self.stripe` (either the injected client for tests, or the
+        # process-singleton from `get_stripe_client()` for live traffic).
+        # The retrieve-subscription call site at L330 still wraps its read
+        # in try/except so genuine Stripe-unreachable conditions degrade
+        # to inline data + a subsequent `customer.subscription.updated`
+        # backfill, exactly as the original design intended.
+        self.stripe: StripeClient = (
+            stripe_client if stripe_client is not None else get_stripe_client()
+        )
 
     # -----------------------------------------------------------------
     # Top-level dispatch
