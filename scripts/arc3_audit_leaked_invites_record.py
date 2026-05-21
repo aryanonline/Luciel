@@ -26,7 +26,12 @@ note containing the closure_drift token) — if so, it skips. Safe to
 re-run.
 
 Usage:
+  # File source (Pattern O laptop-side):
   python scripts/arc3_audit_leaked_invites_record.py arc3-out/flipped-invites.psv
+
+  # Stdin source (Pattern O ECS one-shot — paste the PSV block from the
+  # revoke-driver's stdout sentinels between PSV-BEGIN / PSV-END):
+  python scripts/arc3_audit_leaked_invites_record.py -
 
 Env:
   DATABASE_URL must be set to the prod (or restore-staging) Postgres
@@ -118,7 +123,20 @@ def main() -> int:
         return 2
 
     psv_path = sys.argv[1]
-    if not os.path.isfile(psv_path):
+    if psv_path == "-":
+        # Stdin source: write to a temp file so the existing _parse_psv
+        # iterator is unchanged.
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", delete=False, suffix=".psv"
+        )
+        try:
+            tmp.write(sys.stdin.read())
+            tmp.flush()
+            psv_path = tmp.name
+        finally:
+            tmp.close()
+    elif not os.path.isfile(psv_path):
         print(f"input file not found: {psv_path}", file=sys.stderr)
         return 2
 

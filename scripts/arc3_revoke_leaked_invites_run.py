@@ -223,20 +223,41 @@ def main() -> int:
 
             # Write pipe-delimited RETURNING capture for the paired
             # audit-record helper (same shape the .sql file emits).
+            # ALSO emit the PSV to stdout between explicit sentinels so
+            # that when this driver runs inside an ECS one-shot task
+            # (Pattern O), the operator can extract the RETURNING set
+            # straight out of the CloudWatch log stream without needing
+            # to reach into the container's filesystem.
             out_path = Path(args.out)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            with out_path.open("w", encoding="utf-8", newline="") as g:
-                g.write("|".join(PSV_HEADER_COLS) + "\n")
-                for r in flipped:
-                    cells = [(str(c) if c is not None else "") for c in r]
-                    g.write("|".join(cells) + "\n")
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with out_path.open("w", encoding="utf-8", newline="") as g:
+                    g.write("|".join(PSV_HEADER_COLS) + "\n")
+                    for r in flipped:
+                        cells = [(str(c) if c is not None else "") for c in r]
+                        g.write("|".join(cells) + "\n")
+                wrote_file = True
+            except OSError as exc:
+                # In an ECS one-shot the working dir may be read-only or
+                # the path may not be writable; that's fine because the
+                # stdout sentinels below are the load-bearing channel.
+                print(f"  (file write skipped: {exc})")
+                wrote_file = False
 
             print("=== COMMIT — pending invites flipped to revoked. ===")
             print(f"  flipped_rows   : {len(flipped)}")
-            print(f"  RETURNING file : {out_path}")
+            if wrote_file:
+                print(f"  RETURNING file : {out_path}")
             print()
-            print("Next: python scripts\\arc3_audit_leaked_invites_record.py "
-                  f"{out_path}")
+            print("PSV-BEGIN flipped-invites")
+            print("|".join(PSV_HEADER_COLS))
+            for r in flipped:
+                cells = [(str(c) if c is not None else "") for c in r]
+                print("|".join(cells))
+            print("PSV-END flipped-invites")
+            print()
+            print("Next: feed the PSV block into "
+                  "scripts/arc3_audit_leaked_invites_record.py")
             return 0
 
 
