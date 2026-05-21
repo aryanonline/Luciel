@@ -96,46 +96,88 @@ aws logs describe-log-streams `
     --output table
 
 # ----------------------------------------------------------------------
-# Helper: window-scoped filter on a single quoted term. Mirrors the
-# convention from scripts/diag_invite_email_revoke.ps1 (one term per
-# call to dodge PowerShell 5.1's argument tokenizer issues with OR
-# patterns). Captures BOTH timestamp and message; we need the message
-# body to grep for token= later.
+# Helper: window-scoped CloudWatch filter. CRITICAL FIX (Arc 3, 2026-05-21):
+# the previous version passed hyphenated multi-token patterns like
+# "welcome-set-password-email" as a quoted filter. CloudWatch Logs
+# tokenizes filter patterns on hyphens (and other non-alphanumerics),
+# so a quoted hyphenated string silently matches zero events — even
+# though the substring appears verbatim in the message body. Partner's
+# manual run with the OR-filter `?token= ?jti=` proved real leaked
+# JTIs exist in the same window the script reported as empty.
+#
+# Fix: filter ONCE on the broad tokenizer-safe OR-pattern `?token= ?jti=`
+# (catches every emitter that leaked a JWT in either URL-arg or claim
+# form), capture the union to a single raw file, then grep that file
+# locally with Select-String for the per-emitter tags. PowerShell's
+# regex layer is hyphen-safe; only CloudWatch's tokenizer is not.
 # ----------------------------------------------------------------------
-function Get-WindowedEmitterLines {
+function Get-WindowedRawCapture {
     param(
-        [Parameter(Mandatory)][string]$Term,
+        [Parameter(Mandatory)][string]$Pattern,
         [Parameter(Mandatory)][string]$OutFile,
-        [int]$MaxItems = 1000
+        [int]$MaxItems = 5000
     )
-    $quoted = "`"$Term`""
     Write-Host ""
-    Write-Host "--- filter: $Term -> $OutFile ---" -ForegroundColor Yellow
-    aws logs filter-log-events `
-        --log-group-name $LogGroup `
-        --region $Region `
-        --start-time $StartMs `
-        --end-time   $EndMs `
-        --max-items  $MaxItems `
-        --filter-pattern $quoted `
-        --query "events[*].[timestamp,message]" `
-        --output text | Out-File -FilePath $OutFile -Encoding utf8
+    Write-Host "--- filter (CloudWatch): $Pattern -> $OutFile ---" -ForegroundColor Yellow
+    # IMPORTANT: the CloudWatch OR-filter syntax ?token= ?jti= contains a
+    # space that PowerShell would otherwise split into two CLI args. We
+    # build the argv array explicitly and let PowerShell pass --filter-
+    # pattern's value as a single quoted argument to aws.exe. This is
+    # the same pattern the partner used in the manual run that returned
+    # real leaked JTIs.
+    $awsArgs = @(
+        "logs", "filter-log-events",
+        "--log-group-name", $LogGroup,
+        "--region", $Region,
+        "--start-time", $StartMs,
+        "--end-time", $EndMs,
+        "--max-items", $MaxItems,
+        "--filter-pattern", $Pattern,
+        "--query", "events[*].[timestamp,message]",
+        "--output", "text"
+    )
+    & aws @awsArgs | Out-File -FilePath $OutFile -Encoding utf8
     $lineCount = (Get-Content $OutFile -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
     Write-Host "  -> $lineCount lines captured"
 }
 
+function Split-EmitterTag {
+    param(
+        [Parameter(Mandatory)][string]$SourceFile,
+        [Parameter(Mandatory)][string]$Tag,
+        [Parameter(Mandatory)][string]$OutFile
+    )
+    # Hyphens are fine in PowerShell's Select-String regex; the
+    # CloudWatch tokenizer is the ONLY layer that splits on them.
+    if (Test-Path $SourceFile) {
+        Select-String -Path $SourceFile -Pattern ([regex]::Escape($Tag)) -SimpleMatch `
+            | ForEach-Object { $_.Line } `
+            | Out-File -FilePath $OutFile -Encoding utf8
+    } else {
+        "" | Out-File -FilePath $OutFile -Encoding utf8
+    }
+    $lineCount = (Get-Content $OutFile -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
+    Write-Host ("  split -> {0,5} lines for tag '{1}' -> {2}" -f $lineCount, $Tag, (Split-Path -Leaf $OutFile))
+}
+
 # ----------------------------------------------------------------------
-# (2) Capture all three emitter markers across the discovery window.
-#     Only (2a) is row-bound and load-bearing on remediation. (2b) and
-#     (2c) are evidence-only.
+# (2) Single broad capture, then local per-emitter split.
+#     Only the welcome-set-password subset is row-bound and load-bearing
+#     on remediation; magic-link and pilot-refund splits are evidence-only.
 # ----------------------------------------------------------------------
+$RawFile         = Join-Path $OutDir "token-jti-raw.txt"
 $WelcomeFile     = Join-Path $OutDir "welcome-set-password-emitters.txt"
 $MagicLinkFile   = Join-Path $OutDir "magic-link-emitters.txt"
 $PilotRefundFile = Join-Path $OutDir "pilot-refund-emitters.txt"
 
-Get-WindowedEmitterLines -Term "welcome-set-password-email" -OutFile $WelcomeFile      -MaxItems 2000
-Get-WindowedEmitterLines -Term "magic-link-email"           -OutFile $MagicLinkFile    -MaxItems 2000
-Get-WindowedEmitterLines -Term "pilot-refund-email"         -OutFile $PilotRefundFile  -MaxItems 2000
+# Tokenizer-safe OR-filter — matches the partner-validated manual run.
+Get-WindowedRawCapture -Pattern "?token= ?jti=" -OutFile $RawFile -MaxItems 10000
+
+Write-Host ""
+Write-Host "--- (2x) split raw capture by emitter tag ---" -ForegroundColor Yellow
+Split-EmitterTag -SourceFile $RawFile -Tag "welcome-set-password-email" -OutFile $WelcomeFile
+Split-EmitterTag -SourceFile $RawFile -Tag "magic-link-email"           -OutFile $MagicLinkFile
+Split-EmitterTag -SourceFile $RawFile -Tag "pilot-refund-email"         -OutFile $PilotRefundFile
 
 # ----------------------------------------------------------------------
 # (3) Extract leaked JTIs from the welcome-set-password capture.
@@ -207,9 +249,19 @@ print(f"unique_jtis={len(jtis)}")
 $PyTmp = Join-Path $OutDir "_extract_jtis.py"
 $PyExtract | Out-File -FilePath $PyTmp -Encoding utf8
 
+# Run the extractor against BOTH the welcome subset (for the load-bearing
+# JTI list that drives the SQL flip) AND the full raw capture (so the
+# decode log records every leaked JTI in the window, including magic-
+# link JTIs that are TTL-expired but still need disclosure-record entries).
 python $PyTmp $WelcomeFile $JtiFile $JtiDecodeLog
 $UniqueJtis = (Get-Content $JtiFile -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
 Write-Host "  -> $UniqueJtis unique welcome JTIs extracted to $JtiFile" -ForegroundColor Green
+
+$AllJtiFile      = Join-Path $OutDir "leaked-all-jtis.txt"
+$AllJtiDecodeLog = Join-Path $OutDir "leaked-all-jti-decode.log"
+python $PyTmp $RawFile $AllJtiFile $AllJtiDecodeLog
+$AllUniqueJtis = (Get-Content $AllJtiFile -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
+Write-Host "  -> $AllUniqueJtis unique JTIs (all emitters) extracted to $AllJtiFile" -ForegroundColor Green
 
 # ----------------------------------------------------------------------
 # (4) Counts for the audit record (magic-link + pilot-refund are evidence-
