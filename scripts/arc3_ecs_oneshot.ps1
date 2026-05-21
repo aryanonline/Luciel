@@ -145,10 +145,15 @@ function Invoke-Build {
 }
 
 function Get-LatestTaskDef {
+    # NOTE: --max-items is a CLIENT-SIDE pagination param. With it set,
+    # the CLI returns the requested items AND a pagination NextToken,
+    # which makes --output text emit two lines and breaks --query slicing.
+    # Drop it entirely and let --sort DESC + [0] pick the newest ACTIVE
+    # task-def. The list is bounded (< 1000 entries) so no perf concern.
     $tdArn = aws ecs list-task-definitions `
         --family-prefix luciel-prod-ops `
+        --status ACTIVE `
         --sort DESC `
-        --max-items 1 `
         --region $Region `
         --query 'taskDefinitionArns[0]' --output text
     if ([string]::IsNullOrWhiteSpace($tdArn) -or $tdArn -eq 'None') {
