@@ -103,10 +103,35 @@ function Invoke-Build {
     if (-not (Test-Path 'td-prod-ops-rev3.json')) {
         throw "td-prod-ops-rev3.json not found in CWD; run from repo root"
     }
-    $td = Get-Content 'td-prod-ops-rev3.json' -Raw | ConvertFrom-Json
-    $td.containerDefinitions[0].image = $ImageRef
-    $td.containerDefinitions[0].logConfiguration.options.'awslogs-stream-prefix' = $StreamPrefix
-    $td | ConvertTo-Json -Depth 20 | Out-File -FilePath 'td-prod-ops-rev4.json' -Encoding utf8
+    # Surgical text edits on the raw JSON instead of round-tripping
+    # through ConvertFrom-Json | ConvertTo-Json. PowerShell 5.1's
+    # ConvertTo-Json collapses single-element arrays into scalars
+    # (requiresCompatibilities, containerDefinitions, environment,
+    # secrets all have len==1) which AWS rejects as "Invalid JSON".
+    # Also avoids the Out-File -Encoding utf8 BOM gotcha entirely.
+    $tdRaw = Get-Content 'td-prod-ops-rev3.json' -Raw
+    # (1) Swap the pinned image digest. The rev3 file has a literal
+    #     image string; replace the FIRST occurrence to be safe.
+    $oldImageRegex = '"image"\s*:\s*"[^"]+"'
+    $newImageLine = '"image": "' + $ImageRef + '"'
+    if ($tdRaw -notmatch $oldImageRegex) {
+        throw "Could not locate 'image' field in td-prod-ops-rev3.json"
+    }
+    $tdNew = [regex]::Replace($tdRaw, $oldImageRegex, $newImageLine, 1)
+    # (2) Swap the awslogs-stream-prefix.
+    $oldStreamRegex = '"awslogs-stream-prefix"\s*:\s*"[^"]+"'
+    $newStreamLine = '"awslogs-stream-prefix": "' + $StreamPrefix + '"'
+    if ($tdNew -notmatch $oldStreamRegex) {
+        throw "Could not locate 'awslogs-stream-prefix' field in td-prod-ops-rev3.json"
+    }
+    $tdNew = [regex]::Replace($tdNew, $oldStreamRegex, $newStreamLine, 1)
+    # Write BOM-less UTF-8 via the .NET API.
+    [System.IO.File]::WriteAllText(
+        (Join-Path (Get-Location) 'td-prod-ops-rev4.json'),
+        $tdNew,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Write-Host "    Wrote td-prod-ops-rev4.json (BOM-less UTF-8)"
 
     Write-Host "==> register-task-definition" -ForegroundColor Cyan
     $tdArn = aws ecs register-task-definition `
