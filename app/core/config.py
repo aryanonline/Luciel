@@ -250,6 +250,47 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = True
     session_cookie_domain: str = ""
 
+    # --- Arc 3 Work-Unit B.2 -- JWT signing-key `kid` rolling window ---
+    #
+    # The single-secret `magic_link_secret` field above does NOT support
+    # in-place rotation: overwriting it atomically invalidates every
+    # signed-in customer's 30-day session cookie plus every in-flight
+    # 24h set-password / reset-password / magic-link token. We added a
+    # `kid`-header-based two-key rolling-window scheme so the operator
+    # can rotate the signing key without forcing every customer to
+    # re-login. Design memo: arc3-out/B2-kid-rolling-design.md.
+    #
+    # Contract:
+    #
+    # jwt_signing_keys_json: JSON map of {kid: secret}. In prod, populated
+    #                       from SSM under /luciel/jwt-signing-keys (a
+    #                       SecureString JSON blob). Exactly two entries
+    #                       during a rotation; one entry steady-state.
+    #                       Example: {"v2026-05-21": "<primary>",
+    #                                 "v2025-08-12": "<grace>"}
+    #                       When empty AND magic_link_secret is set, the
+    #                       service falls back to a single "legacy"-kid
+    #                       entry derived from magic_link_secret. This is
+    #                       the boot-time shim that lets the code change
+    #                       ship BEFORE the SSM blob lands -- zero deploy-
+    #                       ordering hazards.
+    # jwt_active_kid:       the kid that the minter should use for newly-
+    #                       issued tokens. Must be a key in
+    #                       jwt_signing_keys_json. Empty falls through to
+    #                       "legacy".
+    # jwt_grace_kid:        advisory only -- the decoder accepts any kid
+    #                       present in jwt_signing_keys_json. Recorded
+    #                       here so the rotation runbook can assert "we
+    #                       are mid-rotation" vs. "we are steady-state"
+    #                       at a glance.
+    #
+    # The `magic_link_secret` field stays through Step 32a as the boot-
+    # time shim; removed when Step 32a self-serve identity ships its own
+    # auth module rewrite.
+    jwt_signing_keys_json: str = ""
+    jwt_active_kid: str = ""
+    jwt_grace_kid: str = ""
+
     # --- Outbound transactional email (Step 30a / 30a.2) ---
     #
     # As of Step 30a.2 Phase D, the magic-link email is delivered through

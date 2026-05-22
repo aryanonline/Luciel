@@ -25,9 +25,11 @@ explicitly forbids by requiring `algorithms=[...]` on every decode.
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Literal
 
 import jwt
@@ -63,6 +65,12 @@ TOKEN_TYPE_RESET_PASSWORD: Literal["reset_password"] = "reset_password"
 JWT_ALGORITHM = "HS256"
 JWT_ISSUER = "luciel-backend"
 
+# Arc 3 Work-Unit B.2: the `kid` we stamp on tokens minted when the
+# operator has NOT yet populated the new jwt_signing_keys_json blob.
+# This is the boot-time shim that keeps the code change deploy-safe
+# regardless of SSM ordering. See arc3-out/B2-kid-rolling-design.md.
+_LEGACY_KID = "legacy"
+
 
 class MagicLinkError(Exception):
     """Raised on any magic-link or session-cookie validation failure.
@@ -75,14 +83,122 @@ class MagicLinkError(Exception):
     """
 
 
+# ---------------------------------------------------------------------
+# Arc 3 Work-Unit B.2 -- JWT signing-key `kid` rolling window
+# ---------------------------------------------------------------------
+#
+# _resolve_keys() returns the {kid: secret} map that the minter and
+# decoder both consult. The decoder reads the token's own `kid` header
+# (via jwt.get_unverified_header) and looks up the secret in this
+# map; unknown kid is collapsed to MagicLinkError ("Invalid token.")
+# so a probing client cannot distinguish "wrong kid" from "wrong
+# signature" from "expired" -- same posture as the rest of _decode().
+#
+# The map is parsed once per process via @lru_cache. Hot-reloading the
+# JSON blob in-place is intentionally NOT supported: rotation goes
+# through an ECS service bounce, which is the chokepoint where the
+# operator gets to observe the new keys load cleanly before any user
+# traffic hits them.
+#
+# Boot-time shim semantics:
+#   * jwt_signing_keys_json populated -> use it verbatim.
+#   * jwt_signing_keys_json empty AND magic_link_secret set ->
+#     fabricate {_LEGACY_KID: magic_link_secret}. This is what every
+#     pre-B.2 deploy will see until SSM gets the new params, and what
+#     every token minted before B.2 (no kid header) will decode under.
+#   * both empty -> fail closed at first mint/decode.
+
+
+@lru_cache(maxsize=1)
+def _resolve_keys() -> dict[str, str]:
+    """Return the {kid: secret} signing-key map for the current process.
+
+    Cached for the lifetime of the process. To pick up a rotation,
+    bounce the ECS service.
+
+    Test-time note: the cache means tests that mutate
+    settings.jwt_signing_keys_json must call
+    `_resolve_keys.cache_clear()` after the mutation. The new
+    `tests/security/test_jwt_kid_rolling.py` does this through a
+    fixture so callers don't have to think about it.
+    """
+    raw = settings.jwt_signing_keys_json.strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise MagicLinkError(
+                "jwt_signing_keys_json is set but is not valid JSON; "
+                "refusing to sign or verify."
+            ) from exc
+        if not isinstance(parsed, dict) or not parsed:
+            raise MagicLinkError(
+                "jwt_signing_keys_json must be a non-empty JSON object "
+                "of {kid: secret}."
+            )
+        for k, v in parsed.items():
+            if not isinstance(k, str) or not k:
+                raise MagicLinkError(
+                    "jwt_signing_keys_json contains a non-string or "
+                    "empty kid."
+                )
+            if not isinstance(v, str) or not v:
+                raise MagicLinkError(
+                    "jwt_signing_keys_json contains a non-string or "
+                    "empty secret."
+                )
+        return dict(parsed)
+
+    # Boot-time shim: fall back to the single legacy secret.
+    if settings.magic_link_secret:
+        return {_LEGACY_KID: settings.magic_link_secret}
+
+    raise MagicLinkError(
+        "No JWT signing key is configured. Set either "
+        "JWT_SIGNING_KEYS_JSON (preferred) or MAGIC_LINK_SECRET "
+        "(legacy shim) on the backend."
+    )
+
+
+def _active_kid() -> str:
+    """Return the kid the minter should stamp on freshly-issued tokens.
+
+    Resolution order:
+      1. settings.jwt_active_kid, if non-empty AND present in the key map.
+      2. _LEGACY_KID, if the key map has exactly that one entry (the
+         boot-time shim path).
+      3. Otherwise raise -- an ambiguous map with no active pointer is
+         an operator misconfiguration that must fail closed.
+    """
+    keys = _resolve_keys()
+    active = settings.jwt_active_kid.strip()
+    if active:
+        if active not in keys:
+            raise MagicLinkError(
+                f"jwt_active_kid={active!r} is not present in "
+                f"jwt_signing_keys_json; refusing to mint."
+            )
+        return active
+    if list(keys.keys()) == [_LEGACY_KID]:
+        return _LEGACY_KID
+    raise MagicLinkError(
+        "jwt_active_kid is empty and the key map has more than one "
+        "entry; cannot disambiguate which kid to sign with."
+    )
+
+
 def _secret_or_fail() -> str:
-    """Pull the signing secret from settings, raising MagicLinkError if empty."""
-    if not settings.magic_link_secret:
-        raise MagicLinkError(
-            "Magic-link signing secret is not configured. "
-            "Set MAGIC_LINK_SECRET on the backend."
-        )
-    return settings.magic_link_secret
+    """Return the signing secret for the active kid.
+
+    Semantics: "what would a fresh mint use right now?" -- which is
+    exactly what every existing caller (the four mint_* functions, the
+    e2e test fixtures that re-mint tokens with a stamped jti) wants.
+
+    Preserved as a module-level helper for backward compatibility with
+    tests/e2e/step_30a_4_team_invite_live_e2e.py and any future caller
+    that wants to mint a token outside the four canonical mint paths.
+    """
+    return _resolve_keys()[_active_kid()]
 
 
 def mint_magic_link_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> str:
@@ -96,6 +212,7 @@ def mint_magic_link_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> 
     for blacklist-based revocation if we ever need it.
     """
     secret = _secret_or_fail()
+    kid = _active_kid()
     now = datetime.now(timezone.utc)
     exp = now + timedelta(hours=settings.magic_link_ttl_hours)
     payload = {
@@ -108,7 +225,7 @@ def mint_magic_link_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> 
         "exp": int(exp.timestamp()),
         "jti": str(uuid.uuid4()),
     }
-    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM, headers={"kid": kid})
 
 
 def mint_session_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> str:
@@ -120,6 +237,7 @@ def mint_session_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> str
     session cookie after a single consume.
     """
     secret = _secret_or_fail()
+    kid = _active_kid()
     now = datetime.now(timezone.utc)
     exp = now + timedelta(days=settings.session_cookie_ttl_days)
     payload = {
@@ -132,12 +250,39 @@ def mint_session_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> str
         "exp": int(exp.timestamp()),
         "jti": str(uuid.uuid4()),
     }
-    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM, headers={"kid": kid})
 
 
 def _decode(token: str, *, expected_typ: str) -> dict:
-    """Decode, verify, and type-check a JWT. Raises MagicLinkError on any failure."""
-    secret = _secret_or_fail()
+    """Decode, verify, and type-check a JWT. Raises MagicLinkError on any failure.
+
+    Arc 3 Work-Unit B.2: key resolution goes through the `kid` header.
+    A token's `kid` header tells us which secret in the key-map to
+    verify against. Tokens minted before B.2 have no `kid` header --
+    PyJWT's get_unverified_header returns {} for those, and we fall
+    back to `_LEGACY_KID`. The legacy entry in the key-map IS the old
+    single magic_link_secret, so legacy tokens continue to verify
+    transparently throughout the cutover.
+
+    Unknown kid is collapsed to "Invalid token." -- same posture as
+    bad signature / wrong issuer / expired. A probing client cannot
+    distinguish "wrong kid" from "wrong signature".
+    """
+    keys = _resolve_keys()
+    try:
+        unverified_header = jwt.get_unverified_header(token)
+    except jwt.InvalidTokenError as exc:
+        raise MagicLinkError("Invalid token.") from exc
+
+    kid = unverified_header.get("kid", _LEGACY_KID)
+    secret = keys.get(kid)
+    if secret is None:
+        # Either the token was signed with a key we've retired, OR a
+        # legacy (kid-less) token arrived while no _LEGACY_KID entry
+        # exists in the key-map (post-rotation cleanup state). Both
+        # surface as "Invalid token." -- no oracle.
+        raise MagicLinkError("Invalid token.")
+
     try:
         # `algorithms=[JWT_ALGORITHM]` is non-optional; without it the
         # PyJWT library refuses to validate, and even a misconfigured
@@ -224,6 +369,7 @@ def mint_set_password_token(
     a second probe.
     """
     secret = _secret_or_fail()
+    kid = _active_kid()
     now = datetime.now(timezone.utc)
     exp = now + timedelta(hours=settings.magic_link_ttl_hours)
     payload = {
@@ -237,7 +383,7 @@ def mint_set_password_token(
         "exp": int(exp.timestamp()),
         "jti": str(uuid.uuid4()),
     }
-    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM, headers={"kid": kid})
 
 
 def mint_reset_password_token(
@@ -256,6 +402,7 @@ def mint_reset_password_token(
     replayed as a reset (and vice versa) after the original consume.
     """
     secret = _secret_or_fail()
+    kid = _active_kid()
     now = datetime.now(timezone.utc)
     exp = now + timedelta(hours=settings.magic_link_ttl_hours)
     payload = {
@@ -268,7 +415,7 @@ def mint_reset_password_token(
         "exp": int(exp.timestamp()),
         "jti": str(uuid.uuid4()),
     }
-    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM, headers={"kid": kid})
 
 
 def consume_set_password_token(token: str) -> dict:
