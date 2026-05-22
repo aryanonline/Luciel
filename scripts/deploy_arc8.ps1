@@ -302,8 +302,14 @@ try {
     exit 1
 }
 
-# (b) ECS Exec id-check on a running worker task: expect uid=10001(luciel).
-Write-Host "    (b) ECS Exec 'id' on worker task -- expect uid=10001(luciel)" -ForegroundColor Gray
+# (b) ECS Exec ps-check on a running worker task: expect PID 1 / celery uid=10001.
+# IMPORTANT: do NOT use `id` here -- ECS Exec spawns its own session shell as
+# root inside the container (the `ssm-session-worker` process), so `id` reports
+# the session worker's uid (always root), NOT the container's main process uid.
+# The canonical diagnostic is `ps -eo pid,user,uid,gid,comm` and reading the
+# PID 1 / application-process row. See ~~D-worker-runs-as-root-in-container-2026-05-22~~
+# closure diagnostic-correction note in docs/DRIFTS.md.
+Write-Host "    (b) ECS Exec 'ps -eo' on worker task -- expect PID 1: celery user=luciel uid=10001" -ForegroundColor Gray
 $WorkerTaskArn = aws ecs list-tasks `
     --cluster $Cluster `
     --service-name $WorkerService `
@@ -321,10 +327,11 @@ if ([string]::IsNullOrWhiteSpace($WorkerTaskArn) -or $WorkerTaskArn -eq "None") 
     Write-Host "            --cluster $Cluster ``" -ForegroundColor White
     Write-Host "            --task $WorkerTaskArn ``" -ForegroundColor White
     Write-Host "            --container $WorkerContainer --interactive ``" -ForegroundColor White
-    Write-Host "            --command 'id' ``" -ForegroundColor White
+    Write-Host "            --command 'ps -eo pid,user,uid,gid,comm' ``" -ForegroundColor White
     Write-Host "            --region $AwsRegion" -ForegroundColor White
     Write-Host ""
-    Write-Host "        Expected output: uid=10001(luciel) gid=10001(luciel) ..." -ForegroundColor Yellow
+    Write-Host "        Expected output row: '    1 luciel   10001 10001 celery'" -ForegroundColor Yellow
+    Write-Host "        (do NOT use 'id' here -- it reports the ECS Exec session worker's uid (root), not PID 1)" -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -344,8 +351,8 @@ Write-Host "    backend task-def: $BackendNewArn"
 Write-Host "    worker task-def:  $WorkerNewArn"
 Write-Host ""
 Write-Host "    Next steps (operator):" -ForegroundColor Cyan
-Write-Host "    1. Run the ECS Exec 'id' check on the worker task (above)"
-Write-Host "       and confirm uid=10001(luciel)."
+Write-Host "    1. Run the ECS Exec 'ps -eo' check on the worker task (above)"
+Write-Host "       and confirm PID 1 row shows celery as luciel/10001."
 Write-Host "    2. Tail /ecs/luciel-worker logs and confirm no SecurityWarning."
 Write-Host "    3. Update DRIFTS.md: close"
 Write-Host "         D-worker-runs-as-root-in-container-2026-05-22"
