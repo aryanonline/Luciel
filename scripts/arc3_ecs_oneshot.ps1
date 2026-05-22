@@ -260,6 +260,43 @@ function Invoke-OneShot {
     Write-Host "    Stream    : $streamName"
 
     Write-Host "==> Tailing CloudWatch until STOPPED" -ForegroundColor Cyan
+    # The log stream does not exist until the container's first stdout
+    # flush, so the first few get-log-events calls return
+    # ResourceNotFoundException on stderr. With $ErrorActionPreference
+    # = 'Stop', PowerShell promotes ANY native stderr to a terminating
+    # RemoteException even when redirected via 2>$null. We swap to a
+    # try/wrapper that keeps stderr capture local and ignores the
+    # known-transient "stream not found" error.
+    function Get-StreamEvents {
+        param([string]$Stream, [string]$Token)
+        $args = @(
+            'logs', 'get-log-events',
+            '--log-group-name', $LogGroup,
+            '--log-stream-name', $Stream,
+            '--start-from-head',
+            '--region', $Region,
+            '--output', 'json'
+        )
+        if ($Token) { $args += @('--next-token', $Token) }
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $stdout = & aws @args 2>&1
+            # & aws emits both stdout and stderr into the same stream when
+            # combined with 2>&1; split error records from JSON.
+            $jsonLines = @()
+            foreach ($line in $stdout) {
+                if ($line -is [System.Management.Automation.ErrorRecord]) { continue }
+                $jsonLines += [string]$line
+            }
+            $joined = ($jsonLines -join "`n").Trim()
+            if (-not $joined) { return $null }
+            try { return $joined | ConvertFrom-Json } catch { return $null }
+        } finally {
+            $ErrorActionPreference = $prevPref
+        }
+    }
+
     $nextToken = $null
     $desc = $null
     while ($true) {
@@ -269,22 +306,10 @@ function Invoke-OneShot {
             --tasks $taskArn `
             --region $Region `
             --query 'tasks[0]' --output json | ConvertFrom-Json
-        $logArgs = @(
-            'logs', 'get-log-events',
-            '--log-group-name', $LogGroup,
-            '--log-stream-name', $streamName,
-            '--start-from-head',
-            '--region', $Region,
-            '--output', 'json'
-        )
-        if ($nextToken) { $logArgs += @('--next-token', $nextToken) }
-        $logRaw = & aws @logArgs 2>$null
-        if ($LASTEXITCODE -eq 0 -and $logRaw) {
-            $logOut = $logRaw | ConvertFrom-Json
-            if ($logOut.events -and $logOut.events.Count -gt 0) {
-                foreach ($e in $logOut.events) { Write-Host $e.message }
-                $nextToken = $logOut.nextForwardToken
-            }
+        $logOut = Get-StreamEvents -Stream $streamName -Token $nextToken
+        if ($logOut -and $logOut.events -and $logOut.events.Count -gt 0) {
+            foreach ($e in $logOut.events) { Write-Host $e.message }
+            $nextToken = $logOut.nextForwardToken
         }
         if ($desc.lastStatus -eq 'STOPPED') { break }
         Write-Host "    [...lastStatus=$($desc.lastStatus)]" -ForegroundColor DarkGray
@@ -292,21 +317,9 @@ function Invoke-OneShot {
 
     # Trailing drain.
     Start-Sleep -Seconds 3
-    $logArgs = @(
-        'logs', 'get-log-events',
-        '--log-group-name', $LogGroup,
-        '--log-stream-name', $streamName,
-        '--start-from-head',
-        '--region', $Region,
-        '--output', 'json'
-    )
-    if ($nextToken) { $logArgs += @('--next-token', $nextToken) }
-    $logRaw = & aws @logArgs 2>$null
-    if ($LASTEXITCODE -eq 0 -and $logRaw) {
-        $logOut = $logRaw | ConvertFrom-Json
-        if ($logOut.events) {
-            foreach ($e in $logOut.events) { Write-Host $e.message }
-        }
+    $logOut = Get-StreamEvents -Stream $streamName -Token $nextToken
+    if ($logOut -and $logOut.events) {
+        foreach ($e in $logOut.events) { Write-Host $e.message }
     }
 
     $exitCode = $desc.containers[0].exitCode
