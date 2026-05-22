@@ -1,8 +1,8 @@
-# Arc 3 Work-Unit B.2 — JWT `kid` Rolling-Window Design Memo
+# Arc 3 Work-Unit B.2 â€” JWT `kid` Rolling-Window Design Memo
 
 **Date:** 2026-05-21
 **Author:** VantageMind, paired with Aryan Singh
-**Status:** DESIGN — awaiting partner approval before code touches land
+**Status:** DESIGN â€” awaiting partner approval before code touches land
 **Closure drift:** `D-set-password-token-logged-plaintext-2026-05-17` (residual on 13 unmatched leaked JTIs)
 **Closing tag:** `arc-3-paired-prod-touch`
 
@@ -30,15 +30,15 @@ JTIs from Arc 3 A.2a still need a closure path.
 
 Add a two-key rolling-window scheme:
 
-- **PRIMARY (active) key** — used to sign new tokens. Carries a stable
+- **PRIMARY (active) key** â€” used to sign new tokens. Carries a stable
   string `kid` like `"v2026-05-21"`.
-- **SECONDARY (grace) key** — used **only for decode** of tokens minted
+- **SECONDARY (grace) key** â€” used **only for decode** of tokens minted
   before the last rotation. Carries the previous `kid`.
-- **Active `kid` pointer** — settings string telling the minter which
+- **Active `kid` pointer** â€” settings string telling the minter which
   of the two keys is primary; the decoder uses the token's own `kid`
   header to look up the correct key from a two-entry table.
 
-After a grace period (≥ max token TTL = 30 days, the session-cookie
+After a grace period (â‰¥ max token TTL = 30 days, the session-cookie
 TTL), the secondary entry is removed and rotation is fully complete.
 
 ### Why two keys, not N
@@ -71,7 +71,7 @@ Add three new fields; deprecate one:
 magic_link_secret: str = ""
 
 # New: JSON map of {kid: secret}. In prod, populated from SSM under
-# /luciel/jwt-signing-keys (SecureString JSON blob). Exactly two
+# /luciel/production/jwt_signing_keys_json (SecureString JSON blob). Exactly two
 # entries during a rotation; one entry steady-state.
 #
 # Example: {"v2026-05-21": "<primary-secret>", "v2025-08-12": "<grace-secret>"}
@@ -98,16 +98,16 @@ jwt_grace_kid: str = ""
      fallback to `"legacy"`. This is the boot-time shim that lets the
      code ship before the SSM blob lands.
    * If both are empty, raises `MagicLinkError("no signing key
-     configured")` — fail closed, same posture as today.
+     configured")` â€” fail closed, same posture as today.
 
 2. **New module-level helper `_active_kid() -> str`**
    * Returns `settings.jwt_active_kid` if set, else `"legacy"`.
    * Raises if the active kid is not a key in `_resolve_keys()`.
 
-3. **Mint paths (all four)** — add `headers={"kid": _active_kid()}` to
+3. **Mint paths (all four)** â€” add `headers={"kid": _active_kid()}` to
    `jwt.encode()`. Otherwise unchanged.
 
-4. **Decoder `_decode()`** — rewrite the key-resolution leg only:
+4. **Decoder `_decode()`** â€” rewrite the key-resolution leg only:
    ```python
    keys = _resolve_keys()
    try:
@@ -125,7 +125,7 @@ jwt_grace_kid: str = ""
    # ... rest of jwt.decode(token, secret, algorithms=[...], ...) unchanged.
    ```
 
-5. **`_secret_or_fail()`** — keep the function but redirect it to
+5. **`_secret_or_fail()`** â€” keep the function but redirect it to
    return `_resolve_keys()[_active_kid()]`. This preserves the e2e
    test fixture contract (`tests/e2e/step_30a_4_team_invite_live_e2e.py`
    imports `_secret_or_fail` to re-mint tokens with stamped jti). The
@@ -137,10 +137,10 @@ jwt_grace_kid: str = ""
 
 | Param path | Type | Shape |
 |---|---|---|
-| `/luciel/jwt-signing-keys` | SecureString | JSON: `{"v2026-05-21": "...", "v2025-08-12": "..."}` |
-| `/luciel/jwt-active-kid` | String | `v2026-05-21` |
-| `/luciel/jwt-grace-kid` | String (optional) | `v2025-08-12` during rotation; empty steady-state |
-| `/luciel/magic-link-secret` | SecureString | **DEPRECATED** — kept until Step 32a for boot-time shim |
+| `/luciel/production/jwt_signing_keys_json` | SecureString | JSON: `{"v2026-05-21": "...", "v2025-08-12": "..."}` |
+| `/luciel/production/jwt_active_kid` | String | `v2026-05-21` |
+| `/luciel/production/jwt_grace_kid` | String (optional) | `v2025-08-12` during rotation; empty steady-state |
+| `/luciel/production/magic_link_secret` | SecureString | **DEPRECATED** â€” kept until Step 32a for boot-time shim |
 
 ECS task-def `secrets:` block adds three entries for `JWT_SIGNING_KEYS_JSON`,
 `JWT_ACTIVE_KID`, `JWT_GRACE_KID`. The existing `MAGIC_LINK_SECRET`
@@ -161,7 +161,7 @@ The shim is the critical piece. Order of operations:
    populated as `v2025-08-12` for grace). Re-deploy. New tokens minted
    with `kid="v2026-05-21"`. Tokens minted before the deploy (no kid
    header) decode under `kid="legacy"`, but **the `legacy` key value
-   must be the same string as `v2025-08-12`** — i.e., the JSON map
+   must be the same string as `v2025-08-12`** â€” i.e., the JSON map
    must include `"legacy": "<old-secret>"` for the first rotation only.
 
 3. **Mint a fresh secret for `v2026-05-21`**, write it to the JSON
@@ -184,13 +184,13 @@ fallback get removed.
 
 New file: `tests/security/test_jwt_kid_rolling.py`
 
-1. **`test_mint_uses_active_kid`** — set `jwt_signing_keys_json={"a": "secret-a"}` + `jwt_active_kid="a"`; mint a token; assert the unverified header carries `kid="a"`.
-2. **`test_decode_with_secondary_key`** — set two keys `{"a": "secret-a", "b": "secret-b"}`, active=`"b"`; mint with active `b`, then manually re-mint a token with kid=`a` using PyJWT; assert both decode correctly.
-3. **`test_decode_rejects_unknown_kid`** — mint a token with kid=`"unknown"` using PyJWT; assert `_decode()` raises `MagicLinkError`.
-4. **`test_legacy_shim_no_kid_header`** — set `magic_link_secret="legacy-secret"` and leave `jwt_signing_keys_json` empty; manually mint a token WITHOUT kid header (using PyJWT directly); assert it decodes under the `legacy` fallback.
-5. **`test_legacy_shim_then_kid_promotion`** — set `magic_link_secret="OLD"`, `jwt_signing_keys_json={"legacy": "OLD", "v2": "NEW"}`, `jwt_active_kid="v2"`; assert the minter uses `v2`; assert a kidless legacy token still decodes.
-6. **`test_no_keys_configured_fails_closed`** — both empty; assert `_decode()` raises.
-7. **`test_active_kid_not_in_map_fails_closed`** — `jwt_active_kid="missing"`; assert mint raises.
+1. **`test_mint_uses_active_kid`** â€” set `jwt_signing_keys_json={"a": "secret-a"}` + `jwt_active_kid="a"`; mint a token; assert the unverified header carries `kid="a"`.
+2. **`test_decode_with_secondary_key`** â€” set two keys `{"a": "secret-a", "b": "secret-b"}`, active=`"b"`; mint with active `b`, then manually re-mint a token with kid=`a` using PyJWT; assert both decode correctly.
+3. **`test_decode_rejects_unknown_kid`** â€” mint a token with kid=`"unknown"` using PyJWT; assert `_decode()` raises `MagicLinkError`.
+4. **`test_legacy_shim_no_kid_header`** â€” set `magic_link_secret="legacy-secret"` and leave `jwt_signing_keys_json` empty; manually mint a token WITHOUT kid header (using PyJWT directly); assert it decodes under the `legacy` fallback.
+5. **`test_legacy_shim_then_kid_promotion`** â€” set `magic_link_secret="OLD"`, `jwt_signing_keys_json={"legacy": "OLD", "v2": "NEW"}`, `jwt_active_kid="v2"`; assert the minter uses `v2`; assert a kidless legacy token still decodes.
+6. **`test_no_keys_configured_fails_closed`** â€” both empty; assert `_decode()` raises.
+7. **`test_active_kid_not_in_map_fails_closed`** â€” `jwt_active_kid="missing"`; assert mint raises.
 
 E2E test fixture compatibility:
 
@@ -204,12 +204,12 @@ E2E test fixture compatibility:
 
 ## Six-pillar check
 
-- **Scalability** — Two-entry key map; O(1) decode lookup. Caches resolved keys at module level so we parse the JSON once per process boot.
-- **Reliability** — Boot-time shim means we can ship the code change BEFORE the SSM blob exists. Zero deploy-ordering hazards. Rotation ceremony is a 5-step runbook with a 30-day grace window, not a guess.
-- **Maintainability** — The contract lives in three places: `config.py` field docs, this design memo, and the new test file. `_resolve_keys()` is the single chokepoint for "which secret signs which kid".
-- **Traceability** — Every minted token now carries a `kid` claim that says **when** it was issued. Audit rows that capture token payloads get a free temporal fingerprint.
-- **Security** — Unknown-kid is collapsed to `"Invalid token."` (no oracle). Removing a key from the map is the atomic revocation primitive — we did not have this before. The shim does NOT widen the surface (legacy fallback only activates when the new JSON blob is empty).
-- **Simplicity** — Two keys, one active pointer, one grace pointer. No N-key generalization, no rotation worker, no kid-as-UUID. Just a date-stamped string. The complexity buys exactly one capability: rotate the signing key without forcing every customer to re-login.
+- **Scalability** â€” Two-entry key map; O(1) decode lookup. Caches resolved keys at module level so we parse the JSON once per process boot.
+- **Reliability** â€” Boot-time shim means we can ship the code change BEFORE the SSM blob exists. Zero deploy-ordering hazards. Rotation ceremony is a 5-step runbook with a 30-day grace window, not a guess.
+- **Maintainability** â€” The contract lives in three places: `config.py` field docs, this design memo, and the new test file. `_resolve_keys()` is the single chokepoint for "which secret signs which kid".
+- **Traceability** â€” Every minted token now carries a `kid` claim that says **when** it was issued. Audit rows that capture token payloads get a free temporal fingerprint.
+- **Security** â€” Unknown-kid is collapsed to `"Invalid token."` (no oracle). Removing a key from the map is the atomic revocation primitive â€” we did not have this before. The shim does NOT widen the surface (legacy fallback only activates when the new JSON blob is empty).
+- **Simplicity** â€” Two keys, one active pointer, one grace pointer. No N-key generalization, no rotation worker, no kid-as-UUID. Just a date-stamped string. The complexity buys exactly one capability: rotate the signing key without forcing every customer to re-login.
 
 ## Out of scope (deferred to Step 32a, intentionally)
 
@@ -223,3 +223,23 @@ E2E test fixture compatibility:
 1. **The boot-time shim is load-bearing.** If the code lands but the SSM blob is set incorrectly on the first deploy after, we could still get a wrong-secret bounce. Mitigation: end-to-end smoke test in Work-Unit B.2.5 covers the shim path before we touch SSM.
 2. **PyJWT's `get_unverified_header()` is a separate parse call.** Adds ~one regex's worth of CPU per decode. At our traffic volume this is invisible. At 10k QPS we'd cache; we're not at 10k QPS.
 3. **The two-key map is JSON-in-a-SecureString.** A typo at SSM write time fails closed (we can't decode) but doesn't expose anything. A typo in the `jwt_active_kid` pointer also fails closed (mint raises). No silent-corruption mode exists.
+
+---
+
+## Amendment — 2026-05-21 (post-B.2.6)
+
+The "SSM contract (prod)" table originally specified `/luciel/jwt-*` paths
+with hyphens. The actual prod SSM convention is `/luciel/production/<snake_case>`
+— confirmed during B.2.6 pre-flight (`describe-parameters` showed
+`magic_link_secret` under `/luciel/production/`, not `/luciel/`). The table
+above has been corrected in-place to reflect what was actually populated.
+
+This amendment also notes the post-incident standard adopted in B.2.6:
+**all `put-parameter` operations on SecureString JSON payloads MUST use
+`--value file://<path>`**, never an inline `--value '<json>'`. The
+in-flight shell layers (PowerShell + bash + heredocs) cannot be relied
+upon to preserve the JSON's double-quote characters. Verification is by
+`get-parameter` round-trip with sha256 match. See
+`arc3-out/B2-6-cutover-record.md` for the full incident narrative.
+
+Drifts closed: `D-b2-design-memo-ssm-paths-wrong-2026-05-21`.
