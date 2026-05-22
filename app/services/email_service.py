@@ -39,9 +39,85 @@ import os
 from typing import Final
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
+from sqlalchemy.orm import Session
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# Arc 8 WU-6 -- application-layer SES suppression precheck.
+#
+# Every outbound send_email call in this module performs a precheck via
+# EmailSuppressionService.is_suppressed BEFORE invoking boto3.
+# SuppressedRecipientError is the precheck-rejection error -- it is a
+# distinct class from MagicLinkError / WelcomeEmailError / RefundEmailError
+# so a caller can tell the difference between "SES rejected the send" and
+# "the application refused to call SES". The same caller pattern (catch
+# at the webhook boundary; audit + return 200 to Stripe; raise at the API
+# boundary) applies to both: the suppression rejection is just a faster
+# path that doesn't burn the SES API call.
+#
+# The send functions accept an optional ``db`` Session for callers that
+# already hold one (the webhook / API path). When ``db`` is None, we open
+# a short-lived session via SessionLocal for the precheck only -- the
+# send path itself never writes to the database. This keeps the existing
+# kwargs-only signatures backward-compatible.
+from app.services.email_suppression_service import (  # noqa: E402
+    SuppressedRecipientError,
+    is_suppressed as _is_address_suppressed,
+)
+
+__all_suppression__ = ("SuppressedRecipientError",)
+
+
+def _precheck_suppression(to_email: str, db: Session | None, marker: str) -> None:
+    """Raise SuppressedRecipientError if ``to_email`` is on the suppression list.
+
+    Opens a short-lived session via SessionLocal when the caller did not
+    provide one. The session is read-only for this lookup. Lookup
+    failures (DB unreachable, etc.) are logged and treated as
+    fail-open -- a suppression check that itself fails MUST NOT take
+    down the send path; the operational alarm is the log line, not a
+    raised exception. The downstream SES send will still fail loudly
+    if the address is unrecoverable.
+
+    ``marker`` is the log-marker prefix of the calling send function
+    (e.g. ``[magic-link-email]``) so a suppression-shortcircuit log
+    line is grep-able alongside the existing send-attempt log lines.
+    """
+    try:
+        if db is not None:
+            suppressed = _is_address_suppressed(db, to_email)
+        else:
+            # Lazy import to avoid a circular import at module-load time
+            # (app.db.session imports app.repositories.audit_chain which
+            # imports app.models.admin_audit_log -- the chain is acyclic
+            # but loaded lazily here for symmetry with boto3 below).
+            from app.db.session import SessionLocal  # noqa: WPS433
+
+            with SessionLocal() as scoped:
+                suppressed = _is_address_suppressed(scoped, to_email)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s suppression precheck failed; failing OPEN (continuing to "
+            "SES send). Investigate immediately -- a precheck outage "
+            "means HardBounce / Complaint short-circuit is degraded.",
+            marker,
+        )
+        return
+
+    if suppressed:
+        logger.warning(
+            "%s suppression precheck SHORT-CIRCUITED to=%s (address on "
+            "application-layer suppression list; SES call skipped).",
+            marker,
+            to_email,
+        )
+        raise SuppressedRecipientError(
+            f"Address {to_email!r} is on the application-layer "
+            f"suppression list; outbound send refused."
+        )
 
 
 # Arc 2 (2026-05-20) -- D-set-password-token-logged-plaintext-2026-05-17 fix.
@@ -215,6 +291,7 @@ def send_magic_link_email(
     to_email: str,
     magic_link_url: str,
     display_name: str | None = None,
+    db: Session | None = None,
 ) -> None:
     """Send (or log) a magic-link email.
 
@@ -230,10 +307,23 @@ def send_magic_link_email(
         only. Useful for offline development and for the existing
         contract test, which greps the source for the marker string.
 
+    Arc 8 WU-6: BEFORE either branch, the address is prechecked against
+    the application-layer suppression list. If suppressed,
+    :class:`SuppressedRecipientError` is raised and neither SES nor the
+    log path is touched. The optional ``db`` Session lets the caller
+    pass in its own session (the webhook / API path); when None, a
+    short-lived session is opened for the precheck only.
+
     The stable marker prefix `[magic-link-email]` lets the e2e
     harness (tests/e2e/step_30a_live_e2e.py) assert the URL was
     produced without needing a real mailbox to read from.
     """
+    # Arc 8 WU-6 -- application-layer suppression precheck. Runs in
+    # BOTH transports (log and ses) because the suppression list is the
+    # application-layer source of truth; bypassing it in log mode would
+    # let local dev send to an address production refuses to send to.
+    _precheck_suppression(to_email, db, "[magic-link-email]")
+
     body = _build_body(to_email, magic_link_url, display_name)
     transport = _transport()
 
@@ -267,9 +357,17 @@ def send_magic_link_email(
 
     try:
         client = boto3.client("sesv2", region_name=region)
+        # Arc 8 WU-6 -- ConfigurationSetName activates the feedback
+        # event destination (Bounce / Complaint / Reject /
+        # RenderingFailure -> SNS topic luciel-ses-events -> backend
+        # POST /api/v1/ses-events). ReplyToAddresses routes any buyer
+        # reply into the monitored support inbox instead of the
+        # unmonitored noreply mailbox.
         response = client.send_email(
             FromEmailAddress=settings.from_email,
             Destination={"ToAddresses": [to_email]},
+            ReplyToAddresses=[settings.ses_reply_to_address],
+            ConfigurationSetName=settings.ses_configuration_set_name,
             Content={
                 "Simple": {
                     "Subject": {"Data": SUBJECT_MAGIC_LINK, "Charset": "UTF-8"},
@@ -376,6 +474,7 @@ def send_welcome_set_password_email(
     set_password_url: str,
     display_name: str | None = None,
     purpose: str = "signup",
+    db: Session | None = None,
 ) -> None:
     """Send (or log) the welcome / invite / reset email for password set.
 
@@ -395,6 +494,11 @@ def send_welcome_set_password_email(
       * On SES failure: logs the full body at WARNING + raises
         :class:`WelcomeEmailError`.
     """
+    # Arc 8 WU-6 -- application-layer suppression precheck. See
+    # send_magic_link_email for the design contract; same gate, same
+    # SuppressedRecipientError surface.
+    _precheck_suppression(to_email, db, "[welcome-set-password-email]")
+
     body = _build_welcome_set_password_body(
         to_email=to_email,
         set_password_url=set_password_url,
@@ -439,9 +543,13 @@ def send_welcome_set_password_email(
 
     try:
         client = boto3.client("sesv2", region_name=region)
+        # Arc 8 WU-6 -- ConfigurationSetName + ReplyToAddresses. See
+        # send_magic_link_email for the design contract.
         response = client.send_email(
             FromEmailAddress=settings.from_email,
             Destination={"ToAddresses": [to_email]},
+            ReplyToAddresses=[settings.ses_reply_to_address],
+            ConfigurationSetName=settings.ses_configuration_set_name,
             Content={
                 "Simple": {
                     "Subject": {"Data": subject, "Charset": "UTF-8"},
@@ -539,6 +647,7 @@ def send_pilot_refund_email(
     amount_cents: int,
     currency: str,
     display_name: str | None = None,
+    db: Session | None = None,
 ) -> None:
     """Send (or log) the pilot-refund confirmation email.
 
@@ -562,6 +671,13 @@ def send_pilot_refund_email(
     RefundEmailError`` -- the email is a courtesy leg, not a transactional
     leg. SES failure must NOT roll back the refund cascade.
     """
+    # Arc 8 WU-6 -- application-layer suppression precheck. See
+    # send_magic_link_email for the design contract; same gate, same
+    # SuppressedRecipientError surface. The refund email is the
+    # courtesy leg AFTER the cascade commits, so a suppression
+    # rejection here is benign -- the financial refund still landed.
+    _precheck_suppression(to_email, db, "[pilot-refund-email]")
+
     body = _build_refund_body(
         to_email=to_email,
         refund_id=refund_id,
@@ -602,9 +718,13 @@ def send_pilot_refund_email(
 
     try:
         client = boto3.client("sesv2", region_name=region)
+        # Arc 8 WU-6 -- ConfigurationSetName + ReplyToAddresses. See
+        # send_magic_link_email for the design contract.
         response = client.send_email(
             FromEmailAddress=settings.from_email,
             Destination={"ToAddresses": [to_email]},
+            ReplyToAddresses=[settings.ses_reply_to_address],
+            ConfigurationSetName=settings.ses_configuration_set_name,
             Content={
                 "Simple": {
                     "Subject": {"Data": SUBJECT_PILOT_REFUND, "Charset": "UTF-8"},

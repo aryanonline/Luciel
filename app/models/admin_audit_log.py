@@ -253,6 +253,48 @@ ACTION_INVITE_REVOKED = "invite_revoked"
 ACTION_DOMAIN_CREATED = "domain_created"
 ACTION_DOMAIN_DEACTIVATED = "domain_deactivated"
 
+# Arc 8 WU-6 -- SES feedback / suppression cohort.
+#
+# These verbs are deliberately separate from ACTION_CREATE / ACTION_DELETE_HARD
+# on a generic resource so a compliance auditor (and the AWS sandbox-exit
+# reviewer) can filter the audit chain on the verb alone and see the full
+# deliverability story:
+#
+# ACTION_EMAIL_SUPPRESSION_RECORDED  -- an address was added to the
+#                                       application-layer suppression list.
+#                                       after_json carries
+#                                       {reason, source_event_id, address}.
+#                                       Emitted by EmailSuppressionService
+#                                       inside the same transaction as the
+#                                       EmailSuppression INSERT so the chain
+#                                       guarantees atomicity (Invariant 4).
+# ACTION_EMAIL_SUPPRESSION_CLEARED   -- an operator-initiated removal of a
+#                                       suppression row. The address is now
+#                                       sendable again. before_json carries
+#                                       the cleared row's {reason,
+#                                       source_event_id, first_suppressed_at}
+#                                       so the chain preserves the history
+#                                       even though the working-state row is
+#                                       hard-deleted.
+# ACTION_EMAIL_SEND_EVENT_RECEIVED   -- the SES feedback route accepted an
+#                                       SNS-delivered event and persisted it
+#                                       to email_send_event. Not every event
+#                                       triggers a suppression (only Bounce
+#                                       with bounceType=Permanent and
+#                                       Complaint do), but every event
+#                                       received is auditable so a sandbox-
+#                                       exit reviewer can verify the loop
+#                                       is live. after_json carries
+#                                       {event_type, event_id, address?}.
+#
+# Resource types accompany these verbs:
+#   RESOURCE_EMAIL_SUPPRESSION pairs with ACTION_EMAIL_SUPPRESSION_RECORDED
+#       and ACTION_EMAIL_SUPPRESSION_CLEARED.
+#   RESOURCE_EMAIL_SEND_EVENT pairs with ACTION_EMAIL_SEND_EVENT_RECEIVED.
+ACTION_EMAIL_SUPPRESSION_RECORDED = "email_suppression_recorded"
+ACTION_EMAIL_SUPPRESSION_CLEARED = "email_suppression_cleared"
+ACTION_EMAIL_SEND_EVENT_RECEIVED = "email_send_event_received"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -311,6 +353,10 @@ ALLOWED_ACTIONS = (
     # Step 30a.5 -- Company-tier Domain self-serve verbs.
     ACTION_DOMAIN_CREATED,
     ACTION_DOMAIN_DEACTIVATED,
+    # Arc 8 WU-6 -- SES feedback / suppression cohort.
+    ACTION_EMAIL_SUPPRESSION_RECORDED,
+    ACTION_EMAIL_SUPPRESSION_CLEARED,
+    ACTION_EMAIL_SEND_EVENT_RECEIVED,
 )
 
 
@@ -376,6 +422,15 @@ RESOURCE_IDENTITY_CLAIM = "identity_claim"
 # "every event involving jane@brokerage.com" with a single filter.
 RESOURCE_USER_INVITE = "user_invite"
 
+# Arc 8 WU-6 -- SES feedback / suppression cohort.
+# email_suppression rows track addresses the application layer refuses
+# to send to. email_send_event rows track received SES feedback events.
+# resource_natural_id = address (lowercased) on suppression actions; the
+# SNS MessageId on event-received actions. resource_pk = the surrogate
+# id on the respective table.
+RESOURCE_EMAIL_SUPPRESSION = "email_suppression"
+RESOURCE_EMAIL_SEND_EVENT = "email_send_event"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -399,6 +454,9 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_IDENTITY_CLAIM,
     # Step 30a.4 -- first-class invite lifecycle
     RESOURCE_USER_INVITE,
+    # Arc 8 WU-6 -- SES feedback / suppression cohort.
+    RESOURCE_EMAIL_SUPPRESSION,
+    RESOURCE_EMAIL_SEND_EVENT,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):

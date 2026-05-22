@@ -311,6 +311,53 @@ class Settings(BaseSettings):
     from_email: str = "noreply@vantagemind.ai"
     marketing_site_url: str = "https://www.vantagemind.ai"
 
+    # --- Arc 8 Work-Unit 6 -- SES feedback / suppression / deliverability ---
+    #
+    # Closes D-ses-feedback-loop-not-wired-2026-05-22 and
+    # D-ses-reply-to-monitored-inbox-not-confirmed-2026-05-22.
+    #
+    # ses_configuration_set_name:
+    #     The name of the SES configuration set that the backend attaches
+    #     to every outbound send_email call. The configuration set has an
+    #     event destination that routes Bounce / Complaint / Reject /
+    #     RenderingFailure notifications to the SNS topic
+    #     ``luciel-ses-events`` in ca-central-1, which HTTPS-subscribes
+    #     to ``POST /api/v1/ses-events`` on our backend.
+    #
+    #     Without the ConfigurationSetName parameter on send_email, SES
+    #     does NOT emit feedback events to the configuration set's
+    #     destination -- the configuration set exists but is dormant.
+    #     Wiring this slot is the load-bearing knob that activates the
+    #     feedback loop.
+    #
+    #     Default ``luciel-default`` matches the name the WU-6 Phase B
+    #     prod-touch ceremony creates in the SES console. If the
+    #     configuration set does not yet exist in the SES account, the
+    #     send_email call returns a ConfigurationSetDoesNotExistException
+    #     and the existing MagicLinkError / WelcomeEmailError /
+    #     RefundEmailError handlers surface the failure -- so a missing
+    #     configuration set is loud, not silent. Operators landing
+    #     WU-6 must create the configuration set BEFORE rolling out the
+    #     code change.
+    #
+    # ses_reply_to_address:
+    #     The address SES populates into the Reply-To header. Today's
+    #     transactional sends use From = ``noreply@vantagemind.ai`` which
+    #     drops replies on the floor (the noreply mailbox is not
+    #     monitored). Reply-To = ``support@vantagemind.ai`` routes any
+    #     buyer reply ("I never set my password, can you help?",
+    #     "please refund my charge") into the monitored support inbox
+    #     where a human can act on it. This is a deliverability and
+    #     trust signal AWS evaluates during the sandbox-exit review.
+    #
+    #     Closes D-ses-reply-to-monitored-inbox-not-confirmed-2026-05-22.
+    #     The literal address must also be a verified SES identity (or
+    #     part of the verified domain) -- ``vantagemind.ai`` is verified
+    #     at the domain level, so any mailbox on that domain is
+    #     send-as-eligible.
+    ses_configuration_set_name: str = "luciel-default"
+    ses_reply_to_address: str = "support@vantagemind.ai"
+
     # --- CORS (Step 30a.2-pilot Commit 3d) ---
     #
     # D-cors-middleware-missing-on-checkout-preflight-2026-05-15:

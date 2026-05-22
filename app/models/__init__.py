@@ -18,6 +18,20 @@ from app.models.conversation import Conversation  # noqa: F401  (Step 24.5c)
 from app.models.identity_claim import IdentityClaim, ClaimType  # noqa: F401  (Step 24.5c)
 from app.models.subscription import Subscription  # noqa: F401  (Step 30a)
 from app.models.user_invite import UserInvite, InviteStatus  # noqa: F401  (Step 30a.4)
+from app.models.email_send_event import (  # noqa: F401  (Arc 8 WU-6)
+    EmailSendEvent,
+    SES_EVENT_TYPES,
+    SES_EVENT_TYPES_TRIGGER_SUPPRESSION,
+    SES_EVENT_BOUNCE,
+    SES_EVENT_COMPLAINT,
+)
+from app.models.email_suppression import (  # noqa: F401  (Arc 8 WU-6)
+    EmailSuppression,
+    SUPPRESSION_REASONS,
+    SUPPRESSION_REASON_HARD_BOUNCE,
+    SUPPRESSION_REASON_COMPLAINT,
+    SUPPRESSION_REASON_MANUAL_BLOCK,
+)
 
 __all__ = [
     "AgentConfig",
@@ -44,4 +58,15 @@ __all__ = [
     "Subscription",
     "UserInvite",
     "InviteStatus",
+    # Arc 8 WU-6 -- SES feedback / suppression cohort
+    "EmailSendEvent",
+    "SES_EVENT_TYPES",
+    "SES_EVENT_TYPES_TRIGGER_SUPPRESSION",
+    "SES_EVENT_BOUNCE",
+    "SES_EVENT_COMPLAINT",
+    "EmailSuppression",
+    "SUPPRESSION_REASONS",
+    "SUPPRESSION_REASON_HARD_BOUNCE",
+    "SUPPRESSION_REASON_COMPLAINT",
+    "SUPPRESSION_REASON_MANUAL_BLOCK",
 ]
