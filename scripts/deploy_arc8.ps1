@@ -89,9 +89,38 @@ Write-Host "    worker:    $WorkerService -> container $WorkerContainer"
 Write-Host ""
 
 # ----- [1/7] Build image with BUILD_GIT_SHA threaded in -----
-Write-Host "==> [1/7] Building image (--build-arg BUILD_GIT_SHA=$Sha)" -ForegroundColor Cyan
-docker build --build-arg "BUILD_GIT_SHA=$Sha" -t $Image .
+# IMPORTANT: --platform linux/amd64 pins arch to match Fargate runtime.
+# --provenance=false + --sbom=false disable BuildKit attestations that
+# produce multi-entry manifest lists where Fargate may pull an attestation
+# blob (no USER directive) instead of the real image. Without these flags,
+# the Dockerfile USER directive may not take effect at container runtime.
+# Drift evidence: arc8 WU-2 first attempt 2026-05-22 (image 9414390f) ran
+# as uid=0(root) despite Dockerfile USER luciel; root cause was attestation
+# manifest selection by Fargate.
+Write-Host "==> [1/7] Building image (--build-arg BUILD_GIT_SHA=$Sha, single-arch, no attestations)" -ForegroundColor Cyan
+docker buildx build `
+  --platform linux/amd64 `
+  --provenance=false `
+  --sbom=false `
+  --build-arg "BUILD_GIT_SHA=$Sha" `
+  -t $Image `
+  --load .
 if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: docker build failed" -ForegroundColor Red; exit 1 }
+
+# ----- [1b/7] Verify USER directive baked in (paranoid local guard) -----
+Write-Host "==> [1b/7] Verifying image USER=luciel (local docker inspect)" -ForegroundColor Cyan
+$imageUser = docker inspect --format='{{.Config.User}}' $Image
+if ($imageUser -ne "luciel") {
+  Write-Host "ERROR: built image User='$imageUser', expected 'luciel'. Dockerfile USER directive did not bake. Aborting deploy." -ForegroundColor Red
+  exit 1
+}
+Write-Host "    OK: image User=luciel"
+$imageArch = docker inspect --format='{{.Architecture}}' $Image
+if ($imageArch -ne "amd64") {
+  Write-Host "ERROR: built image Architecture='$imageArch', expected 'amd64'. Aborting deploy." -ForegroundColor Red
+  exit 1
+}
+Write-Host "    OK: image Architecture=amd64"
 
 # ----- [2/7] ECR login + push + resolve digest -----
 Write-Host "==> [2/7] ECR login + push" -ForegroundColor Cyan
