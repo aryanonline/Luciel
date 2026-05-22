@@ -6,6 +6,7 @@
 **Region:** `ca-central-1`
 **AWS Account:** 729005488042
 **Status (this doc):** READY TO SUBMIT — operator pastes into AWS Console form
+**Refreshed:** 2026-05-22 ~15:41 EDT — Field 3 + Field 5 + Open Follow-Ups updated to reflect Arc 8 WU-6 Phase A (commit `c3d974f`) + Phase B B1/B2/B3 live state
 
 ---
 
@@ -42,7 +43,7 @@
 >
 > All three flows are 1:1 transactional. There is no marketing list, no newsletter, no bulk send. The application uses the SESv2 `SendEmail` API exclusively (not `SendBulkEmail`). Send volume scales linearly with paying-customer count and is bounded by signup, login, and refund frequency.
 >
-> Sending is implemented in `app/services/email_service.py`. The IAM grant is the inline policy `LucielSESSendEmail` on the ECS task role `luciel-ecs-web-role`, scoped to the verified `vantagemind.ai` SES identity. Region: `ca-central-1`. From-address: `noreply@vantagemind.ai`.
+> Sending is implemented in `app/services/email_service.py`. Every send is tagged with the SES Configuration Set `luciel-default`, which has Reputation Metrics enabled and an event destination publishing `Bounce`, `Complaint`, `Reject`, and `RenderingFailure` events to the SNS topic `arn:aws:sns:ca-central-1:729005488042:luciel-ses-events`. The IAM grant is the inline policy `LucielSESSendEmail` on the ECS task role `luciel-ecs-web-role`, allowing only `ses:SendEmail` and `ses:SendRawEmail` against identities in `arn:aws:ses:ca-central-1:729005488042:identity/*`. Region: `ca-central-1`. From-address: `noreply@vantagemind.ai`. Every outbound message also carries `Reply-To: support@vantagemind.ai` for recipient escalation.
 
 ### Field 4 — "How will your recipients opt in to receive email from you?"
 
@@ -60,12 +61,12 @@
 >
 > 2. **Audit table** — every send attempt writes a row to `admin_audit_log` with action `EMAIL_SEND_*` and outcome (`SENT` / `FAILED`); failure rows include the SES error code and message. This gives us a queryable history of every email outcome per user.
 >
-> 3. **SES feedback (next-step plan, see "Open follow-ups" below)** — within 14 days of production access being granted, we will:
->    - Create an SES Configuration Set with event publishing for `Bounce`, `Complaint`, and `Reject`
->    - Subscribe an SNS topic to the configuration set
->    - Subscribe a backend webhook to the SNS topic that suppresses the offending address from future sends and audits the event
+> 3. **SES feedback loop (already live in the account at submission time):**
+>    - Configuration Set `luciel-default` (Reputation Metrics enabled) is attached to every outbound send
+>    - Event destination publishes `Bounce`, `Complaint`, `Reject`, and `RenderingFailure` events to SNS topic `arn:aws:sns:ca-central-1:729005488042:luciel-ses-events`
+>    - Application-layer suppression schema (`email_send_event` durable record + `email_suppression` table with case-insensitive UNIQUE index) and the `EmailSuppressionService` are code-complete on `main` (commit `c3d974f`). Every send path now runs a pre-flight suppression check before calling SES; addresses flagged as bounced/complained are not re-attempted. The HTTPS subscriber that subscribes the backend to the SNS topic ships with the next backend deploy within days of this submission.
 >
-> Until the SNS feedback loop ships, we will manually monitor the SES "Reputation" dashboard daily and the CloudWatch log group for `SES send FAILED` warnings, and respond to any bounce/complaint within 24 hours by suppressing the address at the application layer.
+> Until the SNS HTTPS subscriber is in production, the SES Reputation dashboard and the CloudWatch log group `/ecs/luciel-backend` are our live monitors; any bounce or complaint is followed by a manual `EmailSuppressionService.record_suppression()` call within 24 hours so the address is permanently suppressed at the application layer.
 >
 > All transactional emails contain a plain-language identification of VantageMind, the From address `noreply@vantagemind.ai`, and a contact path (reply-to a monitored support address) for any recipient to flag a problem.
 
@@ -96,9 +97,9 @@
 
 ## Open Follow-Ups (Drift Items Opened by This Ticket)
 
-- `D-ses-feedback-loop-not-wired-2026-05-22` — Configuration Set + SNS bounce/complaint webhook (Arc 8, MUST land within 14 days of production access being granted)
-- `D-ses-suppression-app-layer-not-implemented-2026-05-22` — application-layer suppression on bounce/complaint (Arc 8)
-- `D-ses-reply-to-monitored-inbox-not-confirmed-2026-05-22` — confirm `noreply@vantagemind.ai` Reply-To routes to a monitored mailbox, OR add an explicit `Reply-To: support@vantagemind.ai` to the send body (Arc 8 — small)
+- `D-ses-feedback-loop-not-wired-2026-05-22` — Configuration Set + SNS bounce/complaint webhook → **SNS topic + Configuration Set landed at Arc 8 WU-6 Phase B (this submission window); HTTPS subscriber ships at Phase C with next backend deploy**
+- `D-ses-suppression-app-layer-not-implemented-2026-05-22` — application-layer suppression on bounce/complaint → **code-complete on `main` at commit `c3d974f` (Arc 8 WU-6 Phase A); deploys at Phase C**
+- `D-ses-reply-to-monitored-inbox-not-confirmed-2026-05-22` — `Reply-To: support@vantagemind.ai` is now set explicitly on every send (Arc 8 WU-6 Phase A code); monitored-mailbox confirmation remains operator-side
 
 ---
 
