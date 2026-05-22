@@ -103,6 +103,8 @@ This satisfies the partner-locked operational rule "we are designing a business 
 
 ## §3 — Migration ordering — Alembic revision detail
 
+**Annotation 2026-05-22-late (Arc 4 tier-shape revision).** Revision A is extended to add three further artifacts beyond the original additive set: (a) `subscriptions.billing_model VARCHAR(16) NULL` column with in-migration backfill `UPDATE subscriptions SET billing_model='flat' WHERE billing_model IS NULL`; (b) the `admin_tier_overrides` table gains six new columns to carry the Enterprise hybrid-billing axis: `billing_model VARCHAR(16) NULL`, `included_usage_per_period INTEGER NULL`, `overage_rate_cents INTEGER NULL`, `committed_use_discount_bps INTEGER NULL`, `period_start DATE NULL`, `period_end DATE NULL`, `metered_unit VARCHAR(16) NULL` (all nullable, defaults set per the value table in `A-tier-matrix-detail.md` v2 §17.2); (c) new table `metering_emissions` as an append-only cursor for the Enterprise metering hook — primary key `(admin_id, period, emission_ts)`, plus `stripe_idempotency_key VARCHAR(128) NOT NULL`, `quantity_emitted INTEGER NOT NULL`, `stripe_subscription_item_id VARCHAR(64) NOT NULL`, `created_at TIMESTAMP NOT NULL`. The `tier` CHECK constraint on `admins.tier` is updated to allow the new value set `('free', 'pro', 'enterprise', 'individual', 'solo', 'team', 'company')` during the migration window (the legacy values stay valid until Revision C's subtractive pass closes them out). Four new audit-action constants land in `app/models/admin_audit_log.py` at Revision A: `TIER_RENAME_APPLIED`, `BILLING_MODEL_ENUM_ADDED`, `METERING_INFRASTRUCTURE_ADDED`, `METERING_USAGE_EMITTED`. Revision B's backfill is extended to also write the per-customer `TIER_RENAME_APPLIED` audit row inside the same transaction as the tier rename `UPDATE` (one row per existing customer; field set `{old_tier, new_tier, admin_tier_overrides_minted}`). The original §3.1/§3.2/§3.3 SQL blocks below remain the load-bearing description; this annotation layers the tier-shape-revision additions on top.
+
 ### §3.1 — Revision A (additive)
 
 **Revision ID:** `arc4_a_admin_instance_additive`
@@ -315,6 +317,46 @@ The full Arc 6 rollback path is therefore: revert Stripe label → revert market
 
 ## §6 — Customer-comms SES email — full draft
 
+**Annotation 2026-05-22-late (Arc 4 tier-shape revision).** The original SES draft below was written for the four-tier rename (Solo / Team / Company / Enterprise label-only changes). The tier-shape revision changes the customer-comms shape materially: existing **Solo customers are renamed Pro** (capability identical — 3 Instances cap unchanged; the 2000 leads/month cap is new but exceeds all current Solo usage by an order of magnitude); existing **Company customers are renamed Enterprise with an `admin_tier_overrides` row mirroring their Company tier limits as override values** (their effective limits do not change at the cutover); existing **Team customers** — none on the live wire at the time of Arc 4 — would backfill to Pro if any existed; and **Free is net-new** with no migration impact. The revised SES draft below replaces the original (which is preserved in git history at commit `5c80c15`):
+
+**Revised draft (lands at Arc 6 commit):**
+
+```
+Subject: Your VantageMind plan name is changing (no price or feature changes)
+
+Hi [first_name],
+
+We're tidying up our plan names to better match how customers actually use VantageMind. Starting [cutover_date], your current plan will be renamed:
+
+  * Solo → Pro      (same price, same features)
+  * Company → Enterprise  (same price, same features, with your negotiated limits preserved)
+
+We're also introducing a new Free tier for evaluators — it doesn't affect your account.
+
+What's NOT changing:
+  * Your monthly invoice amount
+  * Your Instance count cap
+  * Your data, your team, your widget keys, your dashboards
+  * Your contract terms (Enterprise customers)
+
+What IS changing:
+  * The label you see on your invoice and in your account dashboard
+  * Pro customers now have an explicit 2,000 leads/month cap on paper (this exceeds 100% of current Solo customers' actual usage, so you will not notice)
+  * Enterprise customers gain access to new optional capabilities: hybrid billing with included usage + overage (opt-in via account team); committed-use discounts on annual renewal; custom fine-tunes (sales-team coordinated)
+
+If you have any questions, reply to this email and our team will respond within one business day.
+
+Thanks for being a VantageMind customer.
+
+— The VantageMind team
+```
+
+SES delivery cohorts (one campaign per cohort, sent same-day to minimize confusion): (1) live Solo customers → Pro rename note; (2) live Company customers → Enterprise rename + override-preservation note (above text customized with their negotiated values inline); (3) no Team customers exist; (4) Free tier launch is announced via a separate marketing campaign, not this cutover email. Suppression-list discipline (§DRIFTS `D-ses-suppression-app-layer-not-implemented-2026-05-22`) is honored for all three cohorts.
+
+---
+
+**Original draft (preserved for audit — was the v1 doctrine before the 2026-05-22-late tier-shape revision):**
+
 (Authoring here so Arc 6 can pick this up verbatim.)
 
 **To:** every billing-contact email in `admins WHERE tier = 'solo' AND legacy_tenant_id IS NOT NULL` (i.e. every Admin who was on the Individual tier before the rename)
@@ -359,6 +401,8 @@ If you have any questions, hit reply.
 
 ## §7 — Marketing-site (Luciel-Website) changes
 
+**Annotation 2026-05-22-late (Arc 4 tier-shape revision).** The original §7 below described marketing-site changes for a four-tier surface (Solo / Team / Company / Enterprise pricing tiles). The tier-shape revision contracts the pricing surface to three tiles — **Free / Pro / Enterprise** — with the new Enterprise tile carrying a "starting at `$[ENTERPRISE_FLOOR]/year`" framing and a `[Talk to sales](mailto:enterprise@vantagemind.ai)` CTA in place of the previous direct-Checkout-button. The Free tile carries no Checkout button at all — instead a `[Get started free](/signup-free)` CTA pointing to the new CAPTCHA-gated signup form (per DRIFTS §3 `D-free-tier-captcha-missing-2026-05-22`). The Pro tile is the only tile that retains the direct Stripe Checkout button (with monthly / annual toggle). The marketing-site code-surface impact: (a) `src/pages/Pricing.tsx` swaps from a 4-card grid to a 3-card grid with the new copy from CANONICAL_RECAP §11.7; (b) `src/components/PricingCard.tsx` gains a `variant` prop (`'free' | 'pro' | 'enterprise'`) so each tile renders the right CTA; (c) `src/pages/SignupFree.tsx` is net-new — carries the hCaptcha widget, posts to `POST /api/v1/billing/signup-free`, redirects to `/dashboard` on success; (d) `src/pages/ContactSales.tsx` already exists and is wired for the Enterprise CTA target. Rollback plan is `git revert` of the marketing-site commit + manual cache invalidation on the Amplify distribution. The original §7 enumeration below remains accurate at the file-path level; the tier-card-count change is the only material delta.
+
 Outside the Luciel backend repo; tracked here because Arc 6 must coordinate.
 
 **Files to edit in `aryanonline/Luciel-Website`:**
@@ -398,6 +442,16 @@ Authored at Revision B Batch B6. Key assertion patterns:
 ---
 
 ## §9 — Audit chain integrity through the migration
+
+**Annotation 2026-05-22-late (Arc 4 tier-shape revision).** The audit-chain integrity discipline below is unchanged in shape — hash-chained advance, no recomputation, verifier passes at every revision boundary. The integrity-event count grows: in addition to the original §9 actions, the tier-shape revision adds **four new audit actions** that emit at the Arc 5 + Arc 6 cutover: (a) `TIER_RENAME_APPLIED` (one row per existing customer at Revision B's tier-rename `UPDATE`, with field set `{old_tier, new_tier, admin_tier_overrides_minted: bool}`); (b) `BILLING_MODEL_ENUM_ADDED` (one row at Revision A close, system-actor `system:migration`, tied to the schema change); (c) `METERING_INFRASTRUCTURE_ADDED` (two rows at Revision A close — one for the `admin_tier_overrides` extended columns, one for the `metering_emissions` table); (d) `METERING_USAGE_EMITTED` (one row per successful Stripe usage emission, lands at Arc 6 + ongoing in production). The hash-chain advance test (`scripts/verify-audit-chain.ps1`) runs across the Revision A → B → C boundary and against a freshly-emitted `METERING_USAGE_EMITTED` row to confirm no chain break. **Audit-chain hash refresh:** the v2 `A-tier-matrix-detail.md` rewrite committed in the doc-only commit immediately preceding Arc 5 is itself an audit-chain event — not at the `admin_audit_log` layer (which is for runtime mutations only), but at the documentation audit chain (DRIFTS §3 umbrella drift cross-refs + this arc-record's git history). Commit-hash record below will be filled at commit time:
+
+- Pre-revision baseline hash: `5c80c15` (Arc 4 Deliverable #3 commit before tier-shape revision)
+- Doc-only revision commit hash: (filled at commit)
+- Arc 5 Revision A commit hash: (filled at Arc 5 commit)
+- Arc 5 Revision B commit hash: (filled at Arc 5 commit)
+- Arc 5 Revision C commit hash: (filled at Arc 5 commit)
+- Arc 6 Stripe SKU + metering worker commit hash: (filled at Arc 6 commit)
+- Arc 6 closing-tag commit hash: (filled at Arc 6 commit, stamps `arc-4-tenancy-collapse-admin-instance-lead`)
 
 The hash-chained `AdminAuditLog` must survive the migration with no chain break.
 
@@ -461,6 +515,20 @@ Closing-tag earned when:
 ---
 
 ## §12 — Risk register
+
+**Annotation 2026-05-22-late (Arc 4 tier-shape revision — sequence correction).** The original risk-register row below that read "Sequence Arc 5 before Arc 8" is **WRONG** and is hereby corrected. The corrected sequence is **Arc 8 before Arc 5**:
+
+**Why the sequence reverses:** Arc 8 (security hardening) touches load-bearing infrastructure files that Arc 5 (schema migration) will rename. Specifically: Arc 8 modifies `app/middleware/auth.py`, `app/middleware/session_cookie_auth.py`, `app/middleware/rate_limit.py`, `app/repositories/audit_chain.py`, `app/main.py`, the Dockerfile, and `cfn/luciel-prod-ecs.yaml`; Arc 5 renames `app/middleware/*.py` callsites that reference `tenant_id` → `admin_id` and renames every `Tenant` / `Agent` / `LucielInstance` model reference repo-wide (227 files, ~4,025 callsites per the Arc 4 Deliverable #2 code-surface impact assessment). Running Arc 5 first would force every Arc 8 commit to either (a) edit the post-rename file shape (impossible — Arc 8 work was authored against pre-rename references) or (b) carry merge conflicts on every Arc 8 commit against the just-renamed files. Running Arc 8 first lets each Arc 8 commit land cleanly against the existing noun set; Arc 5's seven-batch rename sweep then mechanically updates the Arc 8 commits' callsites alongside the rest of the codebase.
+
+**Why this wasn't caught earlier:** The Arc 4 design pass was authored before the Arc 8 work-unit list was sized (the Arc 3 deploy ceremony surfaced the seven Arc 8 items on 2026-05-22 ≈ 02:36 EDT, materially after the initial Arc 4 design pass at 2026-05-22 ~10:00 EDT). The sequence as originally written assumed Arc 5 was the next arc; the Arc 8 work-unit was a parallel discovery, not a planned predecessor. The doctrine-pivot annotation pass landed the late discovery into the live plan.
+
+**Corrected sequence in this arc record:**
+
+1. **Arc 8 (security hardening)** lands first — worker-not-root, version endpoint, health endpoint, SES sandbox exit + feedback + suppression, free-tier-CAPTCHA infrastructure (the `signup-free` route, the hCaptcha SSM key, the `admins.last_signup_ip` column added as a standalone migration ahead of the full rename sweep).
+2. **Arc 5 (schema migration)** lands second — the three-revision A/B/C dance described in §3 above (now extended with the tier-shape-revision additions: `billing_model` enum, `admin_tier_overrides` extended columns, `metering_emissions` table). The seven-batch rename sweep mechanically updates Arc 8's callsites alongside everything else.
+3. **Arc 6 (Stripe SKU restructure + metering worker)** lands third — the three-product restructure (archive Solo/Team/Company; create Free $0 + rename Solo→Pro + create Enterprise hybrid pair) + the Celery-beat metering emitter + the customer-comms SES email (§6 above). The `arc-4-tenancy-collapse-admin-instance-lead` closing tag stamps on the final Arc 6 commit.
+
+The original risk-register table below remains the canonical risk-by-risk enumeration; the **single row whose ordering was wrong** is corrected here at the top of the section so a reader does not have to scan the table to find the correction.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|

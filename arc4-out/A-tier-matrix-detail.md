@@ -1,590 +1,461 @@
-# Arc 4 Deliverable #2 — Tier matrix detail
+# Arc 4 Deliverable #2 — Tier matrix detail (v2, Free/Pro/Enterprise + Enterprise hybrid billing)
 
-**Status:** DESIGN — not yet implemented in code. Authored 2026-05-22 alongside Deliverable #1 (canonical doctrine integration, commit `66f6528`). Companion to forthcoming Deliverable #3 (`A-tenancy-collapse-arc-record.md`, execution arc).
+**Status:** DESIGN — not yet implemented in code. Authored 2026-05-22; **rewritten in full 2026-05-22-late** to reflect the Arc 4 tier-shape revision from four tiers (Solo / Team / Company / Enterprise) to three tiers (**Free / Pro / Enterprise**) plus a new Enterprise hybrid-billing axis. Companion to Deliverable #3 (`A-tenancy-collapse-arc-record.md`, execution arc, also revised 2026-05-22-late).
 
-**Audience:** Engineer-facing. The buyer-facing surface is CANONICAL_RECAP §14 "Entitlement matrix". When the two disagree, this file documents the *intended* shape and `app/policy/entitlements.py` is the runtime source of truth; any three-way disagreement (CANONICAL §14 / this file / `entitlements.py`) opens a drift in DRIFTS §3.
+**Audience:** Engineer-facing. The buyer-facing surface is CANONICAL_RECAP §14 "Entitlement matrix v2 (Free / Pro / Enterprise)". When the two disagree, this file documents the *intended* shape and `app/policy/entitlements.py` is the runtime source of truth; any three-way disagreement (CANONICAL §14 / this file / `entitlements.py`) opens a drift in DRIFTS §3.
+
+**Audit-chain note (v1 supersession):** The v1 of this file (4-tier × 22-dim) is preserved in git history; the head of `main` at commit `8c3e0b7` is the canonical v1 source for the four-tier shape. v2 (this file) replaces v1 as the live spec. Both are part of the audit chain.
 
 **Cross-refs:**
-- CANONICAL_RECAP.md §14 — buyer-facing entitlement matrix (six-axis regroup, 4-tier columns)
-- ARCHITECTURE.md §4.1 — three-axis isolation contract (Admin↔Admin / Instance↔Instance / Lead↔Lead)
-- DRIFTS.md §3 `D-tenancy-collapse-admin-instance-lead-2026-05-22` — umbrella drift this file resolves under
-- `app/policy/entitlements.py` — current 18-dimension × 3-tier module (Step 30a.6 shape); this file specifies the 22-dimension × 4-tier rewrite
+- CANONICAL_RECAP.md §11.7 — public-positioning copy (Free / Pro / Enterprise tier framing)
+- CANONICAL_RECAP.md §14 — buyer-facing entitlement matrix v2 (six-axis regroup, 3-tier columns) and the v1 annotation block preserving Solo/Team/Company/Enterprise for audit
+- ARCHITECTURE.md §3.2 tier-shape note (2026-05-22-late) — system-view commit of the three-tier shape
+- ARCHITECTURE.md §3.2.14 — metering hook + `billing_model` enum + `admin_tier_overrides` + `metering_emissions` table
+- ARCHITECTURE.md §4.1 — three-axis isolation contract (Admin↔Admin / Instance↔Instance / Lead↔Lead) with 2026-05-22-late annotation
+- ARCHITECTURE.md §4.7 — three-layer scope enforcement with 2026-05-22-late annotation (two new gates: Free CAPTCHA + Enterprise metering)
+- DRIFTS.md §3 `D-tenancy-collapse-admin-instance-lead-2026-05-22` — umbrella drift (with 2026-05-22-late annotation block extending resolution path)
+- DRIFTS.md §3 `D-enterprise-metering-not-implemented-2026-05-22` — runtime metering gap
+- DRIFTS.md §3 `D-free-tier-captcha-missing-2026-05-22` — Free-tier abuse-control gap
+- `app/policy/entitlements.py` — current 18-dimension × 3-tier module (Step 30a.6 shape under old Individual/Team/Company labels); this file specifies the post-Arc-4 rewrite
 
 ---
 
-## §1 — Why this file exists
+## §1 — Why this file exists (v2)
 
-CANONICAL §14 commits the new four-tier (Solo / Team / Company / Enterprise) capacity-gated doctrine and regroups the entitlement matrix into six axes. What §14 deliberately does *not* carry:
+CANONICAL §14 commits the three-tier (Free / Pro / Enterprise) capacity-gated doctrine and regroups the entitlement matrix into six axes plus a new Enterprise hybrid-billing axis. What §14 deliberately does *not* carry:
 
-1. **Numeric values for the four new Arc-4 dimensions** (`model_tier_per_instance`, `composition_enabled`, `max_composition_depth`, `knowledge_share_grants_enabled`) beyond the per-tier summary cell — no semantics for what "depth=2" actually means at a composition call-site, no default model-tier label per Instance, no override mechanics.
-2. **Enterprise-tier numeric values** for the existing 18 dimensions — §14 lists them as "Unlimited (negotiated)" or "Custom" with no specifics; the negotiation envelope still needs to be bounded somewhere.
-3. **Upgrade / downgrade behavior at the tier boundary** — what happens to an Admin's existing Instances, composition grants, and audit retention when they switch tiers mid-cycle.
-4. **The `app/policy/entitlements.py` post-rename shape** — the dataclass layout, the new `TIER_SOLO` / `TIER_ENTERPRISE` constants, the four new `Dimension(...)` rows, and the rename of `domains_cap` (delete) and the rename of every `TIER_INDIVIDUAL` callsite.
+1. **Numeric values for the 18 entitlement dimensions per tier** beyond the per-tier summary cell — no semantics for what "composition depth = 2" actually means at a call-site, no default model-tier label per Instance per tier, no override mechanics on the `admin_tier_overrides` row.
+2. **Enterprise-tier numeric values** for the entitlement dimensions — §14 lists them as "Unlimited via overrides" or "Custom"; the negotiation envelope still needs to be bounded somewhere on paper so a sales-call can quote concrete defaults before the override row is written.
+3. **Free-tier hard limits and the CAPTCHA + 1-per-email/IP composition** — §14 commits Free as "$0 evaluator tier" but does not specify the 18-dimension numeric floor or the abuse-control gate composition.
+4. **The new Enterprise hybrid-billing axis** — `billing_model` enum on `subscriptions`, `included_usage_per_period`, `overage_rate_cents`, `committed_use_discount_bps`, `period_start`, `period_end` columns on `admin_tier_overrides`, and the `metering_emissions` cursor table.
+5. **Upgrade / downgrade behavior at the tier boundary** — what happens to an Admin's existing Instances, composition grants, and audit retention when they switch tiers mid-cycle.
+6. **The `app/policy/entitlements.py` post-Arc-4 shape** — the dataclass layout, the new `TIER_FREE` / `TIER_PRO` / `TIER_ENTERPRISE` constants, the per-axis override-consultation logic, and the rename of every legacy `TIER_INDIVIDUAL` / `TIER_TEAM` / `TIER_COMPANY` callsite.
 
-This file holds those four detail layers. Each section below maps 1:1 to an axis from CANONICAL §14, then enumerates the engineer-facing detail for that axis.
+This file holds those six detail layers. Each section below maps 1:1 to an axis (or sub-axis) from CANONICAL §14, then enumerates the engineer-facing detail.
 
 ---
 
 ## §2 — Axis 1: Instance count
 
-### §2.1 — Numeric values (post-Arc-4)
+### §2.1 — Numeric values
 
-| Dimension | Solo | Team | Company | Enterprise | Live-Today? | Enforcement site |
-|---|---|---|---|---|---|---|
-| `luciel_instances_cap` (rename → `instances_cap`) | 3 | 10 | 50 | `None` (sentinel for "negotiated") | ✅ | `POST /api/v1/admin/luciel-instances` (rename → `/api/v1/admin/instances`) checks against `INSTANCE_COUNT_CAP_BY_TIER` |
-| `widget_cap` (derived) | 1 | 3 | `None` (Unlimited within instance cap) | `None` | ✅ | Derived view; embed-key-mint at Step 30b / Step 31.2 |
+| Tier | `instance_count_cap` | Override surface |
+|---|---|---|
+| **Free** | 1 | None — gate is hard-coded in `entitlements.py` |
+| **Pro** | 3 | None — gate is hard-coded in `entitlements.py` |
+| **Enterprise** | `NULL` (= unlimited) | `admin_tier_overrides.instance_cap_override` — Integer, NULL means unlimited; a numeric value tightens to that value (negotiated cap for cost-conscious Enterprise deals) |
 
-### §2.2 — Enterprise envelope
+### §2.2 — Enforcement surface
 
-"Unlimited (negotiated)" is **not** an unbounded runtime value. The Enterprise tier's `instances_cap` is `None` in `entitlements.py` (matches existing Company `widget_cap` and Company `leads_cap` sentinel pattern), and the negotiation envelope is bounded by **a per-Admin override row** in a new table `admin_tier_overrides` (proposed for Deliverable #3 schema migration):
+- **Where:** `AdminService.create_luciel_instance(admin_id, ...)` (renamed from `create_instance_for_tenant`); also `TierProvisioningService.premint_for_tier(admin_id, tier)` at signup.
+- **Failure mode:** 402 with `error.code='instance_cap_exceeded'` and a body shape `{tier, current_count, cap}` so the UI can render an upgrade CTA.
+- **Race:** The check is `SELECT count(*) FROM luciel_instances WHERE admin_id=? AND active=true` immediately before the `INSERT`; a `UNIQUE` constraint on `(admin_id, name)` provides the safety net against a concurrent double-insert.
 
-```
-admin_tier_overrides
--------------------
-admin_id              FK admins.id      PK
-dimension_key         varchar(64)       PK
-override_value        jsonb             (literal int / bool / str matching the Entitlement.value type)
-override_enforced     boolean
-notes                 text              (operator-set, e.g. "Contract 2026-Q3, 200-instance cap")
-created_at            timestamptz
-created_by_user_id    FK users.id
-```
+### §2.3 — Upgrade / downgrade behavior
 
-When `get_entitlement(tier=TIER_ENTERPRISE, dimension_key=...)` is called, the lookup first checks `admin_tier_overrides` for the Admin in scope; if a row exists, that wins. If no row exists, the `_enterprise_set()` default applies (which is "unbounded" for most dimensions — i.e. `None`).
-
-This is the **one architectural shape** that Enterprise needs that the existing three tiers don't: a per-Admin override surface. Without it, Enterprise is indistinguishable from Company-with-bigger-numbers, and the negotiation envelope is unauditable.
-
-### §2.3 — Upgrade / downgrade behavior at this axis
-
-| From → To | Instance cap behavior |
-|---|---|
-| Solo → Team | Cap goes 3 → 10. Existing Instances all carry forward. No data movement. |
-| Team → Company | Cap goes 10 → 50. Existing Instances all carry forward. No data movement. |
-| Company → Enterprise | Cap goes 50 → negotiated. Existing Instances all carry forward. An `admin_tier_overrides` row is **required** at the upgrade transaction or the upgrade aborts (no silent fall-back to "unbounded"). |
-| Team → Solo (downgrade) | Cap goes 10 → 3. If Admin currently has > 3 Instances, the downgrade is **refused at the API layer** with a structured error listing the excess Instances. Admin must archive Instances before downgrade. No Instance is ever auto-deleted at tier-change. |
-| Company → Team (downgrade) | Cap goes 50 → 10. Same refusal-on-excess policy as Team → Solo. |
-| Enterprise → Company (downgrade) | Cap goes negotiated → 50. Same refusal-on-excess policy. The `admin_tier_overrides` row is **soft-deleted** (audit-trail preserved), not hard-deleted. |
+- **Free → Pro:** All existing Free Instances (max 1) carry forward; the cap raises to 3 immediately. No data migration.
+- **Pro → Enterprise:** All existing Pro Instances (max 3) carry forward; the cap raises to unlimited unless `admin_tier_overrides.instance_cap_override` is set. No data migration.
+- **Enterprise → Pro (downgrade):** If the Admin currently has more than 3 active Instances, the downgrade is **rejected** at the billing-portal layer with `error.code='downgrade_blocked_instance_count'`; the customer is shown the count and asked to deactivate down to 3 first. Soft-deleted Instances above the new cap are unaffected (they stay soft-deleted).
+- **Pro → Free (downgrade):** Same shape; reject above 1 active Instance.
 
 ---
 
-## §3 — Axis 2: Per-instance capacity
+## §3 — Axis 2: Leads per month
 
 ### §3.1 — Numeric values
 
-| Dimension | Solo | Team | Company | Enterprise | Live-Today? | Enforcement site |
-|---|---|---|---|---|---|---|
-| `leads_cap` (per Instance) | 3 active | 100 active | `None` (Unlimited) | `None` | ✅ | Lead-create call-site checks against `LEADS_CAP_BY_TIER` |
-| `conversations_per_day_per_seat` | 50 | 200 | `None` (Unlimited) | `None` | ❌ Roadmap | Per-seat counter not built; gated on Step 34 / Step 31.x. **Override available via `admin_tier_overrides`** when built. |
-| `audit_retention_days` | 30 | 90 | 365 | "Custom" (`None` = honor `admin_tier_overrides`, default 365) | ❌ Roadmap | Purge worker tier-agnostic today; gated on next cron touch. |
+| Tier | `leads_per_month_cap` | Override surface |
+|---|---|---|
+| **Free** | 10 | None — hard-coded |
+| **Pro** | 2,000 | None — hard-coded |
+| **Enterprise** | `NULL` (= unlimited included floor + overage) | `admin_tier_overrides.included_usage_per_period` (Integer, the included floor); overage above the floor is billed via the metering emitter (§17 below) |
 
-### §3.2 — `leads_cap` semantics — per Instance or per Admin?
+### §3.2 — Enforcement surface
 
-**Per Instance.** The cap counts *active* leads against one Instance, not the Admin's aggregate. A Solo Admin with 3 Instances may have 9 active leads total (3 × 3). The cap is the gate that triggers the soft-purge cascade after retention expiry — once an Instance hits its `leads_cap`, the lead-create call-site returns a structured "cap-reached" response, and the Admin must either archive an existing lead, upgrade, or wait for the purge worker to expire stale leads.
+- **Where:** `app/services/lead_service.py` `create_lead(...)` — the same call-site that mints a `Lead` row. Counter source: `SELECT count(*) FROM leads WHERE admin_id=? AND created_at >= date_trunc('month', now())`.
+- **Failure mode (Free, Pro):** 402 with `error.code='leads_cap_exceeded'`.
+- **Failure mode (Enterprise):** Never returns 402 — the lead is always created. The metering emitter (Arc 6) reports the overage to Stripe; the customer-facing visibility is the next invoice, not a 402.
+- **Counter reset:** Calendar-month boundary in the Admin's billing timezone (default UTC; future per-Admin override on `admins.billing_timezone`).
 
-This is unchanged from the existing Step 30a.6 shape; documenting here because the Arc 4 collapse renames `agent_id` → `instance_id` and the cap mechanic must rebind to the new noun.
+### §3.3 — Upgrade / downgrade behavior
 
-### §3.3 — `conversations_per_day_per_seat` semantics — what counts?
-
-A "conversation" is a `conversations` row (the cross-channel grouping primitive from Step 24.5c). A new conversation is a new count-tick. Continued messages within the same `conversation_id` do not re-tick. The "seat" is a `users.id` under the Admin scope, not an Instance. A Team Admin with 10 seats has a daily ceiling of 10 × 200 = 2,000 conversations.
-
-The reset window is **rolling 24h**, not midnight-aligned, per the implementation precedent at the Stripe rate-limit middleware. This avoids the "midnight rush" failure mode where every Admin's counter resets at the same wall-clock moment.
-
-### §3.4 — `audit_retention_days` — purge worker shape
-
-Today's purge worker (Step 30a.2) is **tier-agnostic** with a uniform 90-day window. Post-Arc-4 it becomes tier-aware:
-
-```python
-# pseudocode for the purge worker dispatch
-for admin in admins_query:
-    retention_days = get_entitlement(
-        tier=admin.tier,
-        dimension_key="audit_retention_days",
-    ).value
-    if retention_days is None:  # Enterprise with override
-        override = admin_tier_overrides.lookup(admin.id, "audit_retention_days")
-        retention_days = override.value if override else 365
-    cutoff = now() - timedelta(days=retention_days)
-    purge_audit_rows(admin_id=admin.id, older_than=cutoff)
-```
-
-The purge worker still runs nightly; only the cutoff varies per Admin. The `None` sentinel for Enterprise means "honor override or default 365" — Enterprise cannot be "infinite retention" without an explicit override row, because unbounded retention is a compliance hazard (we'd be holding data indefinitely with no buyer-side commitment).
-
-### §3.5 — Upgrade / downgrade behavior at this axis
-
-| Transition | Per-instance behavior |
-|---|---|
-| Solo → Team | `leads_cap` 3 → 100 (per Instance). Existing leads carry forward; no purge. `audit_retention_days` 30 → 90: rows aged 30–90 days that were due for purge are *preserved* (we never shorten history; we only ever extend it on upgrade). |
-| Team → Company | `leads_cap` 100 → Unlimited. `audit_retention_days` 90 → 365: same preserve-on-extend rule. |
-| Company → Enterprise | `audit_retention_days` 365 → override-controlled (default 365, never shorter). |
-| Team → Solo (downgrade) | `leads_cap` 100 → 3: existing leads beyond 3 per Instance are **not** auto-deleted; they remain accessible but the cap-reached gate fires on new lead-create. `audit_retention_days` 90 → 30: rows aged 30–90 days are **preserved through the current billing cycle**, then become eligible for purge at the next billing-cycle boundary. (We do not retroactively shorten the data window mid-cycle — that would be a quiet contract break.) |
-| Company → Team / Enterprise → Company (downgrade) | Same retention-preserve-through-cycle rule. |
+- **Mid-month upgrade Free→Pro:** The counter is not reset; the Pro cap (2,000) absorbs whatever count Free already accumulated. Pro customers won't notice; Free customers get effectively-immediate uncap.
+- **Mid-month downgrade Pro→Free:** If current month count > 10, the next `create_lead` call returns 402 immediately. The customer is warned at the billing-portal downgrade confirmation step.
+- **Enterprise:** Mid-cycle moves trigger a pro-rated `metering_emissions` close-out so the invoice is correct.
 
 ---
 
 ## §4 — Axis 3: Model tier per Instance
 
-### §4.1 — New dimension (Arc 4)
+### §4.1 — Numeric values
 
-| Dimension | Solo | Team | Company | Enterprise | Live-Today? | Enforcement site |
-|---|---|---|---|---|---|---|
-| `model_tier_per_instance` | `"mini"` | `"mid"` | `"premium"` | `"premium+dedicated"` | ❌ Roadmap | Not yet wired; gated on future arc that adds per-Instance model-class routing in `app/services/chat_service.py` |
+| Tier | Default model | Burst availability | Custom fine-tunes |
+|---|---|---|---|
+| **Free** | `base` only (the cheapest model in the foundation-model abstraction layer §4.8) | None | No |
+| **Pro** | `mid` (one tier above base) | `top` available for individual turns marked `urgent=true` by the operator; rate-limited to a configurable budget per Admin per month | No |
+| **Enterprise** | All available models | Unrestricted | Yes — per-Admin custom fine-tunes via `admin_tier_overrides.fine_tune_model_id` (nullable VARCHAR(64) FK to a future `fine_tunes` table; v1 schema lands at Arc 5 Revision A as a placeholder, runtime wiring is Arc 6+) |
 
-### §4.2 — Semantics
+### §4.2 — Enforcement surface
 
-`model_tier_per_instance` is the **default** model class for a new Instance under that Admin. It is a label, not a model identifier — the mapping label → concrete model (e.g. `mini` → `gpt-4o-mini`, `mid` → `gpt-4o`, `premium` → `claude-sonnet-4`) is held in a separate `MODEL_TIER_MAPPING` table/config so we can swap the concrete model without changing the entitlement contract.
+- **Where:** `app/runtime/context_assembler.py` model-selection logic, called from `chat_service.py` per turn.
+- **Failure mode:** A Pro customer requesting `urgent=true` past their monthly burst budget gets the `mid` model with a `model_downgrade_reason='burst_budget_exhausted'` flag on the response envelope. No 402; the turn completes.
 
-The label is the **floor**, not the ceiling. A Company-tier Admin can configure a specific Instance to use `mini` (e.g. for a high-volume low-stakes use case) — the entitlement just sets the default and the maximum class the Admin is *allowed* to select per Instance. A Solo Admin cannot configure an Instance above `mini`; the chat-service routing layer refuses the call.
+### §4.3 — Override surface
 
-### §4.3 — `premium+dedicated` semantics
-
-Enterprise's `premium+dedicated` means premium-class model running on dedicated infrastructure (negotiated). This is the bridge to the "dedicated infrastructure" promise in CANONICAL §14's closing paragraph. The dedicated infrastructure is a separate provisioning concern (separate VPC, separate model-host pool); the entitlement contract just gates *whether* the Admin can request it.
-
-### §4.4 — Override surface
-
-`admin_tier_overrides` applies here too — a Company-tier Admin can negotiate `premium+dedicated` access without upgrading to Enterprise (and pay the model-cost differential). The override is the lever; the tier label is the default.
+`admin_tier_overrides.model_tier_default` (nullable VARCHAR(32)) lets an Enterprise contract specify a non-default model as the floor; e.g. an Enterprise customer who negotiated `top` as their default rather than `mid`.
 
 ---
 
-## §5 — Axis 4: Composition
+## §5 — Axis 4: Composition (Instance-to-Instance grants within an Admin)
 
-### §5.1 — Three new dimensions (Arc 4)
+### §5.1 — Numeric values
 
-| Dimension | Solo | Team | Company | Enterprise | Live-Today? | Enforcement site |
-|---|---|---|---|---|---|---|
-| `composition_enabled` | `False` | `True` | `True` | `True` | ❌ Roadmap | `instance_composition_grants` table not yet created |
-| `max_composition_depth` | `0` | `2` | `None` (Unlimited within Admin) | `None` | ❌ Roadmap | Depth enforcement at composition call site |
-| `knowledge_share_grants_enabled` | `False` | `False` | `True` | `True` | ❌ Roadmap | `knowledge_share_grants` table not yet created |
+| Tier | `composition_enabled` | `max_composition_depth` | `knowledge_share_grants_enabled` |
+|---|---|---|---|
+| **Free** | False | 0 | False |
+| **Pro** | True | 2 | False (composition only; knowledge-share is Enterprise-only) |
+| **Enterprise** | True | `NULL` (= unlimited within reason) | True |
 
-### §5.2 — Two-table contract
+### §5.2 — Definitions
 
-Composition needs **two** tables, not one. The distinction is the §4.1 isolation contract:
+- **Composition depth** = the number of hops in an inter-Instance call chain. Depth=2 means Instance A can call Instance B which can call Instance C, and the audit row carries the full chain. Depth>2 calls are rejected at `app/services/composition_service.py`.
+- **Knowledge-share grant** = an explicit `knowledge_share_grants(grantor_instance_id, grantee_instance_id, knowledge_namespace, granted_at, granted_by_user_id, revoked_at)` row that permits the grantee Instance to read from the grantor's knowledge namespace. Without this row, every Instance is knowledge-isolated even within an Admin scope.
 
-**Table 1 — `instance_composition_grants`:** grants one Instance permission to *call* another Instance as a tool. Directional. Audited. Bounded by `max_composition_depth`.
+### §5.3 — Enforcement surface
 
-```
-instance_composition_grants
----------------------------
-id                      uuid PK
-admin_id                FK admins.id        (composition is same-Admin-only)
-caller_instance_id      FK instances.id
-callee_instance_id      FK instances.id
-created_at              timestamptz
-created_by_user_id      FK users.id
-revoked_at              timestamptz NULL
-notes                   text
-
-CHECK (caller_instance_id != callee_instance_id)
-CHECK (admin_id = (SELECT admin_id FROM instances WHERE id = caller_instance_id))
-CHECK (admin_id = (SELECT admin_id FROM instances WHERE id = callee_instance_id))
-```
-
-**Table 2 — `knowledge_share_grants`:** grants one Instance the right to *read knowledge* (vector embeddings, memories, lead context) from another Instance. Strict superset of composition — if knowledge-share is granted, composition is implied. The reverse is **not** true: a Team Admin can grant Instance A → Instance B composition (Instance A can call Instance B as a tool) without granting knowledge-share (Instance A cannot read Instance B's memory directly; the only data flow is via the explicit tool-call response payload, which is audited).
-
-```
-knowledge_share_grants
-----------------------
-id                      uuid PK
-admin_id                FK admins.id        (same-Admin-only)
-source_instance_id      FK instances.id     (the Instance whose knowledge is being shared)
-target_instance_id      FK instances.id     (the Instance gaining read access)
-scope                   varchar(32)         CHECK IN ('memories', 'leads', 'embeddings', 'all')
-created_at              timestamptz
-created_by_user_id      FK users.id
-revoked_at              timestamptz NULL
-```
-
-### §5.3 — Depth semantics — what does `max_composition_depth = 2` mean?
-
-Depth is the **length of the composition chain at call time**, not the count of grants. If Instance A → Instance B → Instance C is invoked as one request, that's depth 2. A grant graph with 10 instances but each request only chains 2-deep is fine at depth = 2.
-
-| Depth value | Meaning | Reference |
-|---|---|---|
-| `0` | No composition at all (Solo tier) — every Instance is an island | enforcement: refuse any cross-Instance tool call at the chat-service layer |
-| `2` | A chain of at most 2 calls (A→B, or A→B→C) per request | enforcement: chat-service maintains a per-request chain-depth counter; aborts if call would exceed |
-| `None` | Unlimited within Admin scope, bounded only by request-timeout and tool-budget | enforcement: same counter, no abort |
-
-Cross-Admin composition is **architecturally forbidden** at all depths, all tiers — enforced by the FK chain (every grant row has `admin_id` and both Instance FKs must resolve to the same `admin_id`). Even an Enterprise Admin with custom SLA cannot compose with another Admin's Instances; if cross-Admin federation is ever needed, it requires a *new* primitive (federation, not composition) and a new contract surface.
-
-### §5.4 — Audit trail per composition call
-
-Every composition call emits one `AdminAuditLog` row:
-
-```
-action:           "instance_composition_called"
-admin_id:         <calling Admin>
-actor_user_id:    <user who initiated the request, or NULL for autonomous triggers>
-target_resource:  "instance"
-target_id:        <callee_instance_id>
-metadata: {
-  caller_instance_id: <uuid>,
-  callee_instance_id: <uuid>,
-  chain_depth: <int>,
-  grant_id: <uuid>,
-  call_signature: <sha256 of tool name + arg shape>,
-}
-hash_prev:        <previous row hash>
-hash_self:        <this row hash>
-```
-
-The hash-chain (existing audit chain from §4.3) extends through composition calls. A composition chain of depth 2 emits **two** audit rows (one per hop), not one.
-
-### §5.5 — Upgrade / downgrade at this axis
-
-| Transition | Composition behavior |
-|---|---|
-| Solo → Team | `composition_enabled` `False` → `True`. No existing grants to migrate (Solo had none). Admin must explicitly create grants via the admin UI; nothing auto-enables. |
-| Team → Company | `max_composition_depth` `2` → `None`. Existing grants remain valid (the grant *graph* is unchanged); only the per-request depth ceiling lifts. |
-| Company → Solo (downgrade) | `composition_enabled` `True` → `False`. All existing `instance_composition_grants` and `knowledge_share_grants` are **soft-revoked** (revoked_at set, rows preserved for audit). At the next composition call attempt, the chat service refuses. Re-upgrade restores the grants (revoked_at cleared) within a 30-day grace window; after 30 days the rows hard-delete via the next purge worker pass. |
-| Team → Solo (downgrade) | Same soft-revoke cascade as Company → Solo. |
-| Company → Team (downgrade) | `max_composition_depth` `None` → `2`. Existing grants remain valid (no grant-row state change). New composition calls that would exceed depth 2 are refused at request time; in-flight calls already deeper than 2 complete (we don't kill mid-request). |
+- **Where:** `app/services/composition_service.py` `resolve_composition_chain(...)`; called from the foundation-model tool-call dispatch layer in `chat_service.py`.
+- **Failure modes:** `composition_disabled_for_tier` (Free), `max_depth_exceeded` (Pro at >2 hops), `composition_grant_missing` (any tier without an explicit `instance_composition_grants` row).
+- **Override surface:** `admin_tier_overrides.composition_depth_override` (Integer, NULL means unlimited; a numeric value tightens) for Enterprise.
 
 ---
 
-## §6 — Axis 5: Configurability
+## §6 — Axis 5: API access (programmatic + widget)
 
 ### §6.1 — Numeric values
 
-| Dimension | Solo | Team | Company | Enterprise | Live-Today? | Enforcement site |
-|---|---|---|---|---|---|---|
-| `custom_branding` | `False` | `False` | `True` | `True` | ❌ Roadmap | Step 30b widget carries theme field; tier-gating not enforced |
-| `voice_channel` | `"Roadmap"` | `"Roadmap"` | `"Roadmap"` | `"Roadmap"` | ❌ Roadmap | Step 34a channel adapter framework |
-| `sms_channel` | `"Roadmap"` | `"Roadmap"` | `"Roadmap"` | `"Roadmap"` | ❌ Roadmap | Step 34a |
-| `email_channel` | `"Roadmap"` | `"Roadmap"` | `"Roadmap"` | `"Roadmap"` | ❌ Roadmap | Step 34a |
+| Tier | `api_enabled` | Rate limit | Embed-key minting |
+|---|---|---|---|
+| **Free** | False | N/A | False (no widget embed, no public API access; widget chat for Free Instances only works via the marketing-site preview surface) |
+| **Pro** | True | 60 requests/minute per Admin (configurable per-key inside the budget) | True (up to 3 embed keys per Admin, one per Instance) |
+| **Enterprise** | True | Custom per `admin_tier_overrides.api_rate_limit_rpm` (Integer, default 1000) | True (unlimited embed keys; key minting still requires `admin_owner` role) |
 
-### §6.2 — `custom_branding` shape
+### §6.2 — Enforcement surface
 
-The widget already carries a `theme` JSONB field (from Step 30b). Today the value is ignored at render time (always uses the default VantageMind theme). Post-Arc-4 enforcement:
-
-- Solo / Team: `theme` field reads as `null` to the widget runtime regardless of stored value (the entitlement check happens at the read-side, not the write-side, so an Admin who upgrades sees their stored theme apply without re-saving).
-- Company / Enterprise: `theme` field reads as stored.
-
-The write-side accepts any valid theme JSON regardless of tier (we don't strip data on write), so upgrade-to-Company instantly unlocks any theme the Admin had already saved.
-
-### §6.3 — Channel adapters — why all four tiers are "Roadmap"
-
-Per the Step 30a.6 correction (`D-channels-promised-not-built-multi-tier-2026-05-20`), voice / SMS / email are committed across all tiers, not Company-only. Gated entirely on Step 34a's adapter framework. When Step 34a lands, all four tier cells flip together to `True` (or to a per-tier rate limit if we discover we need to gate channel volume).
+- **Where:** `app/middleware/rate_limit.py` (existing module from Step 30a); reads `subscriptions.tier` (now `admins.tier` post-Arc-5) to select the limit.
+- **Failure mode:** 429 with `Retry-After` header. Free requests are 403 with `error.code='api_disabled_for_tier'`.
 
 ---
 
-## §7 — Axis 6: Operational features
+## §7 — Axis 6: Roles and seats
 
-### §7.1 — Numeric values (Live-Today + Roadmap)
+### §7.1 — Numeric values
 
-| Dimension | Solo | Team | Company | Enterprise | Live-Today? | Enforcement site |
-|---|---|---|---|---|---|---|
-| `seats` | 1 | 10 | 50 | `None` (negotiated) | ✅ | `invite_service.py` invite-mint cap |
-| `api_rate_limit_rpm` | 10 | 60 | 300 | `None` (Custom) | ❌ Roadmap | `RateLimitFallback` middleware; per-tier profiles not wired |
-| `concurrent_instances` | 2 | 10 | 50 | `None` (Custom) | ❌ Roadmap | Concurrency counter not built |
-| `cross_instance_memory` | `None` (N/A — composition off) | `None` (N/A — knowledge-share off) | `"Roadmap"` (explicit grants) | `"Roadmap"` | ❌ Roadmap | Knowledge-share grant table not built |
-| `audit_csv_export` | `False` | `False` | `True` | `True` | ❌ Roadmap | No route exists; Step 31.x |
-| `sso` | `False` | `False` | `"Roadmap"` | `"Roadmap"` | ❌ Roadmap | No integration; future enterprise step beyond Step 33b |
-| `priority_support` | `"None (community / docs)"` | `"Email response within 24h"` | `"Email + Slack within 4h"` | `"Custom SLA"` | ❌ Roadmap | No SLA infrastructure; future ops step |
-| `dedicated_success_manager` | `False` | `False` | `"Annual cadence only"` | `True` | ❌ Roadmap | Operator-process row; first Company annual hand-off |
+| Tier | Available roles | Seat cap | `delegated_admin_enabled` |
+|---|---|---|---|
+| **Free** | `admin_owner` only (1 user = the signup email) | 1 | False |
+| **Pro** | `admin_owner`, `instance_lead`, `member` | 5 (the Admin and up to 4 invited teammates) | False |
+| **Enterprise** | `admin_owner`, `instance_lead`, `member`, `delegated_admin` | `NULL` (= unlimited, but bounded by `admin_tier_overrides.seat_cap_override` if set) | True (gated on `admin_tier_overrides.delegated_admin_enabled`) |
 
-### §7.2 — REMOVED dimension — `domains_cap`
+### §7.2 — Role definitions
 
-Original Dimension 3 from the Step 30a.6 matrix. Arc 4 removes the Domain layer entirely. The entitlements module deletes this dimension; the `DOMAIN_COUNT_CAP_BY_TIER` map in `app/models/subscription.py` is deleted in the same commit. CANONICAL §14 preserves the row with strikethrough as audit chain; this module does *not* preserve it (the module is the runtime source of truth; preserving a dead dimension creates lookup risk).
+- **`admin_owner`** — full read/write/admin on the Admin scope; the signup user; one per Admin.
+- **`instance_lead`** — read/write on the Instances they're assigned to via `scope_assignments`; read-only on Admin-rollup dashboard panes.
+- **`member`** — read-only on the Instances they're assigned to.
+- **`delegated_admin`** (Enterprise-only) — full admin on a subset of Instances delegated by `admin_owner`; supports an SSO-mapped sub-admin pattern for large Enterprise customers.
 
-### §7.3 — `api_rate_limit_rpm` — per Admin or per Instance?
+### §7.3 — Enforcement surface
 
-**Per Admin.** A Team Admin with 10 Instances shares 60 rpm across all Instances. This matches the "Admin is the billing boundary" doctrine — rate limit is a billing-axis cap, not a per-Instance capacity cap (the per-Instance capacity cap is `conversations_per_day_per_seat`).
+- **Where:** `app/middleware/auth.py` resolves the user's role on every request; `app/services/admin_service.py` calls the role-check helper on every mutating call.
+- **Override surface:** `admin_tier_overrides.seat_cap_override` (Integer, NULL means unlimited) and `admin_tier_overrides.delegated_admin_enabled` (Boolean).
 
-### §7.4 — `concurrent_instances` — what counts as "concurrent"?
+---
 
-A `concurrent_instances` value of 10 means: at any single moment in time, no more than 10 of the Admin's Instances may be actively processing an LLM call. An Instance idle-between-requests does not count. The counter ticks on chat-service entry and decrements on exit (including error exit).
+## §8 — Axis 7: Dashboard views
 
-This is **per-Admin**, not per-Instance. An Admin with 50 Instances all warm-but-idle is at concurrent count 0.
+### §8.1 — Numeric values
 
-### §7.5 — `seats` semantics — what does a "seat" map to?
+| Tier | Single-instance view | Instance-group view | Admin rollup | Metering / overage surface |
+|---|---|---|---|---|
+| **Free** | ✅ | ❌ | ❌ | ❌ |
+| **Pro** | ✅ | ✅ | ✅ | ❌ |
+| **Enterprise** | ✅ | ✅ | ✅ | ✅ |
 
-A `seat` is one row in `users` × `scope_assignments` under the Admin. Scope assignments rebind from `(tenant_id, domain_id?, agent_id?)` to `(admin_id, instance_id?)`. A user can have multiple scope_assignment rows (e.g. assigned to two Instances under the same Admin) without counting as multiple seats — the seat is the `users.id`, not the assignment.
+### §8.2 — Enforcement surface
 
-The post-Arc-4 role taxonomy on `scope_assignments`:
+The `/app` shell in the marketing site reads `admins.tier` and selects one of three layouts (`FreeShell`, `ProShell`, `EnterpriseShell`). Backend dashboard endpoints (`/api/v1/dashboard/{admin,instance-group,instance}`) are unchanged in shape but return 403 with `error.code='dashboard_disabled_for_tier'` when the caller's tier does not include that view.
 
-| Old role | New role | Semantics |
+---
+
+## §9 — Axis 8: Audit retention
+
+### §9.1 — Numeric values
+
+| Tier | `audit_retention_days` | Override surface |
 |---|---|---|
-| `owner` | `owner` | Unchanged. One per Admin. The Admin's billing contact. Full read/write across every Instance under the Admin. |
-| `tenant_admin` | `admin_user` | Renamed. A user with admin-write privileges across the Admin scope but not the billing contact. |
-| `department_lead` | `instance_lead` | Renamed. A user assigned to a specific Instance with read/write on that Instance only. |
-| `teammate` | `member` | Renamed. A user assigned to a specific Instance with read-only on that Instance. |
+| **Free** | 30 | None |
+| **Pro** | 365 | None |
+| **Enterprise** | `NULL` (= unlimited) | `admin_tier_overrides.audit_retention_days_override` (Integer, NULL means unlimited; a numeric value caps; most Enterprise contracts negotiate 7-year retention for FINTRAC compliance, so the override is rarely NULL in practice) |
 
-The four-role taxonomy is preserved in shape; only the names change. The `_enforce_tier_scope` map in `admin_service.py` deletes the `domain` row and renames the `agent` row to `instance`.
+### §9.2 — Enforcement surface
+
+The retention purge worker (`app/workers/retention_worker.py`, shipped at Step 30a.2) reads each Admin's tier + override and purges `admin_audit_log` rows older than the resolved retention.
 
 ---
 
-## §8 — Post-rewrite `app/policy/entitlements.py` shape
+## §10 — Axis 9: SSO
 
-This is the **target** state of the module after the Arc 4 execution arc completes. The structure is unchanged (dataclasses, frozen, lookup helpers); only the dimensions, tiers, and constants rebind.
+### §10.1 — Numeric values
+
+| Tier | SSO | Provider support |
+|---|---|---|
+| **Free** | ❌ | N/A |
+| **Pro** | ❌ | N/A |
+| **Enterprise** | ✅ | SAML 2.0 v1; OIDC v2 (Arc 7+) |
+
+### §10.2 — Enforcement surface
+
+`app/services/sso_service.py` (lands at Arc 7+); Enterprise contracts include the SP metadata exchange. Pro customers asking for SSO are sales-funnel-routed to Enterprise.
+
+---
+
+## §11 — Axis 10: Custom widget branding
+
+### §11.1 — Numeric values
+
+| Tier | `widget_branding_custom` | Co-brand "Powered by Luciel" |
+|---|---|---|
+| **Free** | False | Always shown |
+| **Pro** | False (color + logo customization only) | Always shown |
+| **Enterprise** | True | Removable via `admin_tier_overrides.cobrand_hidden=true` |
+
+---
+
+## §12 — Axis 11: Webhook outbound
+
+### §12.1 — Numeric values
+
+| Tier | Webhook outbound | Concurrent deliveries |
+|---|---|---|
+| **Free** | False | N/A |
+| **Pro** | True (1 endpoint per Admin) | 5 concurrent |
+| **Enterprise** | True (unlimited endpoints) | `admin_tier_overrides.webhook_concurrency_override` (default 50) |
+
+---
+
+## §13 — Axis 12: Cross-Instance memory federation
+
+### §13.1 — Numeric values
+
+| Tier | Federation enabled | Notes |
+|---|---|---|
+| **Free** | False | One Instance = no federation surface |
+| **Pro** | False (composition is the surface for cross-Instance work; memory stays per-Instance) | A Pro customer who needs federated memory across Instances is an Enterprise customer |
+| **Enterprise** | True | Requires `knowledge_share_grants` row per (grantor, grantee, namespace) |
+
+---
+
+## §14 — Axis 13: SLA
+
+### §14.1 — Numeric values
+
+| Tier | Uptime SLA | Response SLA |
+|---|---|---|
+| **Free** | None (best-effort) | None |
+| **Pro** | 99.5% (no credit, just published target) | 24h email response |
+| **Enterprise** | 99.9% with service credits per `admin_tier_overrides.sla_credit_schedule` | Custom per contract; default 4h business-hours |
+
+---
+
+## §15 — Axis 14: Data residency
+
+### §15.1 — Numeric values
+
+| Tier | Region |
+|---|---|
+| **Free** | `ca-central-1` only |
+| **Pro** | `ca-central-1` only |
+| **Enterprise** | `ca-central-1` default; alternate region via `admin_tier_overrides.data_residency_region` (lands at Arc 9+ when a second region is provisioned) |
+
+---
+
+## §16 — Axis 15: Export
+
+### §16.1 — Numeric values
+
+| Tier | CSV export | Full audit-chain export |
+|---|---|---|
+| **Free** | False | False |
+| **Pro** | True (CSV of own data) | False (the audit chain is a regulator-facing surface; Pro customers see the dashboard view but not the raw chain) |
+| **Enterprise** | True | True |
+
+---
+
+## §17 — NEW Axis: Enterprise hybrid billing model
+
+This axis is net-new in v2 of this matrix. It applies to Enterprise tier only; Free and Pro have a single implied `billing_model` (Free=`free` implicit, Pro=`flat`).
+
+### §17.1 — `billing_model` enum on `subscriptions`
+
+| Value | Meaning | Applies to |
+|---|---|---|
+| `flat` | Recurring Price only; no metered emission | Pro (default); Enterprise contracts that negotiated a flat rate |
+| `hybrid` | Recurring platform-fee Price + metered usage Price on the same subscription | Enterprise (default) |
+| `consumption` | Metered usage Price only (no platform fee) | Reserved for v2 future; no SKU ships with `consumption` at Arc 6 |
+
+### §17.2 — `admin_tier_overrides` hybrid-billing columns
+
+| Column | Type | Meaning | Default for Enterprise hybrid |
+|---|---|---|---|
+| `billing_model` | VARCHAR(16) | Mirror of the subscription-row value; lives here so a regulator reading the override table alone can see the negotiated shape | `'hybrid'` |
+| `included_usage_per_period` | Integer | The included floor of metered units (leads or tokens, per the configured unit) | Negotiated; typical floors: 10,000 leads/month or 10M tokens/month |
+| `overage_rate_cents` | Integer | Per-unit overage rate in cents (Stripe's wire format) | Negotiated; typical rates: 5¢/lead or $0.05/1K tokens |
+| `committed_use_discount_bps` | Integer | Basis points off the floor for committed-use Admins (e.g. 1500 = 15% off the platform fee in exchange for a 12-month commit) | 0 (no discount) for month-to-month; 1500 typical for annual commits |
+| `period_start` | Date | Contract window start | Signing date |
+| `period_end` | Date | Contract window end; renewal triggers re-negotiation, not silent rollover | Signing date + 12 months |
+| `metered_unit` | VARCHAR(16) | Either `'leads'` or `'tokens'` | `'leads'` (real-estate vertical default) |
+
+### §17.3 — Metering emitter (Celery beat)
+
+Per ARCHITECTURE §3.2.14, an hourly Celery-beat worker reads the running total of the metered unit and emits the delta to Stripe with an idempotency key. Failure modes are documented at DRIFTS §3 `D-enterprise-metering-not-implemented-2026-05-22`.
+
+### §17.4 — Pricing-page positioning
+
+CANONICAL_RECAP §11.7 commits the "starting at `$[ENTERPRISE_FLOOR]/year`" framing with a `[Talk to sales](mailto:enterprise@vantagemind.ai)` CTA. The `$[ENTERPRISE_FLOOR]` placeholder is filled at Arc 6 when the marketing-side copy is wired (placeholder is intentional in this design doc so the value is not committed in a code review separate from the marketing-copy review).
+
+### §17.5 — Self-serve carve-out
+
+Enterprise is **deliberately not self-serve at v1**. There is no Checkout flow that mints an Enterprise subscription; every Enterprise row is operator-minted via a `scripts/mint-enterprise-admin.ps1` runbook that takes the signed contract terms and writes the `admin_tier_overrides` row + the Stripe subscription. Self-serve Enterprise is a future shape if a market signal demands it.
+
+---
+
+## §18 — `app/policy/entitlements.py` post-Arc-4 shape
+
+### §18.1 — Constants
 
 ```python
-"""Tier-entitlement matrix v2 (Arc 4, 2026-05-22).
+TIER_FREE = "free"
+TIER_PRO = "pro"
+TIER_ENTERPRISE = "enterprise"
+ALL_TIERS = (TIER_FREE, TIER_PRO, TIER_ENTERPRISE)
 
-The operational differences between Solo, Team, Company, and Enterprise
-tiers -- beyond instance cap and price -- live in this module as the
-single first-class artifact. CANONICAL_RECAP §14 "Entitlement matrix" is
-the buyer-facing surface. Six axes, 22 named dimensions across 4 tiers.
-
-Eight dimensions remain deferred to follow-up Steps (channel adapters,
-per-seat metering, concurrency counter, etc.) plus the four new Arc 4
-dimensions (model tier, composition, depth, knowledge-share) all
-roadmap. Per-row drifts open lazily at the corresponding-Step touch.
-
-Enterprise tier accepts per-Admin overrides via `admin_tier_overrides`
-(see arc4-out/A-tier-matrix-detail.md §2.2).
-"""
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any
-
-from app.models.subscription import (
-    TIER_COMPANY,
-    TIER_ENTERPRISE,  # NEW
-    TIER_SOLO,        # renamed from TIER_INDIVIDUAL
-    TIER_TEAM,
-)
-
-
-@dataclass(frozen=True)
-class Entitlement:
-    value: Any
-    enforced: bool
-    pairing_step: str | None = None
-
-
-@dataclass(frozen=True)
-class Dimension:
-    key: str
-    label: str
-    axis: str  # NEW: one of "instance_count", "per_instance_capacity",
-               # "model_tier", "composition", "configurability",
-               # "operational"
-
-
-DIMENSIONS: tuple[Dimension, ...] = (
-    # Axis 1 -- Instance count (2 dimensions)
-    Dimension("instances_cap", "Instances cap", "instance_count"),
-    Dimension("widget_cap", "Widget cap (derived)", "instance_count"),
-
-    # Axis 2 -- Per-instance capacity (3 dimensions)
-    Dimension("leads_cap", "Leads / conversations stored cap (per Instance)", "per_instance_capacity"),
-    Dimension("conversations_per_day_per_seat", "Conversations per day, per seat", "per_instance_capacity"),
-    Dimension("audit_retention_days", "Audit retention", "per_instance_capacity"),
-
-    # Axis 3 -- Model tier (1 dimension, NEW)
-    Dimension("model_tier_per_instance", "Model tier per Instance", "model_tier"),
-
-    # Axis 4 -- Composition (3 dimensions, NEW)
-    Dimension("composition_enabled", "Composition enabled", "composition"),
-    Dimension("max_composition_depth", "Max composition chain depth", "composition"),
-    Dimension("knowledge_share_grants_enabled", "Knowledge-share grants enabled", "composition"),
-
-    # Axis 5 -- Configurability (4 dimensions)
-    Dimension("custom_branding", "Custom widget branding", "configurability"),
-    Dimension("voice_channel", "Voice channel adapter", "configurability"),
-    Dimension("sms_channel", "SMS channel adapter", "configurability"),
-    Dimension("email_channel", "Email channel adapter", "configurability"),
-
-    # Axis 6 -- Operational features (8 dimensions)
-    Dimension("seats", "Seats (people who can sign in under the Admin)", "operational"),
-    Dimension("api_rate_limit_rpm", "API rate limit (rpm, per Admin)", "operational"),
-    Dimension("concurrent_instances", "Concurrent Instances (per-Admin LLM concurrency)", "operational"),
-    Dimension("cross_instance_memory", "Cross-instance memory (knowledge-share)", "operational"),
-    Dimension("audit_csv_export", "Audit CSV export", "operational"),
-    Dimension("sso", "SSO (SAML / OIDC)", "operational"),
-    Dimension("priority_support", "Priority support", "operational"),
-    Dimension("dedicated_success_manager", "Dedicated success manager", "operational"),
-)
-
-assert len(DIMENSIONS) == 21, (  # 2+3+1+3+4+8 = 21 dimensions in the module
-    "DIMENSIONS must remain 21 rows in the module -- the 22nd row in "
-    "CANONICAL_RECAP §14's matrix is `domains_cap` preserved with "
-    "strikethrough as audit chain; the module does not carry dead rows."
-)
-
-
-# Pairing-step tokens (existing + new Arc 4 tokens)
-_STEP_34A_CHANNELS = "Step 34a (channel adapter framework)"
-_STEP_31X_METERING = "Step 31.x (per-seat metering + per-tier rate-limit profiles)"
-_STEP_36_COUNCIL = "Step 36 (Luciel Council) / Step 31.x (concurrency counter)"
-_STEP_37_HYBRID = "Step 37 (hybrid retrieval) -- knowledge-share grants"
-_STEP_NEXT_CRON = "next cron touch -- per-tier retention class into the purge worker"
-_STEP_AUDIT_EXPORT = "Step 31.x (audit CSV export route)"
-_STEP_WIDGET_THEME = "next widget touch -- tier-gating the theme field"
-_STEP_FUTURE_OPS = "future ops step -- SLA infrastructure"
-_STEP_FIRST_COMPANY_ANNUAL = "first Company annual hand-off"
-_STEP_BEYOND_33B = "future enterprise step beyond Step 33b -- SSO integration"
-_STEP_ARC_5_COMPOSITION = "Arc 5 (composition grant tables + chat-service routing)"  # NEW
-_STEP_ARC_5_MODEL_TIER = "Arc 5 (per-Instance model-class routing)"  # NEW
-
-
-# Each tier's row builder -- shape unchanged, dimension set rebound.
-def _solo_set() -> EntitlementSet:
-    return {
-        # Axis 1
-        "instances_cap": Entitlement(3, enforced=True),
-        "widget_cap": Entitlement(1, enforced=True),
-        # Axis 2
-        "leads_cap": Entitlement(3, enforced=True),
-        "conversations_per_day_per_seat": Entitlement(50, enforced=False, pairing_step=_STEP_31X_METERING),
-        "audit_retention_days": Entitlement(30, enforced=False, pairing_step=_STEP_NEXT_CRON),
-        # Axis 3
-        "model_tier_per_instance": Entitlement("mini", enforced=False, pairing_step=_STEP_ARC_5_MODEL_TIER),
-        # Axis 4
-        "composition_enabled": Entitlement(False, enforced=False, pairing_step=_STEP_ARC_5_COMPOSITION),
-        "max_composition_depth": Entitlement(0, enforced=False, pairing_step=_STEP_ARC_5_COMPOSITION),
-        "knowledge_share_grants_enabled": Entitlement(False, enforced=False, pairing_step=_STEP_ARC_5_COMPOSITION),
-        # Axis 5
-        "custom_branding": Entitlement(False, enforced=False, pairing_step=_STEP_WIDGET_THEME),
-        "voice_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "sms_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "email_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        # Axis 6
-        "seats": Entitlement(1, enforced=True),
-        "api_rate_limit_rpm": Entitlement(10, enforced=False, pairing_step=_STEP_31X_METERING),
-        "concurrent_instances": Entitlement(2, enforced=False, pairing_step=_STEP_36_COUNCIL),
-        "cross_instance_memory": Entitlement(None, enforced=True),  # N/A -- composition off
-        "audit_csv_export": Entitlement(False, enforced=True),
-        "sso": Entitlement(False, enforced=True),
-        "priority_support": Entitlement("None (community / docs)", enforced=False, pairing_step=_STEP_FUTURE_OPS),
-        "dedicated_success_manager": Entitlement(False, enforced=True),
-    }
-
-
-def _enterprise_set() -> EntitlementSet:
-    return {
-        # Axis 1
-        "instances_cap": Entitlement(None, enforced=True),  # negotiated; admin_tier_overrides required
-        "widget_cap": Entitlement(None, enforced=True),
-        # Axis 2
-        "leads_cap": Entitlement(None, enforced=True),
-        "conversations_per_day_per_seat": Entitlement(None, enforced=False, pairing_step=_STEP_31X_METERING),
-        "audit_retention_days": Entitlement(None, enforced=False, pairing_step=_STEP_NEXT_CRON),  # default 365 via override path
-        # Axis 3
-        "model_tier_per_instance": Entitlement("premium+dedicated", enforced=False, pairing_step=_STEP_ARC_5_MODEL_TIER),
-        # Axis 4
-        "composition_enabled": Entitlement(True, enforced=False, pairing_step=_STEP_ARC_5_COMPOSITION),
-        "max_composition_depth": Entitlement(None, enforced=False, pairing_step=_STEP_ARC_5_COMPOSITION),  # Unlimited
-        "knowledge_share_grants_enabled": Entitlement(True, enforced=False, pairing_step=_STEP_ARC_5_COMPOSITION),
-        # Axis 5
-        "custom_branding": Entitlement(True, enforced=False, pairing_step=_STEP_WIDGET_THEME),
-        "voice_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "sms_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "email_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        # Axis 6
-        "seats": Entitlement(None, enforced=True),
-        "api_rate_limit_rpm": Entitlement(None, enforced=False, pairing_step=_STEP_31X_METERING),
-        "concurrent_instances": Entitlement(None, enforced=False, pairing_step=_STEP_36_COUNCIL),
-        "cross_instance_memory": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_37_HYBRID),
-        "audit_csv_export": Entitlement(True, enforced=False, pairing_step=_STEP_AUDIT_EXPORT),
-        "sso": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_BEYOND_33B),
-        "priority_support": Entitlement("Custom SLA", enforced=False, pairing_step=_STEP_FUTURE_OPS),
-        "dedicated_success_manager": Entitlement(True, enforced=False, pairing_step=_STEP_FIRST_COMPANY_ANNUAL),
-    }
-
-
-# _team_set() and _company_set() follow the same shape -- see CANONICAL §14
-# matrix for the full numeric values per dimension. Omitted here for brevity
-# (will be authored in full at execution-arc commit time).
-
-
-ENTITLEMENTS_BY_TIER: dict[str, EntitlementSet] = {
-    TIER_SOLO: _solo_set(),
-    TIER_TEAM: _team_set(),
-    TIER_COMPANY: _company_set(),
-    TIER_ENTERPRISE: _enterprise_set(),
-}
-
-
-# Override lookup -- NEW for Arc 4
-def get_entitlement(
-    *,
-    tier: str,
-    dimension_key: str,
-    admin_id: str | None = None,
-    db_session: Any | None = None,
-) -> Entitlement:
-    """Look up an entitlement cell, honoring admin_tier_overrides for Enterprise.
-
-    When tier == TIER_ENTERPRISE and admin_id + db_session are provided,
-    the lookup first checks admin_tier_overrides for that Admin.
-    Otherwise falls back to the tier default.
-    """
-    if tier == TIER_ENTERPRISE and admin_id and db_session:
-        override = _lookup_admin_override(
-            db_session=db_session,
-            admin_id=admin_id,
-            dimension_key=dimension_key,
-        )
-        if override is not None:
-            return Entitlement(
-                value=override.override_value,
-                enforced=override.override_enforced,
-                pairing_step=None,
-            )
-    return ENTITLEMENTS_BY_TIER[tier][dimension_key]
+BILLING_MODEL_FLAT = "flat"
+BILLING_MODEL_HYBRID = "hybrid"
+BILLING_MODEL_CONSUMPTION = "consumption"
+ALL_BILLING_MODELS = (BILLING_MODEL_FLAT, BILLING_MODEL_HYBRID, BILLING_MODEL_CONSUMPTION)
 ```
 
-(`_team_set()` and `_company_set()` omitted in this design doc for brevity; their full numeric rows are mechanically derived from the CANONICAL §14 matrix and will be authored at execution-arc commit time. The pattern is fixed.)
+### §18.2 — Per-tier static map (load-bearing for Free + Pro; Enterprise consults overrides)
+
+```python
+TIER_ENTITLEMENTS = {
+    TIER_FREE: TierEntitlement(
+        instance_count_cap=1,
+        leads_per_month_cap=10,
+        model_tier_default="base",
+        composition_enabled=False,
+        max_composition_depth=0,
+        knowledge_share_grants_enabled=False,
+        api_enabled=False,
+        api_rate_limit_rpm=0,
+        embed_key_count_cap=0,
+        seat_cap=1,
+        delegated_admin_enabled=False,
+        dashboard_views=frozenset({"single_instance"}),
+        audit_retention_days=30,
+        sso_enabled=False,
+        widget_branding_custom=False,
+        webhook_outbound_enabled=False,
+        cross_instance_memory_federation=False,
+        uptime_sla_pct=None,
+        data_residency_region="ca-central-1",
+        export_csv_enabled=False,
+        export_audit_chain_enabled=False,
+    ),
+    TIER_PRO: TierEntitlement(
+        instance_count_cap=3,
+        leads_per_month_cap=2000,
+        model_tier_default="mid",
+        composition_enabled=True,
+        max_composition_depth=2,
+        knowledge_share_grants_enabled=False,
+        api_enabled=True,
+        api_rate_limit_rpm=60,
+        embed_key_count_cap=3,
+        seat_cap=5,
+        delegated_admin_enabled=False,
+        dashboard_views=frozenset({"single_instance", "instance_group", "admin_rollup"}),
+        audit_retention_days=365,
+        sso_enabled=False,
+        widget_branding_custom=False,
+        webhook_outbound_enabled=True,
+        cross_instance_memory_federation=False,
+        uptime_sla_pct=99.5,
+        data_residency_region="ca-central-1",
+        export_csv_enabled=True,
+        export_audit_chain_enabled=False,
+    ),
+    TIER_ENTERPRISE: TierEntitlement(
+        # Defaults; every field is overrideable via admin_tier_overrides
+        instance_count_cap=None,  # unlimited
+        leads_per_month_cap=None,  # unlimited included floor; overage metered
+        model_tier_default="top",
+        composition_enabled=True,
+        max_composition_depth=None,  # unlimited
+        knowledge_share_grants_enabled=True,
+        api_enabled=True,
+        api_rate_limit_rpm=1000,
+        embed_key_count_cap=None,  # unlimited
+        seat_cap=None,  # unlimited
+        delegated_admin_enabled=True,
+        dashboard_views=frozenset({"single_instance", "instance_group", "admin_rollup", "metering_overage"}),
+        audit_retention_days=None,  # unlimited (typically negotiated to 7y)
+        sso_enabled=True,
+        widget_branding_custom=True,
+        webhook_outbound_enabled=True,
+        cross_instance_memory_federation=True,
+        uptime_sla_pct=99.9,
+        data_residency_region="ca-central-1",
+        export_csv_enabled=True,
+        export_audit_chain_enabled=True,
+    ),
+}
+```
+
+### §18.3 — `resolve_entitlement(admin, axis)` algorithm
+
+1. Read `admin.tier`.
+2. Look up the static map: `value = TIER_ENTITLEMENTS[admin.tier].<axis>`.
+3. If `admin.tier == TIER_ENTERPRISE` and an `admin_tier_overrides` row exists for this Admin and the override column for this axis is not NULL, return the override value.
+4. Otherwise return the static value.
+
+**Fail-closed posture:** A missing entitlement entry inherits the most-restrictive value (no access). A missing override row for an Enterprise Admin reads the static map (which is the unlimited shape for Enterprise — so an Enterprise Admin with no override row gets the full feature set, which is the intended posture for a freshly-signed-and-not-yet-customized Enterprise customer).
 
 ---
 
-## §9 — Code-surface impact assessment
+## §19 — Migration & rename scope
 
-Surfaces that touch tier or scope nouns and need rename/rewrite in the Arc 5 execution arc:
+The legacy `entitlements.py` (Step 30a.6 shape under `TIER_INDIVIDUAL` / `TIER_TEAM` / `TIER_COMPANY` labels) is **fully replaced** at Arc 5 Revision B (cutover). The rename map:
 
-| File | Current state | Post-Arc-4 target | Notes |
-|---|---|---|---|
-| `app/models/subscription.py` | `TIER_INDIVIDUAL` / `TIER_TEAM` / `TIER_COMPANY` constants; `TIER_PERMITTED_SCOPES = {TIER_TEAM: ("agent", "domain"), ...}` (line 99–103); `INSTANCE_COUNT_CAP_BY_TIER`; `DOMAIN_COUNT_CAP_BY_TIER` | `TIER_SOLO` / `TIER_TEAM` / `TIER_COMPANY` / `TIER_ENTERPRISE`; `TIER_PERMITTED_SCOPES` map deleted (uniform `("instance",)` at every tier); `DOMAIN_COUNT_CAP_BY_TIER` deleted | **Existing drift confirmed (added to Arc 4 sweep):** `TIER_PERMITTED_SCOPES[TIER_TEAM]` still claims `("agent", "domain")` at line 101 even though Step 30a.6 set `DOMAIN_COUNT_CAP_BY_TIER[TIER_TEAM] = 0` at line 147. Arc 4 collapse closes this inconsistency by deleting the map entirely. |
-| `app/policy/entitlements.py` | 18 dimensions × 3 tiers (this file's pre-Arc-4 reading) | 21 dimensions × 4 tiers + Enterprise override path | Per §8 above |
-| `app/services/tier_provisioning_service.py` | `premint_for_tier` walks tier-specific scope branch | Uniform `premint_for_admin` — mints Admin + 1 Instance regardless of tier | Composition grants minted lazily on Admin demand, not at signup |
-| `app/services/admin_service.py` | `_enforce_tier_scope` maps tier → allowed scope_level | Map deleted; tier no longer determines scope topology | Scope is uniform `(admin_id, instance_id?, lead_id?)` |
-| `app/api/v1/admin.py` | `/admin/luciel-instances` POST; `/admin/domains/self-serve` POST | `/admin/instances` POST; `/admin/domains/*` routes deleted | Backwards-compat redirect maintained for one billing cycle |
-| `app/models/subscription.py` (Subscription FK) | `subscriptions.tenant_id` | `subscriptions.admin_id` | Alembic column rename |
-| `app/middleware/session_cookie_auth.py` | References `TenantConfig.active` | `AdminConfig.active` | Mechanical rename |
-| `app/services/billing_webhook_service.py` | `Tenant` / `TenantConfig` lookups | `Admin` / `AdminConfig` | Mechanical rename |
-| Audit constants | `TENANT_CREATED`, `DOMAIN_CREATED`, `AGENT_CREATED`, etc. | `ADMIN_CREATED`, `INSTANCE_CREATED` (DOMAIN_* deleted, AGENT_* renamed) | Audit chain integrity preserved: historical rows keep their original action strings; new rows use the new strings; the verify-chain script reads both |
+| Legacy | v2 |
+|---|---|
+| `TIER_INDIVIDUAL` | `TIER_PRO` (Solo customers backfill to Pro at the in-migration `UPDATE`; their cap raises from 3 to … 3 — no semantic change for them at the Instance axis; their `leads_per_month_cap` raises from the implicit unlimited-with-rate-limit shape to the explicit 2000 cap, which is a **tightening** that affects no current customer because no current Solo customer exceeds 2000 leads/month per the existing usage data) |
+| `TIER_TEAM` | Eliminated. Existing Team customers (none on the live wire at the time of Arc 4) would backfill to `TIER_PRO` if any existed. |
+| `TIER_COMPANY` | `TIER_ENTERPRISE` (Company customers backfill to Enterprise with a default `admin_tier_overrides` row mirroring their Company tier limits as override values, so their effective limits do not change) |
+| `DOMAIN_COUNT_CAP_BY_TIER` | Eliminated entirely (Domain layer removed at Arc 4) |
+| `INSTANCE_COUNT_CAP_BY_TIER[TIER_INDIVIDUAL]=3` | `TIER_ENTITLEMENTS[TIER_PRO].instance_count_cap=3` (same value, new key) |
+| `INSTANCE_COUNT_CAP_BY_TIER[TIER_TEAM]=10` | Eliminated |
+| `INSTANCE_COUNT_CAP_BY_TIER[TIER_COMPANY]=50` | `TIER_ENTITLEMENTS[TIER_ENTERPRISE].instance_count_cap=None` (unlimited) with `admin_tier_overrides.instance_cap_override=50` for the backfilled Company customers |
 
-**Measured scope of rename sweep (corrected at Deliverable #3 grounding pass, 2026-05-22):** ~4,025+ raw callsites across 227 files in `app/`, `tests/`, and `alembic/`. Breakdown:
-
-| Identifier | Callsite count | Files |
-|---|---|---|
-| `tenant_id` (column / variable / kwarg) | 2,121 | majority of API + service + model layer |
-| `domain_id` (column / variable / kwarg) | 917 | dashboard + admin + cascade layer |
-| `agent_id` (column / variable / kwarg) | 606 | chat + identity + Luciel-instance layer |
-| `LucielInstance` (class / type / import) | 381 | model + service + API layer |
-| `Domain` (class / type / import) | 298 | model + service layer |
-| `Tenant` (class / type / import) | 214 | model + service + middleware layer |
-| `Agent` (class / type / import) | 456 | shared with the AI-worker class name; care needed to disambiguate from third-party `Agent` references if any |
-| `TenantConfig` | 83 | config layer |
-| `tenant_admin` (role string) | 63 | scope_assignments + policy layer |
-| `TIER_INDIVIDUAL` | 38 | subscription model + service layer |
-| `department_lead` (role string) | 16 | scope_assignments + policy layer |
-| `DOMAIN_COUNT_CAP` | 13 | subscription model + service layer |
-
-The scale forces a **staged migration** plan over a single-revision rename — see Deliverable #3 §3 (Migration ordering decision). Stripe SKU rename (Individual → Solo) remains a separate out-of-band concern.
+The rename is purely a label move for the live customers (Solo→Pro, Company→Enterprise with override-preserved-limits); the only **net-new** tier is Free, and the only **net-removed** tier is Team (which had no live customers).
 
 ---
 
-## §10 — Open questions for execution arc (Deliverable #3)
+## §20 — Audit chain integrity
 
-These are decisions deliberately *not* made in Deliverable #2 — they belong in the execution arc where the migration plan lives:
+The Arc 4 tier rename emits the following audit rows:
 
-1. **Migration ordering** — single Alembic revision vs sequence of revisions (rename Tenant first, then drop Domain, then rename Agent)? Single revision is atomic but harder to rollback; sequence is granular but creates intermediate states.
-2. **Backwards-compat window** — do we keep `tenant_id` as a column alias for one billing cycle (via DB view) or hard-cut on the migration commit?
-3. **Stripe SKU rename timing** — before, during, or after the schema migration? My recommendation: after. Stripe rename is cosmetic and reversible; do it last so the schema is stable before customers see the new label.
-4. **`admin_tier_overrides` migration** — created empty at Arc 5, or pre-populated with one override per existing Enterprise customer? (Currently zero Enterprise customers, so empty is safe; but the migration must create the table.)
-5. **Customer-comms SES email** — sent at Stripe-rename time, or at schema-migration time? My recommendation: at Stripe-rename time. Customers don't see the schema; they see the Stripe label. Tying the email to the visible event is cleaner.
-6. **`max_composition_depth` ceiling at Company tier** — is `None` (truly unlimited) the right call, or should we set a safety ceiling (e.g. 10) to prevent runaway composition chains? Strongly recommend a safety ceiling at the *implementation* layer even when the contract is `None` — the request-timeout / tool-budget layer should already prevent runaway chains, but belt-and-suspenders.
+- One `TIER_RENAME_APPLIED` row per existing customer at the cutover transaction (Arc 5 Revision B), with field set `{old_tier, new_tier, admin_tier_overrides_minted: bool}`.
+- One `BILLING_MODEL_ENUM_ADDED` row at Arc 5 Revision A close, tied to the schema change itself.
+- Two `METERING_INFRASTRUCTURE_ADDED` rows (one for the `admin_tier_overrides` extended columns, one for the `metering_emissions` table) at Arc 5 Revision A close.
 
----
-
-## §11 — Closing
-
-This file is the engineer-facing detail layer for the Arc 4 tier matrix doctrine integrated into CANONICAL §14 at commit `66f6528`. It is the input artifact for Arc 5 (schema migration + code rename sweep) and Arc 6 (Stripe SKU restructure + customer-comms). It carries no implementation; the implementation lands in those execution arcs against this spec.
-
-When the Arc 5 schema migration lands, this file's §8 module shape becomes the actual `app/policy/entitlements.py` module. When the Arc 6 Stripe rename lands, this file's §10 open questions become resolved commitments and get folded into the canonical record.
-
-Until those arcs land, this file is the contract.
-
-**Closing tag:** `arc-4-deliverable-2-tier-matrix-detail` — earned when this file commits and DRIFTS §3 `D-tenancy-collapse-admin-instance-lead-2026-05-22` adds a cross-ref line pointing here.
+All four action types are added to `app/models/admin_audit_log.py` in Arc 5 Revision A. The hash chain advances normally; the integrity check (`scripts/verify-audit-chain.ps1`) confirms continuity across the rename boundary.
