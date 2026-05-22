@@ -125,7 +125,7 @@ VantageMind is a **domain-agnostic, model-agnostic judgment layer** (CANONICAL_R
 - **Drifts in scope:**
   - `D-set-password-token-logged-plaintext-2026-05-17` (P1 security) — JWT visible in CloudWatch logs. Plan: do not log raw token text during E2E and verify the rotation runbook (Step 32a) treats this as critical.
   - `D-welcome-email-subject-mojibake-2026-05-17` (cosmetic) — verify subject line in Gmail when the welcome email arrives.
-  - `D-luciel-ecs-web-role-missing-ses-send-permission-2026-05-18` (P2) — verify SES *does* send (it does today via the `LucielSESSendEmail` policy attachment), but flag the IAM role drift.
+  - ~~`D-luciel-ecs-web-role-missing-ses-send-permission-2026-05-18`~~ (CLOSED 2026-05-22 via Arc 3 Work-Unit B.3 ledger correction — the `LucielSESSendEmail` inline policy on `luciel-ecs-web-role` was already in place pre-Arc-3; the originating scout was partial. See `DRIFTS.md` §5 closure stanza and `arc3-out/B3-ses-iam-ledger-correction.md`. Remaining SES posture work — sandbox exit, IAM action-narrowing, feedback-loop wiring, app-layer suppression, monitored reply-to inbox — carries forward under five paired Arc 8 drifts dated 2026-05-22).
 
 ### S2.2 Buyer completes Stripe Checkout (annual)
 - **Actor:** Buyer
