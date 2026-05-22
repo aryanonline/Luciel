@@ -103,6 +103,86 @@ _OWNER_ROLE = "owner"
 _SLUG_BAD_CHARS = re.compile(r"[^a-z0-9-]+")
 _SLUG_COLLAPSE_HYPHENS = re.compile(r"-{2,}")
 
+# Email shape gate at the provisioning entry point (Arc 3 Work-Unit C,
+# 2026-05-22). Mirrors the precedent in ``app/identity/resolver.py``
+# (``_EMAIL_SHAPE`` + ``_EMAIL_MAX_LEN``) so this service applies the
+# same liberal-but-non-degenerate email contract the resolver does --
+# we deliberately do NOT do RFC-grade deliverability validation here:
+#
+#   1. The webhook upstream has already trusted Stripe's email column,
+#      and the resolver is the canonical normalisation/shape gate per
+#      ARCHITECTURE §3.2.11. Re-validating with stricter rules here
+#      would create a second, divergent contract.
+#
+#   2. Synthetic emails minted by the Option B onboarding path and the
+#      identity resolver (``identity-<uuid>@<tenant>.luciel.local``,
+#      ``agent-<id>@<tenant>.luciel.local``) MUST pass -- they are
+#      legitimate per ``app/models/user.py`` line 14. Stricter
+#      ``email-validator`` deliverability checks (MX lookup, public-
+#      suffix list, etc.) would reject these.
+#
+# What this gate DOES catch:
+#   * empty / whitespace-only input
+#   * missing or duplicated ``@``
+#   * embedded control characters or whitespace inside the address
+#   * length above RFC 5321 maximum (320 chars; matches User.email
+#     column cap and identity resolver constants)
+#
+# Failure mode: ``TierProvisioningValidationError`` (subclass of
+# ``ValueError``) so the existing webhook ``except ValueError`` trap
+# path keeps catching it without code changes downstream.
+_EMAIL_MAX_LEN = 320
+_EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class TierProvisioningValidationError(ValueError):
+    """Raised when ``premint_for_tier`` is called with structurally
+    invalid input (today: only an unparseable ``primary_user.email``).
+
+    Subclasses ``ValueError`` so the webhook's existing
+    ``except ValueError`` trap path catches it without modification.
+    Distinct class so future call sites can distinguish a validation
+    failure (4xx-class, do not retry) from a real provisioning error
+    (5xx-class, retryable by reconciler).
+    """
+
+
+def _validate_email_shape(email: str | None) -> str:
+    """Liberal email shape gate -- accepts synthetic emails, rejects
+    obvious garbage. Returns the case-folded, whitespace-stripped
+    email on success; raises ``TierProvisioningValidationError`` on
+    failure.
+
+    See module-level comment above ``_EMAIL_SHAPE`` for the design
+    rationale. This function deliberately does NOT do RFC-grade
+    validation -- it pins the same contract the identity resolver
+    pins, no stricter, no looser.
+    """
+    if email is None:
+        raise TierProvisioningValidationError(
+            "primary_user.email is required (got None)"
+        )
+    if not isinstance(email, str):
+        raise TierProvisioningValidationError(
+            f"primary_user.email must be str (got {type(email).__name__})"
+        )
+    candidate = email.strip().lower()
+    if not candidate:
+        raise TierProvisioningValidationError(
+            "primary_user.email is empty / whitespace-only"
+        )
+    if len(candidate) > _EMAIL_MAX_LEN:
+        raise TierProvisioningValidationError(
+            f"primary_user.email exceeds RFC 5321 max length "
+            f"({_EMAIL_MAX_LEN}); got {len(candidate)} chars"
+        )
+    if not _EMAIL_SHAPE.match(candidate):
+        raise TierProvisioningValidationError(
+            "primary_user.email is not a valid email shape "
+            "(must be `local@domain.tld` with no embedded whitespace)"
+        )
+    return candidate
+
 
 def _slugify_agent_id_from_email(email: str) -> str:
     """Turn an email into a URL-safe Agent.agent_id slug.
@@ -178,6 +258,19 @@ class TierProvisioningService:
             raise ValueError(
                 f"TierProvisioningService.premint_for_tier: unknown tier {tier!r}"
             )
+
+        # Arc 3 Work-Unit C (2026-05-22): shape-gate the email at the
+        # entry point so a structurally-invalid email surfaces as a
+        # clean ``TierProvisioningValidationError`` (4xx-class, do not
+        # retry) instead of failing later with an opaque downstream
+        # error (slug collision, DB constraint, etc.). The webhook's
+        # existing ``except ValueError`` trap catches it unchanged --
+        # ``TierProvisioningValidationError`` subclasses ``ValueError``.
+        # Synthetic ``*.luciel.local`` emails pass; we mirror the
+        # liberal contract pinned by ``app/identity/resolver.py``.
+        _validate_email_shape(
+            getattr(primary_user, "email", None) if primary_user is not None else None
+        )
 
         tenant = self.admin.get_tenant_config(tenant_id)
         if tenant is None or not getattr(tenant, "active", False):
