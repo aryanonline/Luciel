@@ -246,3 +246,86 @@ class PilotRefundResponse(BaseModel):
     currency: str = Field(..., description="ISO-4217 currency, lowercased (e.g. 'cad').")
     tenant_id: str = Field(..., description="Tenant that was cascade-deactivated.")
     deactivated_at: datetime = Field(..., description="UTC time the cascade ran.")
+
+
+# ---------------------------------------------------------------------
+# POST /api/v1/billing/signup-free  (Arc 8 Work-Unit 5)
+# ---------------------------------------------------------------------
+
+class SignupFreeRequest(BaseModel):
+    """Inbound request for the Free-tier self-serve signup endpoint.
+
+    Arc 4 Deliverable #4 introduced the Free / Pro / Enterprise tier
+    shape. The Free tier is self-serve and **unauthenticated** at the
+    moment of signup (no credential exists yet -- the act of signing
+    up is what mints the first Admin row). That makes the endpoint a
+    free SES-quota drain and a free database-row drain unless we put
+    a bot gate in front of it; D-free-tier-captcha-missing-2026-05-22
+    is the drift, and hCaptcha is the gate (see
+    ``app/services/hcaptcha_service.py``).
+
+    Field set is deliberately minimal:
+
+      email         -- becomes the new Admin.email and the SES
+                       destination for the magic-link verification
+                       email. EmailStr enforces shape; the
+                       ``_validate_email_shape`` defence-in-depth at
+                       the tier-provisioning service (Arc 3 Work-Unit
+                       C) is the second layer.
+      display_name  -- carried onto the new Admin row and surfaced
+                       in the welcome SES email. min=1, max=200
+                       matches the v1 CheckoutSessionRequest field.
+      captcha_token -- the ``h-captcha-response`` value emitted by
+                       the front-end hCaptcha widget. Verified
+                       server-side before any DB write.
+
+    No ``tier`` field because this endpoint is Free-tier-only by
+    contract. Pro / Enterprise signups go through the paid
+    ``/billing/checkout`` flow which has its own (Stripe-based) bot
+    gate via the card-issuing step.
+    """
+    email: EmailStr = Field(
+        ..., description="Email of the new Free-tier admin. Becomes "
+                        "Admin.email after captcha + Arc-5 mint.",
+    )
+    display_name: str = Field(
+        ..., min_length=1, max_length=200,
+        description="Display name carried onto the Admin row and the "
+                    "welcome SES email.",
+    )
+    captcha_token: str = Field(
+        ..., min_length=1,
+        description="hCaptcha h-captcha-response token from the "
+                    "front-end widget. Verified server-side before "
+                    "any DB write or SES send.",
+    )
+
+
+class SignupFreeResponse(BaseModel):
+    """Outbound response for the Free-tier signup endpoint.
+
+    Two shapes coexist behind one schema because the full mint logic
+    is blocked on Arc 5 (the ``admins`` table doesn't exist yet):
+
+      Pre-Arc-5 (today):
+        status="pending-arc-5", admin_id=None, message=...
+
+      Post-Arc-5 (after the schema migration lands):
+        status="ok", admin_id="<uuid>", message="Check your email
+        for a verification link."
+
+    The marketing site renders both states the same way -- a
+    "Thanks, check your email" panel -- so the Arc 5 lift is a
+    backend-only change with no client-side coupling.
+    """
+    status: Literal["ok", "pending-arc-5"] = Field(
+        ..., description="'ok' once Arc 5 lands; 'pending-arc-5' until "
+                        "the admins table exists.",
+    )
+    admin_id: str | None = Field(
+        default=None,
+        description="UUID of the newly-minted Admin row. None pre-Arc-5.",
+    )
+    message: str = Field(
+        ..., description="Human-readable status message for the marketing site.",
+    )

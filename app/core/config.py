@@ -342,6 +342,44 @@ class Settings(BaseSettings):
         ]
     )
 
+    # --- Arc 8 Work-Unit 5 -- hCaptcha for Free-tier self-serve signup ---
+    #
+    # D-free-tier-captcha-missing-2026-05-22 resolution. The Free tier
+    # (Arc 4 Deliverable #4 -- Free/Pro/Enterprise shape) ships a
+    # public unauthenticated signup endpoint at
+    # ``POST /api/v1/billing/signup-free``. Without a bot gate that
+    # surface is a free SES-quota drain and a free database-row drain,
+    # so we require an hCaptcha token on every Free-tier signup.
+    #
+    # Provider choice: hCaptcha (privacy-preserving, GDPR-friendly,
+    # free up to 1M requests/month). Verify is a single HTTP POST to
+    # https://api.hcaptcha.com/siteverify with form-encoded
+    # ``{secret, response, [remoteip]}``; no SDK required (httpx is
+    # already in the dependency set).
+    #
+    # hcaptcha_secret_key: server-side secret read from SSM under
+    #                      /luciel/production/HCAPTCHA_SECRET_KEY at
+    #                      task launch (env-var injection). Empty
+    #                      default keeps boot safe in dev / CI; the
+    #                      ``/billing/signup-free`` route fails 501
+    #                      (not 500) when the slot is empty, mirroring
+    #                      the Stripe-not-configured boot-safe pattern
+    #                      (§3.2.9).
+    # hcaptcha_verify_url: separated from the secret so a future
+    #                      pivot to Cloudflare Turnstile or a
+    #                      hCaptcha enterprise endpoint does not
+    #                      require touching the service code. Default
+    #                      is the public hCaptcha verify URL.
+    # hcaptcha_site_key:   the front-end widget key (pk_-equivalent).
+    #                      Not consumed server-side; reserved here so
+    #                      the marketing site can read it through the
+    #                      same /api/v1/billing/public-config surface
+    #                      that exposes the Stripe publishable key.
+    #                      Optional, empty default.
+    hcaptcha_secret_key: str = ""
+    hcaptcha_verify_url: str = "https://api.hcaptcha.com/siteverify"
+    hcaptcha_site_key: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

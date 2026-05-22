@@ -1,7 +1,8 @@
 """Step 30a: billing API routes.
 
-Public surface for the self-serve subscription flow. Eight routes
-(seventh route /pilot-refund added in Step 30a.2-pilot):
+Public surface for the self-serve subscription flow. Nine routes
+(seventh route /pilot-refund added in Step 30a.2-pilot; ninth route
+/signup-free added in Arc 8 Work-Unit 5):
 
   POST /api/v1/billing/checkout           -- create a Stripe Checkout session
   POST /api/v1/billing/webhook            -- Stripe webhook receiver
@@ -12,6 +13,9 @@ Public surface for the self-serve subscription flow. Eight routes
                                              $100 refund + cancel in 90-day window
   GET  /api/v1/billing/me                 -- read current subscription state
   POST /api/v1/billing/logout             -- clear the session cookie
+  POST /api/v1/billing/signup-free        -- Arc 8 WU-5: Free-tier self-serve
+                                             signup (hCaptcha-gated, mint logic
+                                             completes at Arc 5)
 
 Auth model:
 
@@ -51,6 +55,8 @@ from app.schemas.billing import (
     OnboardingClaimResponse,
     PilotRefundResponse,
     PortalSessionResponse,
+    SignupFreeRequest,
+    SignupFreeResponse,
     SubscriptionStatusResponse,
 )
 from app.services.billing_service import (
@@ -61,6 +67,11 @@ from app.services.billing_service import (
     PilotWindowExpiredError,
 )
 from app.services.billing_webhook_service import BillingWebhookService
+from app.services.hcaptcha_service import (
+    CaptchaInvalidError,
+    CaptchaNotConfiguredError,
+    verify_captcha,
+)
 from app.services.magic_link_service import (
     MagicLinkError,
     build_magic_link_url,
@@ -677,3 +688,111 @@ def logout() -> JSONResponse:
         path="/",
     )
     return response
+
+
+# ---------------------------------------------------------------------
+# POST /signup-free  (Arc 8 Work-Unit 5 -- Free-tier self-serve signup)
+# ---------------------------------------------------------------------
+#
+# D-free-tier-captcha-missing-2026-05-22 resolution. The Free tier
+# (Arc 4 Deliverable #4) is unauthenticated at the moment of signup,
+# which makes this surface a free SES-quota drain and a free DB-row
+# drain unless we gate it. hCaptcha is the gate; verification happens
+# BEFORE any side effect.
+#
+# Today (pre-Arc-5) the success path returns a 200 with
+# ``status="pending-arc-5"`` because the ``admins`` table does not
+# exist yet. Once Arc 5 lands the ``admins`` table + the
+# ``admins.last_signup_ip`` column, this handler will:
+#
+#   1. Verify the captcha (already implemented below).
+#   2. Insert an Admin row scoped to a freshly-minted Free-tier
+#      Instance, capturing ``last_signup_ip`` from the trusted
+#      client IP.
+#   3. Mint a magic-link token and send the verification email via
+#      SES (re-using app/services/magic_link_service +
+#      app/services/email_service).
+#   4. Return 200 with ``status="ok"`` and the new admin_id.
+#
+# Adding step 2-4 is a code-only follow-up at Arc 5; the captcha
+# contract on this route is locked in here.
+#
+# Auth posture: PUBLIC. The path is exempt from api-key middleware
+# via the existing ``/api/v1/billing`` prefix on SKIP_AUTH_PATHS
+# (see app/middleware/auth.py). The captcha is the access gate.
+
+@router.post(
+    "/signup-free",
+    response_model=SignupFreeResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def signup_free(
+    body: SignupFreeRequest,
+    request: Request,
+) -> SignupFreeResponse:
+    """Free-tier self-serve signup. hCaptcha-gated, no payment, no
+    credential required.
+
+    Response codes:
+      * 200 -- captcha verified successfully. Body carries
+               ``status="pending-arc-5"`` until Arc 5 mints the Admin
+               row; ``status="ok"`` afterwards.
+      * 422 -- captcha verification failed (token missing, expired,
+               or rejected by hCaptcha). Body carries the hCaptcha
+               error-codes list for the marketing site to show a
+               targeted error message.
+      * 501 -- hCaptcha is not configured on this backend
+               (``settings.hcaptcha_secret_key`` is empty). Boot-safe
+               pattern: the backend boots fine without hCaptcha; only
+               this route is unavailable until the SSM slot lands.
+    """
+    # Pull the client IP from request.client for hCaptcha's risk
+    # score. We deliberately do NOT trust X-Forwarded-For at this
+    # layer -- a future ALB / WAF rewrite of the trusted-IP chain is
+    # tracked separately; for now, ``request.client.host`` is what
+    # the FastAPI app sees from the ALB-target uvicorn worker.
+    remote_ip = request.client.host if request.client else None
+
+    try:
+        await verify_captcha(body.captcha_token, remote_ip=remote_ip)
+    except CaptchaNotConfiguredError as exc:
+        logger.warning("signup_free.captcha_not_configured")
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(exc),
+        )
+    except CaptchaInvalidError as exc:
+        logger.info(
+            "signup_free.captcha_invalid error_codes=%s",
+            exc.error_codes,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": exc.message,
+                "error_codes": exc.error_codes,
+            },
+        )
+
+    # Captcha verified. Pre-Arc-5: the ``admins`` table does not
+    # exist yet, so we cannot persist the new admin. Return a
+    # 200/pending-arc-5 placeholder; the marketing site renders it
+    # identically to the post-Arc-5 200/ok shape (a "thanks, check
+    # your email" panel -- once Arc 5 lands the email send is
+    # genuine, today it's a stub).
+    logger.info(
+        "signup_free.captcha_verified email=%s display_name_len=%d "
+        "remote_ip=%s status=pending-arc-5",
+        body.email,
+        len(body.display_name),
+        remote_ip or "unknown",
+    )
+    return SignupFreeResponse(
+        status="pending-arc-5",
+        admin_id=None,
+        message=(
+            "Captcha verified. Account creation is queued behind the "
+            "Arc 5 schema migration; the verification email will be "
+            "sent once the admins table lands."
+        ),
+    )
