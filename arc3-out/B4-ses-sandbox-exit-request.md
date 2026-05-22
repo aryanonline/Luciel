@@ -116,12 +116,15 @@
 
 ## Submission Record
 
-> *(operator fills this in after submitting via Console)*
->
-> - Submission timestamp:
-> - Support Center case ID:
-> - AWS first response timestamp:
-> - Outcome:
+- **Submission timestamp:** 2026-05-22 ~16:37 EDT
+- **Support Center case ID:** 177948223100786
+- **Account ID:** 729005488042
+- **Subject (AWS-side):** SES: Production Access
+- **Severity (AWS-side):** low
+- **Submission form variant:** New streamlined form (Mail type + Website URL + Acknowledgement only; legacy long-form fields removed by AWS). Account-state introspection (`luciel-default` configuration set with `BOUNCE`/`COMPLAINT`/`REJECT`/`RENDERING_FAILURE` event destination to `arn:aws:sns:ca-central-1:729005488042:luciel-ses-events`; rightshaped `LucielSESSendEmail` inline policy on `luciel-ecs-web-role`; verified `vantagemind.ai` identity with DKIM/SPF/DMARC; Phase A code at commit `c3d974f`) is the substantive evidence AWS will review.
+- **AWS first response timestamp:** (pending)
+- **Outcome:** (pending — typical SLA 24–72h)
+- **Closure verification command on approval:** `aws sesv2 get-account --region ca-central-1 --query "ProductionAccessEnabled"` must return `true`
 
 ## Drift Tracker
 

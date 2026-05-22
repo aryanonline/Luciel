@@ -78,6 +78,12 @@ SKIP_AUTH_PATHS = {
     # JWT token-class consume, or always-200 for forgot-password).
     # The api-key middleware is the wrong perimeter here.
     "/api/v1/auth",
+    # Arc 8 WU-6 Phase C -- SES feedback / suppression sink. This
+    # route is POSTed by AWS SNS (no api key); the trust gate is the
+    # two-check defence inside the route (TopicArn allowlist +
+    # SigningCertURL host check). The api-key middleware is the
+    # wrong perimeter here.
+    "/api/v1/ses-events",
 }
 
 # Step 31 sub-branch 3: dashboard reads are admin-side observability.

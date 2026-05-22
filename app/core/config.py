@@ -358,6 +358,25 @@ class Settings(BaseSettings):
     ses_configuration_set_name: str = "luciel-default"
     ses_reply_to_address: str = "support@vantagemind.ai"
 
+    # Arc 8 WU-6 Phase C -- SES feedback / suppression sink trust gate.
+    #
+    # ses_sns_topic_arn:
+    #   The full ARN of the SNS topic that the SES configuration set
+    #   ``luciel-default`` publishes feedback events to. The route
+    #   ``POST /api/v1/ses-events`` (app/api/v1/ses_events.py) verifies
+    #   incoming SNS messages carry this exact TopicArn as one half of
+    #   the two-check trust gate (the other half is the SigningCertURL
+    #   host check against *.amazonaws.com).
+    #
+    #   Empty-string default means "do not enforce TopicArn match" --
+    #   used in tests and during the deploy bring-up window before the
+    #   SNS topic is subscribed to the route. Production sets this to
+    #   the real ARN via SSM-injected env var.
+    #
+    #   Today's production value (Phase B-landed AWS infrastructure):
+    #       arn:aws:sns:ca-central-1:729005488042:luciel-ses-events
+    ses_sns_topic_arn: str = ""
+
     # --- CORS (Step 30a.2-pilot Commit 3d) ---
     #
     # D-cors-middleware-missing-on-checkout-preflight-2026-05-15:
