@@ -535,7 +535,7 @@ Surfaces that touch tier or scope nouns and need rename/rewrite in the Arc 5 exe
 
 | File | Current state | Post-Arc-4 target | Notes |
 |---|---|---|---|
-| `app/models/subscription.py` | `TIER_INDIVIDUAL` / `TIER_TEAM` / `TIER_COMPANY` constants; `TIER_ALLOWED_SCOPE_LEVELS = {TIER_TEAM: ("agent", "domain"), ...}`; `INSTANCE_COUNT_CAP_BY_TIER`; `DOMAIN_COUNT_CAP_BY_TIER` | `TIER_SOLO` / `TIER_TEAM` / `TIER_COMPANY` / `TIER_ENTERPRISE`; `TIER_ALLOWED_SCOPE_LEVELS` map deleted (uniform "instance" at every tier); `DOMAIN_COUNT_CAP_BY_TIER` deleted | **Existing drift surfaced:** `TIER_ALLOWED_SCOPE_LEVELS[TIER_TEAM]` still claims `("agent", "domain")` even though Step 30a.6 set `DOMAIN_COUNT_CAP_BY_TIER[TIER_TEAM] = 0`. Arc 4 collapse closes this inconsistency by deleting the map entirely. |
+| `app/models/subscription.py` | `TIER_INDIVIDUAL` / `TIER_TEAM` / `TIER_COMPANY` constants; `TIER_PERMITTED_SCOPES = {TIER_TEAM: ("agent", "domain"), ...}` (line 99–103); `INSTANCE_COUNT_CAP_BY_TIER`; `DOMAIN_COUNT_CAP_BY_TIER` | `TIER_SOLO` / `TIER_TEAM` / `TIER_COMPANY` / `TIER_ENTERPRISE`; `TIER_PERMITTED_SCOPES` map deleted (uniform `("instance",)` at every tier); `DOMAIN_COUNT_CAP_BY_TIER` deleted | **Existing drift confirmed (added to Arc 4 sweep):** `TIER_PERMITTED_SCOPES[TIER_TEAM]` still claims `("agent", "domain")` at line 101 even though Step 30a.6 set `DOMAIN_COUNT_CAP_BY_TIER[TIER_TEAM] = 0` at line 147. Arc 4 collapse closes this inconsistency by deleting the map entirely. |
 | `app/policy/entitlements.py` | 18 dimensions × 3 tiers (this file's pre-Arc-4 reading) | 21 dimensions × 4 tiers + Enterprise override path | Per §8 above |
 | `app/services/tier_provisioning_service.py` | `premint_for_tier` walks tier-specific scope branch | Uniform `premint_for_admin` — mints Admin + 1 Instance regardless of tier | Composition grants minted lazily on Admin demand, not at signup |
 | `app/services/admin_service.py` | `_enforce_tier_scope` maps tier → allowed scope_level | Map deleted; tier no longer determines scope topology | Scope is uniform `(admin_id, instance_id?, lead_id?)` |
@@ -545,7 +545,24 @@ Surfaces that touch tier or scope nouns and need rename/rewrite in the Arc 5 exe
 | `app/services/billing_webhook_service.py` | `Tenant` / `TenantConfig` lookups | `Admin` / `AdminConfig` | Mechanical rename |
 | Audit constants | `TENANT_CREATED`, `DOMAIN_CREATED`, `AGENT_CREATED`, etc. | `ADMIN_CREATED`, `INSTANCE_CREATED` (DOMAIN_* deleted, AGENT_* renamed) | Audit chain integrity preserved: historical rows keep their original action strings; new rows use the new strings; the verify-chain script reads both |
 
-**Estimated scope of rename sweep:** ~80–120 callsites across `app/` and `tests/` based on a `grep -c "tenant\|domain\|agent\|LucielInstance" app/` first pass (will be measured precisely in Deliverable #3). Stripe SKU rename (Individual → Solo) is a separate concern handled out-of-band via Stripe dashboard.
+**Measured scope of rename sweep (corrected at Deliverable #3 grounding pass, 2026-05-22):** ~4,025+ raw callsites across 227 files in `app/`, `tests/`, and `alembic/`. Breakdown:
+
+| Identifier | Callsite count | Files |
+|---|---|---|
+| `tenant_id` (column / variable / kwarg) | 2,121 | majority of API + service + model layer |
+| `domain_id` (column / variable / kwarg) | 917 | dashboard + admin + cascade layer |
+| `agent_id` (column / variable / kwarg) | 606 | chat + identity + Luciel-instance layer |
+| `LucielInstance` (class / type / import) | 381 | model + service + API layer |
+| `Domain` (class / type / import) | 298 | model + service layer |
+| `Tenant` (class / type / import) | 214 | model + service + middleware layer |
+| `Agent` (class / type / import) | 456 | shared with the AI-worker class name; care needed to disambiguate from third-party `Agent` references if any |
+| `TenantConfig` | 83 | config layer |
+| `tenant_admin` (role string) | 63 | scope_assignments + policy layer |
+| `TIER_INDIVIDUAL` | 38 | subscription model + service layer |
+| `department_lead` (role string) | 16 | scope_assignments + policy layer |
+| `DOMAIN_COUNT_CAP` | 13 | subscription model + service layer |
+
+The scale forces a **staged migration** plan over a single-revision rename — see Deliverable #3 §3 (Migration ordering decision). Stripe SKU rename (Individual → Solo) remains a separate out-of-band concern.
 
 ---
 
