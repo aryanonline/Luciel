@@ -16,6 +16,14 @@
     -Stage audit  : run-task that invokes
                     arc3_audit_leaked_invites_record.py with the captured
                     PSV piped in via stdin. Requires -PsvFile.
+    -Stage scan-summary :
+                    run-task that invokes arc3_audit_leak_scan_summary.py
+                    to record a SINGLE hash-chain-safe audit row with the
+                    bucket math from the dry-run. Use when the dry-run
+                    found zero pending matches (so the row-level -Stage
+                    audit would emit zero rows and lose investigation
+                    traceability). Requires -ScanDate plus the bucket
+                    counts; JtiFile defaults the same as -Stage revoke.
 
   Every stage tails CloudWatch and reports exitCode.
 
@@ -24,7 +32,7 @@
   image. This keeps the image generic and re-usable across windows.
 
 .PARAMETER Stage
-  'build' | 'revoke' | 'audit'.
+  'build' | 'revoke' | 'audit' | 'scan-summary'.
 
 .PARAMETER Live
   Switch. Only meaningful for -Stage revoke. Default OFF (dry-run).
@@ -53,15 +61,29 @@
 .EXAMPLE
   # audit-record
   .\\scripts\\arc3_ecs_oneshot.ps1 -Stage audit -PsvFile arc3-out\\flipped-invites.psv
+
+.EXAMPLE
+  # scan-summary (zero-flip outcome; writes one summary row instead)
+  .\\scripts\\arc3_ecs_oneshot.ps1 -Stage scan-summary `
+      -ScanDate 2026-05-21 -Pending 0 -Accepted 2 -Revoked 4 `
+      -Expired 0 -Unmatched 13 -Total 19
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('build', 'revoke', 'audit')]
+    [ValidateSet('build', 'revoke', 'audit', 'scan-summary')]
     [string]$Stage,
     [switch]$Live,
     [string]$JtiFile = 'arc3-out\leaked-welcome-jtis.txt',
     [string]$PsvFile = '',
+    [string]$ScanDate = '',
+    [int]$Pending = -1,
+    [int]$Accepted = -1,
+    [int]$Revoked = -1,
+    [int]$Expired = -1,
+    [int]$Unmatched = -1,
+    [int]$Total = -1,
+    [string]$DiscoveryWindow = '2026-05-13..2026-05-20',
     [string]$Region = 'ca-central-1',
     [string]$Cluster = 'luciel-cluster',
     [string]$EcrRepo = '729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend',
@@ -367,6 +389,47 @@ echo "$ARC3_PSV_INLINE" | python scripts/arc3_audit_leaked_invites_record.py -
         $cmd = @('sh', '-c', $bootstrap)
         $envOv = @(@{ name = 'ARC3_PSV_INLINE'; value = $psvContent })
         Write-Host "==> Stage=audit" -ForegroundColor Cyan
+        Invoke-OneShot -ContainerCmd $cmd -EnvOverrides $envOv
+        break
+    }
+    'scan-summary' {
+        if (-not (Test-Path $JtiFile)) { throw "JtiFile not found: $JtiFile" }
+        if (-not $ScanDate) { throw "Stage=scan-summary requires -ScanDate YYYY-MM-DD" }
+        foreach ($pair in @(
+            @{ Name = 'Pending'; Value = $Pending },
+            @{ Name = 'Accepted'; Value = $Accepted },
+            @{ Name = 'Revoked'; Value = $Revoked },
+            @{ Name = 'Expired'; Value = $Expired },
+            @{ Name = 'Unmatched'; Value = $Unmatched },
+            @{ Name = 'Total'; Value = $Total }
+        )) {
+            if ($pair.Value -lt 0) {
+                throw "Stage=scan-summary requires -$($pair.Name) (got $($pair.Value))"
+            }
+        }
+        $jtiContent = Get-Content $JtiFile -Raw
+        # Note: the python command is rendered on a single line so we
+        # don't have to fight PowerShell here-string + sh line-
+        # continuation escaping. ($Var) in a @"..."@ interpolates;
+        # `$Var stays literal for the in-container shell.
+        $pyCmd = (
+            "python scripts/arc3_audit_leak_scan_summary.py " +
+            "--scan-date $ScanDate " +
+            "--jti-file /tmp/arc3/jtis.txt " +
+            "--pending $Pending --accepted $Accepted --revoked $Revoked " +
+            "--expired $Expired --unmatched $Unmatched --total $Total " +
+            "--discovery-window $DiscoveryWindow"
+        )
+        $bootstrap = @"
+set -e
+mkdir -p /tmp/arc3
+printf '%s' "`$ARC3_JTI_INLINE" > /tmp/arc3/jtis.txt
+echo "--- jti-file lines: `$(wc -l < /tmp/arc3/jtis.txt) ---"
+exec $pyCmd
+"@
+        $cmd = @('sh', '-c', $bootstrap)
+        $envOv = @(@{ name = 'ARC3_JTI_INLINE'; value = $jtiContent })
+        Write-Host "==> Stage=scan-summary  ScanDate=$ScanDate" -ForegroundColor Cyan
         Invoke-OneShot -ContainerCmd $cmd -EnvOverrides $envOv
         break
     }
