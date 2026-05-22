@@ -1,6 +1,28 @@
 # Arc 4 Deliverable #3 — Tenancy collapse execution arc record
 
-**Status:** DESIGN — execution plan only, no code lands until the plan is reviewed, approved, and staged into Arc 5 (schema migration) and Arc 6 (code rename sweep + Stripe SKU restructure + customer-comms).
+> **⚠️ V2 RE-SCOPING NOTE (Arc 9 WU-9.7, 2026-05-22):** The body of this document below was authored at the Arc 4 close against the **four-tier shape** (Solo / Team / Company / Enterprise) and the **21-dimension entitlement matrix** that pre-dated the V2 doctrine reconstruction. Arc 9 re-anchored the canonical trio against V2; the live tier shape is now **Free / Pro / Enterprise** (three tiers) and the live entitlement matrix is the **6-axis abstract shape** in CANONICAL_RECAP §14 post-WU-9.3 (capacity, channels, integration, branding, governance, support). The companion file `A-tier-matrix-detail.md` was already V2-rewritten on 2026-05-22-late and supersedes the tier-matrix half of this document's plan. This re-scoping note **shrinks the in-scope item list** below as follows:
+>
+> **In-scope items that SHRINK or COLLAPSE under V2:**
+> - §1.1 item 3 ("Entitlements module rewrite to 21-dim × 4-tier shape") → **collapsed**: the V2 6-axis matrix lives in CANONICAL_RECAP §14 today; no `app/policy/entitlements.py` rewrite required at Arc 5/6 (the module was never built; entitlement-enforcement work is deferred to a future arc per `~~D-entitlement-matrix-v1-2026-05-20~~` closure at WU-9.6).
+> - §1.1 item 6 ("Stripe SKU rename: Individual → Solo product label") → **collapsed**: V2 has no Solo tier; the live tier shape is Free / Pro / Enterprise. The Stripe rename plan still applies in spirit but the target label is **Pro** (the V2 successor to the legacy Individual/Team monetised tier), not Solo. The actual SKU restructure is now driven by Arc 6 scoped against the V2 three-tier price ladder.
+> - §1.1 item 7 + §2.5 + §6 ("Customer-comms SES email — Individual → Solo rename") → **collapsed**: no live customers exist on the wire (last live tenant `co-354c5056` retired at Step 30a.2-pilot); the customer-comms email is unnecessary. If/when V2 ships a new SKU label that any future customer needs to be notified of, the email-draft pattern in §6 below is reusable as a template.
+> - §1.1 item 8 ("Marketing-site /pricing tier labels: Individual → Solo, add Enterprise card") → **shrunk**: the marketing-site update is now Free / Pro / Enterprise three-card layout (not the four-card Solo/Team/Company/Enterprise the §6 customer-comms references). The Pricing.tsx edit is smaller in scope; the live site already carries Free / Pro / Enterprise per CANONICAL §14.
+> - §1.1 item 4 ("New tables: `instance_composition_grants`, `knowledge_share_grants`, `admin_tier_overrides`") → **partially survives**: `admin_tier_overrides` survives as the Enterprise hybrid-billing override surface (per V2 §3.2.14 `metering_emissions` + `admin_tier_overrides`). `instance_composition_grants` and `knowledge_share_grants` survive but are now `enforced=False` placeholders for a future composition-runtime arc (already noted in §1.2 item 1 of the body below; V2 does not change that deferral).
+>
+> **In-scope items that SURVIVE under V2 unchanged:**
+> - §1.1 item 1 (Alembic schema migration: rename `tenants → admins`, drop `domains`, rename `agents → instances`) — the Admin/Instance/Lead noun collapse is the load-bearing change of Arc 5 and survives V2 verbatim.
+> - §1.1 item 2 (Code rename sweep — ~4,025 callsites) — the noun rename is unaffected by V2 (V2 sharpens the why, not the what).
+> - §1.1 item 5 (Cascade chain reduction: 13-layer → 12-layer; Domain layer removed) — survives unchanged.
+> - §1.1 item 9 (Test suite rebound to new noun set) — survives unchanged.
+> - §1.1 item 10 (Closing-tag `arc-4-tenancy-collapse-admin-instance-lead`) — survives unchanged.
+>
+> **Net effect under V2:** Arc 5 (schema migration) is substantially the same scope (the noun collapse is the load-bearing work). Arc 6 (Stripe SKU + customer-comms + entitlements module + marketing-site) shrinks substantially — the entitlements-module rewrite collapses entirely, the customer-comms email collapses entirely, the Stripe rename retargets from Individual→Solo to the V2 Free/Pro/Enterprise SKU ladder, and the marketing-site edit shrinks to the already-live V2 pricing surface. **Estimated Arc 6 commit count: drops from ~8 to ~3 commits.** The exact retargeted Arc 6 plan will be authored at Arc 6 kickoff (post-Arc-9-close), not in this document — this re-scoping note is the V2 record; the original four-tier plan below is preserved for audit chain integrity.
+>
+> **Arc 9 WU-9.7 commit:** see `git log --grep "arc9 WU-9.7"` for the landing SHA on `main`. No code touched. The body below remains the verbatim Arc 4 close artifact for audit traceability.
+>
+> ---
+
+**Status:** DESIGN — execution plan only, no code lands until the plan is reviewed, approved, and staged into Arc 5 (schema migration) and Arc 6 (code rename sweep + Stripe SKU restructure + customer-comms). **Note (Arc 9 WU-9.7):** scope per V2 re-scoping header above; the four-tier and Individual→Solo references in the body below are pre-V2 framing preserved for audit.
 
 **Authored:** 2026-05-22 at the close of Arc 4 doctrine integration, alongside Deliverable #1 (commit `66f6528`) and Deliverable #2 (commit `8c3e0b7`).
 
