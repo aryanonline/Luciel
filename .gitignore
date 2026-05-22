@@ -164,3 +164,32 @@ register_r2.py
 
 # Pytest log dumps from local-only debug runs.
 pytest_*.log
+
+# Arc 3 + Arc 4 operator scratch (token audit + task-def staging).
+# Arc 3 token audit emitted JTI extracts, decode logs, and emitter scans
+# into arc3-out/. Arc 4 task-def restructure emitted dozens of staging
+# JSON blobs at repo root (td-*, luciel-*, *-rev*.json). All ephemeral;
+# canonical record lives in DRIFTS.md / arc-records / CloudWatch.
+# Patterns are surgical -- they do NOT catch app/, scripts/, or
+# alembic/ tracked content.
+arc3-out/
+
+# Arc 3/4 task-def + manifest staging blobs at repo root.
+td-backend-*.json
+td-worker-*.json
+td-migrate-*.json
+td-prod-ops-*.json
+luciel-backend-*.json
+luciel-worker-*.json
+luciel-migrate-*.json
+backend-rev*.json
+worker-rev*.json
+manifest-*.json
+network-config.json
+
+# Arc 3/4 diagnostic scratch dumps (d*-*.txt, *-emitters.txt).
+d[0-9]*-*.txt
+*-emitters.txt
+
+# Arc 3/4 raw-form intermediates (pre-jq / pre-rewrite JSON dumps).
+*.json.raw
