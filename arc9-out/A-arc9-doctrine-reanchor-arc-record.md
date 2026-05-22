@@ -71,13 +71,20 @@ V2 Q1 makes explicit what live canonical Q1 leaves implicit: *"The Admin should 
 
 Each work-unit lands as one or two commits, doc-only. Partner sign-off precedes every push except WU-9.1 (mechanical V2 absorb is partner's own writing).
 
-### §3.1 — WU-9.1 — V2 absorb (mechanical)
+### §3.1 — WU-9.1 — V2 absorb (mechanical — LANDED 2026-05-22)
 
 **Input:** `docs/in-flight/Luciel-V2-canonical-input-2026-05-22.md` (preserved at Arc 9 open).
-**Output:** `docs/CANONICAL_RECAP.md` §1–§11 rewritten to absorb V2 verbatim where V2 sharpens; live canonical sections V2 leaves alone are preserved.
-**Method:** Section-by-section diff between live canonical and V2. V2 wins on every conflict (partner authored V2 as truth). Status-marker semantics from live canonical preserved (✅ / 🔧 / 📋 / 🔬). Drift cross-refs from live canonical preserved.
-**Partner involvement:** No sign-off required for the mechanical absorb. Sign-off lands on the commit-message review before push.
-**Estimated diff size:** ±300 lines across §1–§11.
+**Output:** `docs/CANONICAL_RECAP.md` §1–§11 absorbed V2 sharpenings; live canonical sections V2 leaves alone preserved. Downstream Q-token references in CANONICAL_RECAP §12 + §13.1 and ARCHITECTURE §3.2.5 + §3.2.12 updated for the new Q1–Q7 numbering.
+**Method (actual, post-execution):** Section-by-section diff between live canonical and V2 confirmed that §1–§10 are identical (modulo pandoc table rendering); only §11 carries substantive divergence. V2's §1–§10 were not absorbed mechanically because there was nothing to absorb — V2 preserves live canonical verbatim. §11 absorbed three sharpenings:
+
+1. **Q1 question + answer text expanded** to fold in tier-mobility (V2 question addendum: *"upgrade or downgrade between tiers without having to restart or lose upon their work"*) and to absorb the rotation-and-departure substance from the collapsed Q6.
+2. **Q5 question + answer text expanded** to make tier transitions bidirectional within the same Admin (V2 question addendum: *"later decides to upgrade and downgrade from her current tier, the admin should be able to do so easily"*). Same-Admin tier moves added as the degenerate case of the re-parenting primitive.
+3. **Q6 (personnel rotation) collapsed into Q1 + §14.** V2 dropped Q6; partner confirmed in WU-9.1 sign-off ("sounds correct partner go ahead"). Q6's substance (data-belongs-to-Admin, mandatory key rotation, role binding by tier) migrates: rotation/departure narrative folds into Q1's expanded answer; role-binding-by-tier table moves to §14 in WU-9.3. Channels Q7→Q6 and cross-channel Q8→Q7 renumbered. "Eight questions" header rewritten to "seven questions" with an Arc 9 renumbering note. New drift filed: `D-q6-personnel-rotation-collapsed-into-q1-and-section-14-2026-05-22`.
+
+Status-marker semantics from live canonical preserved (✅ / 🔧 / 📋 / 🔬). Drift cross-refs from live canonical preserved + extended (new Q1 answer points at `D-same-admin-tier-transition-doctrine-hole-2026-05-22`; new Q5 answer points at same; §11 renumbering note points at new drift). Historical text in DRIFTS Pass-8 cross-ref wiring entries and §17 maintenance log left as authored (those describe what was true at prior passes; no version-history sediment rule).
+
+**Partner involvement:** Pre-edit ask_user_question confirmed Q6 collapse intent and tier-transition sharpening intent (2026-05-22 ≈13:30 EDT). Vision-readback to partner before any edits landed; partner approved ("sounds correct partner go ahead", ≈13:31 EDT). No per-section sign-off; one consolidated approval at the readback gate.
+**Actual diff size:** ~25 lines net across CANONICAL_RECAP §11 + ~14 downstream Q-token references in CANONICAL_RECAP §12 + §13.1 + 2 ARCHITECTURE triangulation lines + 1 new DRIFTS entry (≈75 lines including cross-refs). The ±300-line estimate at Arc 9 open was wrong; §1–§10 needed no absorb because V2 didn't sharpen them. **Lesson for future arc-record estimates:** read the input artifact section-by-section before estimating diff size.
 
 ### §3.2 — WU-9.2 — Roadmap trim of §12
 
