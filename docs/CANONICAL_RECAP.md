@@ -341,71 +341,21 @@ The instance cap on each tier is a per-tier ceiling at Free and Pro, and a per-A
 
 **Intro refund policy (Step 30a.2, locked 2026-05-15; per-tier scaling proposed 2026-05-16 and REJECTED 2026-05-20 at Step 30a.7 diligence pass; courtesy-email addendum landed at Step 30a.2-pilot Commit 3j 2026-05-16).** A first-time Pro customer in the active 90-day intro trial can self-serve a full refund of the $100 CAD intro fee they paid at Pro signup (Free customers have no intro fee, and Enterprise pilot discounts are administered via `admin_tier_overrides.committed_use_discount_bps` rather than refunded as a one-time charge) at any time before the trial converts on day 91. The refund cancels the underlying subscription in the same operation — the customer cannot keep the trial running after the refund clears. After day 91 the intro fee is non-refundable; cancellation through the Customer Portal stops future recurring billing (the §3.2.13 cancel cascade) but does not retroactively refund the intro charge or any recurring charges already invoiced. Refunds during the trial run through a dedicated self-serve endpoint rather than the Customer Portal because Stripe's Portal does not natively expose one-time-charge refunds; the architectural detail (the eighth `/pilot-refund` route, the `SUBSCRIPTION_PILOT_REFUNDED` audit action, and the eligibility predicate that re-uses `is_first_time_customer` plus a trial-window check) lives in ARCHITECTURE §3.2.13. **Customer-communication leg (Commit 3j addendum 2026-05-16):** alongside the on-page refund-success surface and Stripe's optional account-level refund receipt, the platform sends the buyer a best-effort SES courtesy email (subject “Your VantageMind pilot has been refunded”) summarising the refunded amount, the Stripe refund id, the 5–7 business day card-credit window, the canceled-and-closed account state, and a feedback CTA — fired post-commit so a SES failure can never roll back the refund cascade, and a failure path that writes a `pilot_refund_email_send_failed` audit row instead of throwing. The email is a third confirmation leg, not a contract: the audit row remains the single source of truth for the refund itself. ARCHITECTURE §3.2.13 names this as the fifth atomic side effect of `BillingService.process_pilot_refund`.
 
-### Entitlement matrix (Free / Pro / Enterprise, Arc 4 tier-shape revision 2026-05-22-late)
+### Entitlement matrix (Free / Pro / Enterprise — abstract shape)
 
-The operational differences between Free, Pro, and Enterprise tiers — beyond instance cap and price — live in a single first-class artifact: an 18-dimension matrix regrouped under six axes, with each cell split into a **Live-Today** value (enforced at runtime today) and a **Roadmap** value (committed to the buyer, enforcement deferred to a named follow-up Step). The runtime source of truth is `app/policy/entitlements.py` (landing at Arc 5); the engineering-facing detail spec is `arc4-out/A-tier-matrix-detail.md`; the table below is the canonical buyer-facing surface of the same shape. When any of the three disagree, the policy module wins and the disagreement is recorded as a drift. The previous 18-dimension × 4-tier matrix (Solo / Team / Company / Enterprise) is retired in this revision and preserved in git at the Arc 4 v1 commits (`66f6528` / `8c3e0b7`).
+The operational differences between Free, Pro, and Enterprise live along **six gating axes plus a billing-model axis**. The table below is the canonical buyer-facing shape; the per-dimension detail (live-today vs roadmap status, enforcement call-sites, drift carriers, Alembic columns) lives in ARCHITECTURE §3.2.13 (entitlements) and §3.2.14 (metering + hybrid billing). The runtime source of truth is `app/policy/entitlements.py` (landing at Arc 5); the engineering-facing detail spec is `arc4-out/A-tier-matrix-detail.md`. When canonical / architecture / policy module disagree, the policy module wins and the disagreement is recorded as a drift.
 
-**Axis 1 — Instance count** (how many Instances the Admin may run)
+| Axis | Free | Pro | Enterprise |
+|---|---|---|---|
+| **Instance count** (how many Instances the Admin may run) | 1 | 3 | Unlimited via `admin_tier_overrides` |
+| **Per-instance capacity** (Leads/month, conversations/day, audit retention) | 10 Leads/mo, 20 conv/day, 30d audit | 2,000 Leads/mo, 200 conv/day, 90d audit | Unlimited (included floor + metered overage), custom retention |
+| **Model tier per instance** (which LLM backs each Instance) | Base model only | Mid model with top bursts | All tiers + custom fine-tunes |
+| **Composition** (whether Instances can call each other; knowledge-share) | Disabled | Within Admin, depth≤2 | Unlimited, with explicit `knowledge_share_grants` |
+| **Configurability** (operator branding, channel adapters) | Defaults only | Defaults only; channels on Step 34a roadmap for all tiers | Custom branding + roadmap channels |
+| **Operational features** (seats, API, SSO, support, CSV export, success manager) | 1 seat, no API, community support | 3 seats, 60 rpm API, 24h email support | Unlimited seats, 1000 rpm API default, SSO, CSV export, custom SLA, dedicated success manager |
+| **Billing model** (Axis 7 — the hybrid axis) | No `subscriptions` row (`$0` Free) | `subscriptions.billing_model='flat'` | `subscriptions.billing_model='hybrid'` (platform fee + included usage + metered overage; committed-use discount available) |
 
-| # | Dimension | Free | Pro | Enterprise | Enforcement |
-|---|---|---|---|---|---|
-| 2 | Instances cap | 1 | 3 | Unlimited via `admin_tier_overrides.instance_cap` | **Live-Today** — `INSTANCE_COUNT_CAP_BY_TIER` enforced at `/admin/luciel-instances` POST; Enterprise reads `admin_tier_overrides` first, falls back to a default ceiling |
-| 8 | Widget cap (derived from instance cap) | 1 | 3 | Unlimited (via overrides) | **Live-Today** — widget count is a derived view of `INSTANCE_COUNT_CAP_BY_TIER`; enforced at embed-key-mint path |
-
-**Axis 2 — Per-instance capacity** (how much each Instance can do)
-
-| # | Dimension | Free | Pro | Enterprise | Enforcement |
-|---|---|---|---|---|---|
-| 4 | Leads / conversations cap per month | 10 | 2,000 | Unlimited (included floor + metered overage) | **Live-Today** — enforced at the lead-create call-site against `LEADS_CAP_BY_TIER`; Enterprise overage is metered to Stripe via the metering emitter (see ARCHITECTURE §3.2.14) |
-| 9 | Conversations per day, per seat | 20 | 200 | Unlimited | **Roadmap** — per-seat counter not built; gated on Step 34 / Step 31.x — carried under `D-entitlement-matrix-v1-roadmap-rows-deferred-2026-05-20` |
-| 13 | Audit retention | 30 days | 90 days | Custom (default 365 days, per-Admin override) | **Roadmap** — purge worker from Step 30a.2 is tier-agnostic (uniform 90-day window); per-tier retention class not yet wired — same carve-out row |
-
-**Axis 3 — Model tier per instance** (which LLM backs each Instance)
-
-| # | Dimension | Free | Pro | Enterprise | Enforcement |
-|---|---|---|---|---|---|
-| NEW | Model tier per Instance | base only | mid with top bursts | all tiers + custom fine-tunes | **Roadmap** — model-tier enforcement not yet wired; gated on a future arc that introduces per-Instance model-class routing in `app/services/chat_service.py` |
-
-**Axis 4 — Composition** (whether Instances can call each other)
-
-| # | Dimension | Free | Pro | Enterprise | Enforcement |
-|---|---|---|---|---|---|
-| NEW | Composition enabled | No | Yes | Yes | **Roadmap** — `instance_composition_grants` table not yet created; gated on Arc 5 + Step 36 |
-| NEW | Max composition chain depth | 0 (Free→Pro upgrade wall) | 2 | Unlimited within reason (per-Admin override) | **Roadmap** — depth enforcement at composition call site; same arc |
-| NEW | Knowledge flows through composition | No | No | Yes (explicit `knowledge_share_grants`) | **Roadmap** — `knowledge_share_grants` table not yet created; same arc |
-
-**Axis 5 — Configurability** (how richly the Admin can configure Instances)
-
-| # | Dimension | Free | Pro | Enterprise | Enforcement |
-|---|---|---|---|---|---|
-| 15 | Custom widget branding (operator-supplied theme) | No | No | Yes | **Roadmap** — Step 30b widget carries a theme field, tier-gating not yet enforced — same carve-out row |
-| 5 | Voice channel adapter | Roadmap | Roadmap | Roadmap | **Roadmap** — gated on Step 34a; committed to all tiers — see `D-channels-promised-not-built-multi-tier-2026-05-20` |
-| 6 | SMS channel adapter | Roadmap | Roadmap | Roadmap | **Roadmap** — same row as Voice (Step 34a) |
-| 7 | Email channel adapter | Roadmap | Roadmap | Roadmap | **Roadmap** — same row as Voice (Step 34a) |
-
-**Axis 6 — Operational features** (platform capabilities beyond the Instance itself)
-
-| # | Dimension | Free | Pro | Enterprise | Enforcement |
-|---|---|---|---|---|---|
-| 1 | Seats (people who can sign in under the Admin) | 1 | 3 | Unlimited (per-Admin override) | **Live-Today** — `invite_service.py` cap at invite-mint |
-| 10 | API rate limit (requests per minute, per Admin) | Off (no API) | 60 rpm | 1000 rpm default (per-Admin override) | **Roadmap** — `RateLimitFallback` middleware exists; per-tier rate-limit profiles not yet wired — same carve-out row |
-| 11 | Concurrent Instances (per-Admin LLM concurrency ceiling) | 1 | 3 | Custom | **Roadmap** — concurrency counter not built; gated on Step 36 / Step 31.x — same carve-out row |
-| 12 | Cross-instance memory (composition-knowledge-share) | N/A (composition disabled) | N/A (knowledge-share not enabled at Pro) | Yes (explicit `knowledge_share_grants`) | **Roadmap** — Step 24.5c architecture present; cross-instance knowledge-share tier-gating not yet enforced; gated on Step 37 — same carve-out row |
-| 14 | Audit CSV export | No | No | Yes | **Roadmap** — no route exists; gated on Step 31.x — same carve-out row |
-| 16 | SSO (SAML / OIDC enterprise identity) | No | No | Yes | **Roadmap** — no integration; gated on a future enterprise step — same carve-out row |
-| 17 | Priority support | None (community / docs) | Email within 24h | Custom SLA (typically Email + Slack within 4h) | **Roadmap** — no SLA infrastructure; gated on a future ops step — same carve-out row |
-| 18 | Dedicated success manager | No | No | Yes | **Roadmap** — operator-process row; gated on the first Enterprise hand-off — same carve-out row |
-
-**Axis 7 — Billing model** (NEW at Arc 4 tier-shape revision; Enterprise-only hybrid axis)
-
-| # | Dimension | Free | Pro | Enterprise | Enforcement |
-|---|---|---|---|---|---|
-| NEW | `subscriptions.billing_model` | N/A (no `subscriptions` row at all) | `flat` | `hybrid` | **Live-Today** at Arc 5 — column added in Alembic Revision A; runtime entitlement check reads `billing_model` to decide whether to consult `admin_tier_overrides` for overage logic |
-| NEW | Included usage (per period, Enterprise only) | n/a | n/a | `admin_tier_overrides.included_usage_per_period` | **Roadmap** — metered against `metering_emissions` cursor table (see ARCHITECTURE §3.2.14); per-Admin column |
-| NEW | Overage rate (per overage unit, Enterprise only) | n/a | n/a | `admin_tier_overrides.overage_rate_cents` | **Roadmap** — emitted to Stripe as usage records each billing period; see `D-enterprise-metering-not-implemented-2026-05-22` |
-| NEW | Committed-use discount (Enterprise only) | n/a | n/a | `admin_tier_overrides.committed_use_discount_bps` (basis points off the floor) | **Roadmap** — set by sales-ops at provisioning; same drift |
-
-18 entitlement dimensions × 3 tiers, plus the new Axis 7 hybrid-billing dimensions for Enterprise. The Roadmap rows are tracked under the carve-out drift `D-entitlement-matrix-v1-roadmap-rows-deferred-2026-05-20` (the drift name is preserved through this revision for audit-chain continuity even though the matrix is now v2). Per-row drifts open lazily at the corresponding-Step touch.
+Live-Today axes (enforced at runtime now): Instance count, Per-instance Leads/month cap, Seats, Billing model. All other axes are on the Roadmap and tracked under the carve-out drift `D-entitlement-matrix-v1-roadmap-rows-deferred-2026-05-20`; per-row drifts open lazily at the corresponding-Step touch. The previous 18-dimension × 4-tier matrix (Solo / Team / Company / Enterprise) is retired and preserved in git at Arc 4 v1 commits (`66f6528` / `8c3e0b7`).
 
 **A note on dedicated infrastructure.** A future enterprise tier will offer a fully dedicated environment (own database, own compute, own audit boundary) for customers whose compliance posture requires it. It will be built when the first customer actually demands it — not speculatively.
 
