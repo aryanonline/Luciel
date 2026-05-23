@@ -1,17 +1,43 @@
-"""Arc 5 Revision B — data backfill + tier rename for the Admin → Instance collapse.
+"""Arc 5 Revision B — ACTIVE-ONLY data backfill + tier rename + LEGACY_FIXTURE_PURGED audit emission.
 
 Revision ID: arc5_b_admin_instance_cutover
 Revises: arc5_a_admin_instance_additive
 Create Date: 2026-05-23
+
+Aggressive-cleanup posture (D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23)
+-----------------------------------------------------------------------------------
+
+This file was rewritten 2026-05-23 ~13:35 EDT after prod-recon probe
+(task 0de60479392545f9be9d8fe4b7ff30e6, 17:11 UTC) found that prod's
+315 tenant_configs / 146 luciel_instances / 268 agents are dominated by
+inactive fixture rows from prior arcs' verify-walks: 292/315 admin
+candidates, 145/146 luciel_instance candidates, and 246/268 agent rows
+are ``active=false``. The 10 prod subscriptions are ALL ``canceled``.
+
+Partner-locked gates (verbatim from 2026-05-23 ~13:21 EDT session):
+
+* Gate 2 (Backfill scope): ACTIVE-ONLY backfill — 23 active admins +
+  1 active instance. Inactive fixture rows are PURGED in Revision C
+  with the legacy tables; this migration emits one bulk
+  ``LEGACY_FIXTURE_PURGED`` audit row per legacy table summarizing
+  the inactive-row counts + earliest/latest created_at for forensic
+  recoverability.
+
+* Gate 3 (Scope preservation): No legacy_scope_* columns persist on
+  ``instances``. The 1 active row is already tenant-scoped; flattening
+  IS the doctrine.
 
 Why this migration exists
 -------------------------
 
 Revision A (arc5_a_admin_instance_additive) created the new ``admins`` and
 ``instances`` tables (additive, zero-data-risk). Revision B is the
-cutover: it backfills those tables from the legacy ``tenant_configs`` and
-``luciel_instances`` rows + renames legacy tier strings to V2 shape
-(individual/solo → pro; team/company → enterprise; orphan → free).
+cutover: it backfills those tables ACTIVE-ONLY from the legacy
+``tenant_configs`` and ``luciel_instances`` rows + renames legacy tier
+strings to V2 shape (individual/solo → pro; team/company → enterprise;
+orphan → free) + emits bulk-audit rows recording the inactive-row
+purge counts so Revision C's wholesale table drops are forensically
+recoverable.
 
 This is the **HIGH-risk** revision in the Arc 5 chain — it mutates live
 customer data. Rollback path is application-layer revert + dual-read
@@ -97,8 +123,11 @@ def upgrade() -> None:
     conn = op.get_bind()
 
     # ------------------------------------------------------------------
-    # 1. Backfill admins from tenant_configs (joined to subscriptions
-    #    for tier). String semantic key per Q1 lock.
+    # 1. Backfill admins from tenant_configs — ACTIVE ROWS ONLY.
+    #    String semantic key per Q1 lock. Joined to subscriptions for
+    #    tier (no prod row currently has an active subscription, so
+    #    COALESCE → 'free' will fire for all 23 active admins —
+    #    documented under F2 of the aggressive-cleanup amendment).
     # ------------------------------------------------------------------
     conn.execute(sa.text("""
         INSERT INTO admins (
@@ -120,16 +149,19 @@ def upgrade() -> None:
         LEFT JOIN subscriptions s
             ON s.tenant_id = tc.tenant_id
            AND s.active = TRUE
-        WHERE NOT EXISTS (
+        WHERE tc.active = TRUE
+          AND NOT EXISTS (
             SELECT 1 FROM admins WHERE admins.legacy_tenant_id = tc.tenant_id
         )
     """))
 
     # ------------------------------------------------------------------
-    # 2. Backfill instances from luciel_instances. INTEGER PK mirror
-    #    per Revision A §2.1.
+    # 2. Backfill instances from luciel_instances — ACTIVE ROWS ONLY.
+    #    INTEGER PK mirror per Revision A §2.1.
     #    Note D5: column is `li.id` (INTEGER PK), NOT
     #    `li.luciel_instance_id` as defects-doc §3 stated.
+    #    Gate 3: scope_owner_domain_id + scope_level NOT preserved.
+    #    The 1 active prod row is already scope_level='tenant'.
     # ------------------------------------------------------------------
     conn.execute(sa.text("""
         INSERT INTO instances (
@@ -145,7 +177,8 @@ def upgrade() -> None:
             li.id                       AS legacy_luciel_instance_id,
             li.scope_owner_agent_id     AS legacy_agent_id
         FROM luciel_instances li
-        WHERE NOT EXISTS (
+        WHERE li.active = TRUE
+          AND NOT EXISTS (
             SELECT 1 FROM instances WHERE instances.legacy_luciel_instance_id = li.id
         )
     """))
@@ -223,6 +256,115 @@ def upgrade() -> None:
             f"skipped ({type(e).__name__}): {e}. "
             f"Application-layer audit will catch up on first read."
         )
+
+    # ------------------------------------------------------------------
+    # 5. AGGRESSIVE-CLEANUP AMENDMENT (2026-05-23):
+    #    Emit one LEGACY_FIXTURE_PURGED bulk-audit row per legacy
+    #    table summarizing the inactive-row counts + earliest/latest
+    #    created_at. These rows are the forensic recoverability
+    #    surface for Revision C's wholesale table drops.
+    #
+    #    Each emission is soft-failed (same pattern as block 4) — the
+    #    migration MUST NOT abort on audit-row failure, but the
+    #    application-layer audit chain MUST be able to reconstruct
+    #    the purge from these rows on first post-migration read.
+    #
+    #    Skips emission for tables that don't exist (e.g. on a fresh
+    #    dev container where Revision A is the first migration ever
+    #    applied — legacy tables wouldn't have been created).
+    # ------------------------------------------------------------------
+    _LEGACY_PURGE_TABLES = [
+        # (table_name, scope_column_for_active_check, resource_type_in_audit)
+        ("tenant_configs",   "active", "tenant_config"),
+        ("luciel_instances", "active", "luciel_instance"),
+        ("agents",           "active", "agent"),
+        ("domain_configs",   "active", "domain_config"),
+    ]
+
+    for table_name, active_col, resource_type in _LEGACY_PURGE_TABLES:
+        # Skip if table doesn't exist (fresh-DB path).
+        exists = conn.execute(sa.text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :t"
+        ), {"t": table_name}).fetchone()
+        if not exists:
+            print(f"[arc5_b] INFO: skipping LEGACY_FIXTURE_PURGED for "
+                  f"{table_name} — table not present")
+            continue
+
+        # Summarize the inactive rows that Revision C will drop.
+        summary = conn.execute(sa.text(f"""
+            SELECT
+                COUNT(*) FILTER (WHERE {active_col} = FALSE) AS inactive_count,
+                COUNT(*) FILTER (WHERE {active_col} = TRUE)  AS active_count,
+                COUNT(*)                                      AS total_count,
+                MIN(created_at) FILTER (WHERE {active_col} = FALSE) AS earliest_inactive,
+                MAX(created_at) FILTER (WHERE {active_col} = FALSE) AS latest_inactive
+            FROM {table_name}
+        """)).fetchone()
+
+        if summary is None:
+            continue
+
+        inactive_count, active_count, total_count, earliest, latest = summary
+
+        # Idempotency: don't double-emit on re-run. Match on resource_id
+        # set to the table_name sentinel.
+        already_emitted = conn.execute(sa.text("""
+            SELECT 1 FROM admin_audit_logs
+            WHERE action = 'LEGACY_FIXTURE_PURGED'
+              AND resource_id = :rid
+              AND resource_type = :rt
+            LIMIT 1
+        """), {"rid": table_name, "rt": resource_type}).fetchone()
+
+        if already_emitted:
+            print(f"[arc5_b] INFO: LEGACY_FIXTURE_PURGED for "
+                  f"{table_name} already emitted (idempotency)")
+            continue
+
+        try:
+            conn.execute(sa.text("""
+                INSERT INTO admin_audit_logs (
+                    tenant_id, actor_user_id, action, resource_type,
+                    resource_id, payload, created_at
+                )
+                VALUES (
+                    :sentinel_tenant_id,
+                    'system:arc5-revb',
+                    'LEGACY_FIXTURE_PURGED',
+                    :resource_type,
+                    :table_name,
+                    jsonb_build_object(
+                        'table',              :table_name,
+                        'inactive_purged',    :inactive_count,
+                        'active_preserved',   :active_count,
+                        'total_at_purge',     :total_count,
+                        'earliest_inactive_created_at', CAST(:earliest AS TEXT),
+                        'latest_inactive_created_at',   CAST(:latest   AS TEXT),
+                        'migration',          'arc5_b_admin_instance_cutover',
+                        'doctrine_ref',       'D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23'
+                    ),
+                    NOW()
+                )
+            """), {
+                "sentinel_tenant_id": "system:arc5-revb",
+                "resource_type":      resource_type,
+                "table_name":         table_name,
+                "inactive_count":     inactive_count,
+                "active_count":       active_count,
+                "total_count":        total_count,
+                "earliest":           earliest,
+                "latest":             latest,
+            })
+            print(f"[arc5_b] LEGACY_FIXTURE_PURGED emitted for "
+                  f"{table_name}: inactive={inactive_count}, "
+                  f"active_preserved={active_count}, total={total_count}")
+        except Exception as e:  # noqa: BLE001 — soft-fail by design
+            print(
+                f"[arc5_b] WARN: LEGACY_FIXTURE_PURGED audit emission "
+                f"for {table_name} skipped ({type(e).__name__}): {e}."
+            )
 
 
 def downgrade() -> None:
