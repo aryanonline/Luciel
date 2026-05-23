@@ -372,3 +372,41 @@ If ALL pass → Commit 5 (smoke test) closes successfully. We then move to Commi
 
 If ANY fails → I diagnose from the failure output before any further commits.
 ```
+
+---
+
+## ACTUAL RUN — 2026-05-23
+
+Run executed against a fresh `pgvector/pgvector:pg16` compose container on host port 5433 (the Path 3 isolation strategy authored at this commit's prep stage in `2a0006a` — see closed drift `D-docker-compose-pgvector-image-drift-2026-05-23`). The standalone `luciel-postgres` dev container on 5432 was preserved untouched throughout (see deferred drift `D-dev-db-stale-5-weeks-behind-prod-2026-05-23`).
+
+**Outcome:** ALL 6 STEPS PASSED. Revision A is production-ready.
+
+| Step | Outcome | Notes |
+|---|---|---|
+| 0 | ✅ PASS | Fresh compose DB up on 5433, pgvector extension available. |
+| 1 | ✅ PASS | 30+ base migrations replayed empty → `b2e5f17a3d9c` clean (the prod-equivalent baseline), including `b0e003ffa07f_add_knowledge_embeddings_table.py` (vector extension) — this is the live closure evidence for `D-docker-compose-pgvector-image-drift-2026-05-23`. |
+| 2 | ✅ PASS | `alembic upgrade head` landed `arc5_a_admin_instance_additive` in a single jump (matches prod execution semantics). |
+| 3 | ✅ PASS (7/7 sub-checks) | All 6 new tables present (table count: 24 + 6 = 30). All `admins` / `instances` / `admin_tier_overrides` / grant-table / `metering_emissions` / `subscriptions.billing_model` invariants confirmed via `pg_dump`-based `Select-String` checkpoints. |
+| 4 | ✅ PASS | `alembic downgrade -1` returned to `b2e5f17a3d9c` cleanly; table count back to 24; live catalog byte-identical to baseline. The rollback escape hatch is real. |
+| 5 | ✅ PASS | `alembic upgrade head` (cycle 2) re-landed Revision A cleanly. Initial `Compare-Object` against the cycle 1 pg_dump file showed 901 differing lines, but live `information_schema.table_privileges` confirmed all 10 expected `luciel_worker` GRANTs intact on both cycles — the diff was pg_dump session-noise (ownership formatting + extension emission order + `\restrict` session tokens), NOT a real schema delta. **The lesson, now canonical:** for round-trip idempotency tests, use `information_schema` / `pg_catalog` queries directly, not pg_dump file diffs. |
+| 6 | ✅ PASS | `docker compose down -v` cleanly removed container + volume + network; standalone `luciel-postgres` confirmed still up on 5432. |
+
+**Five protocol-vs-migration drifts surfaced during Step 3 verification** — all are documentation-side, all CLOSED via this run's truthification, none represent code defects in the migration. Bundled into umbrella drift `D-arc5-commit5-smoke-protocol-truthification-2026-05-23` in `docs/DRIFTS.md`:
+
+1. `admins.tier_source` column default — protocol said `'default_orphan'`, migration uses `'manual'` (which is one of five enum values in the `CHECK` constraint: `manual` / `revision_b_backfill` / `stripe_webhook` / `sales_ops_provisioned` / `free_signup`).
+2. `knowledge_share_grants.scope` `CHECK` — protocol said `{read_only, read_write}`, migration locked to `{read_only}` only. Partner-entrusted decision to **keep tight** (YAGNI + asymmetric reversibility — widening later is safe, tightening later is destructive). Recorded as separate drift `D-arc5-knowledge-share-scope-tight-2026-05-23` CLOSED-with-rationale.
+3. `ck_composition_grants_no_self_composition` constraint name — protocol said `ck_instance_composition_grants_no_self_composition`, migration shortened the name (likely to stay under PostgreSQL's 63-char identifier limit). Semantic enforcement is identical.
+4. pg_dump comparison technique — the protocol described file diffs as the idempotency proof, but pg_dump's output ordering is non-deterministic between invocations. Catalog queries are the canonical idempotency proof. Protocol authoring style updated for future arcs.
+5. PowerShell escape gotcha — `psql -c "\d+ table"` produces no output under PowerShell double-quote escaping. Pivoted to `pg_dump > file.sql; Select-String -Path file.sql -Pattern "..."` which is more reliable AND searchable. Future Windows-side smoke protocols should pre-suggest this technique.
+
+**Five satellite assertions captured during this run (forensic, not canonical):**
+
+- `luciel_worker` role + 10 GRANTs survived the down/up cycle (live catalog query confirmed): `admin_audit_logs INSERT+SELECT`, `agents SELECT`, `api_keys SELECT`, `luciel_instances SELECT`, `memory_items INSERT+SELECT`, `messages SELECT`, `sessions SELECT`, `users SELECT`.
+- `pgvector 0.8.2` installed in the compose DB (`SELECT extversion FROM pg_extension WHERE extname='vector'`).
+- `psycopg v3` confirmed in pyproject (`psycopg[binary]>=3.2.10`); URL prefix is `postgresql+psycopg://`, NOT `postgresql+psycopg2://`.
+- `alembic/env.py` honours `$env:DATABASE_URL` via pydantic BaseSettings without touching `alembic.ini`.
+- The dockerignore stash (`stash@{0}: On main: dockerignore simplification — pre Arc 5 pull`) remains parked; resolution deferred to a post-Arc-5 cleanup.
+
+**Commit hash this protocol was finalized under:** TBD (this Commit 5 closure commit).
+
+**Closing tag (deferred):** `arc-5-revision-a-smoke-complete` will be cut after prod execution of Revision A (TODO item 11), not at this commit, because the smoke is the local-side proof and the closing tag covers the local+prod pair.
