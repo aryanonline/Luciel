@@ -41,3 +41,18 @@ td_*.json
 
 # Per-step verification reports never need to ship in the runtime image
 docs/verification-reports/
+
+# Arc 8 WU-6 Phase C exclusions (2026-05-22) — doctrine files, arc-output
+# directories, IAM snapshot JSONs, MS Office artifacts, and Office lock files
+# must never be baked into the runtime image. Each entry below addresses a
+# concrete sediment surface caught during the Phase C paranoid local gate.
+docs/
+arc*-out/
+iam-*.json
+iam/
+*.docx
+~$*
+DRIFTS.md
+ARCHITECTURE.md
+CANONICAL_RECAP.md
+E2E_USER_STORIES.md
