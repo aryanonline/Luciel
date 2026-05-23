@@ -42,7 +42,7 @@ This file holds those six detail layers. Each section below maps 1:1 to an axis 
 | Tier | `instance_count_cap` | Override surface |
 |---|---|---|
 | **Free** | 1 | None — gate is hard-coded in `entitlements.py` |
-| **Pro** | 3 | None — gate is hard-coded in `entitlements.py` |
+| **Pro** | 10 | None — gate is hard-coded in `entitlements.py` |
 | **Enterprise** | `NULL` (= unlimited) | `admin_tier_overrides.instance_cap_override` — Integer, NULL means unlimited; a numeric value tightens to that value (negotiated cap for cost-conscious Enterprise deals) |
 
 ### §2.2 — Enforcement surface
@@ -53,9 +53,9 @@ This file holds those six detail layers. Each section below maps 1:1 to an axis 
 
 ### §2.3 — Upgrade / downgrade behavior
 
-- **Free → Pro:** All existing Free Instances (max 1) carry forward; the cap raises to 3 immediately. No data migration.
-- **Pro → Enterprise:** All existing Pro Instances (max 3) carry forward; the cap raises to unlimited unless `admin_tier_overrides.instance_cap_override` is set. No data migration.
-- **Enterprise → Pro (downgrade):** If the Admin currently has more than 3 active Instances, the downgrade is **rejected** at the billing-portal layer with `error.code='downgrade_blocked_instance_count'`; the customer is shown the count and asked to deactivate down to 3 first. Soft-deleted Instances above the new cap are unaffected (they stay soft-deleted).
+- **Free → Pro:** All existing Free Instances (max 1) carry forward; the cap raises to 10 immediately. No data migration.
+- **Pro → Enterprise:** All existing Pro Instances (max 10) carry forward; the cap raises to unlimited unless `admin_tier_overrides.instance_cap_override` is set. No data migration.
+- **Enterprise → Pro (downgrade):** If the Admin currently has more than 10 active Instances, the downgrade is **rejected** at the billing-portal layer with `error.code='downgrade_blocked_instance_count'`; the customer is shown the count and asked to deactivate down to 10 first. Soft-deleted Instances above the new cap are unaffected (they stay soft-deleted).
 - **Pro → Free (downgrade):** Same shape; reject above 1 active Instance.
 
 ---
@@ -66,8 +66,8 @@ This file holds those six detail layers. Each section below maps 1:1 to an axis 
 
 | Tier | `leads_per_month_cap` | Override surface |
 |---|---|---|
-| **Free** | 10 | None — hard-coded |
-| **Pro** | 2,000 | None — hard-coded |
+| **Free** | 100 | None — hard-coded |
+| **Pro** | 5,000 | None — hard-coded |
 | **Enterprise** | `NULL` (= unlimited included floor + overage) | `admin_tier_overrides.included_usage_per_period` (Integer, the included floor); overage above the floor is billed via the metering emitter (§17 below) |
 
 ### §3.2 — Enforcement surface
@@ -79,8 +79,8 @@ This file holds those six detail layers. Each section below maps 1:1 to an axis 
 
 ### §3.3 — Upgrade / downgrade behavior
 
-- **Mid-month upgrade Free→Pro:** The counter is not reset; the Pro cap (2,000) absorbs whatever count Free already accumulated. Pro customers won't notice; Free customers get effectively-immediate uncap.
-- **Mid-month downgrade Pro→Free:** If current month count > 10, the next `create_lead` call returns 402 immediately. The customer is warned at the billing-portal downgrade confirmation step.
+- **Mid-month upgrade Free→Pro:** The counter is not reset; the Pro cap (5,000) absorbs whatever count Free already accumulated. Pro customers won't notice; Free customers get effectively-immediate uncap.
+- **Mid-month downgrade Pro→Free:** If current month count > 100, the next `create_lead` call returns 402 immediately. The customer is warned at the billing-portal downgrade confirmation step.
 - **Enterprise:** Mid-cycle moves trigger a pro-rated `metering_emissions` close-out so the invoice is correct.
 
 ---
@@ -135,14 +135,17 @@ This file holds those six detail layers. Each section below maps 1:1 to an axis 
 
 | Tier | `api_enabled` | Rate limit | Embed-key minting |
 |---|---|---|---|
-| **Free** | False | N/A | False (no widget embed, no public API access; widget chat for Free Instances only works via the marketing-site preview surface) |
-| **Pro** | True | 60 requests/minute per Admin (configurable per-key inside the budget) | True (up to 3 embed keys per Admin, one per Instance) |
-| **Enterprise** | True | Custom per `admin_tier_overrides.api_rate_limit_rpm` (Integer, default 1000) | True (unlimited embed keys; key minting still requires `admin_owner` role) |
+| **Free** | True | 30 requests/minute per Admin | True (1 embed key per Admin, pinned to the single Free Instance; widget chat works on both the marketing-site preview surface AND on customer sites via the embed key) |
+| **Pro** | True | 300 requests/minute per Admin (configurable per-key inside the budget) | True (up to 10 embed keys per Admin, one per Instance) |
+| **Enterprise** | True | Custom per `admin_tier_overrides.api_rate_limit_rpm` (Integer, default 3000) | True (unlimited embed keys; key minting still requires `admin_owner` role) |
+
+**— NOTE: Free + API surface raises operational drift to P1.** Free customers can mint an embed key and exercise the public API at 30 rpm without payment. `D-free-tier-captcha-missing-2026-05-22` is raised from P2 to **P1** under this revision — captcha + email-verification gating MUST be live before this entitlement ships to customers. Additionally, `D-pro-tier-rate-limit-abuse-surface-2026-05-23` opens for the Pro shape (300 rpm × 25 seats × 10 instances = single-admin saturation surface; need per-instance + per-key rate-limiting in addition to per-admin).
 
 ### §6.2 — Enforcement surface
 
 - **Where:** `app/middleware/rate_limit.py` (existing module from Step 30a); reads `subscriptions.tier` (now `admins.tier` post-Arc-5) to select the limit.
-- **Failure mode:** 429 with `Retry-After` header. Free requests are 403 with `error.code='api_disabled_for_tier'`.
+- **Failure mode:** 429 with `Retry-After` header.
+- **Free-tier abuse-control gate (drift `D-free-tier-captcha-missing-2026-05-22` P1):** Free signup MUST require a captcha pass AND verified email before `api_enabled` resolves to True. Failure mode for an unverified Free Admin: 403 with `error.code='free_tier_verification_required'`. Captcha + email-verification land at Arc 6 alongside the Stripe SKU wiring; until then, the Free tier ships **without** API enabled (the table above is the target shape, the live shape gates on the drift closure).
 
 ---
 
@@ -150,10 +153,10 @@ This file holds those six detail layers. Each section below maps 1:1 to an axis 
 
 ### §7.1 — Numeric values
 
-| Tier | Available roles | Seat cap | `delegated_admin_enabled` |
+| Tier | Available roles | Seat cap (admin-team dashboard logins) | `delegated_admin_enabled` |
 |---|---|---|---|
 | **Free** | `admin_owner` only (1 user = the signup email) | 1 | False |
-| **Pro** | `admin_owner`, `instance_lead`, `member` | 5 (the Admin and up to 4 invited teammates) | False |
+| **Pro** | `admin_owner`, `instance_lead`, `member` | 25 (the Admin and up to 24 invited teammates; seats are at the **Admin-account scope**, NOT per-instance — a Pro Admin with 10 Instances still has 25 total seats shared across all Instances) | False |
 | **Enterprise** | `admin_owner`, `instance_lead`, `member`, `delegated_admin` | `NULL` (= unlimited, but bounded by `admin_tier_overrides.seat_cap_override` if set) | True (gated on `admin_tier_overrides.delegated_admin_enabled`) |
 
 ### §7.2 — Role definitions
@@ -228,6 +231,22 @@ The retention purge worker (`app/workers/retention_worker.py`, shipped at Step 3
 | **Pro** | False (color + logo customization only) | Always shown |
 | **Enterprise** | True | Removable via `admin_tier_overrides.cobrand_hidden=true` |
 
+### §11.2 — Widget custom-domain CNAME (NEW axis, locked 2026-05-23)
+
+Net-new entitlement axis added with the 2026-05-23 partner-resolution. Lets the Admin point a subdomain of their own domain (e.g. `chat.theircompany.com`) at our widget endpoint, so end-users on their site see the chat as branded under their domain rather than `widget.vantagemind.ai`.
+
+| Tier | Custom-domain CNAME | Per-Admin limit |
+|---|---|---|
+| **Free** | False | N/A |
+| **Pro** | True | 1 |
+| **Enterprise** | True | Unlimited |
+
+**Implementation surface (lands at Arc 6 alongside Stripe wiring):**
+- New table `admin_widget_domains(admin_id, cname, verified_at, created_at, deactivated_at)` (Arc 6 schema, NOT Arc 5).
+- TXT-record + HTTPS challenge verification on `verified_at`; only verified CNAMEs route widget traffic.
+- Reverse proxy at the widget edge reads the `Host` header, looks up `admin_widget_domains.admin_id`, and routes to the Admin's Instance.
+- **NOT to be confused with** the legacy `domains` table from the four-layer (Tenant→Domain→Agent→Instance) hierarchy. That table is dropped wholesale in Arc 5 Revision C and has no functional overlap with this CNAME mapping artifact. The reuse of the word "domain" is unfortunate but the table names disambiguate.
+
 ---
 
 ## §12 — Axis 11: Webhook outbound
@@ -258,11 +277,11 @@ The retention purge worker (`app/workers/retention_worker.py`, shipped at Step 3
 
 ### §14.1 — Numeric values
 
-| Tier | Uptime SLA | Response SLA |
+| Tier | Uptime SLA | Support response SLA |
 |---|---|---|
-| **Free** | None (best-effort) | None |
-| **Pro** | 99.5% (no credit, just published target) | 24h email response |
-| **Enterprise** | 99.9% with service credits per `admin_tier_overrides.sla_credit_schedule` | Custom per contract; default 4h business-hours |
+| **Free** | None (best-effort) | Community (GitHub Discussions / community Slack / docs-search; no email ticket) |
+| **Pro** | 99.5% (no credit, just published target) | 48h email response (business hours: M–F 9am–6pm EDT) |
+| **Enterprise** | 99.9% with service credits per `admin_tier_overrides.sla_credit_schedule` | 24h email response + dedicated Customer Success Manager (CSM) for the contract term |
 
 ---
 
@@ -350,73 +369,82 @@ ALL_BILLING_MODELS = (BILLING_MODEL_FLAT, BILLING_MODEL_HYBRID, BILLING_MODEL_CO
 TIER_ENTITLEMENTS = {
     TIER_FREE: TierEntitlement(
         instance_count_cap=1,
-        leads_per_month_cap=10,
+        leads_per_month_cap=100,  # 2026-05-23 revision: raised 10→100 (Option A locked, more generous Free)
         model_tier_default="base",
         composition_enabled=False,
         max_composition_depth=0,
         knowledge_share_grants_enabled=False,
-        api_enabled=False,
-        api_rate_limit_rpm=0,
-        embed_key_count_cap=0,
-        seat_cap=1,
+        api_enabled=True,  # 2026-05-23 revision: Free tier API enabled (raises captcha drift D-free-tier-captcha-missing-2026-05-22 to P1)
+        api_rate_limit_rpm=30,  # 2026-05-23 revision: 0→30rpm Free tier API access
+        embed_key_count_cap=1,  # 2026-05-23 revision: 0→1 Free tier embed key
+        seat_cap=1,  # admin-team dashboard logins at admin-account scope (Meaning 1, locked 2026-05-23)
         delegated_admin_enabled=False,
         dashboard_views=frozenset({"single_instance"}),
         audit_retention_days=30,
         sso_enabled=False,
         widget_branding_custom=False,
+        widget_custom_domain_cname_cap=0,  # 2026-05-23 revision: NEW §11.2 axis, Free=0 CNAMEs
         webhook_outbound_enabled=False,
         cross_instance_memory_federation=False,
         uptime_sla_pct=None,
         data_residency_region="ca-central-1",
         export_csv_enabled=False,
         export_audit_chain_enabled=False,
+        stripe_customer_record_required=False,  # Gap 1 resolution: lazy-create on upgrade (admins.stripe_customer_id NULL while tier='free')
+        support_sla="community",  # community forum only, no SLA
     ),
     TIER_PRO: TierEntitlement(
-        instance_count_cap=3,
-        leads_per_month_cap=2000,
+        instance_count_cap=10,  # 2026-05-23 revision: 3→10 instances (Option A locked)
+        leads_per_month_cap=5000,  # 2026-05-23 revision: 2000→5000 leads/month
         model_tier_default="mid",
         composition_enabled=True,
         max_composition_depth=2,
         knowledge_share_grants_enabled=False,
         api_enabled=True,
-        api_rate_limit_rpm=60,
-        embed_key_count_cap=3,
-        seat_cap=5,
+        api_rate_limit_rpm=300,  # 2026-05-23 revision: 60→300rpm (opens D-pro-tier-rate-limit-abuse-surface-2026-05-23 drift; needs per-instance + per-key limiting before scale)
+        embed_key_count_cap=10,  # 2026-05-23 revision: 3→10 embed keys
+        seat_cap=25,  # 2026-05-23 revision: 5→25 admin-team dashboard logins at admin-account scope (Meaning 1)
         delegated_admin_enabled=False,
         dashboard_views=frozenset({"single_instance", "instance_group", "admin_rollup"}),
         audit_retention_days=365,
         sso_enabled=False,
         widget_branding_custom=False,
+        widget_custom_domain_cname_cap=1,  # 2026-05-23 revision: NEW §11.2 axis, Pro=1 widget CNAME (chat.theircompany.com)
         webhook_outbound_enabled=True,
         cross_instance_memory_federation=False,
         uptime_sla_pct=99.5,
         data_residency_region="ca-central-1",
         export_csv_enabled=True,
         export_audit_chain_enabled=False,
+        stripe_customer_record_required=True,  # Pro requires Stripe customer record
+        support_sla="email_48h",  # 48h email response
     ),
     TIER_ENTERPRISE: TierEntitlement(
         # Defaults; every field is overrideable via admin_tier_overrides
-        instance_count_cap=None,  # unlimited
-        leads_per_month_cap=None,  # unlimited included floor; overage metered
+        instance_count_cap=None,  # unlimited (sales-negotiated)
+        leads_per_month_cap=None,  # unlimited included floor; overage metered above contracted floor
         model_tier_default="top",
         composition_enabled=True,
         max_composition_depth=None,  # unlimited
         knowledge_share_grants_enabled=True,
         api_enabled=True,
-        api_rate_limit_rpm=1000,
+        api_rate_limit_rpm=3000,  # 2026-05-23 revision: default 1000→3000rpm (contract may negotiate higher)
         embed_key_count_cap=None,  # unlimited
-        seat_cap=None,  # unlimited
+        seat_cap=None,  # unlimited admin-team dashboard logins (Meaning 1)
         delegated_admin_enabled=True,
         dashboard_views=frozenset({"single_instance", "instance_group", "admin_rollup", "metering_overage"}),
-        audit_retention_days=None,  # unlimited (typically negotiated to 7y)
+        audit_retention_days=None,  # unlimited (typically negotiated to 7y per contract)
         sso_enabled=True,
         widget_branding_custom=True,
+        widget_custom_domain_cname_cap=None,  # 2026-05-23 revision: NEW §11.2 axis, Enterprise=unlimited widget CNAMEs
         webhook_outbound_enabled=True,
         cross_instance_memory_federation=True,
         uptime_sla_pct=99.9,
         data_residency_region="ca-central-1",
         export_csv_enabled=True,
         export_audit_chain_enabled=True,
+        stripe_customer_record_required=True,  # Enterprise requires Stripe customer record
+        support_sla="email_24h_plus_csm",  # 24h email + dedicated CSM
     ),
 }
 ```
@@ -438,15 +466,15 @@ The legacy `entitlements.py` (Step 30a.6 shape under `TIER_INDIVIDUAL` / `TIER_T
 
 | Legacy | v2 |
 |---|---|
-| `TIER_INDIVIDUAL` | `TIER_PRO` (Solo customers backfill to Pro at the in-migration `UPDATE`; their cap raises from 3 to … 3 — no semantic change for them at the Instance axis; their `leads_per_month_cap` raises from the implicit unlimited-with-rate-limit shape to the explicit 2000 cap, which is a **tightening** that affects no current customer because no current Solo customer exceeds 2000 leads/month per the existing usage data) |
+| `TIER_INDIVIDUAL` | `TIER_PRO` (Solo customers backfill to Pro at the in-migration `UPDATE`; their cap raises from 3 to **10** at the Instance axis per the 2026-05-23 Option A locked entitlement table — strict **expansion** for existing Solo customers, no tightening; their `leads_per_month_cap` becomes the explicit **5000** cap, also a strict expansion vs. the legacy implicit-unlimited-with-rate-limit shape because no Solo customer in the existing usage data exceeds 5000 leads/month) |
 | `TIER_TEAM` | Eliminated. Existing Team customers (none on the live wire at the time of Arc 4) would backfill to `TIER_PRO` if any existed. |
 | `TIER_COMPANY` | `TIER_ENTERPRISE` (Company customers backfill to Enterprise with a default `admin_tier_overrides` row mirroring their Company tier limits as override values, so their effective limits do not change) |
 | `DOMAIN_COUNT_CAP_BY_TIER` | Eliminated entirely (Domain layer removed at Arc 4) |
-| `INSTANCE_COUNT_CAP_BY_TIER[TIER_INDIVIDUAL]=3` | `TIER_ENTITLEMENTS[TIER_PRO].instance_count_cap=3` (same value, new key) |
+| `INSTANCE_COUNT_CAP_BY_TIER[TIER_INDIVIDUAL]=3` | `TIER_ENTITLEMENTS[TIER_PRO].instance_count_cap=10` (2026-05-23 revision: expanded 3→10) |
 | `INSTANCE_COUNT_CAP_BY_TIER[TIER_TEAM]=10` | Eliminated |
 | `INSTANCE_COUNT_CAP_BY_TIER[TIER_COMPANY]=50` | `TIER_ENTITLEMENTS[TIER_ENTERPRISE].instance_count_cap=None` (unlimited) with `admin_tier_overrides.instance_cap_override=50` for the backfilled Company customers |
 
-The rename is purely a label move for the live customers (Solo→Pro, Company→Enterprise with override-preserved-limits); the only **net-new** tier is Free, and the only **net-removed** tier is Team (which had no live customers).
+The rename is purely a label move for the live customers (Solo→Pro with **strictly-expanded** caps per the 2026-05-23 Option A revision, Company→Enterprise with override-preserved-limits); the only **net-new** tier is Free, and the only **net-removed** tier is Team (which had no live customers). The 2026-05-23 revision **strictly expands** Pro caps from the original Arc 4 v2 draft (instances 3→10, leads 2000→5000, api 60→300rpm, embed keys 3→10, seats 5→25), and **strictly expands** Free from disabled-API to 30rpm/100 leads — both changes are net-friendlier to all existing customers, so no customer-facing tightening notice is required.
 
 ---
 
