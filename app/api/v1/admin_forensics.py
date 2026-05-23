@@ -146,7 +146,7 @@ from app.models.admin_audit_log import (
     RESOURCE_LUCIEL_INSTANCE,
 )
 from app.models.api_key import ApiKey
-from app.models.aliases import LucielInstance
+from app.models.instance import Instance as LucielInstance
 from app.models.memory import MemoryItem
 from app.models.message import MessageModel
 from app.models.user import User

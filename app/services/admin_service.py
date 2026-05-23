@@ -1295,7 +1295,7 @@ class AdminService:
             ACTION_TENANT_HARD_PURGED,
             RESOURCE_TENANT,
         )
-        from app.models.aliases import TenantConfig
+        from app.models.admin import AdminConfig as TenantConfig
         from app.repositories.admin_audit_repository import AdminAuditRepository
 
         # ---- Idempotency guard: re-verify retention predicate ----

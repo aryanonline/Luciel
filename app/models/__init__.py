@@ -39,15 +39,10 @@ from app.models.admin import (  # noqa: F401
     TIER_ENTERPRISE,
 )
 from app.models.instance import Instance  # noqa: F401
-# Transitional shim — re-exports legacy names that resolve to Admin / Instance.
-# Deleted at B6 once all call-sites finish their rename.
-from app.models.aliases import (  # noqa: F401
-    Tenant,
-    TenantConfig,
-    LucielInstance,
-    DomainConfig,
-    Agent,
-)
+# Arc 5 Path A Commit C2: app/models/aliases.py was deleted along with the
+# Tenant / TenantConfig / LucielInstance / DomainConfig / Agent transitional
+# re-exports. Importers must reference Admin / AdminConfig / Instance
+# directly (see app/models/admin.py and app/models/instance.py).
 
 __all__ = [
     "AgentConfig",
@@ -90,10 +85,4 @@ __all__ = [
     "TIER_FREE",
     "TIER_PRO",
     "TIER_ENTERPRISE",
-    # Transitional aliases (deleted at B6).
-    "Tenant",
-    "TenantConfig",
-    "LucielInstance",
-    "DomainConfig",
-    "Agent",
 ]

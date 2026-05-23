@@ -86,7 +86,7 @@ from app.models.admin_audit_log import (
 # gate now checks ScopeAssignment (the V2 binding from User to Admin).
 from app.models.scope_assignment import ScopeAssignment
 from app.models.api_key import ApiKey
-from app.models.aliases import LucielInstance
+from app.models.instance import Instance as LucielInstance
 from app.models.message import MessageModel
 from app.models.session import SessionModel
 from app.models.user import User

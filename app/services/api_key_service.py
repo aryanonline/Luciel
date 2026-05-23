@@ -39,7 +39,7 @@ from app.models.admin_audit_log import (
     ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
     RESOURCE_API_KEY,
 )
-from app.models.aliases import LucielInstance
+from app.models.instance import Instance as LucielInstance
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,

@@ -108,7 +108,7 @@ from app.services.scope_prompt_preflight import (
 )
 from app.schemas.memory import MemoryRead
 from app.policy.scope import ScopePolicy
-from app.models.aliases import LucielInstance
+from app.models.instance import Instance as LucielInstance
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
