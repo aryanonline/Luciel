@@ -174,11 +174,15 @@ _DEFAULT_MAX_PENDING_INVITES = 100
 # See CANONICAL_RECAP §12 Step 30a.6 row + §14 Entitlement matrix row 3
 # and DRIFTS `D-tier-semantics-realignment-2026-05-20`.
 
-_TEAM_ALLOWED_INVITE_ROLES: frozenset[str] = frozenset({"teammate"})
-_INDIVIDUAL_ALLOWED_INVITE_ROLES: frozenset[str] = frozenset()  # seats=1
-# Company tier accepts any role string -- v1 surfaces are `teammate`
-# and `department_lead`, but the matrix is permissive at Company so
-# future role-label additions don't require this constant to grow.
+# V2 tier-aware invite-role allow-sets (Arc 5 B8 rename):
+#   Free       → seats=1, no invites allowed
+#   Pro        → seats=25, only 'teammate' role allowed
+#   Enterprise → unlimited seats, any role string permissive
+# Mirrors CANONICAL_RECAP §14 V2 entitlement matrix seat-cap axis.
+_PRO_ALLOWED_INVITE_ROLES:  frozenset[str] = frozenset({"teammate"})
+_FREE_ALLOWED_INVITE_ROLES: frozenset[str] = frozenset()  # seats=1
+# Enterprise tier accepts any role string -- future role-label
+# additions don't require this constant to grow.
 
 
 def _resolve_max_pending_invites(*, tenant_id: str, db: Session) -> int:
@@ -220,9 +224,9 @@ def _check_role_allowed_for_tier(
         STATUS_ACTIVE,
         STATUS_TRIALING,
         Subscription,
-        TIER_COMPANY,
-        TIER_INDIVIDUAL,
-        TIER_TEAM,
+        TIER_ENTERPRISE,
+        TIER_FREE,
+        TIER_PRO,
     )
 
     sub = (
@@ -241,23 +245,23 @@ def _check_role_allowed_for_tier(
         return
 
     tier = sub.tier
-    if tier == TIER_COMPANY:
-        # Company is permissive: any role label flows through.
+    if tier == TIER_ENTERPRISE:
+        # Enterprise is permissive: any role label flows through.
         return
-    if tier == TIER_TEAM:
-        if role not in _TEAM_ALLOWED_INVITE_ROLES:
+    if tier == TIER_PRO:
+        if role not in _PRO_ALLOWED_INVITE_ROLES:
             raise InviteRoleNotAllowedForTierError(
-                f"Team-tier tenants cannot mint role={role!r} invites; "
-                f"allowed roles: {sorted(_TEAM_ALLOWED_INVITE_ROLES)}. "
-                f"Upgrade to Company tier to invite a department lead."
+                f"Pro-tier admins cannot mint role={role!r} invites; "
+                f"allowed roles: {sorted(_PRO_ALLOWED_INVITE_ROLES)}. "
+                f"Upgrade to Enterprise tier to invite custom roles."
             )
         return
-    if tier == TIER_INDIVIDUAL:
-        if role not in _INDIVIDUAL_ALLOWED_INVITE_ROLES:
+    if tier == TIER_FREE:
+        if role not in _FREE_ALLOWED_INVITE_ROLES:
             raise InviteRoleNotAllowedForTierError(
-                f"Individual-tier tenants have seats=1 and cannot mint "
-                f"any invites (requested role={role!r}). Upgrade to Team "
-                f"or Company to invite teammates."
+                f"Free-tier admins have seats=1 and cannot mint "
+                f"any invites (requested role={role!r}). Upgrade to Pro "
+                f"or Enterprise to invite teammates."
             )
         return
     # Unknown tier label -- be permissive rather than 422 on a label

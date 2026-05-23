@@ -48,16 +48,29 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------
-# Tier constants — kept module-level (not a PG enum) so a new tier
-# (e.g. 'individual_pro') can land without a schema migration.
-# Mirrors CANONICAL_RECAP §14 monetization tiers.
+# Tier constants — V2 SHAPE (Arc 5 B8, 2026-05-23).
+#
+# The v1 4-tier surface (TIER_INDIVIDUAL/TEAM/COMPANY) was DELETED at
+# Arc 5 Commit 17 (B8) per docs/DRIFTS.md
+# D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23. The V2
+# canonical shape is Free / Pro / Enterprise (lowercase wire strings).
+#
+# Mirrors CANONICAL_RECAP §14 (V2 monetization tiers) +
+# app/policy/entitlements.py (TIER_FREE/PRO/ENTERPRISE + 16-axis
+# TierEntitlement matrix at §6.5 founder-locks).
+#
+# Source-of-truth for the tier rename mapping (Revision B data
+# backfill, applied to prod at Arc 5 Commit 22):
+#   individual + solo  → pro
+#   team + company     → enterprise
+#   (free is brand-new — no legacy mapping)
 # ---------------------------------------------------------------------
 
-TIER_INDIVIDUAL = "individual"
-TIER_TEAM = "team"
-TIER_COMPANY = "company"
+TIER_FREE = "free"
+TIER_PRO = "pro"
+TIER_ENTERPRISE = "enterprise"
 
-ALLOWED_TIERS = (TIER_INDIVIDUAL, TIER_TEAM, TIER_COMPANY)
+ALLOWED_TIERS = (TIER_FREE, TIER_PRO, TIER_ENTERPRISE)
 
 
 # ---------------------------------------------------------------------
@@ -77,75 +90,31 @@ ALLOWED_BILLING_CADENCES = (BILLING_CADENCE_MONTHLY, BILLING_CADENCE_ANNUAL)
 
 
 # ---------------------------------------------------------------------
-# Tier → permitted-scope mapping (the ARCHITECTURE §4.7 line 551
-# commitment, made code). Step 30a.1.
+# Per-tier instance-count caps (Arc 5 B8, V2 values per §6.5 founder-locks).
 #
-# The CANONICAL_RECAP §14 commitment that *"A Team Luciel is not a
-# bigger Individual Luciel"* is enforced here: the tier of a
-# subscription determines which LucielInstance.scope_level values may
-# be minted under that subscription. Service-layer enforcement only
-# (see drift ``D-tier-scope-mapping-service-layer-only-2026-05-13`` —
-# PostgreSQL CHECK constraints cannot subquery another table, and a
-# trigger adds operational complexity for no functional gain).
+# CANONICAL_RECAP §14 forbids per-seat metering, so these caps are a
+# *billing-integrity* guardrail. The V2 values:
+#   Free       → 1 instance
+#   Pro        → 10 instances
+#   Enterprise → unlimited (sentinel 0 historically meant unlimited;
+#                in V2 we use None so callsites get a clean type
+#                signal via Optional[int]; comparison code at
+#                billing_service treats None as "no cap").
 #
-# The scope-level string literals match
-# ``app.models.luciel_instance.SCOPE_LEVEL_{AGENT,DOMAIN,TENANT}`` —
-# we keep them as string literals here (rather than importing) to
-# avoid pulling the luciel_instance module into the subscription
-# module's import graph, which would create a cycle with
-# ``app.services.tier_provisioning_service``.
+# NOTE: The Domain layer is dead in V2 (D-arc5-aggressive-cleanup
+# amendment). The legacy TIER_PERMITTED_SCOPES + DOMAIN_COUNT_CAP_BY_TIER
+# maps were DELETED at this commit — the V2 Admin → Instance → Lead
+# hierarchy has no scope-level pluralism to enforce.
+#
+# Source of truth: app/policy/entitlements.py TIER_ENTITLEMENTS map
+# (16-axis full row per tier). This map is a service-layer fast-path
+# for the single instance_count_cap axis; the full row is canonical.
 # ---------------------------------------------------------------------
 
-TIER_PERMITTED_SCOPES: dict[str, tuple[str, ...]] = {
-    TIER_INDIVIDUAL: ("agent",),
-    TIER_TEAM: ("agent", "domain"),
-    TIER_COMPANY: ("agent", "domain", "tenant"),
-}
-
-
-# ---------------------------------------------------------------------
-# Per-tier instance-count caps (Step 30a.1).
-#
-# §14 forbids per-seat metering, so these caps are a *billing-integrity*
-# guardrail, not a seat count. A runaway script that mints 200 Luciels
-# under a single $300/mo Team subscription is a service-side problem
-# the cap catches; a Team customer with 10 well-curated Luciels is
-# operating within the design intent.
-# ---------------------------------------------------------------------
-
-TIER_INSTANCE_CAPS: dict[str, int] = {
-    TIER_INDIVIDUAL: 3,
-    TIER_TEAM: 10,
-    TIER_COMPANY: 50,
-}
-
-
-# ---------------------------------------------------------------------
-# Per-tier Domain-count caps (Step 30a.5, realigned at Step 30a.6).
-#
-# Mirrors TIER_INSTANCE_CAPS shape. Step 30a.6 (tier-hierarchy semantic
-# realignment, 2026-05-20) flips Team `1 -> 0`: Team is now flat (one
-# tenant.admin lead + N agent.admin teammates directly under the tenant,
-# no Domain layer at all). Multi-Domain remains a Company-only value
-# driver. Individual tier was already 0 and stays 0 -- it has no Domain
-# scope permitted by TIER_PERMITTED_SCOPES so the entry is
-# belt-and-suspenders; the scope guard fires first. Company tier stays
-# at 50 (symmetric with the 50-Luciel instance cap, partner judgment
-# 2026-05-18, documented in docs/designs/step-30a-5-company-self-serve.md
-# §11 Q1 and re-annotated under §11 Q1 of CANONICAL_RECAP for Step 30a.6).
-#
-# The cap is enforced at the service layer only -- no DB-level CHECK
-# constraint or trigger. Tracked as
-# D-domain-count-cap-service-layer-only-2026-05-18 (mirror of
-# D-tier-scope-mapping-service-layer-only-2026-05-13) in DRIFTS §3.
-# See also CANONICAL_RECAP §12 Step 30a.6 row, §14 Entitlement matrix
-# row 3, and DRIFTS `D-tier-semantics-realignment-2026-05-20`.
-# ---------------------------------------------------------------------
-
-DOMAIN_COUNT_CAP_BY_TIER: dict[str, int] = {
-    TIER_INDIVIDUAL: 0,
-    TIER_TEAM: 0,
-    TIER_COMPANY: 50,
+TIER_INSTANCE_CAPS: dict[str, int | None] = {
+    TIER_FREE:       1,
+    TIER_PRO:        10,
+    TIER_ENTERPRISE: None,  # unlimited
 }
 
 
@@ -269,11 +238,20 @@ class Subscription(Base, TimestampMixin):
     instance_count_cap: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        default=TIER_INSTANCE_CAPS[TIER_INDIVIDUAL],
-        server_default=str(TIER_INSTANCE_CAPS[TIER_INDIVIDUAL]),
+        # Default to Pro's cap (10) — historically Subscription rows
+        # were only created for paying customers (Individual/Team/Company).
+        # In V2 Free admins have no Subscription row at all (lazy-create
+        # on upgrade per Gap 1 lock), so any Subscription instantiated
+        # without an explicit cap is at least Pro — hence Pro's value
+        # is the safest module-import-time default. Service-layer code
+        # at billing_service.compute_instance_cap_for_tier(tier) is the
+        # canonical accessor and overrides this on actual creation.
+        default=TIER_INSTANCE_CAPS[TIER_PRO],
+        server_default=str(TIER_INSTANCE_CAPS[TIER_PRO]),
         comment=(
-            "Hard ceiling on active LucielInstances under this subscription. "
-            "Not a seat count (§14) — a billing-integrity guardrail."
+            "Hard ceiling on active Instances under this subscription. "
+            "Not a seat count (§14) — a billing-integrity guardrail. "
+            "None at the application layer means unlimited (Enterprise)."
         ),
     )
 

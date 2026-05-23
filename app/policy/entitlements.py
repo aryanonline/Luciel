@@ -1,299 +1,54 @@
-"""Tier-entitlement matrix -- v1 (legacy, 4-tier shape, Step 30a.6 2026-05-20)
-co-existing with v2 (current truth, 3-tier Option A shape, Arc 5 Commit 3
-2026-05-23) during the Arc 5 Revision B cutover window.
+"""Tier-entitlement matrix — v2-only post Arc 5 B8 (3-tier Option A).
 
-This module is the single first-class artifact carrying the per-tier
-operational gates. CANONICAL_RECAP \u00a714 "Entitlement matrix" is the
-buyer-facing surface of this same shape; Pricing.tsx feature lists are
-derived from this same shape; the engineering-facing detail spec is
-``arc4-out/A-tier-matrix-detail.md`` \u00a718. When canonical / architecture /
-this module disagree, **this module wins** and the disagreement is
-recorded as a drift in DRIFTS \u00a73.
+The v1 4-tier surface (TIER_INDIVIDUAL/TEAM/COMPANY, Entitlement /
+Dimension dataclasses, _individual_set/_team_set/_company_set factories,
+ENTITLEMENTS_BY_TIER map, get_entitlement/is_enforced lookups) was
+DELETED outright at Arc 5 Commit 17 (B8) per the aggressive-cleanup
+amendment (docs/DRIFTS.md
+D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23).
 
-Two entitlement surfaces co-exist in this module during the Arc 5
-Revision B cutover window:
+The v2 surface below is the sole entitlement-resolution path in the
+post-Arc-5 platform:
 
-* **v1 surface (legacy, 4-tier).** ``TIER_INDIVIDUAL`` / ``TIER_TEAM`` /
-  ``TIER_COMPANY`` (imported from ``app.models.subscription``);
-  ``DIMENSIONS`` (18 rows); ``ENTITLEMENTS_BY_TIER`` dict;
-  ``get_entitlement()`` / ``is_enforced()`` lookups. **Frozen at its
-  Step 30a.6 v1 truth** -- the 13 v1 callsites (admin.py,
-  billing_service.py, billing_webhook_service.py, invite_service.py,
-  tier_provisioning_service.py, plus tests) keep reading the v1 surface
-  unchanged until Revision B sweeps them.
-
-* **v2 surface (current truth, 3-tier Option A).** ``TIER_FREE`` /
-  ``TIER_PRO`` / ``TIER_ENTERPRISE`` (defined in this module, NOT yet on
-  ``Subscription.tier`` -- the DB column gets the new CHECK constraint at
-  Revision C); ``TierEntitlement`` dataclass; ``TIER_ENTITLEMENTS`` dict
-  carrying the **founder-locked Option A numeric values**
-  (``arc5-out/A-arc5-arc4-plan-defects.md`` \u00a76.5);
-  ``resolve_entitlement()`` lookup with the Enterprise override hook.
-  New callsites authored at Revision B onward read v2; legacy callsites
-  swept to v2 in the Revision B batch.
-
-**Side-by-side, not aliased.** ``TIER_FREE`` / ``TIER_PRO`` /
-``TIER_ENTERPRISE`` are *not* aliased to ``TIER_INDIVIDUAL`` /
-``TIER_TEAM`` / ``TIER_COMPANY`` because their numeric meanings diverge
-under Option A (legacy ``TIER_INSTANCE_CAPS[TIER_INDIVIDUAL]=3`` vs v2
-``TIER_ENTITLEMENTS[TIER_PRO].instance_count_cap=10``, and so on across
-7 of 8 entitlement rows). Aliasing would silently smear the doctrine
-drift across the cutover window. Revision B is the explicit, audited
-rename: each callsite migrates v1\u2192v2 with a commit-by-commit batch sweep
-recorded at ``arc4-out/A-tenancy-collapse-arc-record.md`` \u00a712.
+* TIER_FREE / TIER_PRO / TIER_ENTERPRISE — the three tiers (Option A,
+  founder-locked 2026-05-23 at arc5-out/A-arc5-arc4-plan-defects.md
+  §6.5).
+* TierEntitlement dataclass — the 16-axis per-tier shape (CANONICAL §14;
+  arc4-out/A-tier-matrix-detail.md §18.2).
+* TIER_ENTITLEMENTS map — static per-tier values.
+* resolve_entitlement(tier, axis, overrides) — fail-closed lookup with
+  Enterprise-only override hook (overrides param mirrors a row from the
+  admin_tier_overrides table created at Revision A and populated at
+  Revision A+B; an Enterprise Admin with no override row falls through
+  to the static map).
+* get_tier_entitlement(tier) — convenience accessor for the full row.
 
 See also:
-  * CANONICAL_RECAP \u00a714 "Entitlement matrix" -- the buyer-facing table
-    (now sourced from this module's v2 surface).
-  * CANONICAL_RECAP \u00a711.7 -- public tier positioning copy.
-  * ``arc4-out/A-tier-matrix-detail.md`` \u00a718 -- engineering-facing detail
-    spec (the source of the ``TierEntitlement`` field set).
-  * ``arc5-out/A-arc5-arc4-plan-defects.md`` \u00a76.5 -- the single source of
-    truth for the v2 numeric values (founder-locked Option A 2026-05-23).
-  * DRIFTS `D-tenancy-collapse-admin-instance-lead-2026-05-22` -- parent
-    umbrella; `D-entitlement-matrix-v1-2026-05-20` -- the v1 drift
-    (now superseded by the v2 surface below but preserved for audit);
-    `D-free-tier-captcha-missing-2026-05-22` (P1 after 2026-05-23
-    escalation) and `D-pro-tier-rate-limit-abuse-surface-2026-05-23`
-    (P1, NEW) -- abuse-surface gaps gating Free / Pro launches.
+  * CANONICAL_RECAP §14 — buyer-facing matrix.
+  * CANONICAL_RECAP §11.7 — public tier positioning copy.
+  * arc4-out/A-tier-matrix-detail.md §18 — engineering-facing detail.
+  * arc5-out/A-arc5-arc4-plan-defects.md §6.5 — Option A founder-locks.
+  * alembic/versions/arc5_a_admin_instance_additive.py — the
+    admin_tier_overrides schema that backs the override hook.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
-from app.models.subscription import TIER_COMPANY, TIER_INDIVIDUAL, TIER_TEAM
-
 
 # =====================================================================
-# v1 SURFACE (legacy, 4-tier, Step 30a.6 2026-05-20)
+# v2 SURFACE (current truth, 3-tier Option A, Arc 5)
 # =====================================================================
-# Read by the 13 existing v1 callsites (admin.py, billing_service.py,
-# billing_webhook_service.py, invite_service.py, tier_provisioning_
-# service.py, admin_service.py, plus the v1 contract-shape tests).
-# Frozen at its v1 truth until Revision B sweeps every callsite to the
-# v2 surface below.
+# Sole entitlement-resolution path post-B8. The override hook
+# (resolve_entitlement(overrides=dict)) consumes admin_tier_overrides
+# rows for Enterprise Admins; Free + Pro Admins never carry an override
+# row (the absence of a row is the canonical "static map applies"
+# signal).
 
-
-# ---------------------------------------------------------------------
-# Dimension + Entitlement shapes
-# ---------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Entitlement:
-    """One cell of the matrix -- a per-tier, per-dimension entitlement.
-
-    Attributes:
-      value: The Live-Today value -- an int (cap), bool (yes/no), str
-        (literal label like "Email response within 24h"), or ``None``
-        when the cell is N/A for that tier.
-      enforced: ``True`` when the runtime call-site actually enforces
-        this value today; ``False`` when the value is committed to the
-        buyer but enforcement is deferred to ``pairing_step``.
-      pairing_step: The follow-up Step token where deferred enforcement
-        will land. ``None`` when ``enforced=True``.
-    """
-
-    value: Any
-    enforced: bool
-    pairing_step: str | None = None
-
-
-@dataclass(frozen=True)
-class Dimension:
-    """One row of the matrix -- a named operational dimension."""
-
-    key: str
-    label: str
-
-
-# ---------------------------------------------------------------------
-# Dimensions (the 18 rows of the matrix, in CANONICAL_RECAP \u00a714 order)
-# ---------------------------------------------------------------------
-
-DIMENSIONS: tuple[Dimension, ...] = (
-    Dimension("seats", "Seats (people who can sign in under the tenant)"),
-    Dimension("luciel_instances_cap", "Luciel instances cap"),
-    Dimension("domains_cap", "Domains cap"),
-    Dimension("leads_cap", "Leads / conversations stored cap"),
-    Dimension("voice_channel", "Voice channel adapter"),
-    Dimension("sms_channel", "SMS channel adapter"),
-    Dimension("email_channel", "Email channel adapter"),
-    Dimension("widget_cap", "Widget (embeddable chat)"),
-    Dimension("conversations_per_day_per_seat", "Conversations per day, per seat"),
-    Dimension("api_rate_limit_rpm", "API rate limit (requests per minute, per tenant)"),
-    Dimension("concurrent_instances", "Concurrent Sarah instances (per-tenant LLM concurrency ceiling)"),
-    Dimension("cross_domain_memory", "Cross-domain memory"),
-    Dimension("audit_retention_days", "Audit retention"),
-    Dimension("audit_csv_export", "Audit CSV export"),
-    Dimension("custom_branding", "Custom widget branding (operator-supplied theme)"),
-    Dimension("sso", "SSO (SAML / OIDC enterprise identity)"),
-    Dimension("priority_support", "Priority support"),
-    Dimension("dedicated_success_manager", "Dedicated success manager"),
-)
-
-assert len(DIMENSIONS) == 18, (
-    "DIMENSIONS must remain 18 rows -- see CANONICAL_RECAP \u00a714 "
-    "Entitlement matrix and DRIFTS `D-entitlement-matrix-v1-2026-05-20`."
-)
-
-
-# Pairing-step tokens for the eight deferred (Roadmap) rows.
-_STEP_34A_CHANNELS = "Step 34a (channel adapter framework)"
-_STEP_31X_METERING = "Step 31.x (per-seat metering + per-tier rate-limit profiles)"
-_STEP_36_COUNCIL = "Step 36 (Luciel Council) / Step 31.x (concurrency counter)"
-_STEP_37_HYBRID = "Step 37 (hybrid retrieval) -- tier-gated cross-Domain"
-_STEP_NEXT_CRON = "next cron touch -- per-tier retention class into the purge worker"
-_STEP_AUDIT_EXPORT = "Step 31.x (audit CSV export route)"
-_STEP_WIDGET_THEME = "next widget touch -- tier-gating the theme field"
-_STEP_FUTURE_OPS = "future ops step -- SLA infrastructure"
-_STEP_FIRST_COMPANY_ANNUAL = "first Company annual hand-off"
-_STEP_BEYOND_33B = "future enterprise step beyond Step 33b -- SSO integration"
-
-
-# ---------------------------------------------------------------------
-# EntitlementSet -- one tier's full row of values
-# ---------------------------------------------------------------------
-
-
-EntitlementSet = dict[str, Entitlement]
-
-
-def _individual_set() -> EntitlementSet:
-    return {
-        "seats": Entitlement(1, enforced=True),
-        "luciel_instances_cap": Entitlement(3, enforced=True),
-        "domains_cap": Entitlement(0, enforced=True),
-        "leads_cap": Entitlement(3, enforced=True),
-        "voice_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "sms_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "email_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "widget_cap": Entitlement(1, enforced=True),
-        "conversations_per_day_per_seat": Entitlement(50, enforced=False, pairing_step=_STEP_31X_METERING),
-        "api_rate_limit_rpm": Entitlement(10, enforced=False, pairing_step=_STEP_31X_METERING),
-        "concurrent_instances": Entitlement(2, enforced=False, pairing_step=_STEP_36_COUNCIL),
-        "cross_domain_memory": Entitlement(None, enforced=True),  # N/A -- no second domain to cross
-        "audit_retention_days": Entitlement(30, enforced=False, pairing_step=_STEP_NEXT_CRON),
-        "audit_csv_export": Entitlement(False, enforced=True),
-        "custom_branding": Entitlement(False, enforced=False, pairing_step=_STEP_WIDGET_THEME),
-        "sso": Entitlement(False, enforced=True),
-        "priority_support": Entitlement("None (community / docs)", enforced=False, pairing_step=_STEP_FUTURE_OPS),
-        "dedicated_success_manager": Entitlement(False, enforced=True),
-    }
-
-
-def _team_set() -> EntitlementSet:
-    return {
-        "seats": Entitlement(10, enforced=True),
-        "luciel_instances_cap": Entitlement(10, enforced=True),
-        "domains_cap": Entitlement(0, enforced=True),  # Step 30a.6: Team is flat, no Domain layer
-        "leads_cap": Entitlement(100, enforced=True),
-        "voice_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "sms_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "email_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "widget_cap": Entitlement(3, enforced=True),
-        "conversations_per_day_per_seat": Entitlement(200, enforced=False, pairing_step=_STEP_31X_METERING),
-        "api_rate_limit_rpm": Entitlement(60, enforced=False, pairing_step=_STEP_31X_METERING),
-        "concurrent_instances": Entitlement(10, enforced=False, pairing_step=_STEP_36_COUNCIL),
-        "cross_domain_memory": Entitlement(None, enforced=True),  # N/A -- no Domain layer at Team
-        "audit_retention_days": Entitlement(90, enforced=False, pairing_step=_STEP_NEXT_CRON),
-        "audit_csv_export": Entitlement(False, enforced=True),
-        "custom_branding": Entitlement(False, enforced=False, pairing_step=_STEP_WIDGET_THEME),
-        "sso": Entitlement(False, enforced=True),
-        "priority_support": Entitlement("Email response within 24h", enforced=False, pairing_step=_STEP_FUTURE_OPS),
-        "dedicated_success_manager": Entitlement(False, enforced=True),
-    }
-
-
-def _company_set() -> EntitlementSet:
-    return {
-        "seats": Entitlement(50, enforced=True),
-        "luciel_instances_cap": Entitlement(50, enforced=True),
-        "domains_cap": Entitlement(50, enforced=True),
-        "leads_cap": Entitlement(None, enforced=True),  # Unlimited
-        "voice_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "sms_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "email_channel": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_34A_CHANNELS),
-        "widget_cap": Entitlement(None, enforced=True),  # Unlimited (derived from instance cap)
-        "conversations_per_day_per_seat": Entitlement(None, enforced=False, pairing_step=_STEP_31X_METERING),  # Unlimited
-        "api_rate_limit_rpm": Entitlement(300, enforced=False, pairing_step=_STEP_31X_METERING),
-        "concurrent_instances": Entitlement(50, enforced=False, pairing_step=_STEP_36_COUNCIL),
-        "cross_domain_memory": Entitlement(True, enforced=False, pairing_step=_STEP_37_HYBRID),
-        "audit_retention_days": Entitlement(365, enforced=False, pairing_step=_STEP_NEXT_CRON),
-        "audit_csv_export": Entitlement(True, enforced=False, pairing_step=_STEP_AUDIT_EXPORT),
-        "custom_branding": Entitlement(True, enforced=False, pairing_step=_STEP_WIDGET_THEME),
-        "sso": Entitlement("Roadmap", enforced=False, pairing_step=_STEP_BEYOND_33B),
-        "priority_support": Entitlement("Email + Slack within 4h", enforced=False, pairing_step=_STEP_FUTURE_OPS),
-        "dedicated_success_manager": Entitlement("Annual cadence only", enforced=False, pairing_step=_STEP_FIRST_COMPANY_ANNUAL),
-    }
-
-
-ENTITLEMENTS_BY_TIER: dict[str, EntitlementSet] = {
-    TIER_INDIVIDUAL: _individual_set(),
-    TIER_TEAM: _team_set(),
-    TIER_COMPANY: _company_set(),
-}
-
-
-# ---------------------------------------------------------------------
-# Lookup helpers
-# ---------------------------------------------------------------------
-
-
-def get_entitlement(*, tier: str, dimension_key: str) -> Entitlement:
-    """Look up a single entitlement cell.
-
-    Raises ``KeyError`` if either the tier or the dimension is unknown
-    -- callers should validate inputs against ``TIER_*`` constants and
-    ``DIMENSIONS`` before calling.
-    """
-    tier_set = ENTITLEMENTS_BY_TIER[tier]
-    return tier_set[dimension_key]
-
-
-def is_enforced(*, tier: str, dimension_key: str) -> bool:
-    """``True`` when the runtime call-site enforces this dimension today.
-
-    Used by call-sites that want to skip a check when the matrix has
-    declared a value but enforcement is deferred to a follow-up Step.
-    """
-    return get_entitlement(tier=tier, dimension_key=dimension_key).enforced
-
-
-# =====================================================================
-# v2 SURFACE (current truth, 3-tier Option A, Arc 5 Commit 3 2026-05-23)
-# =====================================================================
-# Side-by-side with the v1 surface above. New callsites read v2; legacy
-# callsites migrate v1\u2192v2 in the Revision B batch sweep. Numeric values
-# are the founder-locked Option A table from 2026-05-23, recorded as the
-# single source of truth at
-# ``arc5-out/A-arc5-arc4-plan-defects.md`` \u00a76.5.
-#
-# The v2 surface is consulted at Arc 5 Revision B onward; the
-# ``admin_tier_overrides`` table that backs the Enterprise override hook
-# lands at Arc 5 Revision A (additive migration). Until Revision A is on
-# prod, the override branch is a no-op (the override lookup returns
-# ``None`` and the static map value applies); the resolver tolerates
-# this by treating a missing override row as the default posture.
-#
-# See also:
-#   * ``arc4-out/A-tier-matrix-detail.md`` \u00a718 -- engineering-facing
-#     dataclass + per-tier map spec (the source-of-record for the field
-#     set below).
-#   * DRIFTS `D-free-tier-captcha-missing-2026-05-22` -- P1 abuse-control
-#     gate that must land before Free launches (Free API enablement at
-#     30rpm widens the abuse surface).
-#   * DRIFTS `D-pro-tier-rate-limit-abuse-surface-2026-05-23` -- P1
-#     multiplicative-composition gate (Pro 300rpm \u00d7 25 seats \u00d7 10
-#     instances \u00d7 10 keys); per-key + per-instance rate buckets land at
-#     Arc 8 post-Arc-5.
-
-
-# Tier constants (v2). String literals match the post-Arc-5 lowercase
-# vocab locked at ``arc5-out/A-arc5-arc4-plan-defects.md`` \u00a76.3 (Q3
-# resolution). DB CHECK constraint ``tier IN ('free','pro','enterprise')``
-# tightens at Revision C, not A.
+# Tier constants (v2). String literals match the DB CHECK that Revision C
+# tightens to ('free','pro','enterprise').
 TIER_FREE = "free"
 TIER_PRO = "pro"
 TIER_ENTERPRISE = "enterprise"

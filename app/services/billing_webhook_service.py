@@ -67,8 +67,8 @@ from app.models.subscription import (
     BILLING_CADENCE_MONTHLY,
     STATUS_CANCELED,
     Subscription,
-    TIER_INDIVIDUAL,
     TIER_INSTANCE_CAPS,
+    TIER_PRO,
 )
 from app.models.user import User
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
@@ -92,19 +92,20 @@ logger = logging.getLogger(__name__)
 # Tenant id minting
 # ---------------------------------------------------------------------
 
-# Tier-aware tenant-id prefix. The prefix tags self-serve tenants by
-# tier at a glance, so a grep / DB query against ``tenant_configs``
-# separates Individual-self-serve from Team-self-serve from Company-
-# self-serve without joining ``subscriptions``. Sales-assisted tenants
-# (created outside the webhook) carry no tier prefix.
+# Tier-aware admin-id prefix (V2 — Arc 5 B8 rename). The prefix tags
+# self-serve admins by tier at a glance so a grep / DB query against
+# ``admins`` separates Pro-self-serve from Enterprise-self-serve
+# without joining ``subscriptions``. Sales-assisted admins (created
+# outside the webhook) carry no tier prefix. Free admins lazy-mint via
+# the signup flow, not the webhook, and use the ``free`` prefix.
 _TIER_PREFIX = {
-    "individual": "ind",
-    "team":       "team",
-    "company":    "co",
+    "free":       "free",
+    "pro":        "pro",
+    "enterprise": "ent",
 }
 
 
-def _mint_tenant_id_from_email(email: str, tier: str = TIER_INDIVIDUAL) -> str:
+def _mint_tenant_id_from_email(email: str, tier: str = TIER_PRO) -> str:
     """Generate a URL-safe, collision-resistant tenant slug from an email.
 
     Shape: ``<tier-prefix>-<8 hex chars>``. The prefix is one of
@@ -263,7 +264,11 @@ class BillingWebhookService:
             or (data_object.get("customer_details") or {}).get("name")
             or (email or "Unknown")
         )
-        tier = metadata.get("luciel_tier") or TIER_INDIVIDUAL
+        # V2 default: any checkout that lands without explicit tier metadata
+        # is treated as Pro (the only flat-monthly self-serve V2 tier).
+        # Free has no Subscription row at all (Gap 1 lock); Enterprise
+        # is contract-signed, not webhook-minted.
+        tier = metadata.get("luciel_tier") or TIER_PRO
         if tier not in ALLOWED_TIERS:
             # Defensive — schema-validated upstream, but a hand-crafted
             # Stripe event could arrive with garbage. Fall back to the
@@ -272,9 +277,9 @@ class BillingWebhookService:
             logger.error(
                 "billing-webhook: unknown tier %r in metadata; "
                 "falling back to %s. event=%s sub=%s",
-                tier, TIER_INDIVIDUAL, event_id, stripe_subscription_id,
+                tier, TIER_PRO, event_id, stripe_subscription_id,
             )
-            tier = TIER_INDIVIDUAL
+            tier = TIER_PRO
         billing_cadence = metadata.get("luciel_billing_cadence") or BILLING_CADENCE_MONTHLY
         if billing_cadence not in ALLOWED_BILLING_CADENCES:
             logger.error(
@@ -286,7 +291,7 @@ class BillingWebhookService:
         # Per-tier instance cap is fully derivable from the tier; we do
         # NOT read it from metadata (the buyer cannot influence it).
         instance_count_cap = TIER_INSTANCE_CAPS.get(
-            tier, TIER_INSTANCE_CAPS[TIER_INDIVIDUAL]
+            tier, TIER_INSTANCE_CAPS[TIER_PRO]
         )
 
         if not email:

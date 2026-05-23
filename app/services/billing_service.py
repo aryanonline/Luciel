@@ -44,10 +44,10 @@ from app.models.subscription import (
     BILLING_CADENCE_MONTHLY,
     STATUS_CANCELED,
     Subscription,
-    TIER_COMPANY,
-    TIER_INDIVIDUAL,
+    TIER_ENTERPRISE,
+    TIER_FREE,
     TIER_INSTANCE_CAPS,
-    TIER_TEAM,
+    TIER_PRO,
 )
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
@@ -126,12 +126,21 @@ class PilotChargeNotFoundError(Exception):
 # ---------------------------------------------------------------------
 
 PRICE_ID_KEY: dict[tuple[str, str], str] = {
-    (TIER_INDIVIDUAL, BILLING_CADENCE_MONTHLY): "stripe_price_individual",
-    (TIER_INDIVIDUAL, BILLING_CADENCE_ANNUAL):  "stripe_price_individual_annual",
-    (TIER_TEAM,       BILLING_CADENCE_MONTHLY): "stripe_price_team_monthly",
-    (TIER_TEAM,       BILLING_CADENCE_ANNUAL):  "stripe_price_team_annual",
-    (TIER_COMPANY,    BILLING_CADENCE_MONTHLY): "stripe_price_company_monthly",
-    (TIER_COMPANY,    BILLING_CADENCE_ANNUAL):  "stripe_price_company_annual",
+    # V2 Stripe price-id ENV-var keys. The actual Stripe Product / Price
+    # resources will be RE-CREATED under V2 tier names at Arc 6 (Stripe
+    # SKU restructure work-unit, tracked at Arc 6 in CANONICAL_RECAP §12).
+    # Until Arc 6 lands, these keys point at Stripe Price resources that
+    # do not yet exist — attempts to launch checkout for Pro or Enterprise
+    # will fail at the Stripe API call with a price-not-found error,
+    # which is the correct behaviour (we don't want to charge against
+    # the legacy individual/team/company prices under V2 tier names).
+    # TODO-arc6: Once Arc 6 creates the V2 Stripe Prices, set these
+    # ENV vars in prod task-def + re-deploy.
+    # Free tier has NO Stripe price (lazy-create on upgrade per Gap 1).
+    (TIER_PRO,        BILLING_CADENCE_MONTHLY): "stripe_price_pro_monthly",
+    (TIER_PRO,        BILLING_CADENCE_ANNUAL):  "stripe_price_pro_annual",
+    (TIER_ENTERPRISE, BILLING_CADENCE_MONTHLY): "stripe_price_enterprise_monthly",
+    (TIER_ENTERPRISE, BILLING_CADENCE_ANNUAL):  "stripe_price_enterprise_annual",
 }
 
 
@@ -297,7 +306,10 @@ class BillingService:
         cap (3) defensively — the schema validator should have caught
         that already.
         """
-        return TIER_INSTANCE_CAPS.get(tier, TIER_INSTANCE_CAPS[TIER_INDIVIDUAL])
+        # V2 default: unknown tier → Free (most-restrictive). Enterprise
+        # returns None from TIER_INSTANCE_CAPS (unlimited); the caller
+        # is responsible for handling None as "no cap".
+        return TIER_INSTANCE_CAPS.get(tier, TIER_INSTANCE_CAPS[TIER_FREE])
 
     # -----------------------------------------------------------------
     # Checkout
@@ -308,7 +320,7 @@ class BillingService:
         *,
         email: str,
         display_name: str,
-        tier: str = TIER_INDIVIDUAL,
+        tier: str = TIER_PRO,
         billing_cadence: str = BILLING_CADENCE_MONTHLY,
     ) -> dict[str, str]:
         """Create a Stripe Checkout session and return the redirect URL + id.
