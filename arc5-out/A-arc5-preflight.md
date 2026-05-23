@@ -2,6 +2,8 @@
 
 **Status:** PRE-FLIGHT — planning only, no code edits, no prod touches authored here. Partner-review gate before any execution.
 **Authored:** 2026-05-22 ~22:00 EDT, immediately after Arc 8 WU-6 Phase C doctrine truthification (commits `8b91603` + `c84f1b0`).
+**Corrected:** 2026-05-22 ~22:45 EDT — AST-based ground-truth survey replaced original grep-based §1.2 + §4.1; surfaced 4 material defects in Arc 4's plan (see §1.2.5 + companion doc `A-arc5-arc4-plan-defects.md`). Sprint that would have executed Arc 4's plan tonight was HARD-STOPPED on discovery.
+**Survey tool:** `arc5-out/_arc5_schema_survey.py` (AST-based; parses every ORM class in `app/models/` and lists `__tablename__` + scope-FK columns — re-runnable, deterministic).
 **Anchors:**
 - `arc4-out/A-tenancy-collapse-arc-record.md` §1–§9 (the plan this pre-flight validates against current reality)
 - `arc4-out/A-tier-matrix-detail.md` v2 §17 (the WU-8 Phase A additions Revision A absorbs)
@@ -12,14 +14,16 @@
 
 ## §0 — TL;DR for the partner-review pass
 
-Arc 5 is a **three-Alembic-revision schema migration** that brings the production database into shape with the V2 canonical doctrine. The plan was already authored at Arc 4 in deep detail. **This pre-flight validates the plan against current schema reality** (post-Arc-8-WU-6 head `b2e5f17a3d9c`) and surfaces five gaps that need partner-review resolution before any execution.
+Arc 5 is a **three-Alembic-revision schema migration** that brings the production database into shape with the V2 canonical doctrine. The plan was already authored at Arc 4 in deep detail. **This pre-flight validates the plan against current schema reality** (post-Arc-8-WU-6 head `b2e5f17a3d9c`) and surfaces gaps that need partner-review resolution before any execution.
 
-**The plan in one sentence:** Revision A creates `admins` / `instances` / 3 new grant tables + the WU-8 Phase A additions (additive, zero-risk); Revision B backfills + flips application reads from `tenant_id` → `admin_id` across ~3,900 callsites in 7 gated batches; Revision C drops the legacy `tenants` / `domains` / `luciel_instances` tables + the ~30 `tenant_id` / `domain_id` / `agent_id` / `luciel_instance_id` FK columns + tightens the tier CHECK constraint.
+**The plan in one sentence:** Revision A creates `admins` / `instances` / 3 new grant tables + the WU-8 Phase A additions (additive, zero-risk); Revision B backfills + flips application reads from `tenant_id` → `admin_id` across ~3,900 callsites in 8 gated batches; Revision C drops the legacy `tenant_configs` / `domains` / `luciel_instances` / `agents` tables + 40 scope-FK columns on 17 surviving tables + tightens the tier CHECK constraint.
 
-**Five gaps surfaced by this pre-flight that Arc 4 did NOT anticipate:**
+**HARD-STOP NOTE (2026-05-22 22:35 EDT):** During a Path-3 sprint that began executing Arc 4's authored SQL into a Revision B authoring pass, the agent caught **four material defects** in Arc 4's backfill SQL (table name, two column names on `luciel_instances`, missing JOIN to `subscriptions` for `tier`). Sprint hard-stopped before any commit landed; AST-based survey replaced the grep-based survey that had also been wrong in §1.2 + §4.1. See §1.2.5 + companion doc `A-arc5-arc4-plan-defects.md`. NO PROD WAS TOUCHED. The plan below has been corrected; execution gates on partner review of the correction.
+
+**Gaps surfaced by this pre-flight that Arc 4 did NOT anticipate:**
 
 1. **Tier-constant code rename gap.** Arc 4's plan handles the data-layer tier rename (UPDATE statements in Revision B) but does NOT call out the **code-layer tier-constant rename** in `app/models/subscription.py` (`TIER_INDIVIDUAL`/`TIER_TEAM`/`TIER_COMPANY` → `TIER_FREE`/`TIER_PRO`/`TIER_ENTERPRISE`) and downstream imports (`app/policy/entitlements.py`, `app/services/billing_service.py`, etc.). This is doctrine-critical because the canonical tier shape is **Free / Pro / Enterprise** but the code still emits the legacy four-tier strings.
-2. **Batch sizing drift.** Arc 4's batch B1 was sized at "15 model files"; reality is 19 model files carry `tenant_id` and 15 carry `LucielInstance`/`Agent` references. The 7-batch gating contract is still sound, but per-batch file lists need re-authoring against current reality before B1 begins.
+2. **Batch sizing drift.** Arc 4's batch B1 was sized at "15 model files"; AST-verified reality is **18 ORM classes carry `tenant_id` across 17 distinct files** (`retention.py` contributes two classes: `RetentionPolicy` and `DeletionLog`). The batch gating contract is still sound, but per-batch file lists need re-authoring against current reality before B1 begins.
 3. **Arc 8 WU-6 tables NOT scope-bound — confirmed safe.** The two tables added in Arc 8 WU-6 (`email_send_event`, `email_suppression`) deliberately carry no `tenant_id` / `admin_id` FK because SES events are infrastructure-level. Arc 4's plan was authored before these existed; this pre-flight confirms they need NO action in Arc 5.
 4. **Revision C "drop ~30+ FK columns" needs exhaustive enumeration.** Arc 4 §3.3 left the column-drop list "to be authored at execution time after Revision B smoke is green." This pre-flight enumerates it now so Revision C is a fully-specified mechanical pass, not a discovery exercise.
 5. **Rollback-window discipline beyond Revision C.** Arc 4 §3.3 says "Restore from backup only" after Revision C lands. This pre-flight tightens that into a concrete backup-snapshot operating contract (pre-Revision-A `pg_dump`, pre-Revision-B `pg_dump`, pre-Revision-C `pg_dump` with retention and restore-test cadence).
@@ -41,24 +45,56 @@ Arc 5 is a **three-Alembic-revision schema migration** that brings the productio
   - `dfea1a04e037` — step30a_2_deactivated_at_and_retention
 - **down_revision for Arc 5 Revision A:** `b2e5f17a3d9c`
 
-### §1.2 — Model files that will be touched (24 total in `app/models/`)
+### §1.2 — ORM classes that carry scope FKs — AST GROUND TRUTH (18 classes / 17 surviving tables)
 
-**Models that carry `tenant_id` (19):**
-`admin_audit_log.py`, `agent.py`, `agent_config.py`, `api_key.py`, `conversation.py`, `domain_config.py`, `identity_claim.py`, `knowledge.py`, `luciel_instance.py`, `memory.py`, `retention.py`, `scope_assignment.py`, `session.py`, `subscription.py`, `tenant.py`, `trace.py`, `user.py`, `user_consent.py`, `user_invite.py`
+The table below is the output of `arc5-out/_arc5_schema_survey.py` against `app/models/` at HEAD `d9885f0`. Each row is **one ORM class with at least one of `tenant_id` / `domain_id` / `agent_id` / `luciel_instance_id` as a `mapped_column(...)` on that class** (verified via AST walk inside the class body, NOT a file-level grep — the prior grep-based survey was wrong; see §1.2.5).
 
-**Models that carry `domain_id` (13):**
-`admin_audit_log.py`, `agent.py`, `api_key.py`, `conversation.py`, `domain_config.py`, `identity_claim.py`, `knowledge.py`, `luciel_instance.py`, `scope_assignment.py`, `session.py`, `tenant.py`, `trace.py`, `user_invite.py`
+| File | Class | `__tablename__` | Scope-FK columns on this class |
+|---|---|---|---|
+| `admin_audit_log.py` | `AdminAuditLog` | `admin_audit_logs` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `agent.py` | `Agent` | `agents` | tenant_id, domain_id, agent_id |
+| `agent_config.py` | `AgentConfig` | `agent_configs` | tenant_id, agent_id |
+| `api_key.py` | `ApiKey` | `api_keys` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `conversation.py` | `Conversation` | `conversations` | tenant_id, domain_id |
+| `domain_config.py` | `DomainConfig` | `domain_configs` | tenant_id, domain_id |
+| `identity_claim.py` | `IdentityClaim` | `identity_claims` | tenant_id, domain_id |
+| `knowledge.py` | `KnowledgeEmbedding` | `knowledge_embeddings` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `memory.py` | `MemoryItem` | `memory_items` | tenant_id, agent_id, luciel_instance_id |
+| `retention.py` | `DeletionLog` | `deletion_logs` | tenant_id |
+| `retention.py` | `RetentionPolicy` | `retention_policies` | tenant_id |
+| `scope_assignment.py` | `ScopeAssignment` | `scope_assignments` | tenant_id, domain_id |
+| `session.py` | `SessionModel` | `sessions` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `subscription.py` | `Subscription` | `subscriptions` | tenant_id |
+| `tenant.py` | `TenantConfig` | `tenant_configs` | tenant_id |
+| `trace.py` | `Trace` | `traces` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `user_consent.py` | `UserConsent` | `user_consents` | tenant_id |
+| `user_invite.py` | `UserInvite` | `user_invites` | tenant_id, domain_id |
 
-**Models that carry `agent_id` (9):**
-`admin_audit_log.py`, `agent.py`, `agent_config.py`, `api_key.py`, `knowledge.py`, `luciel_instance.py`, `memory.py`, `session.py`, `trace.py`
+**Totals (AST-verified, do not re-estimate):**
+- 18 ORM classes carry at least one scope FK
+- 43 scope-FK column-defs on those classes
+- One table (`agents`) is dropped wholesale in Revision C, taking 3 of those column-defs with it implicitly
+- **40 column drops required on surviving tables in Revision C** (this is the exact §4.1 list)
 
-**Models that carry `luciel_instance_id` (8):**
-`admin_audit_log.py`, `agent.py`, `api_key.py`, `knowledge.py`, `luciel_instance.py`, `memory.py`, `session.py`, `trace.py`
+**Models that DO NOT carry any scope FK** (AST-verified, confirmed safe and untouched by Revision C's column-drop step):
+- `app/models/base.py` (base class only)
+- `app/models/user.py` — verified by AST: no scope FK on the `User` class. Carries `email`, `password_hash`, `display_name`, etc., but NO `tenant_id`. (The prior §1.2 falsely listed it as tenant_id-carrying.)
+- `app/models/luciel_instance.py` — `LucielInstance` carries `scope_owner_tenant_id` / `scope_owner_domain_id` / `scope_owner_agent_id` (NOT plain `tenant_id`/`domain_id`/`agent_id`). The whole table is dropped in Revision C so column-level analysis is moot, but the column-name correction matters for Arc 4's plan defects (see §1.2.5).
+- `app/models/email_send_event.py`, `app/models/email_suppression.py` (Arc 8 WU-6 — infrastructure-level, no scope binding)
+- `app/models/__init__.py`
 
-**Models that carry NEITHER (5) — untouched by Arc 5:**
-`base.py`, `conversation.py` (wait — has tenant_id; re-checking), `email_send_event.py`, `email_suppression.py`, `__init__.py` (init only)
+### §1.2.5 — Arc 4 plan defects discovered by this AST survey (HARD-STOP TRIGGER)
 
-Correction: confirmed-safe-untouched models = `base.py`, `email_send_event.py`, `email_suppression.py`, `__init__.py`. The other 20 model files will all see edits.
+The AST survey, run after a sprint attempt began, revealed four material defects in `arc4-out/A-tenancy-collapse-arc-record.md` §3.1's backfill SQL. Recorded here in summary; full record + correction stanza in **`arc5-out/A-arc5-arc4-plan-defects.md`**.
+
+| # | Arc 4 plan reference | Reality | Source of truth |
+|---|---|---|---|
+| D1 | `FROM tenants` (Arc 4 line 242) and `op.drop_table("tenants")` (line 291) | Table is `tenant_configs` (per `__tablename__`); there is no `tenants` table | `app/models/tenant.py:24` |
+| D2 | `li.tenant_id` (Arc 4 line 249) in the LucielInstance backfill | Column is `scope_owner_tenant_id` (with `scope_owner_domain_id` + `scope_owner_agent_id` siblings) | `app/models/luciel_instance.py:99` |
+| D3 | `li.name` (Arc 4 line 249) | Column is `display_name` (TenantConfig has the same shape — `display_name`, not `name`) | `app/models/luciel_instance.py:86`, `app/models/tenant.py:34` |
+| D4 | `SELECT id, name, tier, active, created_at FROM tenants` (Arc 4 lines 240–243) | **TenantConfig has no `tier` column.** `tier` lives on `subscriptions.tier`, joined via `subscriptions.tenant_id`. The backfill needs a JOIN. Additionally `name` is `display_name` (D3). | `app/models/tenant.py` full column listing; `app/models/subscription.py:244` |
+
+**Resolution required before Revision A is authored:** the Admin backfill SQL must be rewritten as a JOIN, and the operator must decide whether the new `admins.id` is the legacy `tenant_configs.id` (autoincrement int — opaque) or the legacy `tenant_configs.tenant_id` (string — semantic). This is a partner-review gate.
 
 ### §1.3 — Callsite counts (current reality)
 
@@ -201,7 +237,7 @@ Each batch is its own intermediate commit with a green-test gate before the next
 
 | Batch | Layer | Files (Arc 4 est / current reality) | Identifiers renamed | Validation gate |
 |---|---|---|---|---|
-| **B1** | Model layer | 15 / **19 (+27%)** | `Tenant`→`Admin`, `LucielInstance`→`Instance`, `TenantConfig`→`AdminConfig`. New `aliases.py` keeps `Tenant` as a deprecated alias so the rest of `app/` and `tests/` compile during the batch. | `pytest tests/models/ -x` green |
+| **B1** | Model layer | 15 / **17 files / 18 classes (AST-verified)** | `Tenant`→`Admin`, `LucielInstance`→`Instance`, `TenantConfig`→`AdminConfig`. New `aliases.py` keeps `Tenant` as a deprecated alias so the rest of `app/` and `tests/` compile during the batch. | `pytest tests/models/ -x` green |
 | **B2** | Service layer | 35 / **18 (–49%)** | `tenant_id`→`admin_id`, `luciel_instance_id`→`instance_id`, `agent_id`→`instance_id` in kwarg-only-position. Service-layer test fixtures updated in same batch. | `pytest tests/services/ -x` green |
 | **B3** | API layer (v1 routes) | 25 / **12 (–52%)** | Route paths: `/admin/luciel-instances`→`/admin/instances`, `/admin/domains/*` deleted. Query-param names: `tenant_id`→`admin_id`. Response field names: same rename. | `pytest tests/api/ -x` green + curl smoke against 4 representative endpoints |
 | **B4** | Middleware + auth | 8 (estimate stands, not re-counted yet) | `TenantConfig.active`→`AdminConfig.active`, `tenant_admin` role-string→`admin_user`, `department_lead`→`instance_lead`. JWT claim names rebind. | `pytest tests/middleware/ -x` green |
@@ -232,33 +268,37 @@ Each batch is its own intermediate commit with a green-test gate before the next
 **Risk:** **MEDIUM — irreversible**. After Revision C, schema rollback requires `pg_restore` from the pre-Revision-C backup.
 **Estimated duration on prod RDS:** ~5 minutes (column drops + table drops + constraint creation).
 
-### §4.1 — FK columns dropped — exhaustive enumeration (closing Arc 4's TODO)
+### §4.1 — FK columns dropped — AST-VERIFIED EXHAUSTIVE ENUMERATION (closes Arc 4's TODO)
 
-Per the §1.2 model survey, the columns to drop on Revision C are (table-by-table, column-by-column):
+Per the AST survey in §1.2, the column-drops on Revision C for **surviving tables only** are (table-by-table, column-by-column). `agents` is dropped wholesale in §4.2 and its 3 scope-FK columns go with it implicitly; `luciel_instances` is also dropped wholesale (and its FK columns are named `scope_owner_*`, not plain scope names — defect D2).
 
-| Table | Columns to drop |
+| Table (`__tablename__`) | Columns to drop |
 |---|---|
-| `admin_audit_log` | `tenant_id`, `domain_id`, `agent_id`, `luciel_instance_id` |
-| `agent` | `tenant_id`, `domain_id`, `agent_id` (self-ref), `luciel_instance_id` |
-| `agent_config` | `tenant_id`, `agent_id` |
-| `api_key` | `tenant_id`, `domain_id`, `agent_id`, `luciel_instance_id` |
-| `conversation` | `tenant_id`, `domain_id` |
-| `domain_config` | `tenant_id`, `domain_id` |
-| `identity_claim` | `tenant_id`, `domain_id` |
-| `knowledge` | `tenant_id`, `domain_id`, `agent_id`, `luciel_instance_id` |
-| `luciel_instance` | (entire table dropped — see §4.2) |
-| `memory` | `tenant_id`, `agent_id`, `luciel_instance_id` |
-| `retention` | `tenant_id` |
-| `scope_assignment` | `tenant_id`, `domain_id` |
-| `session` | `tenant_id`, `domain_id`, `agent_id`, `luciel_instance_id` |
-| `subscription` | `tenant_id` |
-| `tenant` | (entire table dropped — see §4.2) |
-| `trace` | `tenant_id`, `domain_id`, `agent_id`, `luciel_instance_id` |
-| `user` | `tenant_id` |
-| `user_consent` | `tenant_id` |
-| `user_invite` | `tenant_id`, `domain_id` |
+| `admin_audit_logs` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `agent_configs` | tenant_id, agent_id |
+| `api_keys` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `conversations` | tenant_id, domain_id |
+| `domain_configs` | tenant_id, domain_id |
+| `identity_claims` | tenant_id, domain_id |
+| `knowledge_embeddings` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `memory_items` | tenant_id, agent_id, luciel_instance_id |
+| `deletion_logs` | tenant_id |
+| `retention_policies` | tenant_id |
+| `scope_assignments` | tenant_id, domain_id |
+| `sessions` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `subscriptions` | tenant_id |
+| `tenant_configs` | tenant_id |
+| `traces` | tenant_id, domain_id, agent_id, luciel_instance_id |
+| `user_consents` | tenant_id |
+| `user_invites` | tenant_id, domain_id |
 
-**Total columns dropped: ~45 (counting per-column, not per-table).**
+**Totals (AST-verified):**
+- **17 surviving tables** carry scope-FK columns to drop
+- **40 column drops** on surviving tables
+- **3 implicit column drops** with the `agents` table itself (Agent has tenant_id, domain_id, self-ref agent_id)
+- The prior §4.1 listed ~45 columns; that count was wrong (it used pluralization-inconsistent table names like `agent`/`tenant`/`user`/`retention` instead of the real `__tablename__` strings, and inflated the count by listing the about-to-be-dropped `agents` and `luciel_instances` row-entries as column-drops)
+
+**Note on `user` table:** the AST survey confirms `User` does NOT carry `tenant_id` (verified by walking the class body). The prior §4.1 listed `user.tenant_id` as a column to drop — that drop would fail. Removed from this corrected list.
 
 ### §4.2 — Tables dropped (in dependency order)
 
@@ -365,7 +405,7 @@ This is the order in which prod-touching steps will execute. Each step is paired
 
 ### Gap 4 — Revision C column-drop list, now exhaustive
 
-**The issue:** Arc 4 §3.3 left the column-drop list "to be authored at execution time." This pre-flight closes that gap at §4.1 above (45 columns across 19 tables).
+**The issue:** Arc 4 §3.3 left the column-drop list "to be authored at execution time." This pre-flight closes that gap at §4.1 above: **40 column drops on 17 surviving tables, plus 3 implicit drops with the `agents` table itself** (AST-verified).
 
 **Recommendation:** **No partner-input needed** — this is a survey result, not a decision. Flagged here for completeness.
 
@@ -400,7 +440,7 @@ Per Arc 4 §1.2 and reaffirmed here:
 
 1. **`arc5-out/A-arc5-revb-batch-checklist.md`** — per-batch file enumeration + validation-gate-pass criteria for B1 through B8
 2. **`arc5-out/A-arc5-rollback-runbook.md`** — concrete PowerShell + AWS CLI snippets for each of the three rollback paths (post-Rev-A revert, post-Rev-B application-revert, post-Rev-C snapshot-restore)
-3. **`arc5-out/A-arc5-revision-c-column-drop-sql.md`** — the full SQL for §4.1 (~45 column drops + 4 table drops + 3 back-pointer drops + 1 constraint tighten) as a single copy-pasteable block for the Revision C migration file
+3. **`arc5-out/A-arc5-revision-c-column-drop-sql.md`** — the full SQL for §4.1 (40 column drops on surviving tables + 4 table drops + 3 back-pointer drops + 1 constraint tighten) as a single copy-pasteable block for the Revision C migration file
 4. **`docs/DRIFTS.md` edit (small, post-partner-review)** — progress the umbrella drift `D-tenancy-collapse-admin-instance-lead-2026-05-22` from OPEN to PRE-FLIGHT-AUTHORED with a pointer to this document
 5. **`docs/CANONICAL_RECAP.md` edit (small)** — update §12 to note Arc 5 pre-flight authored 2026-05-22 ~22:00 EDT, with the 5 gaps surfaced + the proposed resolutions
 
@@ -408,6 +448,28 @@ Per Arc 4 §1.2 and reaffirmed here:
 
 ## §9 — Sign-off
 
-**Pre-flight author:** Agent, 2026-05-22 ~22:00 EDT
-**Partner-review gate:** Aryan to read this doc end-to-end, confirm the 5 gap resolutions, and sign off before any of §5's prod-touching steps begin.
-**Earliest execution window:** After Aryan reviews + the pre-flight artifacts in §8 (1, 2, 3) are authored + a fresh test session is available (this is not a Friday-night job).
+**Pre-flight author:** Agent, 2026-05-22 ~22:00 EDT (corrected 2026-05-22 ~22:45 EDT after sprint hard-stop)
+**Partner-review gate:** Aryan to read this doc end-to-end + read `arc5-out/A-arc5-arc4-plan-defects.md`, resolve Q1–Q3 in that doc + the 5 gaps in §6 here, and sign off before any of §5's prod-touching steps begin.
+**Earliest execution window:** After Aryan reviews + the pre-flight artifacts in §8 (1, 2, 3) are authored + a fresh test session is available (this is not a Friday-night job). The 2026-05-22 sprint attempt is doctrine-evidence that destructive-migration sprints are NOT a Friday-night activity; this is now operational rule.
+
+---
+
+## §10 — Hard-stop record (2026-05-22 22:35 EDT)
+
+**Trigger:** Path-3 sprint directive ("execute Arc 5 + Arc 6 tonight, including tests"). Agent began authoring Revision C's column-drop SQL artifact from this pre-flight's §4.1 (then in its grep-based incorrect form). During authoring, agent caught that `op.drop_column("user", "tenant_id")` would fail because `User` has no `tenant_id` column. Deleted the broken artifact (never committed). Wrote AST-based survey at `_arc5_schema_survey.py`. Survey revealed defects D1–D4 in Arc 4's plan SQL.
+
+**Decision:** HARD-STOP the sprint. Three carry-forward operational rules ("we cannot get lazy"; "maintain scalability, reliability, maintainability, traceability, security at all times"; "I leave all development judgements onto you") collectively require that a destructive migration not be applied from a plan known to contain identifier-level defects. The Path-3 directive was accepted in good faith; the discovery during execution is the doctrine working as designed.
+
+**Artifacts preserved from the hard-stop:**
+- `arc5-out/_arc5_schema_survey.py` (the AST survey tool — permanent fixture)
+- `arc5-out/A-arc5-preflight.md` §1.2 + §1.2.5 + §4.1 (this doc — AST-corrected)
+- `arc5-out/A-arc5-arc4-plan-defects.md` (the defect record + corrected backfill SQL draft + Q1–Q3 partner gates)
+
+**Artifacts NOT created:**
+- No `alembic/versions/arc5_a_*.py` migration file
+- No `arc5-out/A-arc5-revision-c-column-drop-sql.md` (the broken draft was discarded; the AST-corrected drop list now lives at §4.1 above and will land in the Revision C migration file at execution time)
+- No prod connection, no `aws rds` calls, no SSM session, no DB snapshot, no `alembic upgrade`
+- No commits to `main` between `d9885f0` and the truthification commit that lands this hard-stop record
+
+**Discipline-evidence:** Agent self-flagged degradation when it caught the grep-based survey's `user.py: tenant_id` false-positive, then escalated to hard-stop when AST survey surfaced defects in the upstream plan. This is the fatigue-pause rule promised earlier in the segment operating as designed.
+
