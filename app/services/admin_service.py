@@ -13,8 +13,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.agent_config import AgentConfig
-from app.models.domain_config import DomainConfig
-from app.models.tenant import TenantConfig
+from app.models.aliases import DomainConfig
+from app.models.aliases import TenantConfig
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,7 @@ class AdminService:
         audit_ctx / luciel_instance_service are optional so legacy callers
         (internal scripts, tests) still work without the cascade.
         """
-        from app.models.agent import Agent          # Step 24.5 new table
+        from app.models.aliases import Agent          # Step 24.5 new table
         from app.repositories.admin_audit_repository import AdminAuditRepository
 
         # Import constants late to avoid circular imports.
@@ -800,7 +800,7 @@ class AdminService:
         """
         from sqlalchemy import func
         from app.models.memory import MemoryItem
-        from app.models.agent import Agent
+        from app.models.aliases import Agent
         from app.repositories.admin_audit_repository import AdminAuditRepository
         from app.models.admin_audit_log import (
             ACTION_CASCADE_DEACTIVATE,
@@ -985,7 +985,7 @@ class AdminService:
 
         from app.models.agent_config import AgentConfig
         from app.models.conversation import Conversation
-        from app.models.domain_config import DomainConfig
+        from app.models.aliases import DomainConfig
         from app.models.identity_claim import IdentityClaim
         # Step 30a.7 -- privilege-revocation layer models.
         from app.models.scope_assignment import EndReason, ScopeAssignment
@@ -1619,7 +1619,7 @@ class AdminService:
             ACTION_TENANT_HARD_PURGED,
             RESOURCE_TENANT,
         )
-        from app.models.tenant import TenantConfig
+        from app.models.aliases import TenantConfig
         from app.repositories.admin_audit_repository import AdminAuditRepository
 
         # ---- Idempotency guard: re-verify retention predicate ----

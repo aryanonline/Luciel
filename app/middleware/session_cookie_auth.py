@@ -82,7 +82,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.integrations.stripe import get_stripe_client
-from app.models.tenant import TenantConfig
+from app.models.aliases import TenantConfig
 from app.models.user import User
 from app.services.billing_service import BillingService
 from app.services.magic_link_service import MagicLinkError, validate_session_token

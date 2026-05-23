@@ -109,7 +109,7 @@ from app.services.scope_prompt_preflight import (
 )
 from app.schemas.memory import MemoryRead
 from app.policy.scope import ScopePolicy
-from app.models.luciel_instance import LucielInstance
+from app.models.aliases import LucielInstance
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -470,7 +470,7 @@ def list_domains_self_serve(
     """
     from sqlalchemy import func
     from app.models.user_invite import InviteStatus, UserInvite
-    from app.models.agent import Agent
+    from app.models.aliases import Agent
 
     _user, tenant_id, _domain_id = _resolve_invite_actor(
         request=request, db=db

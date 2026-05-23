@@ -73,7 +73,7 @@ from app.models.admin_audit_log import (
     ACTION_USER_INVITED,
     RESOURCE_USER_INVITE,
 )
-from app.models.agent import Agent
+from app.models.aliases import Agent
 from app.models.scope_assignment import ScopeAssignment
 from app.models.user import User
 from app.models.user_invite import InviteStatus, UserInvite

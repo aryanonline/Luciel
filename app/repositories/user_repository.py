@@ -44,7 +44,7 @@ from app.models.admin_audit_log import (
     ACTION_UPDATE,
     RESOURCE_USER,
 )
-from app.models.agent import Agent
+from app.models.aliases import Agent
 from app.models.user import User
 from app.repositories.admin_audit_repository import (
     SYSTEM_ACTOR_TENANT,

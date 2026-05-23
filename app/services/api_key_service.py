@@ -39,7 +39,7 @@ from app.models.admin_audit_log import (
     ACTION_KEY_ROTATED_ON_ROLE_CHANGE,
     RESOURCE_API_KEY,
 )
-from app.models.luciel_instance import LucielInstance
+from app.models.aliases import LucielInstance
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
@@ -495,7 +495,7 @@ class ApiKeyService:
         # Look up the Agent so we can resolve both scope dimensions:
         # the Agent's natural agent_id slug (for direct ApiKey matches)
         # and its primary key (for LucielInstance ownership traversal).
-        from app.models.agent import Agent
+        from app.models.aliases import Agent
 
         agent = self.db.get(Agent, agent_id_pk)
         if agent is None:

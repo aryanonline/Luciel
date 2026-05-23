@@ -82,9 +82,9 @@ from app.models.admin_audit_log import (
     ACTION_WORKER_IDENTITY_SPOOF_REJECT,
     ACTION_WORKER_PERMANENT_FAILURE,
 )
-from app.models.agent import Agent
+from app.models.aliases import Agent
 from app.models.api_key import ApiKey
-from app.models.luciel_instance import LucielInstance
+from app.models.aliases import LucielInstance
 from app.models.message import MessageModel
 from app.models.session import SessionModel
 from app.models.user import User

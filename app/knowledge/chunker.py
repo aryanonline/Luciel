@@ -23,9 +23,9 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from app.models.domain_config import DomainConfig
-from app.models.luciel_instance import LucielInstance
-from app.models.tenant import TenantConfig
+from app.models.aliases import DomainConfig
+from app.models.aliases import LucielInstance
+from app.models.aliases import TenantConfig
 
 # Canonical strategy slugs. Stored verbatim in tenant_configs.chunk_strategy
 # (NOT NULL) and the nullable override columns on domain_configs /

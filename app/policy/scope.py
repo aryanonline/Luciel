@@ -185,7 +185,7 @@ class ScopePolicy:
         """
         # Late-bound import to avoid circularity — scope.py does not
         # depend on SQLAlchemy models at module load.
-        from app.models.luciel_instance import (
+        from app.models.aliases import (
             SCOPE_LEVEL_AGENT,
             SCOPE_LEVEL_DOMAIN,
             SCOPE_LEVEL_TENANT,

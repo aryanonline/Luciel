@@ -50,7 +50,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base
 
 if TYPE_CHECKING:
-    from app.models.agent import Agent
     from app.models.identity_claim import IdentityClaim
     from app.models.memory import MemoryItem
     from app.models.scope_assignment import ScopeAssignment
@@ -139,13 +138,8 @@ class User(Base):
     # ------ relationships ------
     # Lazy="select" (default) -- explicit eager loading happens at the
     # repository layer where it's needed. Avoid N+1 silently.
-    agents: Mapped[list["Agent"]] = relationship(
-        "Agent",
-        back_populates="user",
-        foreign_keys="Agent.user_id",
-        lazy="select",
-    )
-
+    # ``User.agents`` relationship removed at Arc 5 B1 — the Agent layer
+    # was collapsed into ``Instance`` per the aggressive-cleanup amendment.
     scope_assignments: Mapped[list["ScopeAssignment"]] = relationship(
         "ScopeAssignment",
         back_populates="user",

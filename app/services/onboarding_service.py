@@ -24,9 +24,9 @@ from app.models.admin_audit_log import (
     RESOURCE_RETENTION_POLICY,
     RESOURCE_TENANT,
 )
-from app.models.domain_config import DomainConfig
+from app.models.aliases import DomainConfig
 from app.models.retention import RetentionPolicy
-from app.models.tenant import TenantConfig
+from app.models.aliases import TenantConfig
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService

@@ -45,10 +45,10 @@ from app.knowledge.parsers import (
     detect_source_type,
     get_parser,
 )
-from app.models.domain_config import DomainConfig
+from app.models.aliases import DomainConfig
 from app.models.knowledge import KnowledgeEmbedding
-from app.models.luciel_instance import LucielInstance
-from app.models.tenant import TenantConfig
+from app.models.aliases import LucielInstance
+from app.models.aliases import TenantConfig
 from app.repositories.knowledge_repository import KnowledgeRepository
 from app.schemas.knowledge import KNOWLEDGE_TYPES
 

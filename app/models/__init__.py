@@ -1,16 +1,12 @@
 from app.models.agent_config import AgentConfig
 from app.models.api_key import ApiKey
-from app.models.domain_config import DomainConfig
 from app.models.knowledge import KnowledgeEmbedding
 from app.models.memory import MemoryItem
 from app.models.message import MessageModel
 from app.models.session import SessionModel
-from app.models.tenant import TenantConfig
 from app.models.trace import Trace
 from app.models.retention import RetentionPolicy, DeletionLog
 from app.models.user_consent import UserConsent
-from app.models.agent import Agent  # noqa: F401  (Step 24.5)
-from app.models.luciel_instance import LucielInstance  # noqa: F401  (Step 24.5)
 from app.models.admin_audit_log import AdminAuditLog  # noqa: F401  (Step 24.5 — File 6.5a)
 from app.models.user import User  # noqa: F401  (Step 24.5b)
 from app.models.scope_assignment import ScopeAssignment, EndReason  # noqa: F401  (Step 24.5b)
@@ -32,6 +28,26 @@ from app.models.email_suppression import (  # noqa: F401  (Arc 8 WU-6)
     SUPPRESSION_REASON_COMPLAINT,
     SUPPRESSION_REASON_MANUAL_BLOCK,
 )
+# Arc 5 B1 — V2 Admin → Instance shape (aggressive-cleanup amendment).
+from app.models.admin import (  # noqa: F401
+    Admin,
+    AdminConfig,
+    ALLOWED_TIERS_V2,
+    ALLOWED_TIER_SOURCES,
+    TIER_FREE,
+    TIER_PRO,
+    TIER_ENTERPRISE,
+)
+from app.models.instance import Instance  # noqa: F401
+# Transitional shim — re-exports legacy names that resolve to Admin / Instance.
+# Deleted at B6 once all call-sites finish their rename.
+from app.models.aliases import (  # noqa: F401
+    Tenant,
+    TenantConfig,
+    LucielInstance,
+    DomainConfig,
+    Agent,
+)
 
 __all__ = [
     "AgentConfig",
@@ -43,11 +59,7 @@ __all__ = [
     "MemoryItem",
     "RetentionPolicy",
     "Trace",
-    "TenantConfig",
-    "DomainConfig",
     "KnowledgeEmbedding",
-    "Agent",
-    "LucielInstance",
     "AdminAuditLog",
     "User",
     "ScopeAssignment",
@@ -69,4 +81,19 @@ __all__ = [
     "SUPPRESSION_REASON_HARD_BOUNCE",
     "SUPPRESSION_REASON_COMPLAINT",
     "SUPPRESSION_REASON_MANUAL_BLOCK",
+    # Arc 5 B1 -- V2 Admin / Instance.
+    "Admin",
+    "AdminConfig",
+    "Instance",
+    "ALLOWED_TIERS_V2",
+    "ALLOWED_TIER_SOURCES",
+    "TIER_FREE",
+    "TIER_PRO",
+    "TIER_ENTERPRISE",
+    # Transitional aliases (deleted at B6).
+    "Tenant",
+    "TenantConfig",
+    "LucielInstance",
+    "DomainConfig",
+    "Agent",
 ]

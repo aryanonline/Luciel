@@ -29,7 +29,7 @@ from app.models.admin_audit_log import (
     ACTION_UPDATE,
     RESOURCE_LUCIEL_INSTANCE,
 )
-from app.models.luciel_instance import (
+from app.models.aliases import (
     SCOPE_LEVEL_AGENT,
     SCOPE_LEVEL_DOMAIN,
     SCOPE_LEVEL_TENANT,

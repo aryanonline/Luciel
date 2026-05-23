@@ -76,9 +76,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import Integer, and_, func, select
 from sqlalchemy.orm import Session
 
-from app.models.agent import Agent
-from app.models.domain_config import DomainConfig
-from app.models.luciel_instance import LucielInstance
+from app.models.aliases import Agent
+from app.models.aliases import DomainConfig
+from app.models.aliases import LucielInstance
 from app.models.trace import Trace
 
 logger = logging.getLogger(__name__)

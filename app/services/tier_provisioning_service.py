@@ -44,8 +44,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import ACTION_CREATE, RESOURCE_AGENT
-from app.models.agent import Agent
-from app.models.luciel_instance import (
+from app.models.aliases import Agent
+from app.models.aliases import (
     SCOPE_LEVEL_AGENT,
     SCOPE_LEVEL_DOMAIN,
     SCOPE_LEVEL_TENANT,
@@ -55,7 +55,7 @@ from app.models.subscription import (
     TIER_INDIVIDUAL,
     TIER_TEAM,
 )
-from app.models.tenant import TenantConfig
+from app.models.aliases import TenantConfig
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.repositories.scope_assignment_repository import ScopeAssignmentRepository
 from app.services.admin_service import AdminService

@@ -60,10 +60,14 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     NULL for legacy pre-Step-25b rows and for domain/tenant-level shared
     knowledge attached only via the scope triple."""
 
-    luciel_instance: Mapped["LucielInstance | None"] = relationship(  # type: ignore[name-defined]
-        "LucielInstance",
+    # Arc 5 B1 — LucielInstance was collapsed into Instance; the FK column
+    # is preserved until Revision C drops it. Relationship resolves to the
+    # V2 ``instances`` mapping via the back-pointer ``legacy_luciel_instance_id``.
+    luciel_instance: Mapped["Instance | None"] = relationship(  # type: ignore[name-defined]  # noqa: F821
+        "Instance",
         lazy="select",
-        foreign_keys=[luciel_instance_id],
+        primaryjoin="KnowledgeEmbedding.luciel_instance_id == foreign(Instance.legacy_luciel_instance_id)",
+        viewonly=True,
     )
 
     # ---- Content ----

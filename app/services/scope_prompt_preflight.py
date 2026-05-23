@@ -44,7 +44,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.models.domain_config import DomainConfig
+from app.models.aliases import DomainConfig
 
 
 class ScopePromptMissingError(Exception):

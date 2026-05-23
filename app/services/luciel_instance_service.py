@@ -35,7 +35,7 @@ import logging
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.luciel_instance import (
+from app.models.aliases import (
     SCOPE_LEVEL_AGENT,
     SCOPE_LEVEL_DOMAIN,
     SCOPE_LEVEL_TENANT,

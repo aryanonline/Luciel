@@ -12,8 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.agent_config import AgentConfig
-from app.models.domain_config import DomainConfig
-from app.models.tenant import TenantConfig
+from app.models.aliases import DomainConfig
+from app.models.aliases import TenantConfig
 
 
 class ConfigRepository:
