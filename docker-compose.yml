@@ -1,4 +1,14 @@
-version: "3.8"
+# Top-level `version:` removed 2026-05-23 -- obsolete in Compose v2, emits warning.
+# Doctrine drift D-docker-compose-pgvector-image-drift-2026-05-23 closed at this commit:
+# db.image was `postgres:16` (plain), which lacks the `vector` extension binary required
+# by alembic migration b0e003ffa07f (`CREATE EXTENSION IF NOT EXISTS vector` + 1536-dim
+# embedding column on knowledge_embeddings) and the 8 other migrations that work around
+# pgvector's vector type. Real Luciel dev/prod schema requires pgvector -- compose now
+# matches that reality by using pgvector/pgvector:pg16 (postgres:16 + pgvector preinstalled).
+# Local dev port mapped to host:5433 to avoid colliding with the long-running standalone
+# `luciel-postgres` dev container (5 weeks old, holds fixture data, deferred refresh-or-
+# retire decision under D-dev-db-stale-5-weeks-behind-prod-2026-05-23).
+# alembic.ini and any local DATABASE_URL must use port 5433 for compose-managed DB.
 
 services:
   app:
@@ -11,13 +21,13 @@ services:
       - db
 
   db:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: luciel
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 

@@ -5,61 +5,90 @@
 **Agent role:** Guide verification, interpret output, validate each checkpoint before next step
 
 **Pre-conditions:**
-- Local branch `main` at `42958b5` (matches `origin/main`)
-- Docker Desktop running on partner's Windows box
-- PowerShell terminal at repo root `C:\...\luciel\`
-- Alembic head before this test: `arc5_a_admin_instance_additive`
+- Local branch `main` at HEAD with Revision A migration + this protocol present
+- Docker Desktop running on partner's Windows box, Linux engine, fully started
+- PowerShell terminal at repo root `C:\Users\aryan\Projects\Business\Luciel\`
+- Alembic head this protocol drives to: `arc5_a_admin_instance_additive`
 - Prior revision: `b2e5f17a3d9c` (Arc 8 WU-6 email_suppression — already on prod)
+- Standalone `luciel-postgres` container (5-week-old dev DB at `3dbbc70d0105`, 585+424+552 fixture rows) is allowed to remain running on host port **5432** — we do NOT touch it (D-dev-db-stale-5-weeks-behind-prod-2026-05-23 deferred)
+- docker-compose.yml updated 2026-05-23 to use `pgvector/pgvector:pg16` (the `vector` extension is required by 9+ migrations between empty DB and `b2e5f17a3d9c`) and to bind compose db to host port **5433** (avoids the standalone container's 5432)
 
-**NO PROD TOUCHED. Localhost docker-compose `db` service only.**
+**Connection URL for ALL alembic + psql commands in this protocol:**
+```
+postgresql+psycopg://postgres:postgres@localhost:5433/luciel
+```
+The `5433` is critical — `5432` would hit your standalone dev container, NOT the fresh smoke-test DB.
+
+**NO PROD TOUCHED. NO STANDALONE `luciel-postgres` TOUCHED. Smoke test runs against the compose-managed `db` service only, on host port 5433.**
 
 ---
 
 ## Goal
 
-Verify Revision A `upgrade → downgrade -1 → upgrade` round-trips cleanly against a **fresh** postgres:16 container DB, with no leftover state between cycles. Proves:
+Verify Revision A `upgrade → downgrade -1 → upgrade` round-trips cleanly against a **fresh** pgvector/pgvector:pg16 container DB, with no leftover state between cycles. Proves:
 
 1. `upgrade()` emits valid postgres DDL that executes without error
-2. All 6 tables + 1 column-add + 21 indexes + 8 CHECK constraints materialize correctly
+2. All 6 new tables + 1 column-add + 21 indexes + 8+ CHECK constraints materialize correctly
 3. `downgrade()` reverses cleanly in strict FK-reverse order with no dangling objects
 4. Re-applying `upgrade()` on a downgraded DB produces identical schema (idempotency of the round-trip)
+5. The full 9-revision replay (empty → `b2e5f17a3d9c`) executes cleanly, including pgvector extension creation at migration `b0e003ffa07f`
 
 If any step fails, **STOP and report the exact error to me before proceeding.** Do not improvise fixes.
 
 ---
 
-## Step 0 — Fresh container baseline
+## Step 0 — Fresh compose-managed container baseline (port 5433)
+
+The standalone `luciel-postgres` container is allowed to keep running on 5432 — do not stop it.
 
 ```powershell
-cd C:\Users\Aryan\luciel  # adjust path
+cd C:\Users\aryan\Projects\Business\Luciel
 docker compose down -v
 docker compose up -d db
 ```
 
-`down -v` is critical — the `-v` strips the postgres volume so we start from a truly empty `luciel` database. Without it, prior migration state would survive and contaminate the test.
+`down -v` is critical — the `-v` strips the `luciel_pgdata` volume so we start from a truly empty `luciel` database in the compose-managed container. The standalone container's volume is unaffected (different project name).
 
-Wait ~5s for postgres to be ready, then verify:
+Wait ~10s for the fresh pgvector image to initialize postgres (first pull may take 30-60s on initial run), then verify the compose db came up:
+
+```powershell
+docker compose ps
+```
+
+**Expected:** `db` service status `running` (or `healthy`), PORTS column shows `0.0.0.0:5433->5432/tcp`.
+
+Then confirm it's empty AND that pgvector is available in the image:
 
 ```powershell
 docker compose exec db psql -U postgres -d luciel -c "\dt"
+docker compose exec db psql -U postgres -d luciel -c "SELECT * FROM pg_available_extensions WHERE name='vector';"
 ```
 
-**Expected:** `Did not find any relations.` (empty DB, no tables yet)
+**Expected outputs:**
+- First: `Did not find any relations.` (empty DB)
+- Second: One row showing `name=vector`, `default_version` populated, `installed_version` NULL (available but not yet created — that happens during migration `b0e003ffa07f`)
 
-→ Report this back. If you see existing tables, the volume didn't clear — re-run `down -v`.
+→ Paste both outputs. If you see existing tables, the volume didn't clear — re-run `docker compose down -v` and re-create. If pg_available_extensions returns 0 rows for `vector`, the wrong image is being used — STOP.
 
 ---
 
-## Step 1 — Apply Arc 8 WU-6 baseline (run all migrations up to prior head)
+## Step 1 — Apply all migrations up to Arc 8 WU-6 baseline (matches prod schema)
 
 ```powershell
-$env:DATABASE_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/luciel"
+$env:DATABASE_URL = "postgresql+psycopg://postgres:postgres@localhost:5433/luciel"
 alembic upgrade b2e5f17a3d9c
 ```
 
+This replays the full migration chain from empty → `b2e5f17a3d9c`, including:
+- Initial schema migrations
+- `b0e003ffa07f` which runs `CREATE EXTENSION IF NOT EXISTS vector` + creates `knowledge_embeddings.embedding vector(1536)` + ivfflat index — REQUIRES pgvector image
+- The 8 Step-30a + Arc 8 WU-6 migrations that ship the prod schema
+
+This run is expected to take 30-90 seconds for the full replay. Watch for any migration that errors — that's a real finding (not part of Arc 5 but blocks the smoke test).
+
 **Expected output tail:**
 ```
-INFO  [alembic.runtime.migration] Running upgrade ... -> b2e5f17a3d9c, arc8 wu6 email suppression
+INFO  [alembic.runtime.migration] Running upgrade a91c4d2e7f08 -> b2e5f17a3d9c, arc8 wu6 email suppression
 ```
 
 Verify head:
@@ -68,6 +97,13 @@ alembic current
 ```
 
 **Expected:** `b2e5f17a3d9c (head)` — this is the pre-Arc-5 prod state.
+
+Confirm pgvector extension actually got installed during the replay:
+```powershell
+docker compose exec db psql -U postgres -d luciel -c "SELECT extname, extversion FROM pg_extension WHERE extname='vector';"
+```
+
+**Expected:** one row, `vector` + some version (e.g. `0.8.2`).
 
 Verify table count matches prod expectations:
 ```powershell
