@@ -287,19 +287,16 @@ class UserForensic(BaseModel):
 
 
 class LucielInstanceForensic(BaseModel):
-    """Strict-projection of `luciel_instances` for forensic read.
+    """Strict-projection of ``instances`` for forensic read (V2 shape).
 
-    P11 F10 only needs `id` + `active`; the rest are included for
-    cross-pillar reuse (P12/P13 may want `scope_level` etc. in
-    later sub-commits) without forcing another round-trip.
+    Arc 5 Path A — collapsed to the V2 (Admin → Instance) hierarchy.
+    The legacy scope_level / scope_owner_domain_id / scope_owner_agent_id
+    fields no longer exist; the V2 Instance carries ``admin_id`` only.
     """
 
     id: int
-    instance_id: str
-    tenant_id: str = Field(alias="scope_owner_tenant_id")
-    scope_level: str
-    scope_owner_domain_id: str | None
-    scope_owner_agent_id: str | None
+    instance_id: str = Field(alias="instance_slug")
+    tenant_id: str = Field(alias="admin_id")
     active: bool
     created_at: datetime
 
@@ -585,11 +582,8 @@ def get_luciel_instance_forensic_step29c(
         )
     return LucielInstanceForensic(
         id=row.id,
-        instance_id=row.instance_id,
-        scope_owner_tenant_id=row.scope_owner_tenant_id,
-        scope_level=row.scope_level,
-        scope_owner_domain_id=row.scope_owner_domain_id,
-        scope_owner_agent_id=row.scope_owner_agent_id,
+        instance_slug=row.instance_slug,
+        admin_id=row.admin_id,
         active=row.active,
         created_at=row.created_at,
     )
@@ -779,13 +773,14 @@ def toggle_luciel_instance_active_step29c(
     # validation, DB constraint), the mutation below never executes.
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=inst.scope_owner_tenant_id,
+        tenant_id=inst.admin_id,
         action=ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE,
         resource_type=RESOURCE_LUCIEL_INSTANCE,
         resource_pk=inst.id,
-        resource_natural_id=inst.instance_id,
-        domain_id=inst.scope_owner_domain_id,
-        agent_id=inst.scope_owner_agent_id,
+        resource_natural_id=inst.instance_slug,
+        # Arc 5 Path A — domain_id / agent_id no longer exist in V2.
+        domain_id=None,
+        agent_id=None,
         luciel_instance_id=inst.id,
         before={"active": previous_active},
         after={"active": requested_active},
@@ -820,7 +815,7 @@ def toggle_luciel_instance_active_step29c(
     # this function. If any leg fails the whole batch rolls back.
     if requested_active is False and previous_active is True:
         AdminService(db).bulk_soft_deactivate_memory_items_for_luciel_instance(
-            tenant_id=inst.scope_owner_tenant_id,
+            tenant_id=inst.admin_id,
             luciel_instance_id=inst.id,
             audit_ctx=audit_ctx,
             updated_by=getattr(request.state, "actor_label", None),
@@ -837,11 +832,8 @@ def toggle_luciel_instance_active_step29c(
 
     return LucielInstanceForensic(
         id=inst.id,
-        instance_id=inst.instance_id,
-        scope_owner_tenant_id=inst.scope_owner_tenant_id,
-        scope_level=inst.scope_level,
-        scope_owner_domain_id=inst.scope_owner_domain_id,
-        scope_owner_agent_id=inst.scope_owner_agent_id,
+        instance_slug=inst.instance_slug,
+        admin_id=inst.admin_id,
         active=inst.active,
         created_at=inst.created_at,
     )

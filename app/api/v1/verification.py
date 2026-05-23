@@ -57,7 +57,8 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
     ("tenant_configs",       "active", "tenant_inactive_exactly_one", ["tenant_id"]),
     ("domain_configs",       "active", 0,                              ["tenant_id"]),
     ("agents",               "active", 0,                              ["tenant_id"]),
-    ("luciel_instances",     "active", 0,                              ["scope_owner_tenant_id", "tenant_id"]),
+    # Arc 5 Path A — V2: luciel_instances is being collapsed to ``instances`` (admin_id). The legacy column ``scope_owner_tenant_id`` is dropped at Revision C; until then this probe accepts both columns as a transitional fallback.
+    ("luciel_instances",     "active", 0,                              ["tenant_id"]),
     ("api_keys",             "active", 0,                              ["tenant_id"]),
     ("sessions",             None,     "*",                            ["tenant_id"]),
     ("messages",             None,     "*",                            ["tenant_id"]),

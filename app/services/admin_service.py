@@ -1752,12 +1752,11 @@ class AdminService:
     #   * the policy layer (ScopePolicy) checks API-key authority, not
     #     billing entitlement, and we want those concerns separate.
     #
-    # Outcomes:
-    #   * tenant has no active subscription → 402 (treated as Individual
-    #     fall-through is too generous; we fail closed here so sales-
-    #     assisted tenants without a subscription row cannot use the
-    #     self-serve route at all -- they should call admin paths instead).
-    #   * requested scope_level not in tier's permitted set → 402
+    # Outcomes (Arc 5 Path A — V2 collapsed):
+    #   * tenant has no active subscription → 402 (we fail closed so
+    #     sales-assisted tenants without a subscription row cannot use
+    #     the self-serve route at all — they should call admin paths
+    #     instead).
     #   * tenant already at instance_count_cap → 402
     #   * otherwise → silent.
 
@@ -1765,20 +1764,18 @@ class AdminService:
         self,
         *,
         tenant_id: str,
-        requested_scope_level: str,
+        requested_level: str | None = None,
+        **_legacy_kwargs,
     ) -> None:
-        """Step 30a.1: assert (tenant.active_subscription, requested_scope_level)
-        is a permitted pair AND that the tenant has not exceeded its cap.
+        """V2 cap-enforcement guard. Asserts the Admin has an active
+        subscription AND has not exceeded its instance_count_cap.
 
         Raises ``TierScopeViolationError`` (mapped to 402 by the route
         layer). On success returns silently.
         """
         # Local imports keep AdminService importable from contexts that
         # don't have the LucielInstance / Subscription stack loaded.
-        from app.models.subscription import (
-            Subscription,
-            TIER_PERMITTED_SCOPES,
-        )
+        from app.models.subscription import Subscription
         from app.repositories.instance_repository import (
             InstanceRepository,
         )
@@ -1804,16 +1801,11 @@ class AdminService:
                 reason=TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION,
             )
 
-        permitted = TIER_PERMITTED_SCOPES.get(sub.tier, ())
-        if requested_scope_level not in permitted:
-            raise TierScopeViolationError(
-                f"Subscription tier {sub.tier!r} does not permit scope_level="
-                f"{requested_scope_level!r}. Permitted scope levels for this "
-                f"tier: {sorted(permitted)}. Upgrade to a higher tier to "
-                f"create {requested_scope_level}-scope LucielInstances.",
-                reason=TierScopeViolationError.REASON_SCOPE_NOT_PERMITTED,
-            )
-
+        # Arc 5 Path A — V2 has no scope hierarchy below the Admin; the
+        # legacy "scope_level permitted by tier" check is dropped here.
+        # Only the cap-enforcement guard remains, sourced from the V2
+        # entitlement map's ``instance_count_cap`` axis (which the
+        # Subscription row mirrors on the per-Admin column).
         cap = int(sub.instance_count_cap or 0)
         if cap > 0:
             used = InstanceRepository(self.db).count_active_for_admin(tenant_id)

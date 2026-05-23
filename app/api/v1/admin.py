@@ -460,7 +460,7 @@ def create_api_key(
                 ),
             )
         ScopePolicy.enforce_luciel_instance_scope(request, instance)
-        if instance.scope_owner_tenant_id != payload.tenant_id:
+        if instance.admin_id != payload.tenant_id:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -646,7 +646,7 @@ def create_embed_key(
                     "not found."
                 ),
             )
-        if instance.scope_owner_tenant_id != payload.tenant_id:
+        if instance.admin_id != payload.tenant_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -655,22 +655,21 @@ def create_embed_key(
                     "tenant scope."
                 ),
             )
-        # When the embed key is domain-scoped, the instance must either
-        # match that domain or be tenant-wide (domain=NULL). When the
-        # embed key is tenant-wide, ANY instance under the tenant is
-        # acceptable; chat-time resolution will use the instance's own
-        # domain context.
+        # Arc 5 Path A — V2 collapsed: the legacy domain-scoped embed-key
+        # cross-domain guard is gone (V2 has no Domain layer). The
+        # branch below is intentionally dead — the if-condition can
+        # never fire because the second predicate is ``None is not None``.
+        # Kept as a placeholder so the test harness diff stays small;
+        # the whole block is deleted in a follow-on cleanup.
         if (
             payload.domain_id is not None
-            and instance.scope_owner_domain_id is not None
-            and instance.scope_owner_domain_id != payload.domain_id
+            and None is not None  # noqa: F632 — Path A intentional dead branch
+            and None != payload.domain_id  # noqa: F632
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
-                    "Luciel instance belongs to a different domain. "
-                    "A domain-scoped embed key may only pin instances "
-                    "in its own domain (or tenant-wide instances)."
+                    "Luciel instance belongs to a different domain."
                 ),
             )
         if not instance.active:
@@ -900,30 +899,15 @@ def create_luciel_instance(
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> LucielInstanceRead:
-    # Step 30a.5: the teammate_email invite-mode overload that lived
-    # here from Step 30a.1 was removed once POST /admin/invites (Step
-    # 30a.4) reached parity. /admin/luciel-instances is now strictly
-    # a Luciel-instance creation surface; invitations flow through
-    # /admin/invites. See docs/designs/step-30a-5-company-self-serve.md
-    # §8 for the removal rationale.
-    ScopePolicy.enforce_luciel_creation_scope(
-        request,
-        target_scope_level=payload.scope_level,
-        target_tenant_id=payload.scope_owner_tenant_id,
-        target_domain_id=payload.scope_owner_domain_id,
-        target_agent_id=payload.scope_owner_agent_id,
-    )
-    # Step 30a.1 tier/scope guard. Runs BEFORE create_instance so a 402
-    # short-circuits the parent-scope-active validation (which would
-    # otherwise leak "this tenant exists" details on a denied request).
-    # platform_admin keys bypass tier enforcement -- they create on
-    # behalf of sales-assisted tenants whose subscription model is
-    # different.
+    # Arc 5 Path A — V2-collapsed body. Path renamed to
+    # /admin/instances at B3; the legacy teammate_email overload was
+    # removed at Step 30a.5 (invitations flow through POST /admin/invites).
+    ScopePolicy.enforce_admin_scope(request, payload.admin_id)
+    # V2 cap-enforcement guard — platform_admin keys bypass tier enforcement.
     if not ScopePolicy.is_platform_admin(request):
         try:
             service.admin._enforce_tier_scope(
-                tenant_id=payload.scope_owner_tenant_id,
-                requested_scope_level=payload.scope_level,
+                tenant_id=payload.admin_id,
             )
         except TierScopeViolationError as exc:
             raise HTTPException(
@@ -936,20 +920,13 @@ def create_luciel_instance(
     try:
         instance = service.create_instance(
             audit_ctx=audit_ctx,
-            instance_id=payload.instance_id,
+            admin_id=payload.admin_id,
+            instance_slug=payload.instance_slug,
             display_name=payload.display_name,
-            scope_level=payload.scope_level,
-            scope_owner_tenant_id=payload.scope_owner_tenant_id,
-            scope_owner_domain_id=payload.scope_owner_domain_id,
-            scope_owner_agent_id=payload.scope_owner_agent_id,
             description=payload.description,
-            system_prompt_additions=payload.system_prompt_additions,
-            preferred_provider=payload.preferred_provider,
-            allowed_tools=payload.allowed_tools,
+            active=payload.active,
             created_by=payload.created_by,
         )
-    except ParentScopeInactiveError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DuplicateInstanceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -1376,15 +1353,15 @@ def deactivate_luciel_instance(
     # autocommit=True is fine here -- service.deactivate_instance below
     # opens its own transaction for the instance row + audit row.
     #
-    # Step 28 C10 (P3-Q): use scope_owner_tenant_id, not tenant_id. The
+    # Arc 5 Path A — V2 collapsed: read instance.admin_id directly. The
     # LucielInstance ORM model exposes the tenant column as
-    # scope_owner_tenant_id (see app/models/luciel_instance.py line 99).
+    # admin_id (V2 Instance shape post-Arc-5 Path A).
     # Pre-fix this line raised AttributeError before the cascade ever
     # ran, so every DELETE returned 500 in prod even though Pillar 10
     # zero-residue still passed thanks to the tenant-level cascade
     # firing later in the verify teardown PATCH.
     AdminService(db).bulk_soft_deactivate_memory_items_for_luciel_instance(
-        tenant_id=instance.scope_owner_tenant_id,
+        tenant_id=instance.admin_id,
         luciel_instance_id=pk,
         audit_ctx=audit_ctx,
         updated_by=getattr(request.state, "actor_label", None),
@@ -1452,8 +1429,8 @@ def get_effective_chunking_config(
         request=request, instance_id=instance_id, instance_service=instance_service
     )
     cfg = ingestion_service._resolve_chunking_config(
-        tenant_id=instance.scope_owner_tenant_id,
-        domain_id=instance.scope_owner_domain_id,
+        tenant_id=instance.admin_id,
+        domain_id=None,
         luciel_instance_id=instance.id,
     )
     return kschemas.EffectiveChunkingConfigRead(
@@ -1517,8 +1494,8 @@ async def upload_knowledge_file(
         result: IngestResult = ingestion_service.ingest_file(
             file_bytes=file_bytes,
             filename=file.filename or "upload.bin",
-            tenant_id=instance.scope_owner_tenant_id,
-            domain_id=instance.scope_owner_domain_id,
+            tenant_id=instance.admin_id,
+            domain_id=None,
             luciel_instance_id=instance.id,
             knowledge_type=meta.knowledge_type,
             title=meta.title,
@@ -1537,11 +1514,11 @@ async def upload_knowledge_file(
     action = ACTION_KNOWLEDGE_REPLACE if replace_existing else ACTION_KNOWLEDGE_INGEST
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=instance.scope_owner_tenant_id,
+        tenant_id=instance.admin_id,
         action=action,              # or the specific ACTION_KNOWLEDGE_* constant
         resource_type=RESOURCE_KNOWLEDGE,
         resource_pk=instance.id,
-        domain_id=instance.scope_owner_domain_id,
+        domain_id=None,
         luciel_instance_id=instance.id,
         after={
             "source_id": result.source_id,
@@ -1599,8 +1576,8 @@ def ingest_knowledge_text(
     try:
         result = ingestion_service.ingest_text(
             content=payload.content,
-            tenant_id=instance.scope_owner_tenant_id,
-            domain_id=instance.scope_owner_domain_id,
+            tenant_id=instance.admin_id,
+            domain_id=None,
             luciel_instance_id=instance.id,
             knowledge_type=payload.knowledge_type,
             title=payload.title,
@@ -1620,11 +1597,11 @@ def ingest_knowledge_text(
     action = ACTION_KNOWLEDGE_REPLACE if replace_existing else ACTION_KNOWLEDGE_INGEST
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=instance.scope_owner_tenant_id,
+        tenant_id=instance.admin_id,
         action=action,              # or the specific ACTION_KNOWLEDGE_* constant
         resource_type=RESOURCE_KNOWLEDGE,
         resource_pk=instance.id,
-        domain_id=instance.scope_owner_domain_id,
+        domain_id=None,
         luciel_instance_id=instance.id,
         after={
             "source_id": result.source_id,
@@ -1764,11 +1741,11 @@ def delete_knowledge_source(
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=instance.scope_owner_tenant_id,
+        tenant_id=instance.admin_id,
         action=ACTION_KNOWLEDGE_DELETE,              # or the specific ACTION_KNOWLEDGE_* constant
         resource_type=RESOURCE_KNOWLEDGE,
         resource_pk=instance.id,
-        domain_id=instance.scope_owner_domain_id,
+        domain_id=None,
         luciel_instance_id=instance.id,
         after={
             "source_id": source_id,
@@ -1810,8 +1787,8 @@ def replace_knowledge_source_text(
     try:
         result = ingestion_service.ingest_text(
             content=payload.content,
-            tenant_id=instance.scope_owner_tenant_id,
-            domain_id=instance.scope_owner_domain_id,
+            tenant_id=instance.admin_id,
+            domain_id=None,
             luciel_instance_id=instance.id,
             knowledge_type="luciel_knowledge",
             title=payload.title,
@@ -1830,11 +1807,11 @@ def replace_knowledge_source_text(
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=instance.scope_owner_tenant_id,
+        tenant_id=instance.admin_id,
         action=ACTION_KNOWLEDGE_REPLACE,
         resource_type=RESOURCE_KNOWLEDGE,
         resource_pk=instance.id,
-        domain_id=instance.scope_owner_domain_id,
+        domain_id=None,
         luciel_instance_id=instance.id,
         after={
             "source_id": result.source_id,
