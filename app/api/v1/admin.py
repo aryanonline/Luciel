@@ -329,367 +329,9 @@ def update_tenant(
     return TenantConfigRead.model_validate(config)
 
 
-@router.post("/domains", response_model=DomainConfigRead, status_code=status.HTTP_201_CREATED)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def create_domain(
-    request: Request,
-    payload: DomainConfigCreate,
-    db: DbSession,
-) -> DomainConfigRead:
-    ScopePolicy.enforce_tenant_scope(request, payload.tenant_id)
-    # domain-scoped keys cannot create a different domain
-    caller_domain = getattr(request.state, "domain_id", None)
-    if caller_domain and caller_domain != payload.domain_id and not ScopePolicy.is_platform_admin(request):
-        raise HTTPException(status_code=403, detail="This key is scoped to a different domain")
-    service = AdminService(db)
-    existing = service.get_domain_config(payload.tenant_id, payload.domain_id)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Domain {payload.domain_id} for tenant {payload.tenant_id} already exists",
-        )
-
-    config = service.create_domain_config(**payload.model_dump())
-    return DomainConfigRead.model_validate(config)
-
-
 # Step 30a.5 -- cookied self-serve sibling of POST /admin/domains.
 # The existing admin-key route above is kept for operator use; this
 # route is what the Company-tier CompanyTab in Dashboard.tsx calls
-# when a customer clicks "Create Domain".
-#
-# Tenant_id is derived from the cookied user's active ScopeAssignment;
-# the payload only carries slug, display_name, and an optional one-line
-# description. The per-tier Domain cap (DOMAIN_COUNT_CAP_BY_TIER) is
-# enforced via AdminService.enforce_domain_cap and surfaces as a 402.
-@router.post(
-    "/domains/self-serve",
-    response_model=DomainConfigRead,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_domain_self_serve(
-    payload: DomainConfigSelfServeCreate,
-    request: Request,
-    db: DbSession,
-    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> DomainConfigRead:
-    """Cookied self-serve Domain creation for Team and Company tiers (Step 30a.5)."""
-    from app.services.instance_service import TierScopeViolationError
-
-    inviter, tenant_id, _default_domain_id = _resolve_invite_actor(
-        request=request, db=db
-    )
-
-    service = AdminService(db)
-
-    # Step 30a.5 design §3.5: enforce the per-tier Domain cap BEFORE the
-    # slug-collision check so a Team-tier caller hitting the cap with a
-    # duplicate slug sees the 402 (the actionable error) rather than a
-    # 409 they cannot resolve without an upgrade.
-    try:
-        service.enforce_domain_cap(tenant_id=tenant_id)
-    except TierScopeViolationError as exc:
-        code = {
-            TierScopeViolationError.REASON_DOMAIN_CAP_EXCEEDED: "domain_cap_reached",
-            TierScopeViolationError.REASON_SCOPE_NOT_PERMITTED: "tier_scope_not_allowed",
-            TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION: "no_active_subscription",
-        }.get(exc.reason, "tier_scope_not_allowed")
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail={"code": code, "message": str(exc)},
-        ) from exc
-
-    existing = service.get_domain_config(tenant_id, payload.domain_id)
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "domain_slug_taken",
-                "message": (
-                    f"Domain {payload.domain_id!r} already exists under "
-                    f"this tenant."
-                ),
-            },
-        )
-
-    # Count BEFORE creation so the audit row records the cap pressure at
-    # the moment of customer action -- dashboards filter on this to
-    # surface tenants approaching their cap.
-    used_before = service.count_active_domains_for_tenant(tenant_id)
-
-    config = service.create_domain_config(
-        tenant_id=tenant_id,
-        domain_id=payload.domain_id,
-        display_name=payload.display_name,
-        description=payload.description,
-        created_by=inviter.email,
-    )
-
-    AdminAuditRepository(db).record(
-        ctx=audit_ctx,
-        tenant_id=tenant_id,
-        action=ACTION_DOMAIN_CREATED,
-        resource_type=RESOURCE_DOMAIN,
-        resource_pk=config.id,
-        resource_natural_id=config.domain_id,
-        domain_id=config.domain_id,
-        before=None,
-        after={
-            "domain_id": config.domain_id,
-            "display_name": config.display_name,
-            "active": True,
-            "used_after": used_before + 1,
-        },
-        autocommit=True,
-    )
-
-    return DomainConfigRead.model_validate(config)
-
-
-@router.get(
-    "/domains/self-serve",
-    response_model=list[DomainConfigSelfServeRead],
-)
-def list_domains_self_serve(
-    request: Request,
-    db: DbSession,
-) -> list[DomainConfigSelfServeRead]:
-    """Cookied list of Domains under the caller's tenant (Step 30a.5).
-
-    Scoped strictly to the cookied user's tenant; never reads a
-    tenant_id from query string. Returns active and inactive Domains
-    so the CompanyTab can render historical cap pressure.
-
-    Step 30a.5 §4.4 -- response includes two per-Domain rollups
-    (``pending_invites_count``, ``active_agents_count``) so the
-    CompanyTab can render the rollup line without a second fan-out.
-    The counts are computed at the route level, not on the
-    DomainConfig model, per the design's "no parallel constructs"
-    discipline. Drift on UI gap pre-fix:
-    D-company-tab-domain-rollup-fields-missing-2026-05-18.
-    """
-    from sqlalchemy import func
-    from app.models.user_invite import InviteStatus, UserInvite
-    from app.models.aliases import Agent
-
-    _user, tenant_id, _domain_id = _resolve_invite_actor(
-        request=request, db=db
-    )
-    service = AdminService(db)
-    configs = service.list_domain_configs(tenant_id=tenant_id)
-
-    # One grouped query per rollup -- N domains, two queries total, so
-    # we stay O(1) in roundtrips regardless of the Company tier's 50-
-    # domain cap. Both queries are tenant-scoped, never global.
-    pending_rows = (
-        db.query(UserInvite.domain_id, func.count(UserInvite.id))
-        .filter(
-            UserInvite.tenant_id == tenant_id,
-            UserInvite.status == InviteStatus.PENDING,
-        )
-        .group_by(UserInvite.domain_id)
-        .all()
-    )
-    pending_by_domain: dict[str, int] = {
-        row[0]: int(row[1]) for row in pending_rows
-    }
-
-    agent_rows = (
-        db.query(Agent.domain_id, func.count(Agent.id))
-        .filter(
-            Agent.tenant_id == tenant_id,
-            Agent.active.is_(True),
-        )
-        .group_by(Agent.domain_id)
-        .all()
-    )
-    agents_by_domain: dict[str, int] = {
-        row[0]: int(row[1]) for row in agent_rows
-    }
-
-    out: list[DomainConfigSelfServeRead] = []
-    for c in configs:
-        base = DomainConfigRead.model_validate(c)
-        out.append(
-            DomainConfigSelfServeRead(
-                **base.model_dump(),
-                pending_invites_count=pending_by_domain.get(c.domain_id, 0),
-                active_agents_count=agents_by_domain.get(c.domain_id, 0),
-            )
-        )
-    return out
-
-
-@router.delete(
-    "/domains/self-serve/{domain_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-def deactivate_domain_self_serve(
-    domain_id: str,
-    request: Request,
-    db: DbSession,
-    luciel_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
-    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> None:
-    """Cookied Domain deactivation (Step 30a.5).
-
-    Reuses the existing AdminService.deactivate_domain cascade so any
-    Luciels and Agents under the Domain are also deactivated. Adds a
-    customer-visible ACTION_DOMAIN_DEACTIVATED audit row on top of the
-    generic ACTION_DEACTIVATE the cascade already emits.
-    """
-    inviter, tenant_id, _domain_id = _resolve_invite_actor(
-        request=request, db=db
-    )
-    service = AdminService(db)
-    existing = service.get_domain_config(tenant_id, domain_id)
-    if existing is None or not existing.active:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Domain not found.",
-        )
-    success = service.deactivate_domain(
-        tenant_id,
-        domain_id,
-        audit_ctx=audit_ctx,
-        luciel_instance_service=luciel_service,
-        updated_by=inviter.email,
-    )
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Domain not found.",
-        )
-    AdminAuditRepository(db).record(
-        ctx=audit_ctx,
-        tenant_id=tenant_id,
-        action=ACTION_DOMAIN_DEACTIVATED,
-        resource_type=RESOURCE_DOMAIN,
-        resource_pk=existing.id,
-        resource_natural_id=domain_id,
-        domain_id=domain_id,
-        before={"active": True},
-        after={"active": False},
-        autocommit=True,
-    )
-
-
-@router.get("/domains", response_model=list[DomainConfigRead])
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def list_domains(
-    request: Request,
-    db: DbSession,
-    tenant_id: str | None = Query(default=None),
-) -> list[DomainConfigRead]:
-    service = AdminService(db)
-    if not ScopePolicy.is_platform_admin(request):
-        caller_tenant = getattr(request.state, "tenant_id", None)
-        # Force scope: non-platform callers can only see their own tenant.
-        tenant_id = caller_tenant
-    configs = service.list_domain_configs(tenant_id=tenant_id)
-    # If caller is domain-scoped, filter further.
-    caller_domain = getattr(request.state, "domain_id", None)
-    if caller_domain and not ScopePolicy.is_platform_admin(request):
-        configs = [c for c in configs if c.domain_id == caller_domain]
-    return [DomainConfigRead.model_validate(c) for c in configs]
-
-
-@router.get("/domains/{tenant_id}/{domain_id}", response_model=DomainConfigRead)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def get_domain(
-    request: Request,
-    tenant_id: str,
-    domain_id: str,
-    db: DbSession,
-) -> DomainConfigRead:
-    ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
-    service = AdminService(db)
-    config = service.get_domain_config(tenant_id, domain_id)
-    if not config:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Domain config not found",
-        )
-    return DomainConfigRead.model_validate(config)
-
-
-@router.patch("/domains/{tenant_id}/{domain_id}", response_model=DomainConfigRead)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def update_domain(
-    request: Request,
-    tenant_id: str,
-    domain_id: str,
-    payload: DomainConfigUpdate,
-    db: DbSession,
-    instance_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
-    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> DomainConfigRead:
-    ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
-    service = AdminService(db)
-
-    fields = payload.model_dump(exclude_unset=True)
-
-    # Step 26 P7: deactivation must cascade to Agents and LucielInstances.
-    # Route through deactivate_domain() instead of generic update when
-    # the caller is flipping active=False. Other field updates still go
-    # through the generic path (or both, if mixed).
-    if fields.get("active") is False:
-        ok = service.deactivate_domain(
-            tenant_id,
-            domain_id,
-            audit_ctx=audit_ctx,
-            luciel_instance_service=instance_service,
-            updated_by=getattr(request.state, "actor_label", None),
-        )
-        if not ok:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Domain config not found",
-            )
-        # Drop active from the field set; apply any remaining updates via
-        # the generic path (e.g. display_name change in same PATCH call).
-        fields.pop("active", None)
-
-    if fields:
-        config = service.update_domain_config(tenant_id, domain_id, **fields)
-        if not config:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Domain config not found",
-            )
-    else:
-        config = service.get_domain_config(tenant_id, domain_id)
-        if not config:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Domain config not found",
-            )
-
-    return DomainConfigRead.model_validate(config)
-
-@router.delete("/domains/{tenant_id}/{domain_id}", status_code=status.HTTP_204_NO_CONTENT)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def deactivate_domain(
-    request: Request,
-    tenant_id: str,
-    domain_id: str,
-    service: Annotated[AdminService, Depends(get_admin_service)],
-    luciel_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
-    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> None:
-    ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
-    success = service.deactivate_domain(
-        tenant_id,
-        domain_id,
-        audit_ctx=audit_ctx,
-        luciel_instance_service=luciel_service,
-        updated_by=getattr(request.state, "actor_label", None),
-    )
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Domain config not found",
-        )
 
 
 
@@ -1240,7 +882,7 @@ def deactivate_memory_item(
 # =====================================================================
 
 @router.post(
-    "/luciel-instances",
+    "/instances",
     response_model=LucielInstanceRead,
     status_code=status.HTTP_201_CREATED,
 )
@@ -1619,7 +1261,7 @@ def revoke_invite_route(
 
 
 @router.get(
-    "/luciel-instances",
+    "/instances",
     response_model=list[LucielInstanceRead],
 )
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
@@ -1663,7 +1305,7 @@ def list_luciel_instances(
 
 
 @router.get(
-    "/luciel-instances/{pk}",
+    "/instances/{pk}",
     response_model=LucielInstanceRead,
 )
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
@@ -1680,7 +1322,7 @@ def get_luciel_instance(
 
 
 @router.patch(
-    "/luciel-instances/{pk}",
+    "/instances/{pk}",
     response_model=LucielInstanceRead,
 )
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
@@ -1705,7 +1347,7 @@ def update_luciel_instance(
 
 
 @router.delete(
-    "/luciel-instances/{pk}",
+    "/instances/{pk}",
     response_model=LucielInstanceRead,
 )
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
@@ -1753,146 +1395,6 @@ def deactivate_luciel_instance(
     return LucielInstanceRead.model_validate(deactivated)
 
 
-# =====================================================================
-# Step 24.5 — Agent (person/role) management routes
-# These REPLACE Step 24's /admin/agents/* routes which wrote to
-# agent_configs. The new routes write to the new `agents` table.
-# =====================================================================
-
-@router.post(
-    "/agents",
-    response_model=AgentRead,
-    status_code=status.HTTP_201_CREATED,
-)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def create_agent(
-    request: Request,
-    payload: AgentCreate,
-    repo: Annotated[AgentRepository, Depends(get_agent_repository)],
-    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> AgentRead:
-    # Creating an Agent is a domain-level scope action (Agent lives
-    # under a domain). Reuse Step 24's domain-scope check:
-    # platform_admin bypass, tenant match, domain match if the caller
-    # is domain-scoped.
-    ScopePolicy.enforce_domain_scope(
-        request,
-        target_tenant_id=payload.tenant_id,
-        target_domain_id=payload.domain_id,
-    )
-    try:
-        agent = repo.create(
-            tenant_id=payload.tenant_id,
-            domain_id=payload.domain_id,
-            agent_id=payload.agent_id,
-            display_name=payload.display_name,
-            description=payload.description,
-            contact_email=payload.contact_email,
-            created_by=payload.created_by,
-            audit_ctx=audit_ctx,
-        )
-    except IntegrityError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Agent agent_id={payload.agent_id!r} already exists under "
-                f"tenant={payload.tenant_id!r} / domain={payload.domain_id!r}."
-            ),
-        ) from exc
-    return AgentRead.model_validate(agent)
-
-
-@router.get(
-    "/agents",
-    response_model=list[AgentRead],
-)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def list_agents(
-    request: Request,
-    repo: Annotated[AgentRepository, Depends(get_agent_repository)],
-    tenant_id: str | None = Query(default=None),
-    domain_id: str | None = Query(default=None),
-    active_only: bool = Query(default=False),
-) -> list[AgentRead]:
-    if not ScopePolicy.is_platform_admin(request):
-        caller_tenant, caller_domain, _, _ = ScopePolicy._caller(request)
-        if caller_tenant is None:
-            raise HTTPException(status_code=403, detail="Admin key has no tenant scope.")
-        tenant_id = caller_tenant
-        if caller_domain is not None:
-            if domain_id is not None and domain_id != caller_domain:
-                raise HTTPException(
-                    status_code=403,
-                    detail="This key is scoped to a different domain.",
-                )
-            domain_id = caller_domain
-    else:
-        if tenant_id is None:
-            raise HTTPException(
-                status_code=400, detail="platform_admin must specify tenant_id."
-            )
-
-    agents = repo.list_for_scope(
-        tenant_id=tenant_id,
-        domain_id=domain_id,
-        active_only=active_only,
-    )
-    return [AgentRead.model_validate(a) for a in agents]
-
-
-@router.get(
-    "/agents/{tenant_id}/{agent_id}",
-    response_model=AgentRead,
-)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def get_agent(
-    request: Request,
-    tenant_id: str,
-    agent_id: str,
-    repo: Annotated[AgentRepository, Depends(get_agent_repository)],
-) -> AgentRead:
-    ScopePolicy.enforce_tenant_scope(request, tenant_id)
-    agent = repo.get(tenant_id=tenant_id, agent_id=agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found.")
-    # If the caller is domain-scoped, verify the agent's domain matches.
-    ScopePolicy.enforce_domain_scope(
-        request,
-        target_tenant_id=agent.tenant_id,
-        target_domain_id=agent.domain_id,
-    )
-    return AgentRead.model_validate(agent)
-
-
-@router.patch(
-    "/agents/{tenant_id}/{agent_id}",
-    response_model=AgentRead,
-)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def update_agent(
-    request: Request,
-    tenant_id: str,
-    agent_id: str,
-    payload: AgentUpdate,
-    repo: Annotated[AgentRepository, Depends(get_agent_repository)],
-    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> AgentRead:
-    ScopePolicy.enforce_tenant_scope(request, tenant_id)
-    agent = repo.get(tenant_id=tenant_id, agent_id=agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found.")
-    ScopePolicy.enforce_domain_scope(
-        request,
-        target_tenant_id=agent.tenant_id,
-        target_domain_id=agent.domain_id,
-    )
-
-    updates = payload.model_dump(exclude_unset=True)
-    if not updates:
-        return AgentRead.model_validate(agent)
-
-    updated = repo.update(agent, audit_ctx=audit_ctx, **updates)
-    return AgentRead.model_validate(updated)
 
 
 # ---------------------------------------------------------------------
@@ -1912,131 +1414,6 @@ def update_agent(
 #      shows up cleanly in audit-log queries filtered by resource_type
 #      = agent, action = update, before/after.user_id present.
 #   3. Invariant: enforces "one active Agent per (user, tenant)" at
-#      the route layer before delegating to repo.update.
-#
-# Step 24.5b doctrine: re-binding a user to a *different* Agent is
-# deactivate-and-recreate, not in-place UPDATE — audit trail integrity.
-# This route therefore refuses if the target Agent is inactive.
-# ---------------------------------------------------------------------
-@router.post(
-    "/agents/{tenant_id}/{agent_id}/bind-user",
-    response_model=AgentRead,
-)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def bind_agent_to_user(
-    request: Request,
-    tenant_id: str,
-    agent_id: str,
-    payload: AgentBindUserPayload,
-    repo: Annotated[AgentRepository, Depends(get_agent_repository)],
-    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> AgentRead:
-    permissions = getattr(request.state, "permissions", []) or []
-    if "platform_admin" not in permissions:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only platform_admin may bind an Agent to a User identity.",
-        )
-
-    agent = repo.get(tenant_id=tenant_id, agent_id=agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found.")
-    if not agent.active:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Agent is inactive; binding to inactive Agents is refused. "
-                "Per Step 24.5b doctrine, re-binding a user to a different "
-                "Agent is deactivate-and-recreate, not UPDATE in place."
-            ),
-        )
-
-    # Invariant: one active Agent per (user, tenant). Refuse if the
-    # target user already holds an active Agent in this tenant that
-    # is not this one.
-    existing = repo.get_by_user_and_tenant(
-        user_id=payload.user_id,
-        tenant_id=tenant_id,
-        active_only=True,
-    )
-    if existing is not None and existing.id != agent.id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"User {payload.user_id} already holds active Agent "
-                f"{existing.agent_id} in tenant {tenant_id}. Per Step 24.5b "
-                f"invariant, a User holds at most one active Agent per tenant."
-            ),
-        )
-
-    updated = repo.update(
-        agent,
-        audit_ctx=audit_ctx,
-        user_id=payload.user_id,
-        updated_by=payload.updated_by
-            or getattr(request.state, "actor_label", None),
-    )
-    return AgentRead.model_validate(updated)
-
-
-@router.delete(
-    "/agents/{tenant_id}/{agent_id}",
-    response_model=AgentRead,
-)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
-def deactivate_agent(
-    request: Request,
-    tenant_id: str,
-    agent_id: str,
-    repo: Annotated[AgentRepository, Depends(get_agent_repository)],
-    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
-    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-    db: DbSession,
-) -> AgentRead:
-    """Soft-deactivate an Agent AND cascade-deactivate every agent-scoped
-    LucielInstance owned by that agent. Both writes commit atomically
-    with their audit rows."""
-    ScopePolicy.enforce_tenant_scope(request, tenant_id)
-    existing = repo.get(tenant_id=tenant_id, agent_id=agent_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Agent not found.")
-    ScopePolicy.enforce_domain_scope(
-        request,
-        target_tenant_id=existing.tenant_id,
-        target_domain_id=existing.domain_id,
-    )
-
-    # 1. Cascade to agent-scoped Luciels first.
-    service.cascade_on_agent_deactivate(
-        audit_ctx=audit_ctx,
-        tenant_id=existing.tenant_id,
-        domain_id=existing.domain_id,
-        agent_id=existing.agent_id,
-        updated_by=getattr(request.state, "actor_label", None),
-    )
-
-    # 1.5 Memory cascade: soft-deactivate agent-scoped memory_items.
-    # Wired at route level because new-table Agent deactivation
-    # orchestrates at this layer (cascade is not embedded in repo).
-    AdminService(db).bulk_soft_deactivate_memory_items_for_agent(
-        tenant_id=existing.tenant_id,
-        agent_id=existing.agent_id,
-        audit_ctx=audit_ctx,
-        updated_by=getattr(request.state, "actor_label", None),
-        autocommit=False,
-    )
-
-
-    # 2. Deactivate the agent row itself.
-    deactivated = repo.deactivate(
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        updated_by=getattr(request.state, "actor_label", None),
-        audit_ctx=audit_ctx,
-    )
-    if deactivated is None:
-        raise HTTPException(status_code=404, detail="Agent not found.")
-    return AgentRead.model_validate(deactivated)
 # ================================================================
 # Step 25b — Knowledge ingestion / listing / replace / delete
 #
@@ -2051,7 +1428,7 @@ def deactivate_agent(
 
 
 @router.get(
-    "/luciel-instances/{instance_id}/chunking-config",
+    "/instances/{instance_id}/chunking-config",
     response_model=kschemas.EffectiveChunkingConfigRead,
 )
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
@@ -2083,7 +1460,7 @@ def get_effective_chunking_config(
 
 
 @router.post(
-    "/luciel-instances/{instance_id}/knowledge",
+    "/instances/{instance_id}/knowledge",
     response_model=kschemas.KnowledgeSourceRead,
     status_code=status.HTTP_201_CREATED,
 )
@@ -2186,7 +1563,7 @@ async def upload_knowledge_file(
 
 
 @router.post(
-    "/luciel-instances/{instance_id}/knowledge/text",
+    "/instances/{instance_id}/knowledge/text",
     response_model=kschemas.KnowledgeSourceRead,
     status_code=status.HTTP_201_CREATED,
 )
@@ -2269,7 +1646,7 @@ def ingest_knowledge_text(
 
 
 @router.get(
-    "/luciel-instances/{instance_id}/knowledge",
+    "/instances/{instance_id}/knowledge",
     response_model=kschemas.KnowledgeListResponse,
 )
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
@@ -2302,7 +1679,7 @@ def list_knowledge_sources(
 
 
 @router.get(
-    "/luciel-instances/{instance_id}/knowledge/{source_id}",
+    "/instances/{instance_id}/knowledge/{source_id}",
 )
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
 def get_knowledge_source(
@@ -2351,7 +1728,7 @@ def get_knowledge_source(
 
 
 @router.delete(
-    "/luciel-instances/{instance_id}/knowledge/{source_id}",
+    "/instances/{instance_id}/knowledge/{source_id}",
     response_model=kschemas.KnowledgeDeleteResponse,
 )
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
@@ -2401,7 +1778,7 @@ def delete_knowledge_source(
 
 
 @router.put(
-    "/luciel-instances/{instance_id}/knowledge/{source_id}",
+    "/instances/{instance_id}/knowledge/{source_id}",
     response_model=kschemas.KnowledgeSourceRead,
 )
 @limiter.limit(KNOWLEDGE_UPLOAD_RATE_LIMIT, key_func=get_api_key_or_ip)
