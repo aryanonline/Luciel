@@ -45,11 +45,13 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
     """Legacy (pre-Step-24.5). New writes use luciel_instance_id instead."""
 
-    # ---- Step 25b: Luciel-instance binding ----
+    # ---- Step 25b: Instance binding (Arc 5 Revision C re-pointed) ----
+    # FK target moved from luciel_instances.id to instances.id at
+    # Revision C; column name kept for call-site compatibility.
     luciel_instance_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey(
-            "luciel_instances.id",
+            "instances.id",
             ondelete="SET NULL",
             name="fk_knowledge_embeddings_luciel_instance_id",
         ),
@@ -60,13 +62,13 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     NULL for legacy pre-Step-25b rows and for domain/tenant-level shared
     knowledge attached only via the scope triple."""
 
-    # Arc 5 B1 — LucielInstance was collapsed into Instance; the FK column
-    # is preserved until Revision C drops it. Relationship resolves to the
-    # V2 ``instances`` mapping via the back-pointer ``legacy_luciel_instance_id``.
+    # Arc 5 Revision C — luciel_instance_id now FKs directly to instances.id;
+    # the relationship resolves through the natural FK (no longer via the
+    # legacy_luciel_instance_id back-pointer, which was dropped at Revision C).
     luciel_instance: Mapped["Instance | None"] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "Instance",
         lazy="select",
-        primaryjoin="KnowledgeEmbedding.luciel_instance_id == foreign(Instance.legacy_luciel_instance_id)",
+        foreign_keys="KnowledgeEmbedding.luciel_instance_id",
         viewonly=True,
     )
 

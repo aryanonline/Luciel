@@ -135,9 +135,11 @@ class UserInvite(Base, TimestampMixin):
     # convention -- a tenant cannot be hard-deleted while invites reference
     # it; soft-deactivation goes through the AdminService cascade which
     # is responsible for revoking any pending invites in the same txn.
+    # Arc 5 Revision C: FK re-pointed from tenant_configs.tenant_id to
+    # admins.id. Column name kept for call-site compatibility.
     tenant_id: Mapped[str] = mapped_column(
         String(100),
-        ForeignKey("tenant_configs.tenant_id", ondelete="RESTRICT"),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )

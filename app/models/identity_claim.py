@@ -187,12 +187,14 @@ class IdentityClaim(Base):
     # domain_id String(100) without FK (composite natural key in
     # domain_configs validated at service layer). Mirrors
     # scope_assignments File 1.2 convention.
+    # Arc 5 Revision C: FK re-pointed from tenant_configs.tenant_id to
+    # admins.id. Column name kept for call-site compatibility.
     tenant_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey(
-            "tenant_configs.tenant_id",
+            "admins.id",
             ondelete="RESTRICT",
-            name="fk_identity_claims_tenant_id_tenant_configs",
+            name="fk_identity_claims_tenant_id_admins",
         ),
         nullable=False,
         index=True,

@@ -72,8 +72,10 @@ class MemoryItem(Base, TimestampMixin):
         nullable=True,
         index=True,
     )
+    # Arc 5 Revision C: FK re-pointed from luciel_instances.id to
+    # instances.id. Column name kept for call-site compatibility.
     luciel_instance_id: Mapped[int | None] = mapped_column(
-        ForeignKey("luciel_instances.id", ondelete="SET NULL"),
+        ForeignKey("instances.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )

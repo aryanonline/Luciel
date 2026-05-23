@@ -100,9 +100,12 @@ class ScopeAssignment(Base, TimestampMixin):
     # Tenant + domain + role triple. Mirrors the scope-arithmetic columns
     # used elsewhere (api_keys, agents, luciel_instances). String FKs match
     # existing project convention (tenant_configs.tenant_id is VARCHAR(100)).
+    # Arc 5 Revision C: FK re-pointed from tenant_configs.tenant_id to
+    # admins.id (admins.id is 1:1 with the dropped tenant_configs.tenant_id).
+    # Column name kept for call-site compatibility.
     tenant_id: Mapped[str] = mapped_column(
         String(100),
-        ForeignKey("tenant_configs.tenant_id", ondelete="RESTRICT"),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )

@@ -47,13 +47,16 @@ class ApiKey(Base, TimestampMixin):
     agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     """If null, the key works at the tenant level (no agent scoping)."""
 
-    # Step 24.5 — optional pin to a specific LucielInstance.
-    # When set, this key can only talk to that one Luciel. When NULL,
+    # Step 24.5 — optional pin to a specific Instance (V2 unit).
+    # When set, this key can only talk to that one Instance. When NULL,
     # chat resolution falls back to the tenant/domain/agent config path.
+    # Arc 5 Revision C: FK re-pointed from luciel_instances.id to
+    # instances.id (luciel_instances was dropped). Column name kept for
+    # call-site compatibility.
     luciel_instance_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey(
-            "luciel_instances.id",
+            "instances.id",
             ondelete="SET NULL",
             name="fk_api_keys_luciel_instance_id",
         ),

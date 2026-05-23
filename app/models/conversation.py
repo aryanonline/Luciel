@@ -113,12 +113,15 @@ class Conversation(Base):
     # validates the composite (tenant_id, domain_id) against domain_configs
     # at write time. Same convention scope_assignments uses (File 1.2 of
     # Step 24.5b).
+    # Arc 5 Revision C: FK re-pointed from tenant_configs.tenant_id to
+    # admins.id (tenant_configs was dropped; admins.id replaces it 1:1).
+    # Column name 'tenant_id' kept for call-site compatibility.
     tenant_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey(
-            "tenant_configs.tenant_id",
+            "admins.id",
             ondelete="RESTRICT",
-            name="fk_conversations_tenant_id_tenant_configs",
+            name="fk_conversations_tenant_id_admins",
         ),
         nullable=False,
         index=True,
