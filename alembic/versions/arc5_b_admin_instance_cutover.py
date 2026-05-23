@@ -129,22 +129,30 @@ def upgrade() -> None:
     #    COALESCE → 'free' will fire for all 23 active admins —
     #    documented under F2 of the aggressive-cleanup amendment).
     # ------------------------------------------------------------------
+    # NOTE 2026-05-23 Revision B hotfix:
+    #   * Target column is ``admins.name`` (Revision A line 152-157),
+    #     NOT ``admins.display_name``.  Source remains
+    #     ``tenant_configs.display_name`` (which DOES exist).
+    #   * ``tier_source`` vocabulary must match the CHECK constraint
+    #     declared in Revision A (``ck_admins_tier_source_valid``):
+    #     'stripe_webhook' / 'sales_ops_provisioned' / 'free_signup' /
+    #     'revision_b_backfill' / 'manual'.  We map the prior
+    #     'defaulted-to-free' / 'from-subscriptions' sentinels onto
+    #     'revision_b_backfill' (both cases are exactly that — a
+    #     Revision B backfill from legacy state).
     conn.execute(sa.text("""
         INSERT INTO admins (
-            id, display_name, tier, active, created_at,
+            id, name, tier, active, created_at,
             legacy_tenant_id, tier_source
         )
         SELECT
             tc.tenant_id        AS id,
-            tc.display_name,
+            tc.display_name     AS name,
             COALESCE(s.tier, 'free') AS tier,
             tc.active,
             tc.created_at,
             tc.tenant_id        AS legacy_tenant_id,
-            CASE
-                WHEN s.tier IS NULL THEN 'defaulted-to-free'
-                ELSE 'from-subscriptions'
-            END                 AS tier_source
+            'revision_b_backfill' AS tier_source
         FROM tenant_configs tc
         LEFT JOIN subscriptions s
             ON s.tenant_id = tc.tenant_id
@@ -163,19 +171,37 @@ def upgrade() -> None:
     #    Gate 3: scope_owner_domain_id + scope_level NOT preserved.
     #    The 1 active prod row is already scope_level='tenant'.
     # ------------------------------------------------------------------
+    # NOTE 2026-05-23 Revision B hotfix:
+    #   * ``instances.instance_slug`` is NOT NULL (Revision A line
+    #     279-287) and was previously omitted from the column list.
+    #     Source from ``luciel_instances.instance_id`` (the legacy
+    #     semantic slug).
+    #   * ``instances.legacy_agent_id`` is INTEGER but
+    #     ``luciel_instances.scope_owner_agent_id`` is String(100).
+    #     The 1 active prod row is ``scope_level = 'tenant'`` so its
+    #     ``scope_owner_agent_id`` is NULL by the
+    #     ``ck_luciel_instances_scope_owner_shape`` CHECK constraint.
+    #     For any non-null legacy value, accept only digit-only
+    #     strings and cast to integer; anything else becomes NULL
+    #     (back-pointer is best-effort, dropped at Revision C).
     conn.execute(sa.text("""
         INSERT INTO instances (
-            id, admin_id, display_name, active, created_at,
+            id, admin_id, instance_slug, display_name, active, created_at,
             legacy_luciel_instance_id, legacy_agent_id
         )
         SELECT
             li.id                       AS id,
             li.scope_owner_tenant_id    AS admin_id,
+            li.instance_id              AS instance_slug,
             li.display_name,
             li.active,
             li.created_at,
             li.id                       AS legacy_luciel_instance_id,
-            li.scope_owner_agent_id     AS legacy_agent_id
+            CASE
+                WHEN li.scope_owner_agent_id ~ '^[0-9]+$'
+                    THEN li.scope_owner_agent_id::integer
+                ELSE NULL
+            END                         AS legacy_agent_id
         FROM luciel_instances li
         WHERE li.active = TRUE
           AND NOT EXISTS (
@@ -241,7 +267,7 @@ def upgrade() -> None:
                 ),
                 NOW()
             FROM admins a
-            WHERE a.tier_source = 'from-subscriptions'
+            WHERE a.tier_source = 'revision_b_backfill'
               AND NOT EXISTS (
                   SELECT 1 FROM admin_audit_logs aal
                   WHERE aal.resource_id = a.id
