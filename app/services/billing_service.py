@@ -670,11 +670,11 @@ class BillingService:
         try:
             from app.repositories.agent_repository import AgentRepository
             from app.services.admin_service import AdminService
-            from app.services.luciel_instance_service import LucielInstanceService
+            from app.services.instance_service import InstanceService
 
             admin = AdminService(self.db)
             agent_repo = AgentRepository(self.db)
-            luciel_service = LucielInstanceService(self.db, admin_service=admin)
+            luciel_service = InstanceService(self.db, admin_service=admin)
             admin.deactivate_tenant_with_cascade(
                 sub.tenant_id,
                 audit_ctx=ctx,

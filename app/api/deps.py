@@ -36,7 +36,7 @@ from app.repositories.luciel_instance_repository import (  # noqa: E402
     LucielInstanceRepository,
 )
 from app.services.admin_service import AdminService  # noqa: E402
-from app.services.luciel_instance_service import LucielInstanceService  # noqa: E402
+from app.services.instance_service import InstanceService  # noqa: E402
 
 DbSession = Annotated[Session, Depends(get_db)]
 
@@ -139,15 +139,15 @@ def get_admin_audit_repository(db: DbSession) -> AdminAuditRepository:
 def get_admin_service(db: DbSession) -> AdminService:
     """Step 24 constructed AdminService inline inside each handler.
     Step 24.5 needs it as a proper FastAPI dependency because
-    LucielInstanceService takes it as a constructor arg (File 7)."""
+    InstanceService takes it as a constructor arg (File 7)."""
     return AdminService(db)
 
 
 def get_luciel_instance_service(
     db: DbSession,
     admin_service: Annotated[AdminService, Depends(get_admin_service)],
-) -> LucielInstanceService:
-    return LucielInstanceService(db, admin_service=admin_service)
+) -> InstanceService:
+    return InstanceService(db, admin_service=admin_service)
 
 
 def get_audit_context(request: Request) -> AuditContext:

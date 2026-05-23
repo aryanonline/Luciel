@@ -59,7 +59,7 @@ from app.models.aliases import TenantConfig
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.repositories.scope_assignment_repository import ScopeAssignmentRepository
 from app.services.admin_service import AdminService
-from app.services.luciel_instance_service import LucielInstanceService
+from app.services.instance_service import InstanceService
 
 if TYPE_CHECKING:
     from app.models.user import User
@@ -220,10 +220,10 @@ class TierProvisioningService:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.admin = AdminService(db)
-        # LucielInstanceService requires admin_service injection to
+        # InstanceService requires admin_service injection to
         # avoid the File-11 circular import (see luciel_instance_service.py
         # docstring).
-        self.luciel = LucielInstanceService(db, admin_service=self.admin)
+        self.luciel = InstanceService(db, admin_service=self.admin)
         self.audit = AdminAuditRepository(db)
 
     # -----------------------------------------------------------------
@@ -246,7 +246,7 @@ class TierProvisioningService:
 
         Idempotency: re-running pre-mint after a partial success will
         raise ``DuplicateInstanceError`` from
-        ``LucielInstanceService.create_instance`` on the first row that
+        ``InstanceService.create_instance`` on the first row that
         already exists. The caller (the webhook) catches and logs but
         does NOT roll back the subscription -- a reconciler is expected
         to re-attempt after the duplicates are cleaned up.
@@ -418,7 +418,7 @@ class TierProvisioningService:
 
         Writes an ACTION_CREATE / RESOURCE_AGENT audit row in the same
         transaction as the INSERT (Invariant 4). Commits before
-        returning so ``LucielInstanceService.validate_parent_scope_active``
+        returning so ``InstanceService.validate_parent_scope_active``
         sees the Agent on the immediate subsequent
         ``create_instance(scope_level='agent', ...)``.
         """

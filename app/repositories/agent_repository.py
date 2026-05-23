@@ -61,7 +61,7 @@ class AgentRepository:
         at the DB. Caller is expected to translate IntegrityError into
         a 409 at the route layer.
 
-        autocommit=False lets OnboardingService / LucielInstanceService
+        autocommit=False lets OnboardingService / InstanceService
         compose this into a larger transaction.
 
         audit_ctx, when provided, writes an admin_audit_logs row in the
@@ -317,7 +317,7 @@ class AgentRepository:
         """Soft-deactivate an agent. Returns None if not found.
 
         Does NOT cascade to LucielInstance rows owned by this agent —
-        that cascade lives in LucielInstanceService (File 7) so the
+        that cascade lives in InstanceService (File 7) so the
         hierarchy logic sits in one place.
         """
         agent = self.get(tenant_id=tenant_id, agent_id=agent_id)

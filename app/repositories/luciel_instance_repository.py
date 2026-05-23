@@ -12,7 +12,7 @@ Scope of responsibility:
   trust its inputs.
 - Create-at-or-below authorization is ScopePolicy's job (File 9).
 - Parent-scope-active validation (is the owning domain active? is the
-  owning agent active?) lives in LucielInstanceService (File 7).
+  owning agent active?) lives in InstanceService (File 7).
 
 Domain-agnostic: no imports from app/domain/, no vertical branching.
 """

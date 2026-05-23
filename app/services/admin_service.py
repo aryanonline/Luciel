@@ -96,7 +96,7 @@ class AdminService:
             DOMAIN_COUNT_CAP_BY_TIER,
             Subscription,
         )
-        from app.services.luciel_instance_service import TierScopeViolationError
+        from app.services.instance_service import TierScopeViolationError
 
         sub: Subscription | None = (
             self.db.query(Subscription)
@@ -230,7 +230,7 @@ class AdminService:
         domain_id: str,
         *,
         audit_ctx=None,                    # Step 24.5: AuditContext | None
-        luciel_instance_service=None,      # Step 24.5: LucielInstanceService | None
+        luciel_instance_service=None,      # Step 24.5: InstanceService | None
         updated_by: str | None = None,
     ) -> bool:
         """Soft-deactivate a domain and cascade:
@@ -667,7 +667,7 @@ class AdminService:
     ) -> int:
         """Soft-deactivate every active memory_items row for a luciel_instance.
 
-        Called from LucielInstanceService cascade methods when a
+        Called from InstanceService cascade methods when a
         single luciel_instance is deactivated. Memory rows scoped to
         this instance under this tenant flip to active=False.
 
@@ -1776,7 +1776,7 @@ class AdminService:
     # ---------------------------------------------------------------
     #
     # Called from the POST /admin/luciel-instances route (the ONE
-    # self-serve creation chokepoint) BEFORE LucielInstanceService.
+    # self-serve creation chokepoint) BEFORE InstanceService.
     # create_instance. Service-layer enforcement is intentional:
     #
     #   * the schema layer cannot know the caller's active subscription
@@ -1814,7 +1814,7 @@ class AdminService:
         from app.repositories.luciel_instance_repository import (
             LucielInstanceRepository,
         )
-        from app.services.luciel_instance_service import TierScopeViolationError
+        from app.services.instance_service import TierScopeViolationError
 
         sub: Subscription | None = (
             self.db.query(Subscription)

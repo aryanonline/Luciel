@@ -1,5 +1,5 @@
 """
-LucielInstanceService — orchestration layer for scope-owned child Luciels.
+InstanceService — orchestration layer for scope-owned child Luciels.
 
 Step 24.5 (File 7). Sits on top of:
   - LucielInstanceRepository (File 6)
@@ -53,26 +53,26 @@ logger = logging.getLogger(__name__)
 # translates into HTTP responses.
 # ---------------------------------------------------------------------
 
-class LucielInstanceError(Exception):
+class InstanceServiceError(Exception):
     """Base class for service-level errors."""
 
 
-class ParentScopeInactiveError(LucielInstanceError):
+class ParentScopeInactiveError(InstanceServiceError):
     """Raised when the owning tenant/domain/agent doesn't exist or isn't
     active. Route layer maps to 400."""
 
 
-class DuplicateInstanceError(LucielInstanceError):
+class DuplicateInstanceError(InstanceServiceError):
     """Raised when (scope_owner_*, instance_id) already exists.
     Route layer maps to 409."""
 
 
-class InstanceNotFoundError(LucielInstanceError):
+class InstanceNotFoundError(InstanceServiceError):
     """Raised when a target instance can't be resolved. Route layer
     maps to 404."""
 
 
-class TierScopeViolationError(LucielInstanceError):
+class TierScopeViolationError(InstanceServiceError):
     """Step 30a.1: raised when a tenant's active subscription tier does
     NOT permit the requested scope level, or when the tenant has hit
     its ``instance_count_cap``. Route layer maps to 402 Payment Required
@@ -100,7 +100,7 @@ class TierScopeViolationError(LucielInstanceError):
 # Service
 # ---------------------------------------------------------------------
 
-class LucielInstanceService:
+class InstanceService:
     def __init__(
         self,
         db: Session,

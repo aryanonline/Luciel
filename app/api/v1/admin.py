@@ -34,9 +34,9 @@ from app.models.admin_audit_log import (
     RESOURCE_KNOWLEDGE,
 )
 from app.repositories.knowledge_repository import KnowledgeRepository
-from app.services.luciel_instance_service import (
+from app.services.instance_service import (
     InstanceNotFoundError,
-    LucielInstanceService,
+    InstanceService,
 )
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.repositories.agent_repository import AgentRepository
@@ -46,10 +46,10 @@ from app.schemas.luciel_instance import (
     LucielInstanceRead,
     LucielInstanceUpdate,
 )
-from app.services.luciel_instance_service import (
+from app.services.instance_service import (
     DuplicateInstanceError,
     InstanceNotFoundError,
-    LucielInstanceService,
+    InstanceService,
     ParentScopeInactiveError,
     TierScopeViolationError,
 )
@@ -117,7 +117,7 @@ def _load_active_instance(
     *,
     request: Request,
     instance_id: int,
-    instance_service: LucielInstanceService,
+    instance_service: InstanceService,
 ) -> "LucielInstance":
     instance = instance_service.get_by_pk(instance_id)
     if instance is None:
@@ -295,7 +295,7 @@ def update_tenant(
     payload: TenantConfigUpdate,
     db: DbSession,
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-    luciel_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    luciel_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     agent_repo: Annotated[AgentRepository, Depends(get_agent_repository)],
 ) -> TenantConfigRead:
     ScopePolicy.enforce_tenant_scope(request, tenant_id)
@@ -374,7 +374,7 @@ def create_domain_self_serve(
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> DomainConfigRead:
     """Cookied self-serve Domain creation for Team and Company tiers (Step 30a.5)."""
-    from app.services.luciel_instance_service import TierScopeViolationError
+    from app.services.instance_service import TierScopeViolationError
 
     inviter, tenant_id, _default_domain_id = _resolve_invite_actor(
         request=request, db=db
@@ -528,7 +528,7 @@ def deactivate_domain_self_serve(
     domain_id: str,
     request: Request,
     db: DbSession,
-    luciel_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    luciel_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> None:
     """Cookied Domain deactivation (Step 30a.5).
@@ -621,7 +621,7 @@ def update_domain(
     domain_id: str,
     payload: DomainConfigUpdate,
     db: DbSession,
-    instance_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    instance_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> DomainConfigRead:
     ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
@@ -674,7 +674,7 @@ def deactivate_domain(
     tenant_id: str,
     domain_id: str,
     service: Annotated[AdminService, Depends(get_admin_service)],
-    luciel_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    luciel_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> None:
     ScopePolicy.enforce_domain_scope(request, tenant_id, domain_id)
@@ -764,7 +764,7 @@ def create_api_key(
     request: Request,
     payload: ApiKeyCreate,
     db: DbSession,
-    luciel_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    luciel_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> ApiKeyCreateResponse:
     # --- Step 24 scope + privilege guards (unchanged) ---------------
@@ -1248,7 +1248,7 @@ def deactivate_memory_item(
 def create_luciel_instance(
     request: Request,
     payload: LucielInstanceCreate,
-    service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> LucielInstanceRead:
     # Step 30a.5: the teammate_email invite-mode overload that lived
@@ -1625,7 +1625,7 @@ def revoke_invite_route(
 @limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
 def list_luciel_instances(
     request: Request,
-    service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     tenant_id: str | None = Query(default=None),
     domain_id: str | None = Query(default=None),
     agent_id: str | None = Query(default=None),
@@ -1670,7 +1670,7 @@ def list_luciel_instances(
 def get_luciel_instance(
     request: Request,
     pk: int,
-    service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
 ) -> LucielInstanceRead:
     instance = service.get_by_pk(pk)
     if instance is None:
@@ -1688,7 +1688,7 @@ def update_luciel_instance(
     request: Request,
     pk: int,
     payload: LucielInstanceUpdate,
-    service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> LucielInstanceRead:
     instance = service.get_by_pk(pk)
@@ -1712,7 +1712,7 @@ def update_luciel_instance(
 def deactivate_luciel_instance(
     request: Request,
     pk: int,
-    service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
     db: DbSession,
 ) -> LucielInstanceRead:
@@ -1722,7 +1722,7 @@ def deactivate_luciel_instance(
     ScopePolicy.enforce_luciel_instance_scope(request, instance)
 
     # Memory cascade: soft-deactivate this instance's memory_items first.
-    # Wired at route level because LucielInstanceService doesn't depend on
+    # Wired at route level because InstanceService doesn't depend on
     # AdminService (would be a circular import).
     # autocommit=True is fine here -- service.deactivate_instance below
     # opens its own transaction for the instance row + audit row.
@@ -1989,7 +1989,7 @@ def deactivate_agent(
     tenant_id: str,
     agent_id: str,
     repo: Annotated[AgentRepository, Depends(get_agent_repository)],
-    service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
     db: DbSession,
 ) -> AgentRead:
@@ -2059,7 +2059,7 @@ def get_effective_chunking_config(
     request: Request,
     instance_id: int,
     db: DbSession,
-    instance_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    instance_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     ingestion_service: Annotated[IngestionService, Depends(get_ingestion_service)],
 ) -> kschemas.EffectiveChunkingConfigRead:
     """Return the effective (instance -> domain -> tenant) chunking config
@@ -2092,7 +2092,7 @@ async def upload_knowledge_file(
     request: Request,
     instance_id: int,
     db: DbSession,
-    instance_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    instance_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     ingestion_service: Annotated[IngestionService, Depends(get_ingestion_service)],
     audit_repo: Annotated[AdminAuditRepository, Depends(get_admin_audit_repository)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
@@ -2196,7 +2196,7 @@ def ingest_knowledge_text(
     instance_id: int,
     payload: kschemas.KnowledgeIngestRequest,
     db: DbSession,
-    instance_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    instance_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     ingestion_service: Annotated[IngestionService, Depends(get_ingestion_service)],
     audit_repo: Annotated[AdminAuditRepository, Depends(get_admin_audit_repository)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
@@ -2277,7 +2277,7 @@ def list_knowledge_sources(
     request: Request,
     instance_id: int,
     db: DbSession,
-    instance_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    instance_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     include_superseded: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -2310,7 +2310,7 @@ def get_knowledge_source(
     instance_id: int,
     source_id: str,
     db: DbSession,
-    instance_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    instance_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     expand: str | None = Query(default=None, description="'chunks' to include raw chunk rows"),
 ):
     """Get one source on a Luciel instance. By default returns a
@@ -2360,7 +2360,7 @@ def delete_knowledge_source(
     instance_id: int,
     source_id: str,
     db: DbSession,
-    instance_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    instance_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_repo: Annotated[AdminAuditRepository, Depends(get_admin_audit_repository)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> kschemas.KnowledgeDeleteResponse:
@@ -2411,7 +2411,7 @@ def replace_knowledge_source_text(
     source_id: str,
     payload: kschemas.KnowledgeReplaceRequest,
     db: DbSession,
-    instance_service: Annotated[LucielInstanceService, Depends(get_luciel_instance_service)],
+    instance_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     ingestion_service: Annotated[IngestionService, Depends(get_ingestion_service)],
     audit_repo: Annotated[AdminAuditRepository, Depends(get_admin_audit_repository)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
