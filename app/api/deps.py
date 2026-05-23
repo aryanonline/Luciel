@@ -31,7 +31,12 @@ from app.repositories.admin_audit_repository import (  # noqa: E402
     AdminAuditRepository,
     AuditContext,
 )
-from app.repositories.agent_repository import AgentRepository  # noqa: E402
+# Arc 5 Path A — agent_repository.py was deleted at Commit A5; there
+# is no V2 equivalent (V2 hierarchy is Admin → Instance, no Agent
+# layer). The transitional ``get_agent_repository`` factory below is a
+# stub that raises at call time so the FastAPI dependency graph still
+# resolves at import; the routes that depend on it are deleted /
+# rewritten at B1+B2.
 from app.repositories.instance_repository import (  # noqa: E402
     InstanceRepository,
 )
@@ -134,8 +139,18 @@ def get_chat_service(
         consent_policy=consent_policy,
     )
 
-def get_agent_repository(db: DbSession) -> AgentRepository:
-    return AgentRepository(db)
+def get_agent_repository(db: DbSession):
+    """Arc 5 Path A stub — the V1 AgentRepository is deleted; this
+    factory raises if any surviving route still depends on it. The
+    routes that consumed the V1 Agent layer (``/admin/agents/*``) were
+    deleted at B3 (Commit 12); any remaining caller is a sweep target
+    for B1's route-body rewrite.
+    """
+    raise RuntimeError(
+        "AgentRepository was deleted at Arc 5 Commit A5 (Path A). "
+        "V2 has no Agent layer; rewrite the caller against Admin "
+        "and Instance directly."
+    )
 
 
 def get_admin_audit_repository(db: DbSession) -> AdminAuditRepository:

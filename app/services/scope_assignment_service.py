@@ -57,7 +57,11 @@ from sqlalchemy.orm import Session
 
 from app.models.scope_assignment import EndReason, ScopeAssignment
 from app.repositories.admin_audit_repository import AuditContext
-from app.repositories.agent_repository import AgentRepository
+# Arc 5 Path A — AgentRepository deleted at Commit A5; V2 has no Agent layer.
+# The end-assignment cascade below previously walked Agent rows to rotate
+# keys per-Agent; the V2 cascade rewrite (lands at B2) walks ApiKey rows
+# directly by (admin_id, user_id) instead. The agent_repo block below is
+# stubbed to an empty agent list so the cascade is a no-op until B2.
 from app.repositories.scope_assignment_repository import (
     ScopeAssignmentRepository,
 )
@@ -248,7 +252,6 @@ class ScopeAssignmentService:
         from app.services.api_key_service import ApiKeyService
 
         sa_repo = ScopeAssignmentRepository(self.db)
-        agent_repo = AgentRepository(self.db)
         api_key_service = ApiKeyService(self.db)
 
         # ---- Step 1: end the assignment row (idempotent) ----
@@ -285,34 +288,12 @@ class ScopeAssignmentService:
                 self.db.commit()
             return ended
 
-        # ---- Step 2: resolve the Agent rows for this (user, tenant) ----
-        # In steady state we expect exactly one active Agent. We
-        # rotate defensively across all matches (including inactive
-        # historical rows) so deactivate-and-recreate cycles can't
-        # leak working keys via stale Agent rows.
-        target_agents = agent_repo.list_for_user(
-            user_id=assignment.user_id,
-            active_only=False,
-        )
-        target_agents = [
-            a for a in target_agents if a.tenant_id == assignment.tenant_id
-        ]
-
-        # ---- Step 3: rotate keys for each Agent ----
-        # ApiKeyService.rotate_keys_for_agent emits per-key
-        # KEY_ROTATED_ON_ROLE_CHANGE audit rows internally. Returns
-        # the count rotated for logging.
+        # ---- Step 2: V2 — Agent layer eliminated at Arc 5 Commit A5.
+        # The key-rotation cascade against the per-Agent row is gone;
+        # the V2 cascade rewrite (B2) walks ApiKey rows by (admin_id,
+        # user_id) directly. Until B2 the cascade is a no-op.
+        target_agents: list = []
         total_rotated = 0
-        for agent in target_agents:
-            rotated_count = api_key_service.rotate_keys_for_agent(
-                agent_id_pk=agent.id,
-                reason=(
-                    f"scope_assignment_ended:{reason.value}"
-                    + (f":{note}" if note else "")
-                ),
-                audit_ctx=audit_ctx,
-            )
-            total_rotated += rotated_count
 
         if autocommit:
             self.db.commit()

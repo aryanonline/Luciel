@@ -271,7 +271,7 @@ class ScopeAssignmentRepository:
         the service walks Agent -> ApiKey + LucielInstance -> ApiKey
         and emits the per-key KEY_ROTATED_ON_ROLE_CHANGE audit rows.
         Same hierarchy-logic-in-one-place doctrine as
-        AgentRepository.deactivate not cascading to LucielInstance.
+        (deleted V1) AgentRepository.deactivate not cascading to LucielInstance.
 
         autocommit=False lets the service compose this with create()
         in a single transaction (the promotion txn).

@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_engine
 from app.repositories.admin_audit_repository import AuditContext
-from app.repositories.agent_repository import AgentRepository
+# Arc 5 Path A — AgentRepository deleted at Commit A5; V2 has no Agent layer.
 from app.services.admin_service import AdminService
 from app.services.instance_service import InstanceService
 
@@ -44,7 +44,9 @@ def main() -> int:
     engine = get_engine()
     with Session(engine) as db:
         admin = AdminService(db)
-        agent_repo = AgentRepository(db)
+        # Arc 5 Path A — agent_repo no longer exists; the V2 cascade
+        # spine is admin-id-only. This script's `--tenant-id` arg is
+        # interpreted as the V2 admin_id post-Revision-B backfill.
         luciel_service = InstanceService(db, admin_service=admin)
 
         ctx = AuditContext(
@@ -61,7 +63,7 @@ def main() -> int:
                 args.tenant_id,
                 audit_ctx=ctx,
                 luciel_instance_service=luciel_service,
-                agent_repo=agent_repo,
+                agent_repo=None,
                 updated_by=args.actor_label,
                 autocommit=True,
             )

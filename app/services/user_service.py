@@ -36,7 +36,12 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.repositories.admin_audit_repository import AuditContext
-from app.repositories.agent_repository import AgentRepository
+# Arc 5 Path A — AgentRepository deleted at Commit A5. The User-deactivate
+# cascade below previously soft-deactivated every Agent under the User; V2
+# eliminates the Agent layer so the cascade collapses to (a) end every
+# active ScopeAssignment (which is the V2 source of truth for "is the User
+# bound to this Admin") and (b) deactivate the User row. The Agent step is
+# a no-op until Revision C drops the legacy agents table entirely.
 from app.repositories.scope_assignment_repository import ScopeAssignmentRepository
 from app.repositories.user_repository import UserRepository
 from app.models.scope_assignment import EndReason
@@ -303,7 +308,6 @@ class UserService:
 
         user_repo = UserRepository(self.db)
         sa_repo = ScopeAssignmentRepository(self.db)
-        agent_repo = AgentRepository(self.db)
 
         user = user_repo.get_by_pk(user_id)
         if user is None:
@@ -334,24 +338,10 @@ class UserService:
                 audit_ctx=audit_ctx,
             )
 
-        # ---- Step b: soft-deactivate every Agent ----
-        # Cross-tenant. AgentRepository.update emits per-Agent
-        # ACTION_DEACTIVATE audit rows. We loop here rather than
-        # issuing a bulk UPDATE because the audit-row contract is
-        # one row per mutation (per Step 24.5 doctrine).
-        active_agents = agent_repo.list_for_user(
-            user_id=user_id,
-            active_only=True,
-        )
-        for agent in active_agents:
-            agent_repo.update(
-                agent,
-                audit_ctx=audit_ctx,
-                active=False,
-                updated_by=(
-                    audit_ctx.actor_label if audit_ctx else None
-                ),
-            )
+        # ---- Step b (V2): Agent layer eliminated at Arc 5 Commit A5.
+        # The legacy per-Agent soft-deactivate is gone; V2's source of
+        # truth for "User bound to Admin" is ScopeAssignment, which
+        # Step a already ended above.
 
         # ---- Step c: soft-deactivate the User row ----
         # UserRepository.deactivate emits the USER_DEACTIVATED audit

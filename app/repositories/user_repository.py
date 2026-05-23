@@ -327,7 +327,7 @@ class UserRepository:
         Does NOT cascade to ScopeAssignments or ApiKeys -- that cascade
         lives in UserService.deactivate_user (Commit 2) so the
         hierarchy logic sits in one place. Same doctrine as
-        AgentRepository.deactivate not cascading to LucielInstance.
+        (deleted V1) AgentRepository.deactivate not cascading to LucielInstance.
 
         `reason` is the business justification recorded in the audit
         row's `note` field. UserDeactivate schema enforces 10-500 chars

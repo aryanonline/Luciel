@@ -39,7 +39,11 @@ from app.services.instance_service import (
     InstanceService,
 )
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
-from app.repositories.agent_repository import AgentRepository
+# Arc 5 Path A — AgentRepository deleted at Commit A5; the routes that
+# consumed it (/admin/agents/*) were already deleted at B3. The
+# Annotated annotation on the bootstrap-tenant route below is replaced
+# with ``object`` so the FastAPI dependency resolver still parses; the
+# B1 route-body sweep rewrites that route to not depend on AgentRepository.
 from app.schemas.agent import AgentBindUserPayload, AgentCreate, AgentRead, AgentUpdate
 from app.schemas.instance import (
     LucielInstanceCreate,
@@ -296,7 +300,10 @@ def update_tenant(
     db: DbSession,
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
     luciel_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
-    agent_repo: Annotated[AgentRepository, Depends(get_agent_repository)],
+    # Arc 5 Path A — agent_repo dependency dropped (V2 has no Agent layer).
+    # The deactivate_tenant_with_cascade signature still accepts the kwarg
+    # for backward compat; we pass None so the cascade-spine V2 rewrite at
+    # B2 can drop it cleanly.
 ) -> TenantConfigRead:
     ScopePolicy.enforce_tenant_scope(request, tenant_id)
     service = AdminService(db)
@@ -309,7 +316,7 @@ def update_tenant(
             tenant_id,
             audit_ctx=audit_ctx,
             luciel_instance_service=luciel_service,
-            agent_repo=agent_repo,
+            agent_repo=None,
             updated_by=getattr(request.state, "actor_label", None),
         )
         if not deactivated:

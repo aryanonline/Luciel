@@ -2,7 +2,7 @@
 
 Step 30a.4. Wraps app.models.user_invite.UserInvite. Mirrors the
 project-wide repository doctrine established by UserRepository and
-AgentRepository:
+(deleted V1) AgentRepository:
 
 * Pure CRUD. No ScopePolicy calls, no business-rule checks, no HTTP
   exceptions. Callers (InviteService / route handlers) handle those.

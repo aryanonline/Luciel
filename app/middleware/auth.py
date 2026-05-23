@@ -49,7 +49,14 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.db.session import SessionLocal
-from app.repositories.agent_repository import AgentRepository
+# Arc 5 Path A — AgentRepository deleted at Commit A5. The actor_user_id
+# resolution block below previously walked (tenant_id, domain_id, agent_id)
+# → Agent.user_id. V2 has no Agent layer; the V2 resolution path is
+# (admin_id, instance_id) → ScopeAssignment.user_id, which B2 will land.
+# Until then the actor_user_id stays None for non-cookied paths (which
+# matches the pre-Step-24.5b behaviour and is safe — audit rows that
+# need actor_user_id are written from the cookied path that already
+# resolves it from request.state).
 from app.services.api_key_service import ApiKeyService
 
 logger = logging.getLogger(__name__)
@@ -181,40 +188,15 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
             # leave user_id=None. The Agent natural-key lookup hits
             # the existing uq_agents_tenant_domain_agent unique
             # constraint composite index -- ~1ms.
+            # Arc 5 Path A (Commit A5) — Agent layer eliminated; the
+            # legacy (tenant_id, domain_id, agent_id) → Agent.user_id
+            # resolution path is gone. V2 actor_user_id resolution
+            # walks ScopeAssignment by (admin_id, instance_id) instead;
+            # that B2 rewrite lands alongside the cascade-spine V2
+            # collapse. Until then leave actor_user_id=None on the
+            # API-key middleware path (cookied path resolves it
+            # independently from the session cookie).
             actor_user_id = None
-            if tenant_id is not None and domain_id is not None and agent_id is not None:
-                agent_repo = AgentRepository(db)
-                agent = agent_repo.get_scoped(
-                    tenant_id=tenant_id,
-                    domain_id=domain_id,
-                    agent_id=agent_id,
-                )
-                if agent is not None:
-                    # Step 28 Phase 2 fix (D-pillar-13-a3-real-root-cause-2026-05-04):
-                    # this assignment was previously `user_id = agent.user_id`,
-                    # which created a never-read local and left request.state.
-                    # actor_user_id stuck at the line-115 default of None for
-                    # every agent-scoped key in production. The 30-line
-                    # docstring at the top of this file describes the contract
-                    # this typo was silently violating since Step 24.5b. The
-                    # downstream effect was that the worker memory-extraction
-                    # task wrote actor_user_id=NULL, which the post-Step-28
-                    # Phase-1 NOT NULL constraint then rejected -- producing
-                    # the swallowed IntegrityError that surfaced as 0
-                    # MemoryItem rows in Pillar 13 A3.
-                    actor_user_id = agent.user_id  # None until Commit 3 backfill
-                else:
-                    # Defensive: ApiKey references a non-existent Agent.
-                    # This shouldn't happen in steady state (keys are
-                    # minted against existing agents), but log loudly
-                    # if it does -- it indicates orphan key drift that
-                    # Step 28 cleanup should sweep.
-                    logger.warning(
-                        "auth middleware: ApiKey.id=%s references "
-                        "missing Agent (tenant=%s, domain=%s, "
-                        "agent_id=%s) -- user_id resolution skipped",
-                        api_key_id, tenant_id, domain_id, agent_id,
-                    )
 
         except Exception as exc:
             logger.error("Auth middleware error: %s", exc)
