@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcsUpdateLucielServicesOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:UpdateService",
+        "ecs:DescribeServices"
+      ],
+      "Resource": [
+        "arn:aws:ecs:ca-central-1:729005488042:service/luciel-cluster/luciel-backend-service",
+        "arn:aws:ecs:ca-central-1:729005488042:service/luciel-cluster/luciel-worker-service"
+      ]
+    }
+  ]
+}
