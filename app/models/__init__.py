@@ -38,6 +38,8 @@ from app.models.admin import (  # noqa: F401
     TIER_PRO,
     TIER_ENTERPRISE,
 )
+# Arc 6 A — admin_widget_domains allowlist (Free/Pro/Enterprise widget domain control).
+from app.models.admin_widget_domain import AdminWidgetDomain  # noqa: F401
 from app.models.instance import Instance  # noqa: F401
 # Arc 5 Path A Commit C2: app/models/aliases.py was deleted along with the
 # Tenant / TenantConfig / LucielInstance / DomainConfig / Agent transitional
@@ -85,4 +87,6 @@ __all__ = [
     "TIER_FREE",
     "TIER_PRO",
     "TIER_ENTERPRISE",
+    # Arc 6 A -- widget domain allowlist.
+    "AdminWidgetDomain",
 ]
