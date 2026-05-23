@@ -82,7 +82,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.integrations.stripe import get_stripe_client
-from app.models.aliases import TenantConfig
+from app.models.admin import Admin
 from app.models.user import User
 from app.services.billing_service import BillingService
 from app.services.magic_link_service import MagicLinkError, validate_session_token
@@ -221,12 +221,18 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
             # Distinct error code 'TENANT_DEACTIVATED' so audit-log
             # searches can distinguish "subscription expired" from
             # "tenant cascaded" in the field.
-            tenant_config = (
-                db.query(TenantConfig)
-                .filter(TenantConfig.tenant_id == tenant_id)
+            # Arc 5 B4 — Admin replaces TenantConfig (V2 noun set); Admin.id
+            # is the semantic VARCHAR(100) key mirrored from the legacy
+            # tenant_configs.tenant_id at Revision B backfill (active rows
+            # only). Inactive/soft-deleted tenants are not minted into
+            # admins so the active-check below is necessary but redundant
+            # for the post-Revision-B world.
+            admin_row = (
+                db.query(Admin)
+                .filter(Admin.id == tenant_id)
                 .first()
             )
-            if tenant_config is None or not tenant_config.active:
+            if admin_row is None or not admin_row.active:
                 return JSONResponse(
                     status_code=401,
                     content={

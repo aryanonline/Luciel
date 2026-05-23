@@ -67,8 +67,10 @@ class UserInviteCreate(BaseModel):
         min_length=2,
         max_length=100,
         description=(
-            "Role label within the (tenant, domain) scope. v1 defaults to "
-            "'teammate'; Step 30a.5 introduces 'department_lead'."
+            "Role label within the (Admin, Instance) scope. v1 defaults to "
+            "'teammate'; Arc 5 V2 names: 'admin_user' (was 'tenant_admin') and "
+            "'instance_lead' (was 'department_lead'). Freeform string — no "
+            "enum guard at v1."
         ),
     )
 
