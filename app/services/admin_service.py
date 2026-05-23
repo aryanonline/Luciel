@@ -579,118 +579,22 @@ class AdminService:
         updated_by: str | None = None,
         autocommit: bool = True,
     ) -> int:
-        """Soft-deactivate every active memory_items row for a domain.
+        """Arc 5 Path A V2 no-op stub.
 
-        memory_items has no direct domain_id column -- domain
-        attribution is via the agent the memory was scoped to:
-            memory_items.agent_id -> agents.agent_id (within tenant)
-            agents.domain_id == :domain_id
-
-        Tenant-scoped memories with agent_id=NULL are NOT touched
-        here -- they have no domain attribution. They survive a
-        domain-only deactivation and are only cleaned up by tenant
-        deactivation.
-
-        Called from deactivate_domain (cascade). Filters agents by
-        domain_id only (not by Agent.active) so a re-run after
-        agents have already been deactivated still finds the right
-        memory rows.
-
-        Returns count deactivated. Always emits one
-        ACTION_CASCADE_DEACTIVATE audit row even when count == 0.
-        Breakdown by agent_id is captured in after_json.
-
-        audit_ctx is REQUIRED.
+        The Domain layer was eliminated per the aggressive-cleanup
+        amendment. V2 has no domain-scoped memory cascade; this method
+        is preserved only so any straggler caller in tests / verification
+        compiles. Returns 0; does NOT emit an audit row (the cascade
+        spine routes around this method via the V2-aware
+        ``deactivate_tenant_with_cascade``).
         """
-        from sqlalchemy import func
-        from app.models.memory import MemoryItem
-        from app.models.aliases import Agent
-        from app.repositories.admin_audit_repository import AdminAuditRepository
-        from app.models.admin_audit_log import (
-            ACTION_CASCADE_DEACTIVATE,
-            RESOURCE_MEMORY,
+        logger.info(
+            "bulk_soft_deactivate_memory_items_for_domain: Arc 5 Path A "
+            "V2 no-op stub tenant_id=%s domain_id=%s.",
+            tenant_id,
+            domain_id,
         )
-
-        if audit_ctx is None:
-            raise ValueError(
-                "bulk_soft_deactivate_memory_items_for_domain requires audit_ctx"
-            )
-
-        try:
-            # Subquery: agent_id slugs in this domain.
-            agent_ids_subquery = (
-                self.db.query(Agent.agent_id)
-                .filter(
-                    Agent.tenant_id == tenant_id,
-                    Agent.domain_id == domain_id,
-                )
-                .subquery()
-            )
-
-            # Pre-deactivation breakdown.
-            breakdown_rows = (
-                self.db.query(
-                    MemoryItem.agent_id,
-                    func.count().label("row_count"),
-                )
-                .filter(
-                    MemoryItem.tenant_id == tenant_id,
-                    MemoryItem.agent_id.in_(agent_ids_subquery),
-                    MemoryItem.active.is_(True),
-                )
-                .group_by(MemoryItem.agent_id)
-                .all()
-            )
-            breakdown = [
-                {"agent_id": agent_id, "count": row_count}
-                for (agent_id, row_count) in breakdown_rows
-            ]
-
-            count = (
-                self.db.query(MemoryItem)
-                .filter(
-                    MemoryItem.tenant_id == tenant_id,
-                    MemoryItem.agent_id.in_(agent_ids_subquery),
-                    MemoryItem.active.is_(True),
-                )
-                .update(
-                    {"active": False},
-                    synchronize_session=False,
-                )
-            )
-
-            AdminAuditRepository(self.db).record(
-                ctx=audit_ctx,
-                tenant_id=tenant_id,
-                action=ACTION_CASCADE_DEACTIVATE,
-                resource_type=RESOURCE_MEMORY,
-                resource_pk=None,
-                resource_natural_id=None,
-                domain_id=domain_id,
-                after={
-                    "count": count,
-                    "scope": "domain",
-                    "tenant_id": tenant_id,
-                    "domain_id": domain_id,
-                    "breakdown": breakdown,
-                    "trigger": "domain_deactivate_cascade",
-                    "updated_by": updated_by,
-                },
-                note=(
-                    f"Cascade memory_items deactivation from domain "
-                    f"{tenant_id}/{domain_id} deactivation "
-                    f"(via agents subquery; PIPEDA P5)"
-                ),
-                autocommit=False,
-            )
-
-            if autocommit:
-                self.db.commit()
-        except Exception:
-            self.db.rollback()
-            raise
-
-        return count
+        return 0
     
 
     def deactivate_tenant_with_cascade(
