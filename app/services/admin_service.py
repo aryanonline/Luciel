@@ -1779,8 +1779,8 @@ class AdminService:
             Subscription,
             TIER_PERMITTED_SCOPES,
         )
-        from app.repositories.luciel_instance_repository import (
-            LucielInstanceRepository,
+        from app.repositories.instance_repository import (
+            InstanceRepository,
         )
         from app.services.instance_service import TierScopeViolationError
 
@@ -1816,7 +1816,7 @@ class AdminService:
 
         cap = int(sub.instance_count_cap or 0)
         if cap > 0:
-            used = LucielInstanceRepository(self.db).count_active_for_tenant(tenant_id)
+            used = InstanceRepository(self.db).count_active_for_admin(tenant_id)
             if used >= cap:
                 raise TierScopeViolationError(
                     f"Tenant {tenant_id!r} has reached its instance_count_cap="

@@ -32,8 +32,8 @@ from app.repositories.admin_audit_repository import (  # noqa: E402
     AuditContext,
 )
 from app.repositories.agent_repository import AgentRepository  # noqa: E402
-from app.repositories.luciel_instance_repository import (  # noqa: E402
-    LucielInstanceRepository,
+from app.repositories.instance_repository import (  # noqa: E402
+    InstanceRepository,
 )
 from app.services.admin_service import AdminService  # noqa: E402
 from app.services.instance_service import InstanceService  # noqa: E402
@@ -101,8 +101,14 @@ def get_consent_policy(
 ) -> ConsentPolicy:
     return ConsentPolicy(consent_repository=repo)
 
-def get_luciel_instance_repository(db: DbSession) -> LucielInstanceRepository:
-    return LucielInstanceRepository(db)
+def get_instance_repository(db: DbSession) -> InstanceRepository:
+    return InstanceRepository(db)
+
+
+# Arc 5 Path A — transitional alias for the old factory name. Removed
+# at B2 when chat_service.py + admin_service.py + ad-hoc importers
+# finish renaming to ``get_instance_repository``.
+get_luciel_instance_repository = get_instance_repository
 
 def get_chat_service(
     session_service: Annotated[SessionService, Depends(get_session_service)],
@@ -110,9 +116,9 @@ def get_chat_service(
     trace_service: Annotated[TraceService, Depends(get_trace_service)],
     knowledge_retriever: Annotated[KnowledgeRetriever, Depends(get_knowledge_retriever)],
     config_repository: Annotated[ConfigRepository, Depends(get_config_repository)],
-    luciel_instance_repository: Annotated[                                          # Step 24.5 File 15
-        LucielInstanceRepository, Depends(get_luciel_instance_repository)           # Step 24.5 File 15
-    ],                                                                              # Step 24.5 File 15
+    instance_repository: Annotated[
+        InstanceRepository, Depends(get_instance_repository)
+    ],
     consent_policy: Annotated[ConsentPolicy, Depends(get_consent_policy)],
 ) -> ChatService:
     return ChatService(
@@ -124,7 +130,7 @@ def get_chat_service(
         trace_service=trace_service,
         knowledge_retriever=knowledge_retriever,
         config_repository=config_repository,
-        luciel_instance_repository=luciel_instance_repository,   # Step 24.5 File 15
+        instance_repository=instance_repository,
         consent_policy=consent_policy,
     )
 

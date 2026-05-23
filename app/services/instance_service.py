@@ -43,7 +43,7 @@ from app.models.aliases import (
 )
 from app.repositories.admin_audit_repository import AuditContext
 from app.repositories.agent_repository import AgentRepository
-from app.repositories.luciel_instance_repository import LucielInstanceRepository
+from app.repositories.instance_repository import InstanceRepository
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ class InstanceService:
         admin_service,  # app.services.admin_service.AdminService (Step 24)
     ) -> None:
         self.db = db
-        self.repo = LucielInstanceRepository(db)
+        self.repo = InstanceRepository(db)
         self.agents = AgentRepository(db)
         # AdminService is injected (not imported directly) to avoid a
         # circular import: AdminService is what File 11 patches to call

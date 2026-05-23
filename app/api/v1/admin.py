@@ -626,10 +626,10 @@ def create_embed_key(
     # an embed key pinned to another tenant's instance, which would
     # silently cross the scope boundary at chat time.
     if payload.luciel_instance_id is not None:
-        from app.repositories.luciel_instance_repository import (
-            LucielInstanceRepository,
+        from app.repositories.instance_repository import (
+            InstanceRepository,
         )
-        instance_repo = LucielInstanceRepository(db)
+        instance_repo = InstanceRepository(db)
         instance = instance_repo.get_by_pk(payload.luciel_instance_id)
         if instance is None:
             raise HTTPException(

@@ -46,7 +46,7 @@ from app.policy.consent import ConsentPolicy
 from app.policy.engine import PolicyEngine
 from app.policy.escalation import EscalationService
 from app.repositories.config_repository import ConfigRepository
-from app.repositories.luciel_instance_repository import LucielInstanceRepository  # Step 24.5 File 15
+from app.repositories.instance_repository import InstanceRepository  # Arc 5 Path A — V2 Instance repo
 from app.services.session_service import SessionService
 from app.services.trace_service import TraceService
 from app.tools.broker import ToolBroker
@@ -108,7 +108,7 @@ class ChatService:
         trace_service: TraceService,
         knowledge_retriever: KnowledgeRetriever,
         config_repository: ConfigRepository,
-        luciel_instance_repository: LucielInstanceRepository,  # Step 24.5 File 15
+        instance_repository: InstanceRepository,
         consent_policy: ConsentPolicy | None = None,
     ) -> None:
         self.session_service = session_service
@@ -119,7 +119,11 @@ class ChatService:
         self.trace_service = trace_service
         self.knowledge_retriever = knowledge_retriever
         self.config_repository = config_repository
-        self.luciel_instance_repository = luciel_instance_repository  # Step 24.5 File 15
+        self.instance_repository = instance_repository
+        # Arc 5 Path A — transitional attribute alias so the (legacy)
+        # method bodies that still reference ``self.luciel_instance_repository``
+        # keep working until B2 sweeps the V2 chat-service rewrite.
+        self.luciel_instance_repository = instance_repository
         self.consent_policy = consent_policy
         self.policy_engine = PolicyEngine()
         self.escalation_service = EscalationService()
