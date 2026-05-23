@@ -1,0 +1,38 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Arc6SsmReadStripeProduction",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_*"
+    },
+    {
+      "Sid": "Arc6SsmWriteStripeProduction",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:AddTagsToResource"
+      ],
+      "Resource": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_*"
+    },
+    {
+      "Sid": "Arc6KmsViaSsmForStripeProduction",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ssm.ca-central-1.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

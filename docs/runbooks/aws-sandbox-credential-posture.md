@@ -175,7 +175,71 @@ The canonical policy contents are in `ARCHITECTURE.md` \u00a73.2.8 (capability s
 }
 ```
 
-*Canonical JSON last updated:* Arc 5 Commit 21, 2026-05-23. The Sid count is now **11**: 8 baseline blocks from Commit 6 + 2 blocks from the Commit 7 expansion (`EcrPushBackendOnly`, `EcsRegisterTaskDef`) + 1 block from the Commit 21 expansion (`RdsSnapshotLucielDbOnly`). Each expansion is recorded in §8 expansion log below with TODO anchor, rejected alternatives, blast radius, and partner-approval text.
+*Canonical JSON last updated:* Arc 5 Commit 21, 2026-05-23. The Sid count is **11**: 8 baseline blocks from Commit 6 + 2 blocks from the Commit 7 expansion (`EcrPushBackendOnly`, `EcsRegisterTaskDef`) + 1 block from the Commit 21 expansion (`RdsSnapshotLucielDbOnly`). Each expansion is recorded in §8 expansion log below with TODO anchor, rejected alternatives, blast radius, and partner-approval text.
+
+### 3-bis. Customer-managed policy — `LucielSandboxStripeScope` (Arc 6 Commit 2 onward)
+
+At Arc 6 Commit 2 (2026-05-23), the canonical `LucielSandboxArc5MigrateScope` inline policy (§3 above) reached **128.9% of the 2048-character IAM inline-user-policy size limit** when the 3 Arc 6 Stripe Sids were drafted to be appended in-place (2640 minified chars total). Rather than refactor the 11-Sid Arc 5 policy to compact baseline Sids (risk to Arc 5 audit-chain continuity), Arc 6 introduced the Stripe capability as a **separate customer-managed policy** attached to the same user. The customer-managed shape is structurally cleaner than a second inline policy: it has its own version history (IAM keeps up to 5 versions per managed policy), can be detached without being deleted (independently revocable at Arc 8 close or whenever the Stripe surface is retired), can be reused on future principals if needed (e.g., if a Stripe-only operator role is minted later), and shows up in IAM Console under a stable ARN distinct from any user's inline policies. The Arc 5 inline policy stays byte-identical to its Arc 5 Commit 21 final form; the Arc 6 Stripe scope is additive and independently revocable.
+
+**Policy attachment shape:**
+
+| Field | Value |
+|---|---|
+| IAM principal type | Customer-managed policy (not inline) |
+| Policy name | `LucielSandboxStripeScope` |
+| Policy ARN | `arn:aws:iam::729005488042:policy/LucielSandboxStripeScope` |
+| Attached to | IAM user `luciel-sandbox-agent` (account `729005488042`) |
+| Sid count | 3 |
+| Minified size | 646 chars (well under the 6144-char limit for customer-managed policies) |
+| Created by | Partner via IAM Console, Saturday 2026-05-23 6:26 PM EDT |
+| Apply method (if recreating) | `aws iam create-policy --policy-name LucielSandboxStripeScope --policy-document file://ops/iam/LucielSandboxStripeScope.json` then `aws iam attach-user-policy --user-name luciel-sandbox-agent --policy-arn arn:aws:iam::729005488042:policy/LucielSandboxStripeScope` (run from partner's laptop with `luciel-admin` creds) |
+| Reference copy in repo | `ops/iam/LucielSandboxStripeScope.json` |
+| Verification (this commit) | Four `boto3.client('ssm')` probes at 2026-05-23 ≈22:26 UTC: (1) `get_parameter` on `/luciel/production/stripe_price_intro_fee` returned `price_*` (30 chars), (2) `get_parameter WithDecryption=True` on `/luciel/production/stripe_secret_key` returned `sk_live_*` (107 chars) — verifies read + KMS decrypt, (3) `put_parameter Type=SecureString` to `/luciel/production/stripe_arc6_iam_probe` returned 200 — verifies write + KMS encrypt, (4) `get_parameter` round-trip on the probe param returned the exact written value — verifies the full encrypt+decrypt cycle. |
+
+**JSON body** (the canonical reference is `ops/iam/LucielSandboxStripeScope.json`; reproduced here for offline-read convenience):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Arc6SsmReadStripeProduction",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_*"
+    },
+    {
+      "Sid": "Arc6SsmWriteStripeProduction",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:AddTagsToResource"
+      ],
+      "Resource": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_*"
+    },
+    {
+      "Sid": "Arc6KmsViaSsmForStripeProduction",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ssm.ca-central-1.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
+```
+
+The expansion log entry for this customer-managed-policy creation is in §8 (the `2026-05-23 — Arc 6 Commit 2` block below).
 
 ## 4. Paste protocol \u2014 how the agent receives the credential at session start
 
@@ -288,6 +352,27 @@ If only the AWS Console policy is updated and either canonical edit is missing a
 - Partner approval (verbatim): `"Approved — I'll add the Sid block in Console now"` (Saturday, May 23, 2026 at 4:15 PM EDT via `ask_user_question`); JSON paste confirmed by partner (full policy text echoed back at 4:31 PM EDT showing `RdsSnapshotLucielDbOnly` Sid present); first successful `CreateDBSnapshot` API call at 20:31:58 UTC produced `arn:aws:rds:ca-central-1:729005488042:snapshot:luciel-arc5-pre-revision-b-20260523203158`.
 - Canonical mirror: `CANONICAL_RECAP.md` §17 entry `2026-05-23 (Arc 5 Commit 21 — Sandbox credential scope expansion for RDS snapshot capability)`; full ARN / SnapshotCreateTime / engine details at `docs/runbooks/arc5-revision-b-c-prod-apply-and-rollback.md` (ACTUAL RUN to be appended as Revisions B and C execute).
 
+
+#### 2026-05-23 — Arc 6 Commit 2 — LucielSandboxStripeScope customer-managed policy (3 Sids: Arc6SsmReadStripeProduction + Arc6SsmWriteStripeProduction + Arc6KmsViaSsmForStripeProduction) (commit `10bd9d7`)
+- TODO anchor: Arc 6 Commit 2 (Stripe Live wipe — cancel 23 internal/test subs + archive 6 old Prices) and Arc 6 Commit 4 (Stripe mint + 4 SSM puts + `app/core/config.py` rewrite). The full 11-commit Arc 6 plan is at `arc6-out/A-arc6-preflight.md` §3.
+- Need: The Arc 6 Stripe surface restructure requires (a) reading `STRIPE_SECRET_KEY` from SSM to authenticate Stripe API calls at Commit 2 (wipe) and Commit 4 (mint); (b) reading the six existing Stripe Price IDs from SSM at Commit 2 so the wipe record captures the pre-state precisely (which Price IDs are being archived); (c) writing four new Stripe Price IDs to SSM at Commit 4 (the new `stripe_price_pro_monthly`, `stripe_price_pro_annual`, `stripe_price_enterprise_floor_annual`, `stripe_price_enterprise_metered_unit` paths under `/luciel/production/stripe_*`); (d) KMS decrypt/encrypt via the AWS-managed `alias/aws/ssm` key for SecureString get/put. The Arc 5 inline policy had zero SSM and zero KMS Sids — this is a genuine gap, not a redundancy. Preflight miss honestly logged: `arc6-out/A-arc6-preflight.md` initially asserted "no IAM expansion expected at Arc 6" — that claim was wrong; the Commit 2 first call to `boto3 ssm.get_parameter` returned `AccessDeniedException`, which surfaced the gap before any destructive Stripe action.
+- New Sid blocks added (3, all narrowly resource-scoped to the Stripe production namespace):
+  1. `Arc6SsmReadStripeProduction` — Actions `ssm:GetParameter`, `ssm:GetParameters`; Resource `arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_*` (the wildcard at the end bounds reads to the 9 known Stripe paths: `stripe_secret_key`, `stripe_webhook_secret`, `stripe_price_individual`, `stripe_price_individual_annual`, `stripe_price_team_monthly`, `stripe_price_team_annual`, `stripe_price_company_monthly`, `stripe_price_company_annual`, `stripe_price_intro_fee`, plus the 4 new Pro/Enterprise paths landing at Commit 4 — all match the `stripe_*` prefix).
+  2. `Arc6SsmWriteStripeProduction` — Actions `ssm:PutParameter`, `ssm:AddTagsToResource`; same Resource scope as the read Sid. The write Sid is what lets Commit 4 land the new Price IDs in SSM with the overwrite semantic for any path that needs replacement.
+  3. `Arc6KmsViaSsmForStripeProduction` — Actions `kms:Decrypt`, `kms:Encrypt`, `kms:GenerateDataKey`; Resource `*` (the AWS-managed SSM CMK does not expose a stable ARN; AWS recommends `Resource: "*"` for `kms:ViaService`-gated grants on AWS-managed keys); Condition `kms:ViaService = ssm.ca-central-1.amazonaws.com` (this is the load-bearing constraint — without it, this Sid would grant generic KMS; with it, the CMK can only be used through SSM API calls, never directly).
+- Tighter alternatives rejected:
+  1. **Enumerate each of the 13 SSM Stripe paths explicitly in `Resource: []` instead of using the `stripe_*` wildcard** — REJECTED: the Commit 4 plan mints four new Stripe Price IDs (Pro monthly, Pro annual, Enterprise floor annual, Enterprise metered unit) at new SSM paths that don't exist yet; enumerating all 13 means amending the IAM policy again at Commit 4 (a second scope-expansion event for the same Arc), violating the "single-event minimality" gate. The `stripe_*` wildcard at the end of the Resource ARN is bounded to one namespace (`/luciel/production/stripe_*`) and excludes every other production secret (`database-url`, `magic-link-secret`, `JWT_*`, `REDIS_URL`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `SES_SNS_TOPIC_ARN`, `platform-admin-key`, `worker_database_url`) by construction.
+  2. **Mint a one-shot `luciel-arc6-stripe-operator-role` with MFA-required trust policy (the Step 28 P3-K ceremony pattern)** — REJECTED for proportionality: the P3-K ceremony was designed for a single-use admin-DSN read that crossed a higher trust boundary (the `luciel_admin` DB password). The Stripe Live secret is a recurring operational secret (the running ECS container already reads it at every container start; the agent reading it once per Arc-6 wipe + once per Arc-6 mint is the same posture as the container). The MFA-ceremony role is the right shape when the secret is RARE-USE; here the secret is COMMON-USE and the appropriate posture is sandbox-agent-scoped read with the audit-trail discipline already enforced by §9 of this runbook. Future Arc 8 WU-7/WU-8 work will also need Stripe-side reads (for metering emitter implementation); minting a one-shot role per Arc creates ceremony fatigue that erodes audit-trail discipline.
+  3. **Have the partner run all Stripe-side work from their laptop with `luciel-admin` creds; the sandbox does only docs/code/migrations** — REJECTED for symmetry: the Arc 6 plan is an integrated 11-commit arc where Stripe Live state and database state and code state must land in tight sequence; splitting Commit 2 + Commit 4 to a different operator and a different audit trail breaks the "one arc, one operator, one continuous audit chain" property that has been the Arc 5 doctrine. Symmetry is doctrinally load-bearing per the partner directive ("we still maintain the discipline and symmetry between our docs properly").
+  4. **Grant `kms:Decrypt` / `kms:Encrypt` WITHOUT the `kms:ViaService` condition** — REJECTED: this is the canonical least-privilege miss for KMS grants on AWS-managed keys. With the condition, the CMK can only be exercised through SSM (which is the only legitimate path); without it, a credential compromise gives the attacker generic KMS exposure on the AWS-managed key.
+- Blast-radius analysis (worst case — agent malfunction / credential compromise):
+  - **What the new capability adds**: read + write on 9 existing + 4 new SSM SecureString parameters (all under `/luciel/production/stripe_*`); decrypt/encrypt on the AWS-managed SSM CMK *only when invoked through SSM*.
+  - **What the attacker can DO with a compromised key**: read the Stripe Live secret key (already a known prod secret loaded into the running ECS container at every start — the same exposure the running container has); read the Stripe Live webhook signing secret; read all 7+ Stripe Price IDs (already publicly readable from Stripe Dashboard with the secret key); write arbitrary values to the 13 Stripe SSM paths (forcing the next ECS container restart to load corrupted/attacker-chosen Price IDs, which would cause `/billing/checkout` to mint sessions against attacker-chosen Prices — a real availability + integrity exposure).
+  - **What the attacker CANNOT do**: read or write any non-Stripe SSM parameter (the `stripe_*` resource suffix on the wildcard excludes every other prod secret); use the KMS CMK outside SSM (the `kms:ViaService` condition); rotate IAM; create or delete SSM parameters under any other path; mutate ECS services, task definitions, RDS, or any other account resource. The Arc 5 boundary surface (no `iam:*`, no `ecs:UpdateService` on this inline policy, no `ec2:*` write, no broad `*` Resource on any new Sid) remains intact.
+  - **Detection layer**: the SSM-write Sid is the only path through which an attacker could corrupt prod Stripe Price IDs; CloudTrail captures every `ssm:PutParameter` call against `/luciel/production/stripe_*` and the agent's runbook ACTUAL RUN sections capture every legitimate write. Reconciliation between CloudTrail and the in-repo runbook is the second-layer audit defense.
+  - **Recovery layer**: every SSM SecureString parameter in `/luciel/production/stripe_*` retains version history (the `ssm:GetParameterHistory` API returns prior values for up to 100 versions, AWS retention default); a corruption event is recoverable by re-putting the prior version. The Stripe Price IDs are also recoverable from the Stripe Dashboard listing in `acct_1TX2BmRytQVRVXw7` — they are not destroyed by an SSM write.
+- Partner approval (verbatim): `"I will give you the scope exapnsion partner"` (Saturday, May 23, 2026 at 6:14 PM EDT via free-text reply to the 5-gate scope-expansion question), followed by `"okay partner I have created the policy for you: [LucielSandboxStripeScope](https://us-east-1.console.aws.amazon.com/iam/home?region=ca-central-1#/policies/details/arn%3Aaws%3Aiam%3A%3A729005488042%3Apolicy%2FLucielSandboxStripeScope)"` (Saturday, May 23, 2026 at 6:26 PM EDT confirming the policy was created and attached). The post-paste verification: four `boto3.client('ssm')` probes from the sandbox principal at ≈22:26 UTC — (1) `get_parameter` on `/luciel/production/stripe_price_intro_fee` returned a `price_*`-prefix value (30 chars); (2) `get_parameter WithDecryption=True` on `/luciel/production/stripe_secret_key` returned a `sk_live_*`-prefix value (107 chars), verifying the SSM read + KMS-via-SSM decrypt path; (3) `put_parameter Type=SecureString` to `/luciel/production/stripe_arc6_iam_probe` returned HTTP 200, verifying the SSM write + KMS-via-SSM encrypt path; (4) round-trip `get_parameter` on the probe param returned the exact written value byte-for-byte. CloudTrail events for these four calls (operation = `GetParameter` / `PutParameter`, principal = `arn:aws:iam::729005488042:user/luciel-sandbox-agent`, eventTime ≈2026-05-23T22:26:00Z) constitute the second-layer audit anchor. The probe parameter `/luciel/production/stripe_arc6_iam_probe` is left in SSM through Arc 6 close (cleaned up at Commit 11 doctrine-close as part of the Arc 6 sediment-sweep).
+- Canonical mirror: `CANONICAL_RECAP.md` §17 entry `2026-05-23 (Arc 6 Commit 2 — Sandbox credential scope expansion for Stripe production SSM read/write + KMS via SSM via customer-managed policy LucielSandboxStripeScope)` — landing in the same Commit 2 paperwork commit that adds this expansion-log entry. **The Arc 5 inline policy `LucielSandboxArc5MigrateScope` is unchanged** (11 Sids, byte-identical to its Arc 5 Commit 21 form). The 3 new Sids land in a **customer-managed policy** `LucielSandboxStripeScope` (ARN `arn:aws:iam::729005488042:policy/LucielSandboxStripeScope`, §3-bis above) attached to the sandbox-agent user. The customer-managed shape was selected over a second inline policy after the Arc 5 inline policy's 2640-char projected size exceeded the 2048-char IAM inline-user-policy limit (128.9% utilisation); customer-managed policies have a 6144-char limit (we use 646 chars, 10.5%), get versioned by IAM (up to 5 versions retained), are independently revocable without affecting the Arc 5 policy, and can be reused on future principals if a Stripe-only operator role is minted later. Full canonical JSON at `ops/iam/LucielSandboxStripeScope.json`; delta reasoning at `ops/iam/arc6_stripe_ssm_scope_expansion.json`.
 
 <!--
 Future expansion entries land below this comment in chronological order. Template:

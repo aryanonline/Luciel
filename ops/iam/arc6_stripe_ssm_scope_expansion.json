@@ -1,0 +1,52 @@
+{
+  "_meta": {
+    "purpose": "Arc 6 — Stripe SKU restructure — sandbox-agent scope expansion. THREE new Sids that land as a CUSTOMER-MANAGED policy named `LucielSandboxStripeScope` (ARN `arn:aws:iam::729005488042:policy/LucielSandboxStripeScope`) attached to IAM user `luciel-sandbox-agent` in account `729005488042` region `ca-central-1`. This file is the delta view of the new capability; the paste-ready form (Version+Statement wrapper, 646 chars) is at `LucielSandboxStripeScope.json`. The existing 11-Sid inline `LucielSandboxArc5MigrateScope` policy is byte-identical-unchanged; we did NOT append into it because doing so would have exceeded the IAM inline-user-policy 2048-char limit (2640 chars total vs 2048, 128.9%). Customer-managed shape was chosen over a second inline policy because it has its own version history, is independently revocable, can be reused on future principals (e.g. a CI runner), and gives a single canonical ARN for audit. Created by partner via IAM Console at 2026-05-23 6:26 PM EDT.",
+    "expansion_event_id": "arc-6-commit-2-stripe-ssm-scope",
+    "expansion_date": "2026-05-23",
+    "expansion_anchor": "Arc 6 Commit 2 — Stripe Live wipe + Commit 4 — Stripe mint + SSM put",
+    "scope_protocol_drift": "D-prod-credential-scope-expansion-protocol-2026-05-23",
+    "canonical_runbook": "docs/runbooks/aws-sandbox-credential-posture.md §3-bis + §8 (entries land in same commit)",
+    "policy_arn": "arn:aws:iam::729005488042:policy/LucielSandboxStripeScope",
+    "policy_shape": "customer-managed (AWS::IAM::ManagedPolicy)",
+    "policy_size_chars": 646,
+    "policy_size_limit_chars": 6144,
+    "arc5_inline_policy_status": "UNCHANGED (still 11 Sids, byte-identical to Arc 5 Commit 21 form)",
+    "verification_evidence": "Four SSM probes executed at ≈22:26 UTC 2026-05-23 all PASSED: (1) get_parameter on stripe_price_intro_fee → price_* (30 chars); (2) get_parameter WithDecryption=True on stripe_secret_key → sk_live_* (107 chars); (3) put_parameter Type=SecureString to /luciel/production/stripe_arc6_iam_probe → 200 OK; (4) round-trip read on probe → exact match. Probe parameter cleanup deferred to Arc 6 Commit 11.",
+    "blast_radius_analysis": "All three Sids resource-scope to `parameter/luciel/production/stripe_*` (a 9-key namespace, all Stripe-related: secret_key, webhook_secret, 7 Price IDs). The agent cannot read or write any other SSM parameter, including the database-url, magic-link-secret, JWT keys, or any non-Stripe production secret. KMS access is gated by `kms:ViaService=ssm.ca-central-1.amazonaws.com` — the AWS-managed SSM key can only be exercised through SSM API calls, not via direct KMS. Worst case on credential compromise: attacker can read Stripe Live secret key + the 7 Stripe Price IDs (already a known prod secret loaded into the running ECS container), and can write arbitrary values to those 9 SSM paths. Attacker CANNOT decrypt non-Stripe SSM SecureStrings, cannot rotate IAM, cannot affect database, cannot mutate ECS services or task definitions (those Sids remain unchanged), cannot affect any other account resource."
+  },
+  "Sid_blocks_in_customer_managed_policy": [
+    {
+      "Sid": "Arc6SsmReadStripeProduction",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_*"
+    },
+    {
+      "Sid": "Arc6SsmWriteStripeProduction",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:AddTagsToResource"
+      ],
+      "Resource": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/stripe_*"
+    },
+    {
+      "Sid": "Arc6KmsViaSsmForStripeProduction",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ssm.ca-central-1.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
