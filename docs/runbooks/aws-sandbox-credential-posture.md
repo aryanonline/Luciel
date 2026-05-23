@@ -139,10 +139,43 @@ The canonical policy contents are in `ARCHITECTURE.md` \u00a73.2.8 (capability s
         "sts:GetCallerIdentity"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "EcrPushBackendOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImage"
+      ],
+      "Resource": "arn:aws:ecr:ca-central-1:729005488042:repository/luciel-backend"
+    },
+    {
+      "Sid": "EcsRegisterTaskDef",
+      "Effect": "Allow",
+      "Action": "ecs:RegisterTaskDefinition",
+      "Resource": "*"
+    },
+    {
+      "Sid": "RdsSnapshotLucielDbOnly",
+      "Effect": "Allow",
+      "Action": [
+        "rds:CreateDBSnapshot",
+        "rds:DescribeDBSnapshots",
+        "rds:AddTagsToResource"
+      ],
+      "Resource": [
+        "arn:aws:rds:ca-central-1:729005488042:db:luciel-db",
+        "arn:aws:rds:ca-central-1:729005488042:snapshot:luciel-arc5-*"
+      ]
     }
   ]
 }
 ```
+
+*Canonical JSON last updated:* Arc 5 Commit 21, 2026-05-23. The Sid count is now **11**: 8 baseline blocks from Commit 6 + 2 blocks from the Commit 7 expansion (`EcrPushBackendOnly`, `EcsRegisterTaskDef`) + 1 block from the Commit 21 expansion (`RdsSnapshotLucielDbOnly`). Each expansion is recorded in §8 expansion log below with TODO anchor, rejected alternatives, blast radius, and partner-approval text.
 
 ## 4. Paste protocol \u2014 how the agent receives the credential at session start
 
@@ -235,7 +268,26 @@ If only the AWS Console policy is updated and either canonical edit is missing a
 
 ### Expansion log (chronological)
 
-No expansions yet. The policy at Arc 5 Commit 6 IS the baseline.
+#### 2026-05-23 — Arc 5 Commit 7 — EcrPushBackendOnly + EcsRegisterTaskDef (commit `19a40fa`)
+- TODO anchor: TODO #11 (Revision A prod apply)
+- Need: Push the Revision-A-baked image to ECR and register a new `luciel-migrate` task-definition revision pointing at it.
+- New Sid blocks added: `EcrPushBackendOnly`, `EcsRegisterTaskDef`.
+- Tighter alternatives rejected: scoping `RegisterTaskDefinition` to family `luciel-migrate` via `ecs:family` condition key — REJECTED because that condition key does not exist (IAM Console returned `Invalid Service Condition Key: ecs:family` on save attempt). Narrow scope is enforced execution-side via the already-family-scoped `ecs:RunTask` Sid.
+- Partner approval (verbatim): recorded in the partner-side IAM Console save event for `LucielSandboxArc5MigrateScope` at the Commit-7 timestamp.
+- Canonical mirror: `CANONICAL_RECAP.md` §17 Arc 5 Commit 7 entry; full ARNs / digests / log streams at `docs/runbooks/arc5-revision-a-prod-apply-and-rollback.md` §6.
+
+#### 2026-05-23 — Arc 5 Commit 21 — RdsSnapshotLucielDbOnly (commit `<this-commit-hash>`)
+- TODO anchor: TODO #12 (Commits 20-25 PROD execution — Revisions B + C).
+- Need: Create three RDS snapshots of `luciel-db` (pre-Revision-B, post-Revision-B, post-Revision-C) per the Revision B+C runbook §3.3 / §3.5 / §3.6 so each migration step has a precise rollback point. The pre-existing `RDSReadOnly` Sid covers `DescribeDBSnapshots` but not `CreateDBSnapshot`.
+- New Sid block added: `RdsSnapshotLucielDbOnly` — Actions `rds:CreateDBSnapshot`, `rds:DescribeDBSnapshots`, `rds:AddTagsToResource`; Resource scoped to `arn:aws:rds:ca-central-1:729005488042:db:luciel-db` + `arn:aws:rds:ca-central-1:729005488042:snapshot:luciel-arc5-*` (the snapshot-name prefix that bounds this principal to Arc-5-specific snapshots — no ability to act on snapshots outside that naming family).
+- Tighter alternatives rejected:
+  1. ECS `pg_dump` + S3 instead of native snapshot — REJECTED: pg_dump-based recovery isn't point-in-time consistent for a live DB with active connections; Revision A precedent uses native snapshots; adds complexity and weakens recovery guarantee.
+  2. Skip snapshots and rely on RDS automated daily backups — REJECTED: automated backups have ~24h granularity; the runbook's §3.5 sanity-probe failure path requires restoring to the precise pre-B state, which automated backups won't preserve at per-step boundaries.
+  3. Resource-scope to only `arn:...db:luciel-db` and omit snapshot ARN — REJECTED: `DescribeDBSnapshots` requires the snapshot ARN in Resource for status polling; both ARNs are needed.
+- Blast-radius analysis (worst case — agent malfunction / credential compromise): attacker can create arbitrary RDS snapshots of `luciel-db` and list snapshots matching `luciel-arc5-*`. **Cannot** delete or restore snapshots (no `DeleteDBSnapshot` / `RestoreDBInstanceFromDBSnapshot`), cannot affect any other RDS instance, cannot modify the live database. Exposure is storage cost only; no data-loss or availability exposure.
+- Partner approval (verbatim): `"Approved — I'll add the Sid block in Console now"` (Saturday, May 23, 2026 at 4:15 PM EDT via `ask_user_question`); JSON paste confirmed by partner (full policy text echoed back at 4:31 PM EDT showing `RdsSnapshotLucielDbOnly` Sid present); first successful `CreateDBSnapshot` API call at 20:31:58 UTC produced `arn:aws:rds:ca-central-1:729005488042:snapshot:luciel-arc5-pre-revision-b-20260523203158`.
+- Canonical mirror: `CANONICAL_RECAP.md` §17 entry `2026-05-23 (Arc 5 Commit 21 — Sandbox credential scope expansion for RDS snapshot capability)`; full ARN / SnapshotCreateTime / engine details at `docs/runbooks/arc5-revision-b-c-prod-apply-and-rollback.md` (ACTUAL RUN to be appended as Revisions B and C execute).
+
 
 <!--
 Future expansion entries land below this comment in chronological order. Template:
