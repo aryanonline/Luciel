@@ -386,7 +386,7 @@ def onboarding_claim(payload: OnboardingClaimRequest, db: DbSession) -> Onboardi
         return OnboardingClaimResponse(state="unknown", email_sent_to=None)
 
     from app.services.email_service import (
-        EmailDeliveryError,
+        WelcomeEmailError,
         send_welcome_set_password_email,
     )
     from app.services.magic_link_service import (
@@ -418,7 +418,7 @@ def onboarding_claim(payload: OnboardingClaimRequest, db: DbSession) -> Onboardi
             display_name=user.display_name,
             purpose=purpose,
         )
-    except (MagicLinkError, EmailDeliveryError) as exc:
+    except (MagicLinkError, WelcomeEmailError) as exc:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail=str(exc) or "Email delivery failed.",

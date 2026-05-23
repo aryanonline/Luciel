@@ -54,7 +54,6 @@ from app.services.instance_service import (
     DuplicateInstanceError,
     InstanceNotFoundError,
     InstanceService,
-    ParentScopeInactiveError,
     TierScopeViolationError,
 )
 

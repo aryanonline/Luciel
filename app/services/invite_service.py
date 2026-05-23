@@ -94,9 +94,21 @@ from app.services.magic_link_service import (
     build_set_password_url,
     mint_set_password_token,
 )
-from app.services.tier_provisioning_service import _slugify_agent_id_from_email
 
 logger = logging.getLogger(__name__)
+
+
+def _slugify_agent_id_from_email(email: str) -> str:
+    """Arc 5 Path A: legacy agent_slug helper retained ONLY for the
+    audit-row payload string. The live V2 schema has no Agent table;
+    this slug is no longer used for routing, FK, or auth purposes.
+    Kept inline (rather than imported from the deleted tier_provisioning
+    location) so we own the contract at the single remaining caller.
+    """
+    import re
+    local = (email or "").split("@", 1)[0].lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", local).strip("-")
+    return slug or "user"
 
 
 # ---------------------------------------------------------------------
