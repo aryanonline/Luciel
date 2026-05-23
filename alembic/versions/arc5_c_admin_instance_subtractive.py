@@ -117,6 +117,23 @@ def upgrade() -> None:
     bind = op.get_bind()
 
     # -------------------------------------------------------------------------
+    # -1. Widen alembic_version.version_num to VARCHAR(255).
+    #
+    #     Alembic's default version_num column is VARCHAR(32). Our
+    #     revision id ``arc5_c_admin_instance_subtractive`` is 33
+    #     chars, which trips ``StringDataRightTruncation`` when alembic
+    #     writes the new version_num at the end of this migration.
+    #     The fix must run inside Revision C's upgrade() so it is
+    #     visible by the time alembic does its self-bookkeeping UPDATE.
+    #     This is a forward-only one-time widening; subsequent
+    #     migrations are unaffected. 2026-05-23 hotfix.
+    # -------------------------------------------------------------------------
+    bind.execute(sa.text(
+        "ALTER TABLE alembic_version "
+        "ALTER COLUMN version_num TYPE VARCHAR(255)"
+    ))
+
+    # -------------------------------------------------------------------------
     # 0. ORPHAN PURGE (Aggressive-cleanup amendment — 2026-05-23 hotfix).
     #
     #    Revision B backfilled ACTIVE rows only. Legacy V1 child tables
