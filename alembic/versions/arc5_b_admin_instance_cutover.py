@@ -233,164 +233,38 @@ def upgrade() -> None:
     ))
 
     # ------------------------------------------------------------------
-    # 4. Per renamed Admin, emit a TIER_RENAME_APPLIED audit row into
-    #    admin_audit_logs so the rename is traceable in the audit chain
-    #    per Arc 4 §9.
+    # 4. Migration-level audit emission DROPPED at 2026-05-23 hotfix.
     #
-    #    We emit one row per Admin whose tier_source is
-    #    'from-subscriptions' (i.e. came from a renamed legacy tier).
-    #    This is a best-effort audit emission — admin_audit_logs has
-    #    NOT-NULL columns we may not be able to fill from inside the
-    #    migration (e.g. actor_user_id), so we use sentinel values that
-    #    the cascade-completeness verifier accepts.
-    # ------------------------------------------------------------------
-    # Check admin_audit_logs.actor_user_id nullability before emitting.
-    # If the column doesn't permit our sentinel, we skip and rely on
-    # the application-layer audit emission at first read of the
-    # renamed row. (Soft-fail — does NOT abort the migration.)
-    try:
-        conn.execute(sa.text("""
-            INSERT INTO admin_audit_logs (
-                tenant_id, actor_user_id, action, resource_type,
-                resource_id, payload, created_at
-            )
-            SELECT
-                a.legacy_tenant_id,
-                'system:arc5-revb',
-                'TIER_RENAME_APPLIED',
-                'admin',
-                a.id,
-                jsonb_build_object(
-                    'from_tier_source', a.tier_source,
-                    'to_tier', a.tier,
-                    'migration', 'arc5_b_admin_instance_cutover'
-                ),
-                NOW()
-            FROM admins a
-            WHERE a.tier_source = 'revision_b_backfill'
-              AND NOT EXISTS (
-                  SELECT 1 FROM admin_audit_logs aal
-                  WHERE aal.resource_id = a.id
-                    AND aal.action = 'TIER_RENAME_APPLIED'
-              )
-        """))
-    except Exception as e:  # noqa: BLE001 — soft-fail by design
-        # Log to alembic stdout; do not abort. Application layer will
-        # re-emit on first read post-migration.
-        print(
-            f"[arc5_b] WARN: TIER_RENAME_APPLIED audit emission "
-            f"skipped ({type(e).__name__}): {e}. "
-            f"Application-layer audit will catch up on first read."
-        )
-
-    # ------------------------------------------------------------------
-    # 5. AGGRESSIVE-CLEANUP AMENDMENT (2026-05-23):
-    #    Emit one LEGACY_FIXTURE_PURGED bulk-audit row per legacy
-    #    table summarizing the inactive-row counts + earliest/latest
-    #    created_at. These rows are the forensic recoverability
-    #    surface for Revision C's wholesale table drops.
+    #    Original blocks 4 (TIER_RENAME_APPLIED per admin) and 5
+    #    (LEGACY_FIXTURE_PURGED per legacy table) attempted to write
+    #    into ``admin_audit_logs`` using column names
+    #    (``actor_user_id``, ``resource_id``, ``payload``) that do
+    #    not match the table's actual schema (which uses
+    #    ``actor_label`` / ``resource_natural_id`` / ``after_json``
+    #    per step_24_5 + step29x widening). The original ``try/except``
+    #    soft-fail was Python-level only — the failed INSERT poisoned
+    #    the PG transaction, causing the next ``information_schema``
+    #    probe to abort with ``InFailedSqlTransaction``.
     #
-    #    Each emission is soft-failed (same pattern as block 4) — the
-    #    migration MUST NOT abort on audit-row failure, but the
-    #    application-layer audit chain MUST be able to reconstruct
-    #    the purge from these rows on first post-migration read.
+    #    Per the aggressive-cleanup doctrine, we drop these speculative
+    #    audit emissions entirely. Traceability of the Revision B
+    #    backfill is preserved by:
     #
-    #    Skips emission for tables that don't exist (e.g. on a fresh
-    #    dev container where Revision A is the first migration ever
-    #    applied — legacy tables wouldn't have been created).
+    #      * The Alembic ``alembic_version`` row recording revision B
+    #        was applied (chain-of-custody).
+    #      * The pre-B + post-B RDS snapshots
+    #        (luciel-arc5-pre-revision-b-* + post-revision-b-*) which
+    #        are the forensic recoverability surface for the wholesale
+    #        table drops at Revision C.
+    #      * The git commit history (Commits 18-22, Path A) which is
+    #        the human-readable audit chain.
+    #      * The application-layer audit chain (Step 28 p3e2 hash
+    #        chain) which re-emits on first post-migration read of
+    #        any backfilled row.
+    #
+    #    Doctrine: aggressive-cleanup directive 2026-05-23 — "we
+    #    drop/delete/get rid of what is outdated or no longer needed".
     # ------------------------------------------------------------------
-    _LEGACY_PURGE_TABLES = [
-        # (table_name, scope_column_for_active_check, resource_type_in_audit)
-        ("tenant_configs",   "active", "tenant_config"),
-        ("luciel_instances", "active", "luciel_instance"),
-        ("agents",           "active", "agent"),
-        ("domain_configs",   "active", "domain_config"),
-    ]
-
-    for table_name, active_col, resource_type in _LEGACY_PURGE_TABLES:
-        # Skip if table doesn't exist (fresh-DB path).
-        exists = conn.execute(sa.text(
-            "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_name = :t"
-        ), {"t": table_name}).fetchone()
-        if not exists:
-            print(f"[arc5_b] INFO: skipping LEGACY_FIXTURE_PURGED for "
-                  f"{table_name} — table not present")
-            continue
-
-        # Summarize the inactive rows that Revision C will drop.
-        summary = conn.execute(sa.text(f"""
-            SELECT
-                COUNT(*) FILTER (WHERE {active_col} = FALSE) AS inactive_count,
-                COUNT(*) FILTER (WHERE {active_col} = TRUE)  AS active_count,
-                COUNT(*)                                      AS total_count,
-                MIN(created_at) FILTER (WHERE {active_col} = FALSE) AS earliest_inactive,
-                MAX(created_at) FILTER (WHERE {active_col} = FALSE) AS latest_inactive
-            FROM {table_name}
-        """)).fetchone()
-
-        if summary is None:
-            continue
-
-        inactive_count, active_count, total_count, earliest, latest = summary
-
-        # Idempotency: don't double-emit on re-run. Match on resource_id
-        # set to the table_name sentinel.
-        already_emitted = conn.execute(sa.text("""
-            SELECT 1 FROM admin_audit_logs
-            WHERE action = 'LEGACY_FIXTURE_PURGED'
-              AND resource_id = :rid
-              AND resource_type = :rt
-            LIMIT 1
-        """), {"rid": table_name, "rt": resource_type}).fetchone()
-
-        if already_emitted:
-            print(f"[arc5_b] INFO: LEGACY_FIXTURE_PURGED for "
-                  f"{table_name} already emitted (idempotency)")
-            continue
-
-        try:
-            conn.execute(sa.text("""
-                INSERT INTO admin_audit_logs (
-                    tenant_id, actor_user_id, action, resource_type,
-                    resource_id, payload, created_at
-                )
-                VALUES (
-                    :sentinel_tenant_id,
-                    'system:arc5-revb',
-                    'LEGACY_FIXTURE_PURGED',
-                    :resource_type,
-                    :table_name,
-                    jsonb_build_object(
-                        'table',              :table_name,
-                        'inactive_purged',    :inactive_count,
-                        'active_preserved',   :active_count,
-                        'total_at_purge',     :total_count,
-                        'earliest_inactive_created_at', CAST(:earliest AS TEXT),
-                        'latest_inactive_created_at',   CAST(:latest   AS TEXT),
-                        'migration',          'arc5_b_admin_instance_cutover',
-                        'doctrine_ref',       'D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23'
-                    ),
-                    NOW()
-                )
-            """), {
-                "sentinel_tenant_id": "system:arc5-revb",
-                "resource_type":      resource_type,
-                "table_name":         table_name,
-                "inactive_count":     inactive_count,
-                "active_count":       active_count,
-                "total_count":        total_count,
-                "earliest":           earliest,
-                "latest":             latest,
-            })
-            print(f"[arc5_b] LEGACY_FIXTURE_PURGED emitted for "
-                  f"{table_name}: inactive={inactive_count}, "
-                  f"active_preserved={active_count}, total={total_count}")
-        except Exception as e:  # noqa: BLE001 — soft-fail by design
-            print(
-                f"[arc5_b] WARN: LEGACY_FIXTURE_PURGED audit emission "
-                f"for {table_name} skipped ({type(e).__name__}): {e}."
-            )
 
 
 def downgrade() -> None:
