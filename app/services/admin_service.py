@@ -1,8 +1,15 @@
 """
 Admin service.
 
-Handles business logic for tenant, domain, and agent config management.
-Keeps route handlers thin by centralizing validation and persistence.
+Arc 5 Path A (V2 collapse): Domain layer ELIMINATED per the
+aggressive-cleanup amendment. V2 hierarchy is Admin → Instance → Lead;
+there is no DomainConfig surface anymore. The legacy AgentConfig table
+still exists (dropped at Revision C); methods that touch it remain so
+cascade teardown of legacy rows works during the transition.
+
+Handles business logic for admin (formerly tenant) and legacy agent
+config management. Keeps route handlers thin by centralizing validation
+and persistence.
 """
 
 from __future__ import annotations
@@ -12,9 +19,12 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.admin import Admin
 from app.models.agent_config import AgentConfig
-from app.models.aliases import DomainConfig
-from app.models.aliases import TenantConfig
+
+# V2: TenantConfig is an alias for Admin (kept for source compatibility
+# during the transition; deleted with aliases shim at C2).
+TenantConfig = Admin
 
 logger = logging.getLogger(__name__)
 
@@ -24,21 +34,29 @@ class AdminService:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    # --- Tenant Config ---
+    # --- Admin (formerly Tenant) Config ---
 
-    def create_tenant_config(self, **kwargs) -> TenantConfig:
-        config = TenantConfig(**kwargs)
+    def create_tenant_config(self, **kwargs) -> Admin:
+        """Create an Admin row. Legacy name kept for caller compatibility.
+
+        V2 note: callers passing ``tenant_id=`` should pass ``id=`` instead;
+        for the transition we map ``tenant_id`` → ``id`` if present.
+        """
+        if "tenant_id" in kwargs and "id" not in kwargs:
+            kwargs["id"] = kwargs.pop("tenant_id")
+        config = Admin(**kwargs)
         self.db.add(config)
         self.db.commit()
         self.db.refresh(config)
-        logger.info("Created tenant config: %s", config.tenant_id)
+        logger.info("Created admin (tenant_config): %s", config.id)
         return config
 
-    def get_tenant_config(self, tenant_id: str) -> TenantConfig | None:
-        stmt = select(TenantConfig).where(TenantConfig.tenant_id == tenant_id)
+    def get_tenant_config(self, tenant_id: str) -> Admin | None:
+        """Fetch an Admin row by its id (legacy ``tenant_id``)."""
+        stmt = select(Admin).where(Admin.id == tenant_id)
         return self.db.scalars(stmt).first()
 
-    def update_tenant_config(self, tenant_id: str, **kwargs) -> TenantConfig | None:
+    def update_tenant_config(self, tenant_id: str, **kwargs) -> Admin | None:
         config = self.get_tenant_config(tenant_id)
         if not config:
             return None
@@ -47,121 +65,24 @@ class AdminService:
                 setattr(config, key, value)
         self.db.commit()
         self.db.refresh(config)
-        logger.info("Updated tenant config: %s", tenant_id)
+        logger.info("Updated admin (tenant_config): %s", tenant_id)
         return config
 
-    def list_tenant_configs(self) -> list[TenantConfig]:
-        stmt = select(TenantConfig).order_by(TenantConfig.created_at.desc())
+    def list_tenant_configs(self) -> list[Admin]:
+        stmt = select(Admin).order_by(Admin.created_at.desc())
         return list(self.db.scalars(stmt).all())
 
-    # --- Domain Config ---
+    # --- Domain Config: REMOVED (Arc 5 Path A) ---
+    #
+    # The V2 hierarchy is Admin → Instance → Lead. There is no Domain
+    # layer. The methods previously here (create/get/update/list/
+    # count_active_domains_for_tenant, enforce_domain_cap) were deleted
+    # at Arc 5 B3 along with the /admin/domains/* route surface.
+    #
+    # If any legacy script or test still references these names, it must
+    # be rewritten to operate at the Admin or Instance layer.
 
-    def create_domain_config(self, **kwargs) -> DomainConfig:
-        config = DomainConfig(**kwargs)
-        self.db.add(config)
-        self.db.commit()
-        self.db.refresh(config)
-        logger.info(
-            "Created domain config: %s/%s", config.tenant_id, config.domain_id
-        )
-        return config
-
-    def count_active_domains_for_tenant(self, tenant_id: str) -> int:
-        """Step 30a.5: count active DomainConfig rows under a tenant.
-
-        Used by the cookied self-serve route to enforce the per-tier
-        Domain cap (DOMAIN_COUNT_CAP_BY_TIER). Includes only active=True
-        rows so a deactivated Domain frees a slot for re-use.
-        """
-        from sqlalchemy import func
-
-        stmt = select(func.count(DomainConfig.id)).where(
-            DomainConfig.tenant_id == tenant_id,
-            DomainConfig.active.is_(True),
-        )
-        return int(self.db.scalar(stmt) or 0)
-
-    def enforce_domain_cap(self, *, tenant_id: str) -> None:
-        """Step 30a.5: assert the tenant has not exceeded its per-tier
-        Domain cap. Raises ``TierScopeViolationError`` (mapped to 402)
-        on cap breach; raises with reason=NO_ACTIVE_SUBSCRIPTION when
-        there is no active subscription.
-
-        Separate from ``_enforce_tier_scope`` (which checks the Luciel
-        instance cap) because Domains and Luciels are independent
-        scope-bearing resources; both caps can be at-pressure
-        independently and the audit verbs are distinct.
-        """
-        from app.models.subscription import (
-            DOMAIN_COUNT_CAP_BY_TIER,
-            Subscription,
-        )
-        from app.services.instance_service import TierScopeViolationError
-
-        sub: Subscription | None = (
-            self.db.query(Subscription)
-            .filter(
-                Subscription.tenant_id == tenant_id,
-                Subscription.active.is_(True),
-            )
-            .order_by(Subscription.id.desc())
-            .first()
-        )
-        if sub is None:
-            raise TierScopeViolationError(
-                f"Tenant {tenant_id!r} has no active subscription; "
-                f"cannot create Domain via self-serve path.",
-                reason=TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION,
-            )
-
-        cap = DOMAIN_COUNT_CAP_BY_TIER.get(sub.tier, 0)
-        if cap <= 0:
-            # Individual tier (or any tier we have not mapped) cannot
-            # create Domains via self-serve. Surface as scope violation
-            # so the route returns 402 with code=tier_scope_not_allowed
-            # (same shape as the Luciel-instance scope check).
-            raise TierScopeViolationError(
-                f"Subscription tier {sub.tier!r} does not permit "
-                f"customer-created Domains. Upgrade to Team or Company.",
-                reason=TierScopeViolationError.REASON_SCOPE_NOT_PERMITTED,
-            )
-        used = self.count_active_domains_for_tenant(tenant_id)
-        if used >= cap:
-            raise TierScopeViolationError(
-                f"Tenant {tenant_id!r} has reached its Domain cap="
-                f"{cap} (currently {used} active Domains). "
-                f"Deactivate an existing Domain or upgrade your tier.",
-                reason=TierScopeViolationError.REASON_DOMAIN_CAP_EXCEEDED,
-            )
-
-    def get_domain_config(self, tenant_id: str, domain_id: str) -> DomainConfig | None:
-        stmt = select(DomainConfig).where(
-            DomainConfig.tenant_id == tenant_id,
-            DomainConfig.domain_id == domain_id,
-        )
-        return self.db.scalars(stmt).first()
-
-    def update_domain_config(
-        self, tenant_id: str, domain_id: str, **kwargs
-    ) -> DomainConfig | None:
-        config = self.get_domain_config(tenant_id, domain_id)
-        if not config:
-            return None
-        for key, value in kwargs.items():
-            if value is not None and hasattr(config, key):
-                setattr(config, key, value)
-        self.db.commit()
-        self.db.refresh(config)
-        logger.info("Updated domain config: %s/%s", tenant_id, domain_id)
-        return config
-
-    def list_domain_configs(self, tenant_id: str | None = None) -> list[DomainConfig]:
-        stmt = select(DomainConfig).order_by(DomainConfig.created_at.desc())
-        if tenant_id:
-            stmt = stmt.where(DomainConfig.tenant_id == tenant_id)
-        return list(self.db.scalars(stmt).all())
-
-    # --- Agent Config ---
+    # --- Agent Config (legacy table — dropped at Revision C) ---
 
     def create_agent_config(self, **kwargs) -> AgentConfig:
         config = AgentConfig(**kwargs)
@@ -200,29 +121,20 @@ class AdminService:
             stmt = stmt.where(AgentConfig.tenant_id == tenant_id)
         return list(self.db.scalars(stmt).all())
     
-    def validate_domain_active(self, tenant_id: str, domain_id: str) -> bool:
-        """
-        Hierarchy validation used before creating an agent.
-        Returns True only if a DomainConfig exists for (tenant_id, domain_id)
-        AND it is active.
-        """
-        domain = self.get_domain_config(tenant_id, domain_id)
-        return bool(domain and getattr(domain, "active", False))
-
+    # validate_domain_active / list_agent_configs_by_domain: REMOVED at
+    # Arc 5 Path A. V2 has no Domain layer, so domain-scoped validation
+    # and listing are no longer meaningful. AgentConfig is itself legacy
+    # and dropped at Revision C; new code uses InstanceService instead.
     def list_agent_configs_by_domain(
         self, tenant_id: str, domain_id: str,
     ) -> list:
-        """List agents filtered to a specific domain within a tenant."""
-        from app.models.agent_config import AgentConfig  # local import to avoid cycles
-        return (
-            self.db.query(AgentConfig)
-            .filter(
-                AgentConfig.tenant_id == tenant_id,
-                AgentConfig.domain_id == domain_id,
-            )
-            .order_by(AgentConfig.id.asc())
-            .all()
+        """V2 no-op stub. Returns []. Domain layer is gone."""
+        logger.info(
+            "list_agent_configs_by_domain: V2 no-op stub tenant_id=%s domain_id=%s",
+            tenant_id,
+            domain_id,
         )
+        return []
 
     def deactivate_domain(
         self,
@@ -881,7 +793,7 @@ class AdminService:
 
         from app.models.agent_config import AgentConfig
         from app.models.conversation import Conversation
-        from app.models.aliases import DomainConfig
+        # DomainConfig: REMOVED (Arc 5 Path A) - V2 has no Domain layer
         from app.models.identity_claim import IdentityClaim
         # Step 30a.7 -- privilege-revocation layer models.
         from app.models.scope_assignment import EndReason, ScopeAssignment
@@ -1586,15 +1498,33 @@ class AdminService:
             "DELETE FROM agent_configs WHERE tenant_id = :tid"
         )
 
-        # 10. domain_configs
-        row_counts["domain_configs"] = _delete(
-            "DELETE FROM domain_configs WHERE tenant_id = :tid"
-        )
+        # 10. domain_configs: REMOVED at Arc 5 Path A (V2 has no Domain
+        # layer). The domain_configs table is dropped at Revision C; this
+        # cascade no longer touches it. Row count preserved as 0 for
+        # audit-row schema stability.
+        row_counts["domain_configs"] = 0
 
-        # 11. tenant_configs (the parent row itself)
-        row_counts["tenant_configs"] = _delete(
-            "DELETE FROM tenant_configs WHERE tenant_id = :tid"
-        )
+        # 11. admins (the parent row itself).
+        # V2: tenant_configs table is renamed to admins at Revision C
+        # via rename; same primary key (tenant_id → id). During the
+        # transition before Revision C lands, the table is still named
+        # tenant_configs on disk; after Revision C, it is admins. Try
+        # admins first, fall back to tenant_configs.
+        try:
+            row_counts["admins"] = _delete(
+                "DELETE FROM admins WHERE id = :tid"
+            )
+        except Exception:
+            row_counts["admins"] = 0
+        if row_counts["admins"] == 0:
+            try:
+                row_counts["tenant_configs"] = _delete(
+                    "DELETE FROM tenant_configs WHERE tenant_id = :tid"
+                )
+            except Exception:
+                row_counts["tenant_configs"] = 0
+        else:
+            row_counts["tenant_configs"] = 0
 
         # 12. Audit row -- write to AdminAuditLog with full row-count
         # manifest. The audit row uses the resource_natural_id field
