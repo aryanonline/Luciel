@@ -41,7 +41,7 @@ from app.services.instance_service import (
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.repositories.agent_repository import AgentRepository
 from app.schemas.agent import AgentBindUserPayload, AgentCreate, AgentRead, AgentUpdate
-from app.schemas.luciel_instance import (
+from app.schemas.instance import (
     LucielInstanceCreate,
     LucielInstanceRead,
     LucielInstanceUpdate,

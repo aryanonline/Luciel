@@ -3,7 +3,7 @@ Agent schemas — request/response models for agent (person/role) CRUD.
 
 Step 24.5. Matches the Agent SQLAlchemy model (app/models/agent.py).
 Persona fields are deliberately absent — they live on LucielInstance
-schemas (app/schemas/luciel_instance.py).
+schemas (app/schemas/instance.py).
 
 Domain-agnostic: no vertical enums, no hardcoded role names, no
 tenant-ID branches.

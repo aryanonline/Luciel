@@ -381,7 +381,7 @@ class TestTeammateEmailOverloadRemoved:
         (design \u00a78). LucielInstanceCreate must no longer carry the
         field; the first-class invite path is POST /admin/invites.
         """
-        from app.schemas.luciel_instance import LucielInstanceCreate
+        from app.schemas.instance import LucielInstanceCreate
         assert "teammate_email" not in LucielInstanceCreate.model_fields, (
             "LucielInstanceCreate must NOT carry teammate_email -- the "
             "Step 30a.1 invite-mode overload was removed in Step 30a.5 "

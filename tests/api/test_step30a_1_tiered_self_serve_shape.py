@@ -500,7 +500,7 @@ class TestRepositoryCountHelper:
 
 class TestLucielInstanceCreateInviteModeRemoved:
     def test_teammate_email_field_removed(self):
-        from app.schemas.luciel_instance import LucielInstanceCreate
+        from app.schemas.instance import LucielInstanceCreate
         assert "teammate_email" not in LucielInstanceCreate.model_fields
 
     def test_extra_teammate_email_rejected(self):
@@ -508,7 +508,7 @@ class TestLucielInstanceCreateInviteModeRemoved:
         either silently dropped or rejected; we accept either outcome
         but pin that it does NOT round-trip as a model attribute.
         """
-        from app.schemas.luciel_instance import LucielInstanceCreate
+        from app.schemas.instance import LucielInstanceCreate
         try:
             m = LucielInstanceCreate(
                 instance_id="x-luciel",

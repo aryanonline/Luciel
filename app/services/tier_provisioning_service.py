@@ -188,7 +188,7 @@ def _slugify_agent_id_from_email(email: str) -> str:
     """Turn an email into a URL-safe Agent.agent_id slug.
 
     Rules (kept in sync with the ``_SLUG_PATTERN`` in
-    ``app/schemas/luciel_instance.py``):
+    ``app/schemas/instance.py``):
       * lowercase
       * strip the domain part (``@example.com``)
       * replace non ``[a-z0-9-]`` runs with ``-``
