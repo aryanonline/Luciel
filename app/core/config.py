@@ -143,14 +143,31 @@ class Settings(BaseSettings):
     # any realistic tenant's daily expiry.
     retention_max_batches_per_run: int = 10_000
 
-    # --- Stripe billing (Step 30a) ---
+    # --- Stripe billing (Arc 6 V2 SKU surface) ---
     #
-    # Self-serve subscription billing for the Individual tier. The Luciel
-    # backend is the single source of truth for tenant entitlement; Stripe
-    # is purely the payment + recurring-billing surface. All money flows
-    # through Stripe-hosted Checkout (lowest PCI scope, SAQ-A) and the
-    # Stripe Customer Portal (cancel + payment-method update). The
-    # backend never touches a PAN.
+    # Self-serve subscription billing for the Pro tier and ops-driven
+    # billing for the Enterprise tier. The Luciel backend is the single
+    # source of truth for admin entitlement; Stripe is purely the payment
+    # + recurring-billing surface. All money flows through Stripe-hosted
+    # Checkout (lowest PCI scope, SAQ-A) and the Stripe Customer Portal
+    # (cancel + payment-method update). The backend never touches a PAN.
+    #
+    # Tier topology (CANONICAL §11.7 / §14, locked Arc 6 Commit 1):
+    #   Free        — $0 CAD, CAPTCHA-gated signup, no Stripe row at all.
+    #   Pro         — flat-rate self-serve. $349 CAD/mo or $2,990 CAD/yr
+    #                 (~28% annual discount). Stripe Checkout via
+    #                 ``stripe_price_pro_monthly`` / ``stripe_price_pro_annual``.
+    #                 First-time buyers additionally get the intro fee
+    #                 (``stripe_price_intro_fee``) appended as a second
+    #                 line item — same one-time pattern as V1.
+    #   Enterprise  — hybrid flat-plus-metered. $24,000 CAD/yr floor via
+    #                 ``stripe_price_enterprise_floor_annual`` + per-unit
+    #                 metered overage. The metered Price is DEFERRED in
+    #                 Arc 6 Commit 4 per partner direction 2026-05-23
+    #                 ("we can do this when we notice our business
+    #                 booming") — config slot intentionally omitted until
+    #                 the metered SKU materializes; floor-only Checkout
+    #                 path is the live behaviour until then.
     #
     # stripe_secret_key:      live or test secret key (sk_...).
     # stripe_publishable_key: pk_... -- not used server-side except as a
@@ -159,44 +176,52 @@ class Settings(BaseSettings):
     # stripe_webhook_secret:  whsec_... -- MUST be set for webhook signature
     #                         verification. Without it the /billing/webhook
     #                         route fails closed (501) at request time.
-    # stripe_price_individual: price_... for the Individual SKU. Single
-    #                         price at v1. Annual / multi-tier prices land
-    #                         in Step 30a.1 / 30a.2 as additional fields.
     # billing_success_url:    where Stripe redirects post-checkout. Carries
     #                         {CHECKOUT_SESSION_ID} for the onboarding
     #                         claim flow.
     # billing_cancel_url:     where Stripe redirects on "back" from checkout.
-    # billing_trial_days:     trial length in days for new individual
-    #                         subscriptions. 0 disables the trial.
+    # billing_trial_days:     trial length in days for new Pro subscriptions.
+    #                         0 disables the trial.
     #
     # All Stripe fields default to empty strings so the backend boots in
-    # environments without billing configured (dev, CI, tenants on Team /
-    # Company tiers that don't touch self-serve). The billing routes raise
+    # environments without billing configured (dev, CI, Enterprise-only
+    # deployments that don't touch self-serve). The billing routes raise
     # 501 Not Implemented when the corresponding field is empty, never 500.
+    # This is the boot-safe pattern (§3.2.9): BillingService.resolve_price_id
+    # (tier, cadence) -> price_id raises 501 if the requested pair's config
+    # slot is empty rather than crashing the worker.
+    #
+    # V1 deprecation note (Arc 6 Commit 2, 2026-05-23): the six V1 Price
+    # IDs (individual/team/company × monthly/annual) were archived in
+    # Stripe Live on 2026-05-23 and their config slots removed in Arc 6
+    # Commit 4 (this rewrite). V1 vocabulary (individual/team/company,
+    # Tenant) is fully retired across the Stripe-touching surfaces by
+    # Arc 6 Commit 6. See CANONICAL §17 Arc 6 entries.
     stripe_secret_key: str = ""
     stripe_publishable_key: str = ""
     stripe_webhook_secret: str = ""
-    stripe_price_individual: str = ""
-    # --- Step 30a.1: five additional Stripe Price IDs (all optional). ---
-    # The BillingService.resolve_price_id (tier, cadence) -> price_id
-    # lookup raises 501 if the requested pair's config slot is empty.
-    # This is the boot-safe pattern (§3.2.9): a backend without billing
-    # configured still boots; the /billing/checkout route returns 501.
-    stripe_price_individual_annual: str = ""
-    stripe_price_team_monthly: str = ""
-    stripe_price_team_annual: str = ""
-    stripe_price_company_monthly: str = ""
-    stripe_price_company_annual: str = ""
-    # --- Step 30a.2: one-time $100 CAD intro fee Price. ---
+    # --- Pro tier recurring Prices (flat-rate, self-serve via Checkout). ---
+    stripe_price_pro_monthly: str = ""
+    stripe_price_pro_annual: str = ""
+    # --- Enterprise tier floor (hybrid; metered overage deferred). ---
+    # When a metered Price is later minted, the config slot will be added
+    # alongside this one (e.g. ``stripe_price_enterprise_metered_unit``)
+    # and BillingService.create_checkout_session will append both as
+    # separate line items on the Enterprise Checkout. Until then the
+    # Checkout path uses floor-only billing and overage is invoiced
+    # manually outside Stripe.
+    stripe_price_enterprise_floor_annual: str = ""
+    # --- One-time $100 CAD intro fee Price (retained from V1, control). ---
     # Used by BillingService when the buyer's email is first-time-ever
     # (see ``BillingService.is_first_time_customer``). Decoupled from the
-    # six recurring Price IDs because it is a Stripe Price with
+    # recurring Price IDs because it is a Stripe Price with
     # ``type=one_time`` rather than ``recurring`` — the same Price ID is
     # appended as a SECOND line_item alongside whichever (tier, cadence)
     # recurring Price the buyer is signing up for. Empty default keeps
     # boot safe: a missing slot causes /billing/checkout to 501 for
     # first-time buyers only; repeat customers (who skip the intro fee)
-    # continue to work even if this slot is unconfigured.
+    # continue to work even if this slot is unconfigured. Unchanged across
+    # the V1 -> V2 transition; the Stripe Price ID itself is retained.
     stripe_price_intro_fee: str = ""
     # Arc 2 (2026-05-20) -- D-marketing-site-url-luciel-ai-stale-default-2026-05-14
     # belt-and-suspenders sub-finding: production overrides these via the
