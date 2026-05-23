@@ -229,131 +229,23 @@ class AdminService:
         tenant_id: str,
         domain_id: str,
         *,
-        audit_ctx=None,                    # Step 24.5: AuditContext | None
-        luciel_instance_service=None,      # Step 24.5: InstanceService | None
+        audit_ctx=None,
+        luciel_instance_service=None,
         updated_by: str | None = None,
     ) -> bool:
-        """Soft-deactivate a domain and cascade:
-
-        1. Every AgentConfig row in that domain (legacy — Step 24).
-        2. Every new-table Agent row in that domain (Step 24.5).
-        3. Every domain- and agent-scoped LucielInstance under the
-            domain (Step 24.5, via luciel_instance_service).
-
-        All three cascade steps commit in a single transaction with the
-        domain deactivation itself. If any step fails, nothing changes.
-
-        audit_ctx / luciel_instance_service are optional so legacy callers
-        (internal scripts, tests) still work without the cascade.
+        """Arc 5 Path A — V2 no-op stub. The Domain layer was eliminated
+        per the aggressive-cleanup amendment; the /admin/domains/*
+        routes that called this method were deleted at B3. Method
+        survives only so any straggler caller in scripts/tests
+        compiles; returns False (treated as "not found").
         """
-        from app.models.aliases import Agent          # Step 24.5 new table
-        from app.repositories.admin_audit_repository import AdminAuditRepository
-
-        # Import constants late to avoid circular imports.
-        from app.models.admin_audit_log import (
-            ACTION_CASCADE_DEACTIVATE,
-            ACTION_DEACTIVATE,
-            RESOURCE_DOMAIN,
+        logger.info(
+            "AdminService.deactivate_domain: Arc 5 Path A V2 no-op "
+            "stub tenant_id=%s domain_id=%s (V2 has no Domain layer).",
+            tenant_id,
+            domain_id,
         )
-
-        domain = self.get_domain_config(tenant_id, domain_id)
-        if not domain:
-            return False
-
-        was_active = bool(domain.active)
-
-        try:
-            # --- 1. Deactivate the domain itself -----------------------
-            domain.active = False
-            if updated_by is not None:
-                domain.updated_by = updated_by
-
-            if audit_ctx is not None and was_active:
-                AdminAuditRepository(self.db).record(
-                    ctx=audit_ctx,
-                    tenant_id=tenant_id,
-                    action=ACTION_DEACTIVATE,
-                    resource_type=RESOURCE_DOMAIN,
-                    resource_pk=domain.id,
-                    resource_natural_id=domain_id,
-                    domain_id=domain_id,
-                    before={"active": True},
-                    after={"active": False},
-                    autocommit=False,
-                )
-
-            # --- 3. Step 24.5: new-table Agent cascade -----------------
-            affected_agents = (
-                self.db.query(Agent.id, Agent.agent_id)
-                .filter(
-                    Agent.tenant_id == tenant_id,
-                    Agent.domain_id == domain_id,
-                    Agent.active.is_(True),
-                )
-                .all()
-            )
-            affected_agent_pks = [pk for pk, _ in affected_agents]
-            affected_agent_ids = [nid for _, nid in affected_agents]
-
-            self.db.query(Agent).filter(
-                Agent.tenant_id == tenant_id,
-                Agent.domain_id == domain_id,
-                Agent.active.is_(True),
-            ).update(
-                {"active": False, "updated_by": updated_by},
-                synchronize_session=False,
-            )
-
-            if audit_ctx is not None and affected_agent_pks:
-                AdminAuditRepository(self.db).record(
-                    ctx=audit_ctx,
-                    tenant_id=tenant_id,
-                    action=ACTION_CASCADE_DEACTIVATE,
-                    resource_type="agent",
-                    resource_pk=None,
-                    resource_natural_id=None,
-                    domain_id=domain_id,
-                    after={
-                        "count": len(affected_agent_pks),
-                        "affected_pks": affected_agent_pks,
-                        "affected_agent_ids": affected_agent_ids,
-                        "trigger": "domain_deactivate",
-                    },
-                    note=f"Cascade from domain {domain_id} deactivation",
-                    autocommit=False,
-                )
-
-            # --- 3.5 Memory cascade -------------------------------------
-            # Soft-deactivate every memory_items row scoped to agents in
-            # this domain (via subquery through agents.domain_id).
-            # Tenant-only memories (agent_id=NULL) are NOT touched here --
-            # they survive a domain-only deactivation.
-            if audit_ctx is not None:
-                self.bulk_soft_deactivate_memory_items_for_domain(
-                    tenant_id=tenant_id,
-                    domain_id=domain_id,
-                    audit_ctx=audit_ctx,
-                    updated_by=updated_by,
-                    autocommit=False,
-                )
-
-
-            # --- 4. Step 24.5: LucielInstance cascade ------------------
-            if luciel_instance_service is not None and audit_ctx is not None:
-                luciel_instance_service.cascade_on_domain_deactivate(
-                    audit_ctx=audit_ctx,
-                    tenant_id=tenant_id,
-                    domain_id=domain_id,
-                    updated_by=updated_by,
-                )
-
-            self.db.commit()
-            self.db.refresh(domain)
-        except Exception:
-            self.db.rollback()
-            raise
-
-        return True
+        return False
 
     def deactivate_agent(
         self,

@@ -215,11 +215,13 @@ class ChatService:
                 luciel_instance_id,
             )
             return ctx
-        if instance.scope_owner_tenant_id != tenant_id:
+        # Arc 5 Path A — V2 Instance carries admin_id; compare against the
+        # session tenant_id (V2 == Admin slug post-Revision-B backfill).
+        if getattr(instance, "admin_id", None) != tenant_id:
             logger.warning(
-                "Chat turn bound to luciel_instance_id=%s whose tenant=%s does "
+                "Chat turn bound to luciel_instance_id=%s whose admin=%s does "
                 "not match session tenant=%s; falling back to legacy resolution.",
-                luciel_instance_id, instance.scope_owner_tenant_id, tenant_id,
+                luciel_instance_id, getattr(instance, "admin_id", None), tenant_id,
             )
             return ctx
 

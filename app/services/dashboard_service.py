@@ -532,19 +532,21 @@ class DashboardService:
     def _instance_display_lookup_for_tenant(
         self, tenant_id: str
     ) -> dict[str, str]:
+        # Arc 5 Path A — V2 Instance carries admin_id only; the legacy
+        # scope_owner_tenant_id column is gone. tenant_id arg name kept
+        # for caller compatibility; semantically it is the Admin slug.
         stmt = select(LucielInstance.id, LucielInstance.display_name).where(
-            LucielInstance.scope_owner_tenant_id == tenant_id
+            LucielInstance.admin_id == tenant_id
         )
         return {str(row.id): row.display_name for row in self.db.execute(stmt).all()}
 
     def _instance_display_lookup_for_agent(
         self, tenant_id: str, domain_id: str, agent_id: str
     ) -> dict[str, str]:
-        stmt = select(LucielInstance.id, LucielInstance.display_name).where(
-            and_(
-                LucielInstance.scope_owner_tenant_id == tenant_id,
-                LucielInstance.scope_owner_domain_id == domain_id,
-                LucielInstance.scope_owner_agent_id == agent_id,
-            )
-        )
-        return {str(row.id): row.display_name for row in self.db.execute(stmt).all()}
+        # Arc 5 Path A — Agent layer eliminated. The dashboard's
+        # per-agent instance lookup has no V2 equivalent (V2 dashboards
+        # are admin-rollup or single-instance only). Return empty so
+        # any surviving call site renders a blank panel rather than
+        # 500ing; the caller is on B-tier dashboards that the Arc 6
+        # frontend rewrite replaces.
+        return {}
