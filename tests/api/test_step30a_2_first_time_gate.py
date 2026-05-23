@@ -1,6 +1,12 @@
 """Step 30a.2 — first-time gate + paid-intro shape tests.
 
-Coverage targets (per Step 30a.2 design doc §6):
+File name is preserved (Step 30a.2 was the work-unit that introduced
+the first-time gate); the tier vocabulary inside the tests has been
+upgraded from V1 (individual/team/company) to V2 (pro/enterprise) at
+Arc 6 Commit 5 (Path A) along with the matching ``settings`` attribute
+name (``stripe_price_individual`` -> ``stripe_price_pro_monthly``).
+
+Coverage targets (per Step 30a.2 design doc §6, V2-refreshed):
 
   * BillingService.is_first_time_customer returns True iff the
     customer_email has NEVER appeared on a Subscription row
@@ -16,8 +22,8 @@ Coverage targets (per Step 30a.2 design doc §6):
 
 These are shape/behaviour tests with a mocked StripeClient — no live
 Stripe round-trip. The real end-to-end (Checkout Session created in
-Stripe test mode, webhook fires, tenant is minted) is covered by the
-post-deploy smoke runbook in scripts/deploy_30a2.sh §6/6.
+Stripe test mode, webhook fires, Admin is minted) is covered by the
+post-deploy smoke runbook on Commit 10's deploy.
 """
 from __future__ import annotations
 
@@ -159,9 +165,16 @@ class TestCreateCheckoutFirstTimeGate:
         """Wire up the minimum Stripe-side settings so create_checkout
         doesn't bail with BillingNotConfiguredError before it reaches
         the first-time gate.
+
+        Arc 6 Commit 5 (Path A): V1 ``stripe_price_individual`` replaced
+        with V2 ``stripe_price_pro_monthly``. The tests below all use
+        ``tier="pro"`` + ``billing_cadence="monthly"`` so this is the
+        matching ``PRICE_ID_KEY`` slot — changing one without the other
+        would break ``resolve_price_id`` and the test would 501 before
+        reaching the gate under test.
         """
         from app.core.config import settings
-        monkeypatch.setattr(settings, "stripe_price_individual", "price_TEST_ind_m")
+        monkeypatch.setattr(settings, "stripe_price_pro_monthly", "price_TEST_pro_m")
         monkeypatch.setattr(settings, "stripe_price_intro_fee", "price_TEST_intro")
         monkeypatch.setattr(
             settings,
@@ -190,7 +203,7 @@ class TestCreateCheckoutFirstTimeGate:
         svc.create_checkout(
             email="newuser@example.com",
             display_name="New User",
-            tier="individual",
+            tier="pro",
             billing_cadence="monthly",
         )
 
@@ -199,6 +212,11 @@ class TestCreateCheckoutFirstTimeGate:
         assert kwargs["intro_fee_price_id"] == "price_TEST_intro"
         assert kwargs["trial_period_days"] == 90
         assert kwargs["metadata"]["luciel_intro_applied"] == "true"
+        # V2 tier vocab assertion — the metadata stamp must reflect V2,
+        # not the V1 string. The webhook handler keys per-tier branches
+        # off this metadata, so a regression here would mis-route Pro
+        # buyers through an Enterprise (or absent) provisioning path.
+        assert kwargs["metadata"]["luciel_tier"] == "pro"
 
     def test_repeat_buyer_skips_intro_fee_and_trial(self, monkeypatch):
         self._setup_settings(monkeypatch)
@@ -211,7 +229,7 @@ class TestCreateCheckoutFirstTimeGate:
         svc.create_checkout(
             email="returning@example.com",
             display_name="Returning Buyer",
-            tier="individual",
+            tier="pro",
             billing_cadence="monthly",
         )
 
@@ -242,7 +260,7 @@ class TestCreateCheckoutFirstTimeGate:
             svc.create_checkout(
                 email="newuser2@example.com",
                 display_name="New User 2",
-                tier="individual",
+                tier="pro",
                 billing_cadence="monthly",
             )
         # And nothing was sent to Stripe.
@@ -262,7 +280,7 @@ class TestCreateCheckoutFirstTimeGate:
         svc.create_checkout(
             email="returning2@example.com",
             display_name="Returning 2",
-            tier="individual",
+            tier="pro",
             billing_cadence="monthly",
         )
 

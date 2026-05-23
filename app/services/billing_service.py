@@ -126,21 +126,35 @@ class PilotChargeNotFoundError(Exception):
 # ---------------------------------------------------------------------
 
 PRICE_ID_KEY: dict[tuple[str, str], str] = {
-    # V2 Stripe price-id ENV-var keys. The actual Stripe Product / Price
-    # resources will be RE-CREATED under V2 tier names at Arc 6 (Stripe
-    # SKU restructure work-unit, tracked at Arc 6 in CANONICAL_RECAP §12).
-    # Until Arc 6 lands, these keys point at Stripe Price resources that
-    # do not yet exist — attempts to launch checkout for Pro or Enterprise
-    # will fail at the Stripe API call with a price-not-found error,
-    # which is the correct behaviour (we don't want to charge against
-    # the legacy individual/team/company prices under V2 tier names).
-    # TODO-arc6: Once Arc 6 creates the V2 Stripe Prices, set these
-    # ENV vars in prod task-def + re-deploy.
-    # Free tier has NO Stripe price (lazy-create on upgrade per Gap 1).
+    # V2 Stripe price-id ENV-var keys (Arc 6 Commit 4 mint, locked in
+    # CANONICAL_RECAP §11.7 / §14). Each value is the *attribute name* on
+    # ``settings`` that holds the Stripe Price ID for that (tier, cadence)
+    # pair. ``resolve_price_id`` reads via ``getattr(settings, key)`` and
+    # raises ``BillingNotConfiguredError`` if the slot is empty.
+    #
+    # Tier topology (CANONICAL §11.7):
+    #   * Free       — NO Stripe Price (CAPTCHA-gated signup, no Stripe
+    #     row at all). Free is NOT a valid key here — callers that ask
+    #     for ("free", *) get BillingNotConfiguredError, which the route
+    #     layer translates to 501. The free signup path is the dedicated
+    #     POST /api/v1/billing/signup-free route (Arc 6 Commit 8), NOT
+    #     this checkout machinery.
+    #   * Pro        — flat-rate self-serve, monthly + annual cadences.
+    #   * Enterprise — hybrid (flat floor + metered overage). ANNUAL ONLY
+    #     at V2 launch — no monthly cadence in the catalogue. Attempts
+    #     to start an enterprise+monthly checkout raise
+    #     BillingNotConfiguredError (-> 501). The metered overage Price
+    #     is intentionally DEFERRED (Arc 6 Commit 4, partner direction
+    #     2026-05-23) until the Enterprise pipeline materializes; floor-
+    #     only Checkout is the live behaviour until the metered slot is
+    #     minted and a second line-item is appended here.
+    #
+    # If a future tier is added: add a row here and a parallel
+    # ``stripe_price_*`` field on ``Settings``. No code change in
+    # ``resolve_price_id`` is required — it is data-driven.
     (TIER_PRO,        BILLING_CADENCE_MONTHLY): "stripe_price_pro_monthly",
     (TIER_PRO,        BILLING_CADENCE_ANNUAL):  "stripe_price_pro_annual",
-    (TIER_ENTERPRISE, BILLING_CADENCE_MONTHLY): "stripe_price_enterprise_monthly",
-    (TIER_ENTERPRISE, BILLING_CADENCE_ANNUAL):  "stripe_price_enterprise_annual",
+    (TIER_ENTERPRISE, BILLING_CADENCE_ANNUAL):  "stripe_price_enterprise_floor_annual",
 }
 
 
@@ -189,9 +203,10 @@ class BillingService:
     def require_configured(self) -> None:
         """Raises ``BillingNotConfiguredError`` if Stripe is not configured.
 
-        Step 30a.1: we no longer require ``stripe_price_individual`` at
-        boot — each (tier, cadence) pair is validated *lazily* in
-        ``resolve_price_id`` when the checkout route picks one. The
+        Arc 6 Commit 5 (Path A): the V1 ``stripe_price_individual`` boot-
+        check is fully removed; each (tier, cadence) pair is validated
+        *lazily* in ``resolve_price_id`` when the checkout route picks
+        one against the V2 ``PRICE_ID_KEY`` table above. The
         secret-key check stays at boot/route so a backend without any
         Stripe config still returns 501 immediately.
         """
@@ -300,15 +315,17 @@ class BillingService:
 
     @staticmethod
     def resolve_instance_count_cap(*, tier: str) -> int:
-        """Per-tier cap for the new ``subscriptions.instance_count_cap`` column.
+        """Per-tier cap for the ``subscriptions.instance_count_cap`` column.
 
-        Tier strings outside ``ALLOWED_TIERS`` fall back to the Individual
-        cap (3) defensively — the schema validator should have caught
-        that already.
+        Tier strings outside ``ALLOWED_TIERS`` fall back to the Free cap
+        (1) defensively — the schema validator should have caught that
+        already. Free is the most-restrictive tier so an unknown string
+        cannot accidentally over-provision capacity.
         """
-        # V2 default: unknown tier → Free (most-restrictive). Enterprise
-        # returns None from TIER_INSTANCE_CAPS (unlimited); the caller
-        # is responsible for handling None as "no cap".
+        # V2 caps (CANONICAL §14, model app/models/subscription.py):
+        # Free=1, Pro=10, Enterprise=None (unlimited). Enterprise's None
+        # return is documented at the model layer; the caller is
+        # responsible for handling None as "no cap".
         return TIER_INSTANCE_CAPS.get(tier, TIER_INSTANCE_CAPS[TIER_FREE])
 
     # -----------------------------------------------------------------
@@ -325,16 +342,20 @@ class BillingService:
     ) -> dict[str, str]:
         """Create a Stripe Checkout session and return the redirect URL + id.
 
-        Step 30a.1 lifted the v1 Individual-only carve-out. The accepted
-        (tier, cadence) pairs are exactly the keys of ``PRICE_ID_KEY``;
-        ``resolve_price_id`` is the single source of truth.
+        Arc 6 Commit 5 (Path A) note: the V1 vocabulary (individual/team/
+        company tiers, Tenant noun) is fully retired from this route's
+        metadata stamps. The accepted (tier, cadence) pairs are exactly
+        the keys of ``PRICE_ID_KEY`` above; ``resolve_price_id`` is the
+        single source of truth.
 
         We pass four pieces of metadata into Stripe so the webhook
         handler can correlate without an extra Stripe API call:
 
           - ``luciel_email``            — the email the buyer entered.
-          - ``luciel_display_name``     — carried onto TenantConfig.display_name.
-          - ``luciel_tier``             — 'individual' | 'team' | 'company'.
+          - ``luciel_display_name``     — carried onto AdminConfig.display_name.
+          - ``luciel_tier``             — 'pro' | 'enterprise' (V2 vocab; Free
+                                          never reaches this route, it has
+                                          its own /signup-free path).
           - ``luciel_billing_cadence``  — 'monthly' | 'annual'.
 
         The Stripe Checkout session also sets ``customer_email`` so

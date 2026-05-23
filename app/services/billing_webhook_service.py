@@ -106,16 +106,21 @@ _TIER_PREFIX = {
 
 
 def _mint_tenant_id_from_email(email: str, tier: str = TIER_PRO) -> str:
-    """Generate a URL-safe, collision-resistant tenant slug from an email.
+    """Generate a URL-safe, collision-resistant admin slug from an email.
 
     Shape: ``<tier-prefix>-<8 hex chars>``. The prefix is one of
-    ``ind`` / ``team`` / ``co`` per ``_TIER_PREFIX`` (Step 30a.1).
-    The 8 hex chars give 32 bits of randomness — collision probability
-    is negligible at the expected scale of self-serve subscribers, and
-    a collision is caught by the existing tenant_configs.tenant_id
-    unique constraint.
+    ``free`` / ``pro`` / ``ent`` per ``_TIER_PREFIX`` (V2 — Arc 5 B8
+    Admin rename + Arc 6 SKU restructure). The 8 hex chars give 32 bits
+    of randomness — collision probability is negligible at the expected
+    scale of self-serve subscribers, and a collision is caught by the
+    existing ``admins.id`` unique constraint.
+
+    Default fallback for an unknown tier is ``pro`` (matches the
+    function's default arg ``tier=TIER_PRO``) — V2 dropped the V1 ``ind``
+    fallback at Arc 6 Commit 5 because ``individual`` is no longer a
+    valid tier string anywhere in the system.
     """
-    prefix = _TIER_PREFIX.get(tier, "ind")
+    prefix = _TIER_PREFIX.get(tier, "pro")
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
@@ -272,8 +277,16 @@ class BillingWebhookService:
         if tier not in ALLOWED_TIERS:
             # Defensive — schema-validated upstream, but a hand-crafted
             # Stripe event could arrive with garbage. Fall back to the
-            # safest tier (Individual) and log loudly; do NOT raise here
-            # because Stripe must get a 200 to stop redelivering.
+            # safest tier (Pro — Arc 6 Commit 5 update; was Individual
+            # at V1) and log loudly; do NOT raise here because Stripe
+            # must get a 200 to stop redelivering. Pro is the safest
+            # paid-tier fallback because (a) it does not over-provision
+            # like Enterprise would (Enterprise has unlimited Instance
+            # cap), and (b) it does not under-provision like Free would
+            # (Free is a $0 tier and downgrading a paid subscriber to
+            # Free would silently disable paid features). Pro's $349/mo
+            # rate has already been authorized via the Stripe event we
+            # are processing, so we hand the buyer the matching surface.
             logger.error(
                 "billing-webhook: unknown tier %r in metadata; "
                 "falling back to %s. event=%s sub=%s",
@@ -793,9 +806,17 @@ class BillingWebhookService:
             pid = price.get("id")
             if pid:
                 return pid
-        # checkout.session shape -- no items inline; we fall back to
-        # the configured price (Step 30a is single-SKU).
-        return settings.stripe_price_individual or None
+        # checkout.session shape — no items inline. Arc 6 Commit 5 (Path A)
+        # removed the V1 single-SKU fallback ``settings.stripe_price_individual``
+        # because V2 has multiple Prices (pro_monthly, pro_annual,
+        # enterprise_floor_annual) and there is no defensible default to
+        # pick blindly. Modern Stripe checkout.session.completed payloads
+        # always have line items resolvable via Stripe API expansion at
+        # the caller layer; if we get a payload without inline items we
+        # return None and let the caller decide (typically: log + leave
+        # ``stripe_price_id`` NULL on the Subscription row, which the
+        # reconciler can later backfill by retrieving the session).
+        return None
 
     @staticmethod
     def _extract_period_fields(
