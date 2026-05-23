@@ -901,30 +901,34 @@ class AdminService:
     ) -> bool:
         """Soft-deactivate a tenant and cascade leaf-first to every child.
 
-        Step 30a.7 -- 13-layer in-function cascade (all in a single
-        transaction). Subscription cancellation is handled UPSTREAM in
+        Arc 5 B5 -- 12-layer in-function cascade (all in a single
+        transaction). The Domain layer (formerly layer 8, domain_configs)
+        was REMOVED per the aggressive-cleanup amendment
+        (D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23); the
+        V2 Admin → Instance hierarchy has no Domain layer.
+
+        Subscription cancellation is handled UPSTREAM in
         ``app/services/billing_webhook_service.py`` and emits its own
         audit row; this cascade does not touch ``subscriptions`` because
         the Stripe-driven webhook is the source of truth for that layer.
         Total audit-row count for a full tenant teardown is therefore
-        14 = 13 in-function + 1 upstream subscription.
+        13 = 12 in-function + 1 upstream subscription (was 14 pre-B5).
 
         Canonical cascade order:
           1.  conversations             (Step 30a.2 -- soft-delete + ts)
           2.  identity_claims           (Step 30a.2 -- soft-delete + ts)
           3.  memory_items              (broadest leaf below)
           4.  api_keys
-          5.  luciel_instances          (all scope levels: tenant/domain/agent)
-          6.  agents                    (new-table, Step 24.5)
+          5.  luciel_instances          (legacy table — dropped at Revision C)
+          6.  agents                    (legacy table — dropped at Revision C)
           7.  agent_configs             (legacy)
-          8.  domain_configs
-          9.  scope_assignments         (Step 30a.7 NEW -- privilege revocation)
-          10. user_invites              (Step 30a.7 NEW -- pending-invite revoke)
-          11. sessions                  (Step 30a.7 NEW -- session-cookie revoke)
-          12. synthetic_orphan_users    (Step 30a.7 NEW -- test-fixture cleanup,
+          8.  scope_assignments         (Step 30a.7 -- privilege revocation)
+          9.  user_invites              (Step 30a.7 -- pending-invite revoke)
+          10. sessions                  (Step 30a.7 -- session-cookie revoke)
+          11. synthetic_orphan_users    (Step 30a.7 -- test-fixture cleanup,
                                          synthetic=True AND zero remaining
                                          active scope_assignments)
-          13. tenant_config             (active=False, deactivated_at=now())
+          12. tenant_config             (active=False, deactivated_at=now())
 
         Each in-function layer emits exactly one ``cascade_deactivate``-shape
         audit row per touched row, with the documented exception of layer 10
@@ -1212,53 +1216,16 @@ class AdminService:
                     autocommit=False,
                 )
 
-            # --- 8. domain_configs cascade (inline) --------------------
-            affected_domains = (
-                self.db.query(DomainConfig.id, DomainConfig.domain_id)
-                .filter(
-                    DomainConfig.tenant_id == tenant_id,
-                    DomainConfig.active.is_(True),
-                )
-                .all()
-            )
-            dc_pks = [pk for pk, _ in affected_domains]
-            dc_ids = [nid for _, nid in affected_domains]
-            dc_updated = (
-                self.db.query(DomainConfig)
-                .filter(
-                    DomainConfig.tenant_id == tenant_id,
-                    DomainConfig.active.is_(True),
-                )
-                .update(
-                    {
-                        DomainConfig.active: False,
-                        DomainConfig.updated_by: updated_by,
-                    },
-                    synchronize_session=False,
-                )
-            )
-            if dc_updated:
-                AdminAuditRepository(self.db).record(
-                    ctx=audit_ctx,
-                    tenant_id=tenant_id,
-                    action=ACTION_CASCADE_DEACTIVATE,
-                    resource_type=RESOURCE_DOMAIN,
-                    resource_pk=None,
-                    resource_natural_id=None,
-                    after={
-                        "count": int(dc_updated),
-                        "affected_pks": dc_pks,
-                        "affected_domain_ids": dc_ids,
-                        "trigger": "tenant_deactivate",
-                    },
-                    note=(
-                        f"Cascade domain_configs from tenant "
-                        f"{tenant_id} deactivation"
-                    ),
-                    autocommit=False,
-                )
+            # --- 8. (removed at Arc 5 B5) -------------------------------
+            # Domain layer was eliminated per the aggressive-cleanup
+            # amendment (D-arc5-aggressive-cleanup-doctrine-amendment-
+            # 2026-05-23). Previously this cascade visited domain_configs
+            # at layer 8; the table itself is dropped at Revision C and
+            # the V2 Admin → Instance hierarchy has no Domain layer to
+            # cascade. Layer numbering: 7 → 8 (scope_assignments) skipping
+            # the former domain_configs slot.
 
-            # --- 9. scope_assignments cascade (Step 30a.7 NEW) ---------
+            # --- 8. scope_assignments cascade (Step 30a.7) -------------
             # Privilege-revocation layer. scope_assignments is the single
             # source of truth for tenant binding (post Step-30a.5 invitee
             # resolver fix); leaving rows active=True against a soft-
@@ -1323,7 +1290,7 @@ class AdminService:
                     autocommit=False,
                 )
 
-            # --- 10. user_invites cascade (Step 30a.7 NEW) -------------
+            # --- 9. user_invites cascade (Step 30a.7) ------------------
             # Pending invites against a soft-deleted tenant are by
             # definition revocable -- the JWT is still redeemable until
             # expires_at unless we flip status='revoked' here. Reuse
@@ -1380,7 +1347,7 @@ class AdminService:
                     autocommit=False,
                 )
 
-            # --- 11. sessions cascade (Step 30a.7 NEW) -----------------
+            # --- 10. sessions cascade (Step 30a.7) ---------------------
             # session.status='active' is the runtime authenticator for
             # every cookie-bearing request. Flip to 'revoked' in the same
             # transaction as tenant.active=False so there is no race
@@ -1435,7 +1402,7 @@ class AdminService:
                     autocommit=False,
                 )
 
-            # --- 12. synthetic_orphan_users cascade (Step 30a.7 NEW) ---
+            # --- 11. synthetic_orphan_users cascade (Step 30a.7) -------
             # users is a GLOBAL table -- users have no tenant_id column
             # (binding lives in scope_assignments). A blanket
             # users.active=False on cascade would wrongly deactivate real
@@ -1502,7 +1469,7 @@ class AdminService:
                             autocommit=False,
                         )
 
-            # --- 13. tenant_config itself -------------------------------
+            # --- 12. tenant_config itself ------------------------------
             # Step 30a.2: also stamp deactivated_at = now() so the
             # retention worker can compute the 90d purge cutoff. Only
             # set when was_active=True (idempotent re-runs don't
@@ -1531,8 +1498,9 @@ class AdminService:
                     },
                     note=(
                         f"Tenant {tenant_id} deactivated with full cascade "
-                        f"(PIPEDA P5 retention; Step 30a.7 13-layer "
-                        f"in-function + 1 upstream subscription)"
+                        f"(PIPEDA P5 retention; Arc 5 B5 12-layer "
+                        f"in-function + 1 upstream subscription; Domain "
+                        f"layer removed per aggressive-cleanup amendment)"
                     ),
                     autocommit=False,
                 )

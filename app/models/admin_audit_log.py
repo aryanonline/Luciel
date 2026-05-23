@@ -295,6 +295,36 @@ ACTION_EMAIL_SUPPRESSION_RECORDED = "email_suppression_recorded"
 ACTION_EMAIL_SUPPRESSION_CLEARED = "email_suppression_cleared"
 ACTION_EMAIL_SEND_EVENT_RECEIVED = "email_send_event_received"
 
+# Arc 5 B5 -- V2 Admin/Instance lifecycle verbs.
+#
+# Per the aggressive-cleanup amendment
+# (D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23): once Arc 5
+# Revisions A+B+C finish landing the Admin -> Instance collapse, all
+# new-row provisioning emits ACTION_ADMIN_CREATED / ACTION_INSTANCE_CREATED
+# instead of ACTION_CREATE on the generic tenant_config / luciel_instance
+# resource. The legacy ACTION_CREATE rows in the audit chain remain
+# walkable; new rows take the more specific verb so a regulator scanning
+# the chain by verb can locate Admin lifecycle events without scanning
+# every CREATE row.
+#
+# ACTION_TIER_RENAME_APPLIED -- emitted by Revision B for each Admin
+#   row whose legacy tier (individual/solo/team/company) was rewritten to
+#   the V2 vocabulary (pro/enterprise). after_json carries
+#   {from_tier_source, to_tier, migration}. The audit chain therefore
+#   preserves the legacy tier vocabulary visibility even after Revision C
+#   tightens the CHECK constraint to ('free','pro','enterprise').
+#
+# ACTION_LEGACY_FIXTURE_PURGED -- emitted by Revision B (one bulk row per
+#   legacy table) summarizing the inactive-fixture purge that Revision C
+#   will execute. after_json carries
+#   {table, inactive_count, active_count, earliest_created_at,
+#    latest_created_at}. This is the forensic recoverability surface for
+#   Revision C's wholesale table drops.
+ACTION_ADMIN_CREATED = "admin_created"
+ACTION_INSTANCE_CREATED = "instance_created"
+ACTION_TIER_RENAME_APPLIED = "tier_rename_applied"
+ACTION_LEGACY_FIXTURE_PURGED = "legacy_fixture_purged"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -357,6 +387,11 @@ ALLOWED_ACTIONS = (
     ACTION_EMAIL_SUPPRESSION_RECORDED,
     ACTION_EMAIL_SUPPRESSION_CLEARED,
     ACTION_EMAIL_SEND_EVENT_RECEIVED,
+    # Arc 5 B5 -- V2 Admin / Instance lifecycle.
+    ACTION_ADMIN_CREATED,
+    ACTION_INSTANCE_CREATED,
+    ACTION_TIER_RENAME_APPLIED,
+    ACTION_LEGACY_FIXTURE_PURGED,
 )
 
 
@@ -372,6 +407,13 @@ RESOURCE_AGENT = "agent"
 RESOURCE_LUCIEL_INSTANCE = "luciel_instance"
 RESOURCE_API_KEY = "api_key"
 RESOURCE_KNOWLEDGE = "knowledge_embedding"  # Step 25
+# Arc 5 B5 -- V2 resource types. RESOURCE_TENANT remains valid for
+# legacy audit rows referencing the (about-to-be-dropped) tenant_configs
+# table; RESOURCE_ADMIN is the V2 equivalent. RESOURCE_DOMAIN is
+# retained for chain-walkability of pre-B1 audit rows but no NEW rows
+# emit it (Domain layer eliminated).
+RESOURCE_ADMIN = "admin"
+RESOURCE_INSTANCE = "instance"
 RESOURCE_RETENTION_POLICY = "retention_policy"
 # Step 29.y Cluster 1: user_consents row is the auditable resource for
 # consent grant/withdraw. Distinct from RESOURCE_USER (which is the
@@ -457,6 +499,9 @@ ALLOWED_RESOURCE_TYPES = (
     # Arc 8 WU-6 -- SES feedback / suppression cohort.
     RESOURCE_EMAIL_SUPPRESSION,
     RESOURCE_EMAIL_SEND_EVENT,
+    # Arc 5 B5 -- V2 Admin / Instance.
+    RESOURCE_ADMIN,
+    RESOURCE_INSTANCE,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
