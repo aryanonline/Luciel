@@ -223,8 +223,126 @@ The survey:
 1. Walks `app/models/*.py` with `ast.parse`
 2. For each `ClassDef`, reads `__tablename__` via AST (not grep)
 3. For each `ClassDef`, walks the class body (NOT the module) and lists `mapped_column(...)` / `Column(...)` assignments whose target name is in `{tenant_id, domain_id, agent_id, luciel_instance_id}`
-4. Cross-references against `DROP_TABLES = {"tenants", "domains", "luciel_instances", "agents"}` to separate "drop the whole table" from "drop these columns from a surviving table"
+4. Cross-references against `DROP_TABLES = {"tenant_configs", "domains", "luciel_instances", "agents"}` to separate "drop the whole table" from "drop these columns from a surviving table"
 
 Why grep-based survey failed: grep matches the string `tenant_id` anywhere in a file. `app/models/luciel_instance.py` contains `scope_owner_tenant_id` 30+ times; a naive grep would falsely conclude the `LucielInstance` class has a `tenant_id` column. AST walking inside `ClassDef.body` filters that out structurally.
 
 This is now the canonical schema-survey tool for any future destructive migration. It belongs in the repo permanently.
+
+---
+
+## §6 — Partner resolutions (RECORDED 2026-05-23 9:44am EDT)
+
+All four open questions (Q1, Q2, Q3, and Gap 1 from `A-arc5-preflight.md` §6) resolved during the morning re-anchor pass. Partner directive: "yes this looks good partner. Go ahead and proceed" with the entitlement table as the buyer-facing surface + agent's recommended schema/Stripe shape.
+
+### §6.1 — Q1: `admins.id` shape — LOCKED as string (semantic key)
+
+**Decision:** `admins.id VARCHAR(100) PRIMARY KEY` populated from `tenant_configs.tenant_id` (e.g. `"luciel-internal"`), NOT from `tenant_configs.id` (autoincrement int).
+
+**Rationale:**
+1. **FK symmetry** — all 17 surviving scoped tables already type their scope FK as the string `tenant_id` (AST-verified). Choosing the string means Revision B is a column rename, not a re-type + re-backfill. Risk reduction.
+2. **Operator-readability** — `SELECT * FROM admin_audit_logs WHERE admin_id = 'luciel-internal'` reads better than `WHERE admin_id = 42` in incident response.
+3. **URL routability** — `/admin/luciel-internal/instances/...` is shareable; opaque ints are not.
+4. **Stripe symmetry** — `stripe_customer_id` is a string; admin_id being a string keeps the join shape consistent for Arc 6.
+
+**Cost accepted:** legacy `tenant_configs.id` (autoincrement int) is orphaned. Preserved in `admins.legacy_tenant_id` for historical reconstruction; nothing downstream depends on the int.
+
+**Schema column shape (locks in Revision A):**
+```
+admins.id VARCHAR(100) PRIMARY KEY
+admins.legacy_tenant_id VARCHAR(100) NULL  -- back-pointer to tenant_configs.tenant_id; same string
+```
+
+### §6.2 — Q2: orphan-customer tier default — LOCKED as `'free'` with audit trail
+
+**Decision:** Customers in `tenant_configs` with no active `subscriptions` row default to `tier = 'free'` on backfill.
+
+**Audit-trail discipline:** Revision B emits an `ADMIN_BACKFILLED` audit row per admin with `source` field carrying one of:
+- `'from-subscriptions'` — the customer had an active subscription; tier copied (and renamed in step 3)
+- `'defaulted-to-free'` — the customer had no active subscription; tier set to `'free'`
+
+This lets us audit the orphan cohort post-cutover (count, who they are, what they were doing). The `source` field is recorded on the audit row, NOT on the `admins` table itself — audit data belongs in the audit chain, not on the row it audits.
+
+### §6.3 — Q3: tier-string renames — LOCKED as lowercase + separate UPDATE step
+
+**Decision:** Tier vocabulary is `'free'` / `'pro'` / `'enterprise'` (all lowercase). Renames happen as separate `UPDATE` statements AFTER the backfill INSERT, NOT folded into the JOIN's CASE.
+
+**Storage convention:** lowercase strings (matches existing DB tier-string convention: `individual`, `solo`, `team`, `company` are all lowercase). UI presentation capitalizes at render time ("Pro" / "Enterprise" / "Free").
+
+**Rename map:**
+```sql
+UPDATE admins SET tier = 'pro'        WHERE tier IN ('individual', 'solo');
+UPDATE admins SET tier = 'enterprise' WHERE tier IN ('team', 'company');
+-- 'free' rows stay 'free' (no rename needed; 'free' is net-new at this revision)
+```
+
+**CHECK constraint** (tightens in Revision C, NOT Revision A — Revision A keeps the constraint permissive during the in-flight rename window):
+```sql
+ALTER TABLE admins ADD CONSTRAINT admins_tier_check
+  CHECK (tier IN ('free', 'pro', 'enterprise'));
+```
+
+### §6.4 — Gap 1: Free tier behaviour — LOCKED as real tier, no-Stripe-on-Free, 1-instance cap
+
+**Decision:** Free is a real, first-class tier with real entitlements and real audit logging. It is NOT a "no-subscription" sentinel. Free admins get a real `admins` row, a real `instances` row (capped at 1), no Stripe customer record (lazy-created on first upgrade), and the entitlement vector specified in §6.5 below.
+
+**Rationale:**
+1. **Acquisition funnel** — Free is the onboarding ramp. Sentinel-shape would force every Free → Pro upgrade to be a state migration; real-tier-shape makes upgrade a simple `subscriptions` row append.
+2. **Operational symmetry** — cascade verifiers, audit chains, retention policies, deletion logs all key on `admin_id`. Branchless shape across all tiers = lower maintenance tax forever.
+3. **Six pillars** — sentinel-shape violates scalability + maintainability via the branch tax.
+
+**Stripe shape:** `admins.stripe_customer_id VARCHAR(100) NULL`. Free admins carry NULL. Upgrading to Pro/Enterprise creates the Stripe customer record (~200ms latency on upgrade click, pre-warmable at upgrade-form-load). Belt-and-suspenders CHECK constraint at the DB layer (lands in Revision C):
+```sql
+ALTER TABLE admins ADD CONSTRAINT admins_stripe_customer_id_required_on_paid_tier
+  CHECK (tier = 'free' OR stripe_customer_id IS NOT NULL);
+```
+
+### §6.5 — Final entitlement table — LOCKED 2026-05-23 9:51am EDT
+
+The canonical buyer-facing entitlement vector for Arc 5 + Arc 6 + all downstream surfaces. This table **supersedes Arc 4 tier-matrix-v2's §2.1 + §3.1 + §4.1 + §6.1 + §7.1 + §8.1 + §9.1 numeric cells where they conflict**; Arc 4 §17 Enterprise hybrid-billing axis is unchanged.
+
+| Entitlement | Free | Pro | Enterprise |
+|---|---|---|---|
+| Max instances | 1 | 10 | unlimited (sales-negotiated) |
+| Max admin-team seats (dashboard logins) | 1 | 25 | unlimited |
+| Max leads per month | 100 | 5,000 | unlimited (metered usage above floor) |
+| API rate limit (req/min) | 30 | 300 | 3,000 |
+| Audit log retention | 30 days | 1 year | 7 years (or contract) |
+| Widget custom-domain CNAME | No | Yes (1) | Yes (unlimited) |
+| Stripe customer record | No (lazy on upgrade) | Yes | Yes |
+| Support SLA | Community | 48h email | 24h email + dedicated CSM |
+
+**Notes on row semantics (so we don't re-litigate later):**
+
+1. **"Max admin-team seats (dashboard logins)"** — these are humans who help the Admin operate the dashboard (assistants, junior teammates, bookkeepers). Scoped to the **Admin account**, NOT per-instance — a Pro Admin with 10 instances still has 25 total seats shared across all instances. Roles within seats: `admin_owner`, `instance_lead`, `member`, `delegated_admin` (per Arc 4 §7.2).
+
+2. **"Leads"** are end-user conversations (the homebuyer/seller chatting with a Luciel). NOT capped per-instance; capped per-month-per-Admin. Metering basis for Enterprise.
+
+3. **"Widget custom-domain CNAME"** — Meaning A confirmed by partner 2026-05-23: customer points `chat.theircompany.com` at our widget endpoint. This is NOT the legacy `domains` table from the four-layer hierarchy (that table is dropped wholesale in Revision C). It's a new lightweight CNAME-mapping artifact that lands at Arc 6 alongside the Stripe wiring; v1 schema is a `admin_widget_domains(admin_id, cname, verified_at, created_at)` table authored at Arc 6.
+
+4. **"Stripe customer record: No (lazy on upgrade)"** — means `admins.stripe_customer_id IS NULL` while tier='free'. Upgrade transition creates the Stripe customer + subscription in a single coherent operation. See §6.4 rationale + the CHECK constraint above.
+
+5. **"Support SLA: Community"** — means GitHub Discussions / community Slack / docs-search; no email ticket. "48h email" = ticket response within 48 business hours (M–F 9am–6pm EDT). "24h + CSM" = 24-hour email response PLUS a dedicated Customer Success Manager for the contract term.
+
+### §6.6 — Doctrine deltas this resolution creates
+
+The entitlement table above **diverges from Arc 4 tier-matrix-v2** in 7 of 8 rows (only "Free instance cap = 1" + "Free audit retention = 30 days" + "Free seat cap = 1" match). Specifically:
+
+| Dim | Arc 4 v2 | This resolution | Direction |
+|---|---|---|---|
+| Free leads/month | 10 | **100** | More generous (10×) |
+| Free API | Disabled (0 rpm) | **Enabled at 30 rpm** | Net-new on Free — raises captcha drift to P1 |
+| Pro instance cap | 3 | **10** | More generous (3.3×) |
+| Pro seat cap | 5 | **25** | More generous (5×) |
+| Pro leads/month | 2,000 | **5,000** | More generous (2.5×) |
+| Pro API rpm | 60 | **300** | More generous (5×) |
+| Enterprise API rpm | 1,000 default | **3,000 default** | Header value raised |
+
+**Sibling-doc rewrites required (executed in next pass):**
+- `arc4-out/A-tier-matrix-detail.md` §2.1, §3.1, §4.1, §6.1, §7.1, §8.1, §9.1 — in-place rewrite of the Numeric values cells with the new defaults; §10–§16 rows that aren't in the new table (composition depth, knowledge-share grants, SSO, etc.) keep Arc 4's existing values
+- `docs/CANONICAL_RECAP.md` §12 — add 2026-05-23 revision stanza recording this decision + reason ("founder business-shape call, Option A locked")
+- `docs/CANONICAL_RECAP.md` §14 — update the entitlement-matrix-v2 reference to point at §6.5 here as the source of truth (the tier-matrix-detail.md doc gets a forward-pointer in its header to this resolution)
+- `app/policy/entitlements.py` — rewrite `TIER_ENTITLEMENTS` dict with the new defaults; lands as part of Revision A's authoring batch (NOT in the migration file itself — the values live in code, the DB constraint only enforces the tier-name vocabulary)
+- `docs/DRIFTS.md` §3 — (a) raise `D-free-tier-captcha-missing-2026-05-22` from P2 to **P1** (Free + API = abuse vector); (b) **open new drift** `D-pro-tier-rate-limit-abuse-surface-2026-05-23` (Pro at 300rpm × 25 seats × 10 instances = theoretical single-admin saturation; need per-instance + per-key rate-limiting before Pro launches at scale)
+
+These rewrites land in the NEXT commit after this resolution doc is committed, as one cohesive doctrine-revision pass.

@@ -383,13 +383,17 @@ This is the order in which prod-touching steps will execute. Each step is paired
 
 ## §6 — The 5 gaps surfaced for partner-review
 
-### Gap 1 — Free-tier introduction handling
+### Gap 1 — Free-tier introduction handling — RESOLVED 2026-05-23 9:51am EDT
 
-**The issue:** The V2 tier shape is **Free / Pro / Enterprise**, but the legacy data has tier strings like `individual` / `team` / `company`. Arc 4 §3.2 maps `individual`/`solo` → `pro` and `team`/`company` → `enterprise`. Free is **net-new** — no existing customer renames into it.
+**Resolution:** see `arc5-out/A-arc5-arc4-plan-defects.md` §6.4 + §6.5 for the full locked entitlement table + Free tier behaviour + Stripe shape decisions.
 
-**Open question for partner:** Do we want existing customers grandfathered into Pro (Arc 4's plan), or do we want some segment migrated into Free as a downgrade path? The doctrine-honest default per Arc 4 is "existing customers all become Pro at minimum to preserve effective entitlements; Free is for net-new signups only." Confirm this is still your intent.
-
-**Recommendation:** Stick with Arc 4's default. New code-layer constant `TIER_FREE` exists for net-new signups but is never written to existing rows during Revision B.
+**Summary of decisions (full detail in defects doc §6):**
+- Free is a real first-class tier, NOT a sentinel
+- Free admins carry NULL `stripe_customer_id` (lazy-created on upgrade)
+- Q2 orphan-default: customers in `tenant_configs` with no active `subscriptions` row backfill to `tier='free'` with `source='defaulted-to-free'` audit row; customers with active subscriptions backfill to their renamed tier with `source='from-subscriptions'` audit row
+- Net-new signups land directly on `tier='free'`
+- Legacy `individual`/`solo` renames to `pro`; legacy `team`/`company` renames to `enterprise` (per Arc 4 §3.1 step 3 — unchanged)
+- Final entitlement table at `arc5-out/A-arc5-arc4-plan-defects.md` §6.5 supersedes Arc 4 tier-matrix-v2 numeric cells in 7 of 8 rows (more generous Free + Pro per founder business-shape call)
 
 ### Gap 2 — Tier-constant code rename (B8 batch)
 
