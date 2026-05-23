@@ -410,9 +410,9 @@ def sqlite_session():
     # Importing the models registers them on Base.metadata. We only
     # create the four tables the service queries directly.
     from app.models.trace import Trace
-    from app.models.domain_config import DomainConfig
-    from app.models.agent import Agent
-    from app.models.luciel_instance import LucielInstance
+    from app.models.aliases import DomainConfig
+    from app.models.aliases import Agent
+    from app.models.aliases import LucielInstance
 
     engine = create_engine("sqlite:///:memory:")
     for model in (LucielInstance, DomainConfig, Agent, Trace):

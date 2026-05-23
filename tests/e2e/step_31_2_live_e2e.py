@@ -88,7 +88,7 @@ from app.core.config import settings  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.api_key import ApiKey  # noqa: E402
-from app.models.luciel_instance import LucielInstance  # noqa: E402
+from app.models.aliases import LucielInstance  # noqa: E402
 from app.models.subscription import Subscription  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.services.billing_webhook_service import BillingWebhookService  # noqa: E402

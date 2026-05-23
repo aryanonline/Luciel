@@ -467,7 +467,7 @@ class TestAdminServiceTierScopeGuard:
             )
 
     def test_tier_scope_violation_error_has_reasons(self):
-        from app.services.luciel_instance_service import (
+        from app.services.instance_service import (
             TierScopeViolationError,
         )
         for r in (

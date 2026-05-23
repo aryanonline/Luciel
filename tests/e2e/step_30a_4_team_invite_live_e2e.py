@@ -107,15 +107,15 @@ from app.models.admin_audit_log import (  # noqa: E402
     ACTION_INVITE_REDEEMED,
     RESOURCE_USER_INVITE,
 )
-from app.models.agent import Agent  # noqa: E402
-from app.models.domain_config import DomainConfig  # noqa: E402
+from app.models.aliases import Agent  # noqa: E402
+from app.models.aliases import DomainConfig  # noqa: E402
 from app.models.scope_assignment import ScopeAssignment  # noqa: E402
 from app.models.subscription import (  # noqa: E402
     Subscription,
     TIER_TEAM,
     TIER_INSTANCE_CAPS,
 )
-from app.models.tenant import TenantConfig  # noqa: E402
+from app.models.aliases import TenantConfig  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.models.user_invite import UserInvite, InviteStatus  # noqa: E402
 

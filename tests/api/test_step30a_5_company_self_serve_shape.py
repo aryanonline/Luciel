@@ -97,7 +97,7 @@ class TestTierScopeViolationErrorReasons:
         public error.code='domain_cap_reached'. Removing the reason
         constant would break the route's mapping silently.
         """
-        from app.services.luciel_instance_service import (
+        from app.services.instance_service import (
             TierScopeViolationError,
         )
         assert hasattr(TierScopeViolationError, "REASON_DOMAIN_CAP_EXCEEDED")
@@ -111,7 +111,7 @@ class TestTierScopeViolationErrorReasons:
         on the same exception class so the route's mapping table covers
         every reason.
         """
-        from app.services.luciel_instance_service import (
+        from app.services.instance_service import (
             TierScopeViolationError,
         )
         for name in (

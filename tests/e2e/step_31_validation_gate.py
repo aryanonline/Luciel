@@ -107,7 +107,7 @@ from app.models.admin_audit_log import (  # noqa: E402
     RESOURCE_TENANT,
 )
 from app.models.conversation import Conversation  # noqa: E402
-from app.models.domain_config import DomainConfig  # noqa: E402
+from app.models.aliases import DomainConfig  # noqa: E402
 from app.models.identity_claim import (  # noqa: E402
     ClaimType,
     IdentityClaim,
@@ -115,7 +115,7 @@ from app.models.identity_claim import (  # noqa: E402
 from app.models.message import MessageModel  # noqa: E402
 from app.models.retention import DeletionLog  # noqa: E402
 from app.models.session import SessionModel  # noqa: E402
-from app.models.tenant import TenantConfig  # noqa: E402
+from app.models.aliases import TenantConfig  # noqa: E402
 from app.models.trace import Trace  # noqa: E402
 from app.repositories.admin_audit_repository import (  # noqa: E402
     AdminAuditRepository,

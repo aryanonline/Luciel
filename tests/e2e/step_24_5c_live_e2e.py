@@ -74,7 +74,7 @@ from app.models.identity_claim import (  # noqa: E402
 )
 from app.models.message import MessageModel  # noqa: E402
 from app.models.session import SessionModel  # noqa: E402
-from app.models.tenant import TenantConfig  # noqa: E402
+from app.models.aliases import TenantConfig  # noqa: E402
 from app.repositories.session_repository import SessionRepository  # noqa: E402
 from app.services.session_service import SessionService  # noqa: E402
 
