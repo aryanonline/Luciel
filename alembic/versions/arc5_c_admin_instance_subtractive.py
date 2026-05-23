@@ -117,6 +117,85 @@ def upgrade() -> None:
     bind = op.get_bind()
 
     # -------------------------------------------------------------------------
+    # 0. ORPHAN PURGE (Aggressive-cleanup amendment — 2026-05-23 hotfix).
+    #
+    #    Revision B backfilled ACTIVE rows only. Legacy V1 child tables
+    #    (api_keys / knowledge_embeddings / memory_items pointing at
+    #    luciel_instances; scope_assignments / user_invites / conversations
+    #    / identity_claims pointing at tenant_configs) contain rows whose
+    #    parent legacy row is inactive and therefore was NOT backfilled
+    #    into V2.
+    #
+    #    Field survey on PROD (task 4e804484ab9c47828aa44cfc1b9d9b58):
+    #      - api_keys: 110 orphan rows (luciel_instance_id IN 1..127, all
+    #        inactive legacy ids; only id=129 was the active row backfilled
+    #        to instances)
+    #      - scope_assignments: ~143 orphan rows across 74 distinct
+    #        legacy tenant_ids (mostly step24-5b-p12-* / step24-5b-p14-*
+    #        test fixtures + inactive co-* / ind-* / team-* tenants)
+    #      - user_invites: 6 orphan rows across 3 inactive tenants
+    #        (co-354c5056, co-77310d79, team-d55ecc54)
+    #      - knowledge_embeddings / memory_items / conversations /
+    #        identity_claims: clean (0 orphans)
+    #
+    #    Resolution (aggressive-cleanup doctrine 2026-05-23 — "we
+    #    drop/delete/get rid of what is outdated or no longer needed"):
+    #
+    #      * NULLABLE FK columns (api_keys.luciel_instance_id,
+    #        knowledge_embeddings.luciel_instance_id,
+    #        memory_items.luciel_instance_id): UPDATE to NULL where the
+    #        target is missing. This is exactly what ON DELETE SET NULL
+    #        would have done; we apply it eagerly to satisfy the new FK.
+    #
+    #      * NOT-NULL FK columns (scope_assignments.tenant_id,
+    #        user_invites.tenant_id): DELETE orphan rows. The parents
+    #        are inactive tenants and the children reference identities
+    #        that no longer have a corresponding Admin in V2.
+    #
+    #    The pre-C RDS snapshot (luciel-arc5-post-revision-b-*) is the
+    #    forensic recovery surface for any orphan row we delete here.
+    # -------------------------------------------------------------------------
+
+    # --- 0a. NULLABLE FK orphan NULL-out ---
+    for src_table, src_col, ref_table, ref_col in [
+        ("api_keys",             "luciel_instance_id", "instances", "id"),
+        ("knowledge_embeddings", "luciel_instance_id", "instances", "id"),
+        ("memory_items",         "luciel_instance_id", "instances", "id"),
+    ]:
+        result = bind.execute(sa.text(f"""
+            UPDATE {src_table}
+            SET {src_col} = NULL
+            WHERE {src_col} IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM {ref_table}
+                  WHERE {ref_table}.{ref_col} = {src_table}.{src_col}
+              )
+        """))
+        print(f"[arc5_c] orphan-null {src_table}.{src_col}: "
+              f"updated_rows={result.rowcount}")
+
+    # --- 0b. NOT-NULL FK orphan DELETE ---
+    for src_table, src_col, ref_table, ref_col in [
+        ("scope_assignments", "tenant_id", "admins", "id"),
+        ("user_invites",      "tenant_id", "admins", "id"),
+        # conversations/identity_claims were probed clean on PROD but
+        # we still guard so re-runs on dev/staging with legacy fixtures
+        # converge.
+        ("conversations",     "tenant_id", "admins", "id"),
+        ("identity_claims",   "tenant_id", "admins", "id"),
+    ]:
+        result = bind.execute(sa.text(f"""
+            DELETE FROM {src_table}
+            WHERE {src_col} IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM {ref_table}
+                  WHERE {ref_table}.{ref_col} = {src_table}.{src_col}
+              )
+        """))
+        print(f"[arc5_c] orphan-delete {src_table}.{src_col}: "
+              f"deleted_rows={result.rowcount}")
+
+    # -------------------------------------------------------------------------
     # 1. Drop FKs that still reference legacy tables
     # -------------------------------------------------------------------------
     # Named FKs (declared with explicit name= in earlier migrations)
