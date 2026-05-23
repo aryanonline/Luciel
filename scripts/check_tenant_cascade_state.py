@@ -32,10 +32,10 @@ from app.core.database import get_engine
 from sqlalchemy.orm import Session
 
 from app.models.subscription import Subscription
-from app.models.tenant import TenantConfig
-from app.models.luciel_instance import LucielInstance
-from app.models.agent import Agent
-from app.models.domain_config import DomainConfig
+from app.models.aliases import TenantConfig
+from app.models.aliases import LucielInstance
+from app.models.aliases import Agent
+from app.models.aliases import DomainConfig
 from app.models.api_key import ApiKey
 
 

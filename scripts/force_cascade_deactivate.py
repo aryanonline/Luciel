@@ -31,7 +31,7 @@ from app.core.database import get_engine
 from app.repositories.admin_audit_repository import AuditContext
 from app.repositories.agent_repository import AgentRepository
 from app.services.admin_service import AdminService
-from app.services.luciel_instance_service import LucielInstanceService
+from app.services.instance_service import InstanceService
 
 
 def main() -> int:
@@ -45,7 +45,7 @@ def main() -> int:
     with Session(engine) as db:
         admin = AdminService(db)
         agent_repo = AgentRepository(db)
-        luciel_service = LucielInstanceService(db, admin_service=admin)
+        luciel_service = InstanceService(db, admin_service=admin)
 
         ctx = AuditContext(
             actor_method="admin_script",

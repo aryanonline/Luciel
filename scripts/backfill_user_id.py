@@ -83,7 +83,7 @@ from app.models.admin_audit_log import (
     RESOURCE_AGENT,
     RESOURCE_MEMORY,
 )
-from app.models.agent import Agent
+from app.models.aliases import Agent
 from app.models.memory import MemoryItem
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,

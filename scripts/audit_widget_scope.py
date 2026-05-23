@@ -70,7 +70,7 @@ from sqlalchemy.orm import aliased
 
 from app.db.session import SessionLocal
 from app.models.api_key import ApiKey
-from app.models.domain_config import DomainConfig
+from app.models.aliases import DomainConfig
 
 
 def _is_empty_prompt(value: Optional[str]) -> bool:

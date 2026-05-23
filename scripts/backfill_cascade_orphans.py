@@ -81,7 +81,7 @@ from app.models.admin_audit_log import (
 )
 from app.models.scope_assignment import EndReason, ScopeAssignment
 from app.models.session import SessionModel
-from app.models.tenant import TenantConfig
+from app.models.aliases import TenantConfig
 from app.models.user import User
 from app.models.user_invite import InviteStatus, UserInvite
 from app.repositories.admin_audit_repository import (
