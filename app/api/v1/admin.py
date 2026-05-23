@@ -85,11 +85,6 @@ from app.schemas.admin import (
     AgentConfigCreate,
     AgentConfigRead,
     AgentConfigUpdate,
-    DomainConfigCreate,
-    DomainConfigRead,
-    DomainConfigSelfServeRead,
-    DomainConfigSelfServeCreate,
-    DomainConfigUpdate,
     KnowledgeIngestRequest,
     KnowledgeIngestResponse,
     TenantConfigCreate,
@@ -163,7 +158,7 @@ def onboard_tenant(
     """
     One-call tenant onboarding.
 
-    Creates TenantConfig, default DomainConfig, PIPEDA retention policies,
+    Creates Admin (formerly TenantConfig), PIPEDA retention policies,
     and the tenant's first API key atomically. If anything fails,
     nothing is created.
 

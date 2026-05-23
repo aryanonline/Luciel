@@ -76,9 +76,12 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import Integer, and_, func, select
 from sqlalchemy.orm import Session
 
-from app.models.aliases import Agent
-from app.models.aliases import DomainConfig
-from app.models.aliases import LucielInstance
+# Arc 5 Path A: Agent + DomainConfig table REMOVED. LucielInstance is
+# an alias for the V2 ``Instance`` ORM. Dashboard methods that drew on
+# Agent / DomainConfig now return empty display-name maps (legacy V1
+# dashboards are not surfaced in V2).
+from app.models.instance import Instance
+LucielInstance = Instance
 from app.models.trace import Trace
 
 logger = logging.getLogger(__name__)
@@ -513,21 +516,14 @@ class DashboardService:
     # --- display-name lookups (cheap because they're small lists) --- #
 
     def _domain_display_lookup(self, tenant_id: str) -> dict[str, str]:
-        stmt = select(DomainConfig.domain_id, DomainConfig.display_name).where(
-            DomainConfig.tenant_id == tenant_id
-        )
-        return {row.domain_id: row.display_name for row in self.db.execute(stmt).all()}
+        """Arc 5 Path A V2 stub. Domain layer is gone; returns {}."""
+        return {}
 
     def _agent_display_lookup(
         self, tenant_id: str, domain_id: str
     ) -> dict[str, str]:
-        stmt = select(Agent.agent_id, Agent.display_name).where(
-            and_(
-                Agent.tenant_id == tenant_id,
-                Agent.domain_id == domain_id,
-            )
-        )
-        return {row.agent_id: row.display_name for row in self.db.execute(stmt).all()}
+        """Arc 5 Path A V2 stub. Agent layer is gone; returns {}."""
+        return {}
 
     def _instance_display_lookup_for_tenant(
         self, tenant_id: str

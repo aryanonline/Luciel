@@ -82,7 +82,9 @@ from app.models.admin_audit_log import (
     ACTION_WORKER_IDENTITY_SPOOF_REJECT,
     ACTION_WORKER_PERMANENT_FAILURE,
 )
-from app.models.aliases import Agent
+# Arc 5 Path A: Agent table REMOVED. The cross-tenant identity-spoof
+# gate now checks ScopeAssignment (the V2 binding from User to Admin).
+from app.models.scope_assignment import ScopeAssignment
 from app.models.api_key import ApiKey
 from app.models.aliases import LucielInstance
 from app.models.message import MessageModel
@@ -368,19 +370,19 @@ def extract_memory_from_turn(
                 )
 
         # ---------- Gate 6: cross-tenant identity-spoof guard (Step 24.5b -- Q6) ----------
-        # When both agent_id and actor_user_id are present, the Agent row
-        # at (tenant_id, agent_id) MUST have user_id == actor_user_uuid.
-        # This catches a malicious payload that claims an actor identity
-        # whose Agent lives in a different tenant. Pillar 13 in Commit 3
-        # asserts this gate fires.
+        # Arc 5 Path A: V2 binding is ScopeAssignment(user_id, tenant_id).
+        # When actor_user_uuid is present and agent_id is supplied (legacy
+        # field name preserved on the payload for transition), the actor
+        # MUST have an active ScopeAssignment under this tenant.
         if actor_user_uuid is not None and agent_id is not None:
             spoof_agent = db.scalars(
-                select(Agent).where(
-                    Agent.tenant_id == tenant_id,
-                    Agent.agent_id == agent_id,
+                select(ScopeAssignment).where(
+                    ScopeAssignment.tenant_id == tenant_id,
+                    ScopeAssignment.user_id == actor_user_uuid,
+                    ScopeAssignment.active.is_(True),
                 ).limit(1)
             ).first()
-            if spoof_agent is None or spoof_agent.user_id != actor_user_uuid:
+            if spoof_agent is None:
                 logger.warning(
                     "gate6 identity spoof task=%s payload_actor_user=%s "
                     "agent_user=%s tenant=%s agent_id=%s",

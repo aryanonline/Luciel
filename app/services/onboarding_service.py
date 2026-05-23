@@ -24,9 +24,14 @@ from app.models.admin_audit_log import (
     RESOURCE_RETENTION_POLICY,
     RESOURCE_TENANT,
 )
-from app.models.aliases import DomainConfig
+# Arc 5 Path A: DomainConfig REMOVED. V2 onboarding creates an Admin
+# row (formerly TenantConfig) and the retention policies; there is no
+# Domain layer.
+from app.models.admin import Admin
 from app.models.retention import RetentionPolicy
-from app.models.aliases import TenantConfig
+
+# Legacy name kept for source compatibility.
+TenantConfig = Admin
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService
@@ -88,35 +93,31 @@ class OnboardingService:
             raise ValueError(f"Tenant '{tenant_id}' already exists")
 
         try:
-            # 1. Create TenantConfig
-            tenant = TenantConfig(
-                tenant_id=tenant_id,
-                display_name=display_name,
-                description=description,
-                escalation_contact=escalation_contact,
-                allowed_domains=[default_domain_id],
-                system_prompt_additions=system_prompt_additions,
-                active=True,
-                created_by=created_by,
-            )
+            # 1. Create Admin (formerly TenantConfig).
+            # Arc 5 Path A: ``tenant_id`` is the Admin primary key (`id`).
+            tenant_kwargs = {
+                "id": tenant_id,
+                "display_name": display_name,
+                "description": description,
+                "escalation_contact": escalation_contact,
+                "system_prompt_additions": system_prompt_additions,
+                "active": True,
+                "created_by": created_by,
+            }
+            # Some legacy columns (allowed_domains) may persist on the
+            # Admin row until Revision C drops them. Set only if the
+            # column still exists on the ORM model.
+            if hasattr(Admin, "allowed_domains"):
+                tenant_kwargs["allowed_domains"] = [default_domain_id]
+            tenant = Admin(**tenant_kwargs)
             self.db.add(tenant)
             self.db.flush()  # get ID without committing
-            logger.info("Onboard: created tenant config for %s", tenant_id)
+            logger.info("Onboard: created admin (tenant_config) for %s", tenant_id)
 
-            # 2. Create default DomainConfig
-            domain = DomainConfig(
-                tenant_id=tenant_id,
-                domain_id=default_domain_id,
-                display_name=default_domain_display_name,
-                description=default_domain_description,
-                active=True,
-                created_by=created_by,
-            )
-            self.db.add(domain)
-            self.db.flush()
-            logger.info(
-                "Onboard: created domain config %s/%s", tenant_id, default_domain_id
-            )
+            # 2. Default DomainConfig: REMOVED (Arc 5 Path A).
+            # V2 has no Domain layer; ``default_domain_id`` is retained
+            # only as a label inside the audit-row payload below.
+            domain = None
 
             # 3. Create default retention policies
             retention_map = {
@@ -194,19 +195,11 @@ class OnboardingService:
                 },
                 note="onboard_tenant: created tenant_config",
             )
-            audit_repo.record(
-                ctx=ctx,
-                tenant_id=tenant_id,
-                action=ACTION_CREATE,
-                resource_type=RESOURCE_DOMAIN,
-                resource_natural_id=default_domain_id,
-                domain_id=default_domain_id,
-                after={
-                    "display_name": default_domain_display_name,
-                    "description": default_domain_description,
-                },
-                note="onboard_tenant: created default domain_config",
-            )
+            # Arc 5 Path A: RESOURCE_DOMAIN audit row REMOVED. V2 has no
+            # Domain layer, so no domain_config row is created and no
+            # corresponding audit row is emitted. Pillar 20's pair
+            # coverage moves from (tenant, domain, retention, api_key)
+            # to (tenant, retention, api_key) post-collapse.
             # Bulk retention-policy audit row — one row with the full
             # category breakdown in after_json. Five categories.
             audit_repo.record(
@@ -232,7 +225,7 @@ class OnboardingService:
             # 5. Commit everything atomically
             self.db.commit()
             self.db.refresh(tenant)
-            self.db.refresh(domain)
+            # V2: no domain row to refresh.
             for p in retention_policies:
                 self.db.refresh(p)
 

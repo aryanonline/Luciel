@@ -44,7 +44,10 @@ from app.models.admin_audit_log import (
     ACTION_UPDATE,
     RESOURCE_USER,
 )
-from app.models.aliases import Agent
+# Arc 5 Path A: Agent table REMOVED. V2 uses ScopeAssignment to bind
+# users to Admins. Methods that historically queried Agent now query
+# ScopeAssignment.
+from app.models.scope_assignment import ScopeAssignment
 from app.models.user import User
 from app.repositories.admin_audit_repository import (
     SYSTEM_ACTOR_TENANT,
@@ -212,9 +215,11 @@ class UserRepository:
         query = self.db.query(User)
 
         if tenant_id is not None:
-            query = query.join(Agent, Agent.user_id == User.id).filter(
-                Agent.tenant_id == tenant_id
-            )
+            # V2: "users under admin tenant_id" = users with any
+            # ScopeAssignment whose tenant_id matches.
+            query = query.join(
+                ScopeAssignment, ScopeAssignment.user_id == User.id
+            ).filter(ScopeAssignment.tenant_id == tenant_id)
 
         if active_only:
             query = query.filter(User.active.is_(True))
@@ -229,17 +234,21 @@ class UserRepository:
         user_id: uuid.UUID,
         *,
         active_only: bool = False,
-    ) -> list[Agent]:
-        """Cross-tenant: every Agent row this User identity holds.
+    ) -> list[ScopeAssignment]:
+        """V2: every ScopeAssignment row this User identity holds.
 
-        Service layer gates platform-admin authorization on the calling
-        key. Tenant-scoped admins see only assignments under their own
-        tenant via list_for_scope(tenant_id=...).
+        Arc 5 Path A: legacy ``Agent`` row queries are rewritten to use
+        ``ScopeAssignment`` (the V2 binding between User and Admin).
+        The method name is preserved for source compatibility.
         """
-        query = self.db.query(Agent).filter(Agent.user_id == user_id)
+        query = self.db.query(ScopeAssignment).filter(
+            ScopeAssignment.user_id == user_id
+        )
         if active_only:
-            query = query.filter(Agent.active.is_(True))
-        return query.order_by(Agent.tenant_id.asc(), Agent.id.asc()).all()
+            query = query.filter(ScopeAssignment.active.is_(True))
+        return query.order_by(
+            ScopeAssignment.tenant_id.asc(), ScopeAssignment.id.asc()
+        ).all()
     # ---------------------------------------------------------------
     # Update
     # ---------------------------------------------------------------

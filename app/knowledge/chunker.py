@@ -23,9 +23,16 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from app.models.aliases import DomainConfig
-from app.models.aliases import LucielInstance
-from app.models.aliases import TenantConfig
+# Arc 5 Path A (V2 collapse): inheritance chain is Admin → Instance.
+# DomainConfig was deleted; the resolver no longer accepts a domain
+# argument. The legacy ``TenantConfig`` / ``LucielInstance`` names are
+# kept on the public surface as aliases for ``Admin`` / ``Instance`` so
+# call-sites compile during the transition.
+from app.models.admin import Admin
+from app.models.instance import Instance
+
+TenantConfig = Admin
+LucielInstance = Instance
 
 # Canonical strategy slugs. Stored verbatim in tenant_configs.chunk_strategy
 # (NOT NULL) and the nullable override columns on domain_configs /
@@ -84,39 +91,44 @@ class EffectiveChunkingConfig:
 
 def resolve_effective_config(
     *,
-    tenant: TenantConfig,
-    domain: DomainConfig | None,
-    instance: LucielInstance | None,
+    tenant: Admin,
+    domain=None,  # V2: ignored, kept for call-site source-compatibility
+    instance: Instance | None = None,
 ) -> EffectiveChunkingConfig:
-    """Resolve the three-level inheritance chain.
+    """Resolve the two-level inheritance chain (Arc 5 Path A: Admin → Instance).
 
-    Precedence per field: instance -> domain -> tenant.
-    tenant values are NOT NULL by migration, so they are always the
-    non-NULL fallback of last resort.
+    Precedence per field: instance -> admin (tenant). Admin values are
+    NOT NULL by migration, so they are always the non-NULL fallback of
+    last resort.
+
+    The legacy ``domain`` keyword argument is accepted but ignored; V2
+    has no Domain layer.
     """
+    if domain is not None:
+        # Soft warning: callers should drop the domain arg.
+        import logging
+        logging.getLogger(__name__).debug(
+            "resolve_effective_config: legacy 'domain' kwarg passed; "
+            "V2 ignores Domain layer."
+        )
+
     # chunk_size
     if instance is not None and instance.chunk_size is not None:
         chunk_size, size_source = instance.chunk_size, "instance"
-    elif domain is not None and domain.chunk_size is not None:
-        chunk_size, size_source = domain.chunk_size, "domain"
     else:
-        chunk_size, size_source = tenant.chunk_size, "tenant"
+        chunk_size, size_source = tenant.chunk_size, "admin"
 
     # chunk_overlap
     if instance is not None and instance.chunk_overlap is not None:
         chunk_overlap, overlap_source = instance.chunk_overlap, "instance"
-    elif domain is not None and domain.chunk_overlap is not None:
-        chunk_overlap, overlap_source = domain.chunk_overlap, "domain"
     else:
-        chunk_overlap, overlap_source = tenant.chunk_overlap, "tenant"
+        chunk_overlap, overlap_source = tenant.chunk_overlap, "admin"
 
     # chunk_strategy
     if instance is not None and instance.chunk_strategy is not None:
         chunk_strategy, strategy_source = instance.chunk_strategy, "instance"
-    elif domain is not None and domain.chunk_strategy is not None:
-        chunk_strategy, strategy_source = domain.chunk_strategy, "domain"
     else:
-        chunk_strategy, strategy_source = tenant.chunk_strategy, "tenant"
+        chunk_strategy, strategy_source = tenant.chunk_strategy, "admin"
 
     return EffectiveChunkingConfig(
         chunk_size=chunk_size,

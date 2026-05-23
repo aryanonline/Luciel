@@ -73,7 +73,9 @@ from app.models.admin_audit_log import (
     ACTION_USER_INVITED,
     RESOURCE_USER_INVITE,
 )
-from app.models.aliases import Agent
+# Arc 5 Path A: Agent table REMOVED. Invite redemption mints a
+# ScopeAssignment binding the new user to the Admin (tenant). No Agent
+# row is created.
 from app.models.scope_assignment import ScopeAssignment
 from app.models.user import User
 from app.models.user_invite import InviteStatus, UserInvite
@@ -553,39 +555,17 @@ def redeem_invite(
             db.add(user)
             db.flush()
 
+        # Arc 5 Path A (V2): no Agent row is created. The new user is
+        # bound to the Admin via a single ScopeAssignment. The legacy
+        # ``agent_slug`` value is retained for the audit-row payload
+        # (the legacy audit log expects it as a searchable string).
         agent_slug = _slugify_agent_id_from_email(email_norm)
-        existing_agent = db.execute(
-            select(Agent).where(
-                Agent.tenant_id == tenant_id,
-                Agent.domain_id == domain_id,
-                Agent.agent_id == agent_slug,
-            )
-        ).scalars().first()
-        if existing_agent is not None and existing_agent.user_id == user.id:
-            agent = existing_agent
-        else:
-            if existing_agent is not None:
-                # Slug collision on a different user -- suffix.
-                agent_slug = f"{agent_slug}-{user.id.hex[:8]}"[:100]
-            agent = Agent(
-                tenant_id=tenant_id,
-                domain_id=domain_id,
-                agent_id=agent_slug,
-                display_name=email_norm,
-                description="Teammate provisioned via Step 30a.4 invite redemption.",
-                contact_email=email_norm,
-                user_id=user.id,
-                active=True,
-                created_by="team_invite",
-            )
-            db.add(agent)
-            db.flush()
 
         existing_assignment = db.execute(
             select(ScopeAssignment).where(
                 ScopeAssignment.user_id == user.id,
                 ScopeAssignment.tenant_id == tenant_id,
-                ScopeAssignment.domain_id == domain_id,
+                ScopeAssignment.domain_id.is_(None),
                 ScopeAssignment.ended_at.is_(None),
                 ScopeAssignment.active.is_(True),
             )
@@ -594,7 +574,7 @@ def redeem_invite(
             assignment = ScopeAssignment(
                 user_id=user.id,
                 tenant_id=tenant_id,
-                domain_id=domain_id,
+                domain_id=None,  # V2: no Domain layer
                 role=invite.role,
                 active=True,
             )
@@ -603,9 +583,10 @@ def redeem_invite(
 
         # --- Set password. auth_service.set_password commits internally
         #     (it manages its own txn boundary) -- so we commit our
-        #     User/Agent/ScopeAssignment writes first via flush, then
-        #     call set_password, then write the audit row and accept
-        #     row in a second commit. ---
+        #     User/ScopeAssignment writes first via flush, then call
+        #     set_password, then write the audit row and accept row in
+        #     a second commit. (Arc 5 Path A: Agent row no longer
+        #     created.) ---
         auth_service.set_password(db=db, user_id=user.id, password=password)
 
         repo.mark_accepted(invite, accepted_user_id=user.id, autocommit=False)

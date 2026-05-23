@@ -1,9 +1,18 @@
 """
 Config repository.
 
-Handles database lookups for tenant, domain, and agent configurations.
-These are the structured settings that control how a child Luciel
-behaves at each level of the hierarchy.
+Arc 5 Path A (V2 collapse): the legacy three-level configuration chain
+(TenantConfig → DomainConfig → AgentConfig) was eliminated. V2's
+hierarchy is Admin → Instance → Lead; configuration is owned by the
+Admin row directly (instance-level overrides come from the Instance
+model, see ``app.knowledge.chunker.resolve_effective_config``).
+
+The ``get_domain_config`` method has been removed. The legacy
+``get_tenant_config`` and ``get_agent_config`` methods survive in
+collapsed form so any straggler caller in scripts/tests compiles;
+new code must use ``InstanceRepository`` or ``Admin`` directly.
+
+The legacy ``agent_configs`` table is dropped at Revision C.
 """
 
 from __future__ import annotations
@@ -11,9 +20,11 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.admin import Admin
 from app.models.agent_config import AgentConfig
-from app.models.aliases import DomainConfig
-from app.models.aliases import TenantConfig
+
+# V2 alias: TenantConfig is Admin.
+TenantConfig = Admin
 
 
 class ConfigRepository:
@@ -21,29 +32,22 @@ class ConfigRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def get_tenant_config(self, tenant_id: str) -> TenantConfig | None:
-        """Look up the config for a tenant."""
-        stmt = select(TenantConfig).where(
-            TenantConfig.tenant_id == tenant_id,
-            TenantConfig.active.is_(True),
-        )
-        return self.db.scalars(stmt).first()
-
-    def get_domain_config(
-        self, tenant_id: str, domain_id: str
-    ) -> DomainConfig | None:
-        """Look up the config for a specific tenant/domain combination."""
-        stmt = select(DomainConfig).where(
-            DomainConfig.tenant_id == tenant_id,
-            DomainConfig.domain_id == domain_id,
-            DomainConfig.active.is_(True),
+    def get_tenant_config(self, tenant_id: str) -> Admin | None:
+        """Look up the Admin row (legacy name preserved)."""
+        stmt = select(Admin).where(
+            Admin.id == tenant_id,
+            Admin.active.is_(True),
         )
         return self.db.scalars(stmt).first()
 
     def get_agent_config(
         self, tenant_id: str, agent_id: str
     ) -> AgentConfig | None:
-        """Look up the config for a specific agent within a tenant."""
+        """Look up the legacy agent_configs row.
+
+        Dropped at Revision C; preserved here for transition-period
+        callers that still touch the legacy table.
+        """
         stmt = select(AgentConfig).where(
             AgentConfig.tenant_id == tenant_id,
             AgentConfig.agent_id == agent_id,

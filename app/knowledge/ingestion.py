@@ -45,10 +45,14 @@ from app.knowledge.parsers import (
     detect_source_type,
     get_parser,
 )
-from app.models.aliases import DomainConfig
+# Arc 5 Path A: DomainConfig REMOVED (V2 has no Domain layer)
 from app.models.knowledge import KnowledgeEmbedding
-from app.models.aliases import LucielInstance
-from app.models.aliases import TenantConfig
+from app.models.admin import Admin
+from app.models.instance import Instance
+
+# Legacy names kept as aliases during the transition.
+TenantConfig = Admin
+LucielInstance = Instance
 from app.repositories.knowledge_repository import KnowledgeRepository
 from app.schemas.knowledge import KNOWLEDGE_TYPES
 
@@ -289,42 +293,36 @@ class IngestionService:
         self,
         *,
         tenant_id: str | None,
-        domain_id: str | None,
+        domain_id: str | None,  # V2: ignored, kept for call-site compat
         luciel_instance_id: int | None,
     ) -> EffectiveChunkingConfig:
+        """Arc 5 Path A (V2): resolves the Admin → Instance chain.
+
+        The ``domain_id`` argument is accepted for source-compatibility
+        with legacy callers but ignored — V2 has no Domain layer.
+        """
         if not tenant_id:
             raise IngestionError(
                 "tenant_id is required to resolve chunking config"
             )
         tenant = (
-            self.db.query(TenantConfig)
-            .filter(TenantConfig.tenant_id == tenant_id)
+            self.db.query(Admin)
+            .filter(Admin.id == tenant_id)
             .one_or_none()
         )
         if tenant is None:
             raise IngestionError(f"Unknown tenant_id: {tenant_id!r}")
 
-        domain = None
-        if domain_id is not None:
-            domain = (
-                self.db.query(DomainConfig)
-                .filter(
-                    DomainConfig.tenant_id == tenant_id,
-                    DomainConfig.domain_id == domain_id,
-                )
-                .one_or_none()
-            )
-
         instance = None
         if luciel_instance_id is not None:
-            instance = self.db.get(LucielInstance, luciel_instance_id)
+            instance = self.db.get(Instance, luciel_instance_id)
             if instance is None:
                 raise IngestionError(
                     f"Unknown luciel_instance_id: {luciel_instance_id}"
                 )
 
         return resolve_effective_config(
-            tenant=tenant, domain=domain, instance=instance
+            tenant=tenant, instance=instance
         )
 
     def _prepare_versioning(
