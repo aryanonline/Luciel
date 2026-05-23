@@ -1,0 +1,113 @@
+{
+  "captured_at_utc": "2026-05-23T22:50:05+00:00",
+  "stripe_account_id": "acct_1TX2BmRytQVRVXw7",
+  "subscriptions": [],
+  "prices_to_archive": [
+    {
+      "slot": "individual_monthly",
+      "id": "price_1TX3MGRytQVRVXw7TPKQiCAS",
+      "product": "prod_UW5XLqvK0A2PKl",
+      "nickname": "Individual monthly",
+      "active": true,
+      "unit_amount": 3000,
+      "currency": "cad",
+      "type": "recurring",
+      "recurring": {
+        "interval": "month",
+        "interval_count": 1,
+        "usage_type": "licensed"
+      },
+      "created_utc": "2026-05-14T17:47:40+00:00"
+    },
+    {
+      "slot": "individual_annual",
+      "id": "price_1TX3MGRytQVRVXw7408HJhsG",
+      "product": "prod_UW5XLqvK0A2PKl",
+      "nickname": "Individual annual",
+      "active": true,
+      "unit_amount": 30000,
+      "currency": "cad",
+      "type": "recurring",
+      "recurring": {
+        "interval": "year",
+        "interval_count": 1,
+        "usage_type": "licensed"
+      },
+      "created_utc": "2026-05-14T17:47:40+00:00"
+    },
+    {
+      "slot": "team_monthly",
+      "id": "price_1TX3MHRytQVRVXw7LazGyxZH",
+      "product": "prod_UW5XMLeRBpgCJH",
+      "nickname": "Team monthly",
+      "active": true,
+      "unit_amount": 30000,
+      "currency": "cad",
+      "type": "recurring",
+      "recurring": {
+        "interval": "month",
+        "interval_count": 1,
+        "usage_type": "licensed"
+      },
+      "created_utc": "2026-05-14T17:47:41+00:00"
+    },
+    {
+      "slot": "team_annual",
+      "id": "price_1TX3MHRytQVRVXw7pVbzGSX0",
+      "product": "prod_UW5XMLeRBpgCJH",
+      "nickname": "Team annual",
+      "active": true,
+      "unit_amount": 300000,
+      "currency": "cad",
+      "type": "recurring",
+      "recurring": {
+        "interval": "year",
+        "interval_count": 1,
+        "usage_type": "licensed"
+      },
+      "created_utc": "2026-05-14T17:47:41+00:00"
+    },
+    {
+      "slot": "company_monthly",
+      "id": "price_1TX3MIRytQVRVXw79cYZwjVw",
+      "product": "prod_UW5XobSmV02qQp",
+      "nickname": "Company monthly",
+      "active": true,
+      "unit_amount": 200000,
+      "currency": "cad",
+      "type": "recurring",
+      "recurring": {
+        "interval": "month",
+        "interval_count": 1,
+        "usage_type": "licensed"
+      },
+      "created_utc": "2026-05-14T17:47:42+00:00"
+    },
+    {
+      "slot": "company_annual",
+      "id": "price_1TX3MIRytQVRVXw7b7qXMaX1",
+      "product": "prod_UW5XobSmV02qQp",
+      "nickname": "Company annual",
+      "active": true,
+      "unit_amount": 2000000,
+      "currency": "cad",
+      "type": "recurring",
+      "recurring": {
+        "interval": "year",
+        "interval_count": 1,
+        "usage_type": "licensed"
+      },
+      "created_utc": "2026-05-14T17:47:42+00:00"
+    }
+  ],
+  "intro_fee_price_control": {
+    "id": "price_1TXNmnRytQVRVXw7GGfyJiaj",
+    "product": "prod_UWQeeXJ3CwJQYu",
+    "nickname": "Luciel pilot intro fee (one-time,  CAD)",
+    "active": true,
+    "unit_amount": 10000,
+    "currency": "cad",
+    "type": "one_time",
+    "recurring": null
+  }
+}

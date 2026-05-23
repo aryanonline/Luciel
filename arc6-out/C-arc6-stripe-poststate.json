@@ -1,0 +1,112 @@
+{
+  "completed_at_utc": "2026-05-23T22:57:50+00:00",
+  "stripe_account_id": "acct_1TX2BmRytQVRVXw7",
+  "actions": [
+    {
+      "step": "A",
+      "type": "price",
+      "slot": "individual_monthly",
+      "id": "price_1TX3MGRytQVRVXw7TPKQiCAS",
+      "product": "prod_UW5XLqvK0A2PKl",
+      "pre_active": true,
+      "post_active": false,
+      "action": "archived_now",
+      "timestamp_utc": "2026-05-23T22:57:51+00:00"
+    },
+    {
+      "step": "A",
+      "type": "price",
+      "slot": "individual_annual",
+      "id": "price_1TX3MGRytQVRVXw7408HJhsG",
+      "product": "prod_UW5XLqvK0A2PKl",
+      "pre_active": true,
+      "post_active": false,
+      "action": "archived_now",
+      "timestamp_utc": "2026-05-23T22:57:51+00:00"
+    },
+    {
+      "step": "A",
+      "type": "price",
+      "slot": "team_monthly",
+      "id": "price_1TX3MHRytQVRVXw7LazGyxZH",
+      "product": "prod_UW5XMLeRBpgCJH",
+      "pre_active": true,
+      "post_active": false,
+      "action": "archived_now",
+      "timestamp_utc": "2026-05-23T22:57:51+00:00"
+    },
+    {
+      "step": "A",
+      "type": "price",
+      "slot": "team_annual",
+      "id": "price_1TX3MHRytQVRVXw7pVbzGSX0",
+      "product": "prod_UW5XMLeRBpgCJH",
+      "pre_active": true,
+      "post_active": false,
+      "action": "archived_now",
+      "timestamp_utc": "2026-05-23T22:57:52+00:00"
+    },
+    {
+      "step": "A",
+      "type": "price",
+      "slot": "company_monthly",
+      "id": "price_1TX3MIRytQVRVXw79cYZwjVw",
+      "product": "prod_UW5XobSmV02qQp",
+      "pre_active": true,
+      "post_active": false,
+      "action": "archived_now",
+      "timestamp_utc": "2026-05-23T22:57:52+00:00"
+    },
+    {
+      "step": "A",
+      "type": "price",
+      "slot": "company_annual",
+      "id": "price_1TX3MIRytQVRVXw7b7qXMaX1",
+      "product": "prod_UW5XobSmV02qQp",
+      "pre_active": true,
+      "post_active": false,
+      "action": "archived_now",
+      "timestamp_utc": "2026-05-23T22:57:52+00:00"
+    },
+    {
+      "step": "B",
+      "type": "product",
+      "slot": "luciel_individual",
+      "id": "prod_UW5XLqvK0A2PKl",
+      "name": "Luciel Individual",
+      "pre_active": true,
+      "post_active": false,
+      "action": "archived_now",
+      "timestamp_utc": "2026-05-23T22:57:53+00:00"
+    },
+    {
+      "step": "B",
+      "type": "product",
+      "slot": "luciel_team",
+      "id": "prod_UW5XMLeRBpgCJH",
+      "name": "Luciel Team",
+      "pre_active": true,
+      "post_active": false,
+      "action": "archived_now",
+      "timestamp_utc": "2026-05-23T22:57:53+00:00"
+    },
+    {
+      "step": "B",
+      "type": "product",
+      "slot": "luciel_company",
+      "id": "prod_UW5XobSmV02qQp",
+      "name": "Luciel Company",
+      "pre_active": true,
+      "post_active": false,
+      "action": "archived_now",
+      "timestamp_utc": "2026-05-23T22:57:53+00:00"
+    }
+  ],
+  "intro_fee_control": {
+    "price_id": "price_1TXNmnRytQVRVXw7GGfyJiaj",
+    "price_active": true,
+    "product_id": "prod_UWQeeXJ3CwJQYu",
+    "product_active": true,
+    "product_name": "Luciel Pilot Intro Fee"
+  }
+}
