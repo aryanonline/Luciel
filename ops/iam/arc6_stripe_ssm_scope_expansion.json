@@ -12,6 +12,17 @@
     "policy_size_limit_chars": 6144,
     "arc5_inline_policy_status": "UNCHANGED (still 11 Sids, byte-identical to Arc 5 Commit 21 form)",
     "verification_evidence": "Four SSM probes executed at ≈22:26 UTC 2026-05-23 all PASSED: (1) get_parameter on stripe_price_intro_fee → price_* (30 chars); (2) get_parameter WithDecryption=True on stripe_secret_key → sk_live_* (107 chars); (3) put_parameter Type=SecureString to /luciel/production/stripe_arc6_iam_probe → 200 OK; (4) round-trip read on probe → exact match. Probe parameter cleanup deferred to Arc 6 Commit 11.",
+    "scope_reuse_events": [
+      {
+        "event": "arc-7-commit-1-slice-2-3-stripe-mint-and-ssm-put",
+        "date": "2026-05-24",
+        "attached_at_utc_approx": "prior-to-2026-05-24T14:22:00Z (partner-attached at slice-prep boundary; exact attach timestamp not captured)",
+        "operations_performed": "(1) ssm:GetParameter WithDecryption=True on /luciel/production/stripe_secret_key (loaded Stripe Live key for the mint, sk_live_ mode-locked, never echoed); (2) Stripe Price.create x2 for enterprise_monthly (price_1TacunRytQVRVXw71i6eCx1K, $2,800 CAD/mo) and enterprise_annual (price_1TacunRytQVRVXw72JTSAmmq, $24,000 CAD/yr) on existing Enterprise Product prod_UZXsY0kLJsFfop; (3) Stripe Price.modify(active=False) on prior floor_annual price_1TaOmPRytQVRVXw7ozfKMFps; (4) ssm:PutParameter Type=SecureString Overwrite=True x2 for /luciel/production/stripe_price_enterprise_monthly and /luciel/production/stripe_price_enterprise_annual (both Version=1); (5) ssm:GetParameter WithDecryption=True x2 for independent Gate 3 verification of the new params.",
+        "policy_change_required": "NO -- the Arc 6 LucielSandboxStripeScope policy already covers ssm:GetParameter, ssm:PutParameter, and kms:ViaService=ssm on the parameter/luciel/production/stripe_* resource glob; the two new param names match the existing glob exactly. This is policy re-use, not scope expansion. Blast radius analysis below remains unchanged.",
+        "detach_status": "PENDING -- partner to detach at slice close (Arc 7 Commit 1 Slice 2/3 final step) so the sandbox-agent returns to baseline posture between credential-required commits.",
+        "audit_artifact": "arc7-out/arc7-commit1-slice2-stripe-mint-poststate.json (full JSON of minted/archived Price IDs + SSM put versions + control-price active flags)"
+      }
+    ],
     "blast_radius_analysis": "All three Sids resource-scope to `parameter/luciel/production/stripe_*` (a 9-key namespace, all Stripe-related: secret_key, webhook_secret, 7 Price IDs). The agent cannot read or write any other SSM parameter, including the database-url, magic-link-secret, JWT keys, or any non-Stripe production secret. KMS access is gated by `kms:ViaService=ssm.ca-central-1.amazonaws.com` — the AWS-managed SSM key can only be exercised through SSM API calls, not via direct KMS. Worst case on credential compromise: attacker can read Stripe Live secret key + the 7 Stripe Price IDs (already a known prod secret loaded into the running ECS container), and can write arbitrary values to those 9 SSM paths. Attacker CANNOT decrypt non-Stripe SSM SecureStrings, cannot rotate IAM, cannot affect database, cannot mutate ECS services or task definitions (those Sids remain unchanged), cannot affect any other account resource."
   },
   "Sid_blocks_in_customer_managed_policy": [

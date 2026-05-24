@@ -1,0 +1,66 @@
+{
+  "completed_at_utc": "2026-05-24T14:22:07+00:00",
+  "stripe_account_id": "acct_1TX2BmRytQVRVXw7",
+  "arc": "arc7",
+  "commit": "c1-s2",
+  "doctrine": "enterprise-flat-recurring-symmetric-with-pro",
+  "products": {
+    "luciel_enterprise": "prod_UZXsY0kLJsFfop",
+    "luciel_pro": "prod_UZXsUqCuumvw1v"
+  },
+  "minted_prices": [
+    {
+      "slot": "enterprise_monthly",
+      "id": "price_1TacunRytQVRVXw71i6eCx1K",
+      "product": "prod_UZXsY0kLJsFfop",
+      "unit_amount_cad_cents": 280000,
+      "unit_amount_cad_dollars": 2800.0,
+      "currency": "cad",
+      "interval": "month",
+      "interval_count": 1,
+      "usage_type": "licensed",
+      "nickname": "Enterprise monthly (Arc 7 flat-symmetric)",
+      "active": true
+    },
+    {
+      "slot": "enterprise_annual",
+      "id": "price_1TacunRytQVRVXw72JTSAmmq",
+      "product": "prod_UZXsY0kLJsFfop",
+      "unit_amount_cad_cents": 2400000,
+      "unit_amount_cad_dollars": 24000.0,
+      "currency": "cad",
+      "interval": "year",
+      "interval_count": 1,
+      "usage_type": "licensed",
+      "nickname": "Enterprise annual (Arc 7 flat-symmetric)",
+      "active": true
+    }
+  ],
+  "archived_prices": [
+    {
+      "slot": "enterprise_floor_annual",
+      "id": "price_1TaOmPRytQVRVXw7ozfKMFps",
+      "active_post": false,
+      "superseded_by_price_id": "price_1TacunRytQVRVXw72JTSAmmq"
+    }
+  ],
+  "control_prices_still_active": {
+    "intro_fee": "price_1TXNmnRytQVRVXw7GGfyJiaj",
+    "pro_monthly": "price_1TaOmORytQVRVXw77yRoEC8m",
+    "pro_annual": "price_1TaOmORytQVRVXw7ElbQotvK"
+  },
+  "ssm_puts": [
+    {
+      "name": "/luciel/production/stripe_price_enterprise_monthly",
+      "value": "price_1TacunRytQVRVXw71i6eCx1K",
+      "version": 1,
+      "tier": "Standard"
+    },
+    {
+      "name": "/luciel/production/stripe_price_enterprise_annual",
+      "value": "price_1TacunRytQVRVXw72JTSAmmq",
+      "version": 1,
+      "tier": "Standard"
+    }
+  ]
+}
