@@ -133,7 +133,7 @@ PRICE_ID_KEY: dict[tuple[str, str], str] = {
     # pair. ``resolve_price_id`` reads via ``getattr(settings, key)`` and
     # raises ``BillingNotConfiguredError`` if the slot is empty.
     #
-    # Tier topology (CANONICAL §11.7):
+    # Tier topology (CANONICAL §11.7, revised Arc 7 Commit 1):
     #   * Free       — NO Stripe Price (CAPTCHA-gated signup, no Stripe
     #     row at all). Free is NOT a valid key here — callers that ask
     #     for ("free", *) get BillingNotConfiguredError, which the route
@@ -141,21 +141,28 @@ PRICE_ID_KEY: dict[tuple[str, str], str] = {
     #     POST /api/v1/billing/signup-free route (Arc 6 Commit 8), NOT
     #     this checkout machinery.
     #   * Pro        — flat-rate self-serve, monthly + annual cadences.
-    #   * Enterprise — hybrid (flat floor + metered overage). ANNUAL ONLY
-    #     at V2 launch — no monthly cadence in the catalogue. Attempts
-    #     to start an enterprise+monthly checkout raise
-    #     BillingNotConfiguredError (-> 501). The metered overage Price
-    #     is intentionally DEFERRED (Arc 6 Commit 4, partner direction
-    #     2026-05-23) until the Enterprise pipeline materializes; floor-
-    #     only Checkout is the live behaviour until the metered slot is
-    #     minted and a second line-item is appended here.
+    #   * Enterprise — flat-rate self-serve, monthly + annual cadences
+    #     SYMMETRIC WITH PRO since Arc 7 Commit 1 retired the hybrid/
+    #     metered-overage shape (partner doctrine pivot 2026-05-24:
+    #     "Since we have abuse limits for each tier I don't think we
+    #     need to include the metering option for enterprise"). The
+    #     prior `stripe_price_enterprise_floor_annual` slot is RETIRED;
+    #     the new slots are `stripe_price_enterprise_monthly` ($2,800
+    #     CAD/mo) + `stripe_price_enterprise_annual` ($24,000 CAD/yr,
+    #     28.6% annual discount matching Pro's ratio). The (enterprise,
+    #     monthly) 400 reject at app/api/v1/billing.py is REMOVED in the
+    #     same commit. Rate-limit ceilings + leads_per_month_cap +
+    #     instance_count_cap are now the entitlement gates that separate
+    #     Pro from Enterprise — see app/policy/entitlements.py TIER_*
+    #     rows and the (Arc 7 WU-2) rate-limit middleware wiring.
     #
     # If a future tier is added: add a row here and a parallel
     # ``stripe_price_*`` field on ``Settings``. No code change in
     # ``resolve_price_id`` is required — it is data-driven.
     (TIER_PRO,        BILLING_CADENCE_MONTHLY): "stripe_price_pro_monthly",
     (TIER_PRO,        BILLING_CADENCE_ANNUAL):  "stripe_price_pro_annual",
-    (TIER_ENTERPRISE, BILLING_CADENCE_ANNUAL):  "stripe_price_enterprise_floor_annual",
+    (TIER_ENTERPRISE, BILLING_CADENCE_MONTHLY): "stripe_price_enterprise_monthly",
+    (TIER_ENTERPRISE, BILLING_CADENCE_ANNUAL):  "stripe_price_enterprise_annual",
 }
 
 

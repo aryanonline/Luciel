@@ -764,8 +764,14 @@ def upgrade_tier(
 
     Validation (returns 400 detail=...):
       * ``not_an_upgrade``      -- target_tier <= current Admin.tier
-      * ``enterprise_monthly``  -- (enterprise, monthly) not offered
       * ``no_admin_for_user``   -- cookied user has no active scope
+
+    Note: the ``enterprise_monthly`` 400 reject was RETIRED at Arc 7
+    Commit 1 (2026-05-24) when Enterprise gained a monthly-cadence
+    Price symmetric with Pro. The (enterprise, monthly) pair is now a
+    valid Checkout path; if its config slot is empty the route 501s
+    via BillingNotConfiguredError (the standard not-configured shape)
+    rather than 400-rejecting at the route layer.
 
     On success returns ``{checkout_url, session_id}`` -- the client
     redirects to the Stripe-hosted Checkout. The webhook does the
@@ -817,10 +823,13 @@ def upgrade_tier(
     if target_rank <= current_rank:
         raise HTTPException(status_code=400, detail="not_an_upgrade")
 
-    # Enterprise is annual-only at v2 (CANONICAL §14: $24K flat
-    # annual; monthly Enterprise is deferred to Arc 7 metered billing).
-    if payload.target_tier == "enterprise" and payload.billing_cadence != "annual":
-        raise HTTPException(status_code=400, detail="enterprise_monthly")
+    # Arc 7 Commit 1 (2026-05-24) RETIRED the (enterprise, monthly)
+    # 400 reject. Enterprise is now flat-recurring symmetric with Pro:
+    # both monthly + annual cadences are first-class Checkout paths.
+    # The hybrid/metered-overage shape that justified the annual-only
+    # restriction was retired by partner doctrine pivot — see
+    # CANONICAL §17 Arc 7 Commit 1 entry and the closure of
+    # D-enterprise-metering-not-implemented-2026-05-22.
 
     svc = _service(db)
     try:

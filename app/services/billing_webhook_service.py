@@ -1387,8 +1387,10 @@ class BillingWebhookService:
         # checkout.session shape — no items inline. Arc 6 Commit 5 (Path A)
         # removed the V1 single-SKU fallback ``settings.stripe_price_individual``
         # because V2 has multiple Prices (pro_monthly, pro_annual,
-        # enterprise_floor_annual) and there is no defensible default to
-        # pick blindly. Modern Stripe checkout.session.completed payloads
+        # enterprise_monthly, enterprise_annual -- Arc 7 doctrine pivot
+        # retired the prior enterprise_floor_annual metered shape) and
+        # there is no defensible default to pick blindly.
+        # Modern Stripe checkout.session.completed payloads
         # always have line items resolvable via Stripe API expansion at
         # the caller layer; if we get a payload without inline items we
         # return None and let the caller decide (typically: log + leave

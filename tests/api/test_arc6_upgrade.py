@@ -27,8 +27,11 @@ What is psycopg-gated (CI / runtime image only):
      Checkout URL when target_tier > current Admin.tier.
   6. Live route /upgrade -- 400 'not_an_upgrade' on same-tier or
      downgrade target.
-  7. Live route /upgrade -- 400 'enterprise_monthly' on
-     (enterprise, monthly) request.
+  7. Live route /upgrade -- 200 happy-path on (enterprise, monthly)
+     request. Arc 7 doctrine pivot (2026-05-24): Enterprise tier is
+     now FLAT-recurring with self-serve monthly + annual cadences
+     symmetric with Pro; the prior 400 'enterprise_monthly' reject
+     belonged to the retired hybrid-billing shape and is gone.
 
 The live-route classes monkey-patch the Stripe + service boundaries
 so the assertions land without a real Stripe account or a real DB
@@ -430,7 +433,12 @@ class TestUpgradeRouteLive:
             "live /upgrade fixture lives in conftest -- exercised in CI."
         )
 
-    def test_upgrade_enterprise_monthly_returns_400(self, monkeypatch):
+    def test_upgrade_enterprise_monthly_accepts_arc7_doctrine(self, monkeypatch):
+        # Arc 7 doctrine pivot (2026-05-24): the prior 400 reject on
+        # (enterprise, monthly) is RETIRED; Enterprise is now FLAT-recurring
+        # self-serve with monthly + annual cadences symmetric with Pro.
+        # The live route should return 200 with a Stripe Checkout URL
+        # backed by ``stripe_price_enterprise_monthly`` ($2,800 CAD/mo).
         pytest.skip(
             "live /upgrade fixture lives in conftest -- exercised in CI."
         )

@@ -55,13 +55,20 @@ TIER_ENTERPRISE = "enterprise"
 ALL_TIERS_V2: tuple[str, ...] = (TIER_FREE, TIER_PRO, TIER_ENTERPRISE)
 
 # Billing-model constants (v2). Backs ``subscriptions.billing_model``
-# (column added at Arc 5 Revision A per ARCHITECTURE \u00a73.2.14). Free has
-# no ``subscriptions`` row at all; Pro is flat; Enterprise is hybrid.
-# ``consumption`` is reserved for a future pure-usage tier and not yet
-# wired to any tier in the v2 map.
+# (column added at Arc 5 Revision A per ARCHITECTURE §3.2.14). Free has
+# no ``subscriptions`` row at all; Pro and Enterprise are both flat
+# (Arc 7 doctrine pivot 2026-05-24 retired the Enterprise hybrid shape
+# in favour of flat-recurring symmetric self-serve with abuse-prevention
+# caps in entitlements). ``BILLING_MODEL_HYBRID`` and
+# ``BILLING_MODEL_CONSUMPTION`` remain defined as historical/reserved
+# constants but no tier in the v2 map references them; the
+# ``subscriptions.billing_model`` column itself is retired at Arc 7
+# Commit 2 via Alembic migration. ``ALL_BILLING_MODELS`` keeps every
+# constant for downstream validators that may still see the legacy
+# column in row-level snapshots until the migration lands.
 BILLING_MODEL_FLAT = "flat"
-BILLING_MODEL_HYBRID = "hybrid"
-BILLING_MODEL_CONSUMPTION = "consumption"
+BILLING_MODEL_HYBRID = "hybrid"  # RETIRED at Arc 7; not used by any tier
+BILLING_MODEL_CONSUMPTION = "consumption"  # reserved; not used by any tier
 ALL_BILLING_MODELS: tuple[str, ...] = (
     BILLING_MODEL_FLAT,
     BILLING_MODEL_HYBRID,
@@ -234,20 +241,25 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         billing_model=BILLING_MODEL_FLAT,
     ),
     TIER_ENTERPRISE: TierEntitlement(
-        # 2026-05-23 revision: API default 1000\u21923000rpm (contract may
-        # negotiate higher via admin_tier_overrides). Every field below
-        # is overrideable per-Admin once admin_tier_overrides lands at
-        # Arc 5 Revision A; this map carries the unlimited defaults
-        # that apply when no override row exists.
-        instance_count_cap=None,  # unlimited (sales-negotiated)
-        leads_per_month_cap=None,  # unlimited floor + metered overage
+        # 2026-05-24 Arc 7 doctrine pivot: Enterprise is now FLAT-recurring
+        # symmetric with Pro (monthly $2,800 CAD or annual $24,000 CAD,
+        # self-serve via Stripe Checkout). Metering RETIRED -- abuse-prevention
+        # caps (leads_per_month_cap=50000, api_rate_limit_rpm=3000,
+        # embed_key_count_cap=100, instance_count_cap=None=unlimited)
+        # replace the previous unlimited+metered shape. Overflow beyond
+        # 50k leads/month routes to enterprise_overflow_archive (Commit 5)
+        # rather than billing a metered charge. Every field below remains
+        # overrideable per-Admin via admin_tier_overrides (Arc 5 Revision A)
+        # for sales-negotiated contracts above the self-serve ceiling.
+        instance_count_cap=None,  # unlimited (self-serve default; override per contract)
+        leads_per_month_cap=50000,  # Arc 7 abuse cap; overflow -> archive, no metering
         model_tier_default="top",
         composition_enabled=True,
         max_composition_depth=None,  # unlimited
         knowledge_share_grants_enabled=True,
         api_enabled=True,
-        api_rate_limit_rpm=3000,
-        embed_key_count_cap=None,  # unlimited
+        api_rate_limit_rpm=3000,  # 10x Pro; abuse ceiling (overrideable)
+        embed_key_count_cap=100,  # Arc 7 abuse cap (10x Pro); overrideable
         seat_cap=None,  # unlimited admin-team dashboard logins
         delegated_admin_enabled=True,
         dashboard_views=frozenset(
@@ -255,7 +267,6 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
                 "single_instance",
                 "instance_group",
                 "admin_rollup",
-                "metering_overage",
             }
         ),
         audit_retention_days=None,  # unlimited (typically 7y per contract)
@@ -270,7 +281,7 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         export_csv_enabled=True,
         export_audit_chain_enabled=True,
         stripe_customer_record_required=True,
-        billing_model=BILLING_MODEL_HYBRID,  # platform fee + metered overage
+        billing_model=BILLING_MODEL_FLAT,  # Arc 7 doctrine: symmetric with Pro
     ),
 }
 

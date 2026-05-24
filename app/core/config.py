@@ -152,7 +152,15 @@ class Settings(BaseSettings):
     # Checkout (lowest PCI scope, SAQ-A) and the Stripe Customer Portal
     # (cancel + payment-method update). The backend never touches a PAN.
     #
-    # Tier topology (CANONICAL §11.7 / §14, locked Arc 6 Commit 1):
+    # Tier topology (CANONICAL §11.7 / §14, revised Arc 7 Commit 1 —
+    # Enterprise is now FLAT-recurring symmetric with Pro; hybrid /
+    # metered-overage shape RETIRED by doctrine change 2026-05-24,
+    # closes D-enterprise-metering-not-implemented-2026-05-22 as
+    # retired-not-shipped; rate-limit ceilings + leads_per_month_cap
+    # are now the entitlement gates that separate the tiers, per
+    # partner direction: "Since we have abuse limits for each tier I
+    # don't think we need to include the metering option for
+    # enterprise."):
     #   Free        — $0 CAD, CAPTCHA-gated signup, no Stripe row at all.
     #   Pro         — flat-rate self-serve. $349 CAD/mo or $2,990 CAD/yr
     #                 (~28% annual discount). Stripe Checkout via
@@ -160,14 +168,16 @@ class Settings(BaseSettings):
     #                 First-time buyers additionally get the intro fee
     #                 (``stripe_price_intro_fee``) appended as a second
     #                 line item — same one-time pattern as V1.
-    #   Enterprise  — hybrid flat-plus-metered. $24,000 CAD/yr floor via
-    #                 ``stripe_price_enterprise_floor_annual`` + per-unit
-    #                 metered overage. The metered Price is DEFERRED in
-    #                 Arc 6 Commit 4 per partner direction 2026-05-23
-    #                 ("we can do this when we notice our business
-    #                 booming") — config slot intentionally omitted until
-    #                 the metered SKU materializes; floor-only Checkout
-    #                 path is the live behaviour until then.
+    #   Enterprise  — flat-rate self-serve, monthly + annual cadences
+    #                 symmetric with Pro. $2,800 CAD/mo via
+    #                 ``stripe_price_enterprise_monthly`` or $24,000 CAD/yr
+    #                 via ``stripe_price_enterprise_annual`` (28.6% annual
+    #                 discount, matches Pro's ratio). The legacy
+    #                 ``stripe_price_enterprise_floor_annual`` setting is
+    #                 RETIRED at Arc 7 Commit 1 — the "floor" framing
+    #                 belonged to the retired hybrid-billing shape; under
+    #                 flat-recurring there is no floor distinction, just
+    #                 the annual cadence Price.
     #
     # stripe_secret_key:      live or test secret key (sk_...).
     # stripe_publishable_key: pk_... -- not used server-side except as a
@@ -203,14 +213,14 @@ class Settings(BaseSettings):
     # --- Pro tier recurring Prices (flat-rate, self-serve via Checkout). ---
     stripe_price_pro_monthly: str = ""
     stripe_price_pro_annual: str = ""
-    # --- Enterprise tier floor (hybrid; metered overage deferred). ---
-    # When a metered Price is later minted, the config slot will be added
-    # alongside this one (e.g. ``stripe_price_enterprise_metered_unit``)
-    # and BillingService.create_checkout_session will append both as
-    # separate line items on the Enterprise Checkout. Until then the
-    # Checkout path uses floor-only billing and overage is invoiced
-    # manually outside Stripe.
-    stripe_price_enterprise_floor_annual: str = ""
+    # --- Enterprise tier recurring Prices (flat-rate, self-serve via
+    # Checkout — symmetric with Pro since Arc 7 Commit 1 retired the
+    # hybrid/metered shape). $2,800 CAD/mo or $24,000 CAD/yr (28.6%
+    # annual discount mirroring Pro's $349/$2,990 ratio). Empty defaults
+    # keep boot safe: a missing slot causes the (enterprise, *) row in
+    # ``PRICE_ID_KEY`` to resolve to BillingNotConfiguredError → 501. ---
+    stripe_price_enterprise_monthly: str = ""
+    stripe_price_enterprise_annual: str = ""
     # --- One-time $100 CAD intro fee Price (retained from V1, control). ---
     # Used by BillingService when the buyer's email is first-time-ever
     # (see ``BillingService.is_first_time_customer``). Decoupled from the
