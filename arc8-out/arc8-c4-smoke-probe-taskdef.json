@@ -1,0 +1,32 @@
+{
+  "family": "luciel-smoke-probe",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-web-role",
+  "containerDefinitions": [
+    {
+      "name": "smoke-probe",
+      "image": "public.ecr.aws/docker/library/alpine:3.20",
+      "essential": true,
+      "entryPoint": ["/bin/sh", "-c"],
+      "command": [
+        "set -eu; apk add --no-cache curl jq >/dev/null 2>&1; BASE=\"${BASE_URL:-https://api.vantagemind.ai}\"; FAILED=0; echo \"[smoke-probe] target=${BASE} expected_sha=${EXPECTED_SHA:-unset}\"; for path in /health /ready /api/v1/version; do code=$(curl -s -o /tmp/body -w '%{http_code}' \"${BASE}${path}\" || echo 000); body=$(cat /tmp/body 2>/dev/null | head -c 500); echo \"[smoke-probe] ${path} -> HTTP ${code}: ${body}\"; if [ \"$code\" != \"200\" ]; then echo \"[smoke-probe] FAIL on ${path}\"; FAILED=1; fi; done; if [ -n \"${EXPECTED_SHA:-}\" ] && [ \"${EXPECTED_SHA}\" != \"unset\" ]; then VSHA=$(curl -s \"${BASE}/api/v1/version\" | jq -r '.git_sha // \"missing\"'); if [ \"$VSHA\" != \"$EXPECTED_SHA\" ]; then echo \"[smoke-probe] FAIL: version git_sha=${VSHA} != expected=${EXPECTED_SHA}\"; FAILED=1; else echo \"[smoke-probe] PASS: version git_sha matches expected ${EXPECTED_SHA}\"; fi; fi; if [ $FAILED -eq 0 ]; then echo \"[smoke-probe] ALL PROBES PASSED\"; exit 0; else echo \"[smoke-probe] ONE OR MORE PROBES FAILED\"; exit 1; fi"
+      ],
+      "environment": [
+        {"name": "BASE_URL", "value": "https://api.vantagemind.ai"},
+        {"name": "EXPECTED_SHA", "value": "unset"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/luciel-backend",
+          "awslogs-region": "ca-central-1",
+          "awslogs-stream-prefix": "smoke-probe"
+        }
+      }
+    }
+  ]
+}
