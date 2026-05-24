@@ -76,6 +76,12 @@ class EndReason(str, enum.Enum):
     REASSIGNED = "REASSIGNED"
     DEPARTED = "DEPARTED"
     DEACTIVATED = "DEACTIVATED"
+    # Arc 6 Commit 8.5b — seat archived at a downgrade boundary as
+    # overflow LRU loser (the destination tier's seat_cap is lower
+    # than the admin's current active-seat count). Distinct from
+    # DEACTIVATED (admin/user-initiated removal) because re-upgrade
+    # within the audit_retention window rehydrates the row.
+    DOWNGRADE_OVERFLOW_ARCHIVE = "DOWNGRADE_OVERFLOW_ARCHIVE"
 
 
 class ScopeAssignment(Base, TimestampMixin):

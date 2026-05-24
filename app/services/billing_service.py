@@ -34,6 +34,7 @@ from app.core.config import settings
 from app.integrations.stripe import StripeClient
 from app.models.admin_audit_log import (
     ACTION_PILOT_REFUND_EMAIL_SEND_FAILED,
+    ACTION_SUBSCRIPTION_DOWNGRADE_SCHEDULED,
     ACTION_SUBSCRIPTION_PILOT_REFUNDED,
     RESOURCE_SUBSCRIPTION,
 )
@@ -558,6 +559,167 @@ class BillingService:
         return {
             "checkout_url": session.url,
             "session_id": session.id,
+        }
+
+    # -----------------------------------------------------------------
+    # Downgrade scheduling — Arc 6 Commit 8.5b.
+    # -----------------------------------------------------------------
+
+    def schedule_downgrade(
+        self,
+        *,
+        admin_id: str,
+        target_tier: str,
+        audit_ctx: AuditContext,
+    ) -> dict[str, Any]:
+        """Arm a deferred tier downgrade for ``admin_id``.
+
+        Two-sided write within one committed transaction:
+          1. Stripe-side: ``stripe.Subscription.modify(
+             cancel_at_period_end=True)`` on the admin's active sub.
+          2. Local-side: set
+             ``subscriptions.pending_downgrade_target = target_tier``
+             on the same row + record an
+             ``ACTION_SUBSCRIPTION_DOWNGRADE_SCHEDULED`` audit row.
+
+        The actual tier-flip + overflow archive does NOT run here. It
+        runs in the webhook V2 branch of ``_on_subscription_deleted``
+        when Stripe fires the boundary event at
+        ``current_period_end``. This is the lock established in
+        CANONICAL_RECAP §17 Commit 8.5b:
+          * Timing = deferred (cancel_at_period_end)
+          * Buyer keeps current-tier entitlements until the boundary
+          * Reversible: a buyer can re-upgrade before the boundary and
+            this method's effects are undone by the upgrade path
+            (which calls stripe.Subscription.modify(
+            cancel_at_period_end=False) + nulls out
+            pending_downgrade_target -- wired in Commit 8.5b's upgrade
+            integration, separate slice).
+
+        Ent→Pro path (cancel-and-email-rebuy lock):
+          For Enterprise admins downgrading to Pro, ``target_tier`` is
+          ``'pro'`` here but the webhook V2 branch will detect that
+          the post-cancel admin needs to be re-shopped (Pro is a paid
+          tier, not a free fall-back) and fire the transactional
+          ``/signup?tier=pro`` magic-link email. That branching lives
+          downstream in the webhook -- this method only stores the
+          target.
+
+        Idempotency:
+          A second call with the same target_tier on an admin whose
+          sub already has pending_downgrade_target set is a noop on
+          both sides (Stripe accepts a redundant modify; the local
+          column UPDATE is a no-op self-write). A different target
+          (Ent→Free called after an existing Ent→Pro schedule, or
+          vice versa) overwrites the column and emits a fresh audit
+          row so the lifecycle stays inspectable -- the schema CHECK
+          on the column is the only legality gate.
+
+        Raises:
+          ValueError    -- unknown target_tier, or admin has no active
+                           subscription (Free admins cannot downgrade --
+                           they're already at the bottom).
+          BillingNotConfiguredError -- Stripe not wired (env var
+                                       missing). Same gate as checkout.
+        """
+        self.require_configured()
+
+        if not admin_id:
+            raise ValueError("admin_id is required for schedule_downgrade.")
+        if target_tier not in (TIER_FREE, TIER_PRO):
+            # Enterprise is never a downgrade target. Same three-layer
+            # gate as tier_provisioning_service.downgrade_admin_tier:
+            # route validates, service validates here, schema CHECK
+            # validates at the DB. Three layers of the same invariant
+            # because mis-routing into this method with target='enterprise'
+            # would mean a logic bug we want to surface early.
+            raise ValueError(
+                f"schedule_downgrade: target_tier={target_tier!r} is not a "
+                f"legal downgrade destination. Expected one of "
+                f"{{{TIER_FREE!r}, {TIER_PRO!r}}}."
+            )
+
+        sub = self.get_active_subscription_for_tenant(tenant_id=admin_id)
+        if sub is None:
+            # Free admins have no Subscription row by design. A
+            # downgrade request from a Free admin would be a route-
+            # layer bug; we 4xx here defensively.
+            raise ValueError(
+                f"schedule_downgrade: admin {admin_id!r} has no active "
+                f"subscription; downgrade is not applicable."
+            )
+
+        old_tier = sub.tier
+        old_pending = sub.pending_downgrade_target
+
+        # Stripe-side: schedule cancellation at the current period end.
+        # The local UPDATE rides the same transaction as the audit row
+        # so a failure on either rolls back the other (Invariant 4).
+        # Stripe's call is on the external side and cannot be in the
+        # same DB transaction, but its idempotency is its own:
+        # cancel_at_period_end is a state, not an event -- a redundant
+        # modify is a no-op.
+        stripe_sub = self.stripe.schedule_cancellation_at_period_end(
+            stripe_subscription_id=sub.stripe_subscription_id,
+        )
+
+        # Mirror Stripe's view back into our local row.
+        sub.pending_downgrade_target = target_tier
+        sub.cancel_at_period_end = True
+        # If Stripe reported a refreshed period_end, mirror it (the
+        # frontend modal will surface this date as "effective on …").
+        period_end_raw = getattr(stripe_sub, "current_period_end", None)
+        if period_end_raw is not None:
+            sub.current_period_end = datetime.fromtimestamp(
+                int(period_end_raw), tz=timezone.utc,
+            )
+
+        # Audit row with the boundary timestamp in the after_json so a
+        # forensic engineer can answer "when was this downgrade armed,
+        # and what date did the buyer see?" from the audit row alone.
+        AdminAuditRepository(self.db).record(
+            ctx=audit_ctx,
+            tenant_id=admin_id,
+            action=ACTION_SUBSCRIPTION_DOWNGRADE_SCHEDULED,
+            resource_type=RESOURCE_SUBSCRIPTION,
+            resource_natural_id=sub.stripe_subscription_id,
+            before={
+                "tier": old_tier,
+                "pending_downgrade_target": old_pending,
+                "cancel_at_period_end": False,
+            },
+            after={
+                "tier": old_tier,  # unchanged until boundary fires
+                "pending_downgrade_target": target_tier,
+                "cancel_at_period_end": True,
+                "effective_at": (
+                    sub.current_period_end.isoformat()
+                    if sub.current_period_end else None
+                ),
+            },
+            note=(
+                f"Tier downgrade scheduled {old_tier} -> {target_tier} "
+                f"at period_end"
+            ),
+            autocommit=False,
+        )
+        self.db.commit()
+
+        logger.info(
+            "billing: downgrade scheduled admin=%s sub=%s old_tier=%s "
+            "target_tier=%s effective_at=%s",
+            admin_id, sub.stripe_subscription_id, old_tier, target_tier,
+            sub.current_period_end.isoformat() if sub.current_period_end else None,
+        )
+        return {
+            "admin_id": admin_id,
+            "old_tier": old_tier,
+            "target_tier": target_tier,
+            "effective_at": (
+                sub.current_period_end.isoformat()
+                if sub.current_period_end else None
+            ),
+            "stripe_subscription_id": sub.stripe_subscription_id,
         }
 
     # -----------------------------------------------------------------

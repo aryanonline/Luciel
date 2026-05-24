@@ -1,0 +1,542 @@
+"""Downgrade archive service — V2 Arc 6 Commit 8.5b.
+
+The single place that runs **overflow archive at a downgrade boundary**.
+Invoked by the webhook ``_on_subscription_deleted`` V2 branch (when the
+sub's ``pending_downgrade_target`` is set), AFTER ``downgrade_admin_tier``
+has flipped the Admin row to the new tier.
+
+Doctrine (CANONICAL_RECAP §17 Commit 8.5b lock):
+
+* **Policy = LRU soft-archive with rehydrate window.** When the admin
+  holds more of any cap'd resource than the destination tier allows,
+  the *least-recently-updated* overflow rows are archived. The stamp
+  ``pending_downgrade_archived_at`` is what later distinguishes
+  "archived because of downgrade" from other soft-delete states and
+  lets a re-upgrade within the ``audit_retention`` window rehydrate.
+
+* **Four resource axes are capped per tier** (§14 entitlement matrix):
+    - ``instance_count_cap``           -> ``instances`` table
+    - ``embed_key_count_cap``          -> ``api_keys`` (key_kind='embed')
+    - ``widget_custom_domain_cname_cap`` -> ``admin_widget_domains``
+    - ``seat_cap``                     -> ``scope_assignments``
+  The first three use the new ``pending_downgrade_archived_at`` stamp;
+  the fourth reuses the existing Pattern E end-assignment columns
+  (``ended_at`` + ``ended_reason='DOWNGRADE_OVERFLOW_ARCHIVE'`` +
+  ``active=false``) per the schema decision in
+  ``arc6_c_pending_downgrade_columns``.
+
+* **Owner seat is exempt.** Cap-checks against ``seat_cap`` honor the
+  owner-scope-assignment as an always-kept row even if it would
+  otherwise be the LRU loser. A buyer can never archive themselves
+  out of their own Admin.
+
+* **Cap = None means unlimited** (Enterprise). Calling
+  ``archive_overflow_for_admin`` with the Admin already at Enterprise
+  is a noop on every axis. Pro/Free have finite caps; the service
+  loops only when ``cap is not None``.
+
+* **Atomic per-axis, autocommit at the end.** The four per-axis
+  archives run within one SQLAlchemy transaction. Either all four
+  commit or none commit; partial archives are not a state we ever
+  want to leave behind.
+
+* **Reusable for preview.** ``preview_overflow_for_admin`` runs the
+  same LRU sort + count math but mutates nothing. Used by the
+  frontend soft-warn confirm modal ("Pro → Free will archive N
+  instances, M embed keys, …, effective on <date>"). Returning a
+  rich preview shape lets the UI render the modal without the
+  archive service needing a parallel implementation.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Iterable
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.admin_widget_domain import AdminWidgetDomain
+from app.models.api_key import ApiKey
+from app.models.instance import Instance
+from app.models.scope_assignment import EndReason, ScopeAssignment
+from app.policy.entitlements import (
+    TIER_ENTERPRISE,
+    TIER_FREE,
+    TIER_PRO,
+    TIER_ENTITLEMENTS,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------
+# Result shape — used by both preview and apply paths.
+# ---------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class AxisOverflow:
+    """Per-axis overflow tally used by the preview/apply contract.
+
+    * ``axis``        — one of {'instances', 'embed_keys', 'cnames', 'seats'}.
+                        Stable string keys for the JSON response shape.
+    * ``cap``         — destination-tier cap on this axis. ``None`` means
+                        unlimited (Enterprise); the service never lists
+                        this axis as overflow when cap is None.
+    * ``current``     — count of currently-active rows on this axis for
+                        the admin (the rows the cap is applied against).
+    * ``overflow``    — ``max(current - cap, 0)``. The number of rows to
+                        archive (preview) or that were archived (apply).
+    * ``archived_ids``— PKs of the rows the LRU sort selected for archive.
+                        Populated on apply; on preview, populated with the
+                        rows that WOULD be archived so the UI can render
+                        them (\"these 3 instances will be archived: …\").
+    """
+
+    axis: str
+    cap: int | None
+    current: int
+    overflow: int
+    archived_ids: list[int | str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class OverflowSummary:
+    """Aggregate result of a preview or apply call.
+
+    The frontend modal renders this verbatim; the webhook logs it.
+    """
+
+    admin_id: str
+    target_tier: str
+    archived_at: datetime | None  # None on preview, set on apply
+    axes: dict[str, AxisOverflow]
+
+    @property
+    def total_overflow(self) -> int:
+        """Total rows across all axes selected for archive."""
+        return sum(a.overflow for a in self.axes.values())
+
+    @property
+    def any_overflow(self) -> bool:
+        """True iff at least one axis has rows to archive.
+
+        Used by the route layer's preview endpoint to decide whether the
+        soft-warn modal should show overflow language at all. A Free
+        admin downgrading to Free (impossible at the route layer, but
+        defensive) or a Pro admin with very few rows downgrading to Free
+        may have zero overflow on all axes.
+        """
+        return self.total_overflow > 0
+
+
+# ---------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------
+
+# Axis keys are public — they appear in the JSON response shape consumed
+# by Account.tsx's confirm modal. Keep stable; do not rename without
+# updating the frontend in the same commit.
+AXIS_INSTANCES = "instances"
+AXIS_EMBED_KEYS = "embed_keys"
+AXIS_CNAMES = "cnames"
+AXIS_SEATS = "seats"
+ALL_AXES: tuple[str, ...] = (
+    AXIS_INSTANCES, AXIS_EMBED_KEYS, AXIS_CNAMES, AXIS_SEATS,
+)
+
+
+class DowngradeArchiveService:
+    """Compute + apply overflow archive at a downgrade boundary.
+
+    Lifetime: one instance per webhook call OR per preview request.
+    The bound ``Session`` is request-scoped.
+
+    No external dependencies beyond the ORM. Audit emission for the
+    archive rows lives in the calling webhook context (the audit row
+    needs Stripe event metadata that this service doesn't see); this
+    service logs at INFO with structured fields for the audit chain.
+    """
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    # -----------------------------------------------------------------
+    # Public — preview (no writes)
+    # -----------------------------------------------------------------
+
+    def preview_overflow_for_admin(
+        self,
+        *,
+        admin_id: str,
+        target_tier: str,
+    ) -> OverflowSummary:
+        """Compute what would be archived if ``admin_id`` downgraded to
+        ``target_tier`` right now. **Mutates nothing.**
+
+        Used by:
+          * ``POST /api/v1/billing/downgrade/preview`` (Account.tsx modal)
+          * ``archive_overflow_for_admin`` itself (apply path reuses the
+            sort to avoid drift between preview and apply)
+
+        Returns an OverflowSummary with ``archived_at=None`` and each
+        axis populated with the PKs the LRU sort would select.
+        """
+        _validate_target_tier(target_tier)
+        axes = {axis: self._compute_axis(admin_id, target_tier, axis)
+                for axis in ALL_AXES}
+        return OverflowSummary(
+            admin_id=admin_id,
+            target_tier=target_tier,
+            archived_at=None,
+            axes=axes,
+        )
+
+    # -----------------------------------------------------------------
+    # Public — apply (mutates within a single transaction)
+    # -----------------------------------------------------------------
+
+    def archive_overflow_for_admin(
+        self,
+        *,
+        admin_id: str,
+        target_tier: str,
+        autocommit: bool = True,
+    ) -> OverflowSummary:
+        """Run the overflow archive for ``admin_id`` against
+        ``target_tier``'s caps. **Mutates rows in 4 tables.**
+
+        Steps:
+          1. Compute the same LRU sort the preview path would produce.
+          2. For each axis with overflow > 0, stamp the selected rows:
+              * Instances: ``active=False`` + ``pending_downgrade_archived_at=NOW``
+              * Embed keys: same (filtered to key_kind='embed')
+              * CNAMEs: ``pending_downgrade_archived_at=NOW`` (table
+                has no separate ``active`` column; stamp alone is the
+                soft-delete marker on this table)
+              * Seats: end_assignment with EndReason.DOWNGRADE_OVERFLOW_ARCHIVE
+          3. Commit (if autocommit; the webhook caller may compose with
+             tier_provisioning under one txn).
+
+        Idempotency:
+          The LRU query already excludes rows that carry a non-NULL
+          ``pending_downgrade_archived_at`` (they're not active). A
+          replay of the same downgrade boundary archives nothing new
+          and reports zero overflow on the second call.
+
+        Returns:
+          OverflowSummary with ``archived_at`` set to the apply-time
+          UTC timestamp and ``archived_ids`` populated per axis.
+        """
+        _validate_target_tier(target_tier)
+
+        archived_at = datetime.now(timezone.utc)
+        axes: dict[str, AxisOverflow] = {}
+
+        for axis in ALL_AXES:
+            tally = self._compute_axis(admin_id, target_tier, axis)
+            if tally.overflow > 0:
+                self._apply_axis(
+                    admin_id=admin_id,
+                    axis=axis,
+                    archive_ids=tally.archived_ids,
+                    archived_at=archived_at,
+                )
+                logger.info(
+                    "downgrade_archive: admin=%s axis=%s archived=%d cap=%s "
+                    "current=%d target_tier=%s",
+                    admin_id, axis, tally.overflow, tally.cap,
+                    tally.current, target_tier,
+                )
+            axes[axis] = tally
+
+        if autocommit:
+            self.db.commit()
+
+        return OverflowSummary(
+            admin_id=admin_id,
+            target_tier=target_tier,
+            archived_at=archived_at,
+            axes=axes,
+        )
+
+    # -----------------------------------------------------------------
+    # Per-axis computation — single dispatch by axis name.
+    # -----------------------------------------------------------------
+
+    def _compute_axis(
+        self,
+        admin_id: str,
+        target_tier: str,
+        axis: str,
+    ) -> AxisOverflow:
+        """LRU sort + cap check for a single axis. No writes."""
+        cap = _cap_for_axis(target_tier, axis)
+
+        # Unlimited (Enterprise destination, or any axis where the
+        # destination tier has no cap): always zero overflow.
+        if cap is None:
+            return AxisOverflow(axis=axis, cap=None, current=0, overflow=0)
+
+        active_rows = self._active_rows_for_axis(admin_id, axis)
+        current = len(active_rows)
+        overflow = max(current - cap, 0)
+
+        if overflow == 0:
+            return AxisOverflow(axis=axis, cap=cap, current=current, overflow=0)
+
+        # LRU loser selection. Owner seat is exempt: when axis='seats'
+        # we filter the candidate pool to non-owner rows first. If the
+        # remaining non-owner pool is smaller than the overflow count
+        # (i.e. the admin has fewer non-owner seats than the cap delta),
+        # we archive everything non-owner — the math caps at the pool
+        # size. This is the right invariant: "the owner is always
+        # entitled to their own Admin."
+        candidates = active_rows
+        if axis == AXIS_SEATS:
+            candidates = [r for r in active_rows if not _is_owner_seat(r)]
+            # Recompute current/overflow against the non-owner pool so
+            # the reported numbers don't claim we'll archive the owner.
+            non_owner_current = len(candidates)
+            non_owner_overflow = min(overflow, non_owner_current)
+            ids = _lru_select(candidates, non_owner_overflow)
+            return AxisOverflow(
+                axis=axis, cap=cap,
+                current=current,            # original (includes owner)
+                overflow=non_owner_overflow,  # what we'll actually archive
+                archived_ids=ids,
+            )
+
+        ids = _lru_select(candidates, overflow)
+        return AxisOverflow(
+            axis=axis, cap=cap, current=current,
+            overflow=overflow, archived_ids=ids,
+        )
+
+    # -----------------------------------------------------------------
+    # Per-axis active-row queries.
+    # -----------------------------------------------------------------
+
+    def _active_rows_for_axis(
+        self, admin_id: str, axis: str,
+    ) -> list:
+        """Fetch the currently-active rows on a given axis for an admin.
+
+        "Active" means: not previously archived (no stamp set), passes
+        the table's own active flag where one exists.
+
+        The LRU sort key is exposed on each row as ``updated_at`` (or
+        ``started_at`` for scope_assignments — they have no updated_at
+        on the lifecycle columns).
+        """
+        if axis == AXIS_INSTANCES:
+            stmt = (
+                select(Instance)
+                .where(
+                    Instance.admin_id == admin_id,
+                    Instance.active.is_(True),
+                    Instance.pending_downgrade_archived_at.is_(None),
+                )
+            )
+            return list(self.db.scalars(stmt).all())
+
+        if axis == AXIS_EMBED_KEYS:
+            # tenant_id on api_keys is the legacy column name for admin
+            # binding — see D-arc5-tenant-id-column-physical-retention-2026-05-23.
+            stmt = (
+                select(ApiKey)
+                .where(
+                    ApiKey.tenant_id == admin_id,
+                    ApiKey.key_kind == "embed",
+                    ApiKey.active.is_(True),
+                    ApiKey.pending_downgrade_archived_at.is_(None),
+                )
+            )
+            return list(self.db.scalars(stmt).all())
+
+        if axis == AXIS_CNAMES:
+            # admin_widget_domains has no `active` column; the stamp
+            # alone discriminates archived from live.
+            stmt = (
+                select(AdminWidgetDomain)
+                .where(
+                    AdminWidgetDomain.admin_id == admin_id,
+                    AdminWidgetDomain.pending_downgrade_archived_at.is_(None),
+                )
+            )
+            return list(self.db.scalars(stmt).all())
+
+        if axis == AXIS_SEATS:
+            # Active dashboard-seat assignments under this Admin.
+            # tenant_id on scope_assignments is the admin binding
+            # (same physical-retention story as api_keys).
+            stmt = (
+                select(ScopeAssignment)
+                .where(
+                    ScopeAssignment.tenant_id == admin_id,
+                    ScopeAssignment.active.is_(True),
+                    ScopeAssignment.ended_at.is_(None),
+                )
+            )
+            return list(self.db.scalars(stmt).all())
+
+        raise ValueError(f"DowngradeArchiveService: unknown axis {axis!r}")
+
+    # -----------------------------------------------------------------
+    # Per-axis apply.
+    # -----------------------------------------------------------------
+
+    def _apply_axis(
+        self,
+        *,
+        admin_id: str,
+        axis: str,
+        archive_ids: Iterable,
+        archived_at: datetime,
+    ) -> None:
+        """Stamp the archive on the selected rows for one axis.
+
+        Each branch uses bulk UPDATE via the ORM so the change-set
+        rides the caller's transaction. The seat branch uses the
+        repository's ``end_assignment`` because that emits the right
+        idempotency-guarded write and respects the ENUM type.
+        """
+        ids_list = list(archive_ids)
+        if not ids_list:
+            return
+
+        if axis == AXIS_INSTANCES:
+            for row in self.db.scalars(
+                select(Instance).where(Instance.id.in_(ids_list))
+            ).all():
+                row.active = False
+                row.pending_downgrade_archived_at = archived_at
+            return
+
+        if axis == AXIS_EMBED_KEYS:
+            for row in self.db.scalars(
+                select(ApiKey).where(ApiKey.id.in_(ids_list))
+            ).all():
+                row.active = False
+                row.pending_downgrade_archived_at = archived_at
+            return
+
+        if axis == AXIS_CNAMES:
+            for row in self.db.scalars(
+                select(AdminWidgetDomain).where(
+                    AdminWidgetDomain.id.in_(ids_list)
+                )
+            ).all():
+                row.pending_downgrade_archived_at = archived_at
+            return
+
+        if axis == AXIS_SEATS:
+            # Reuse Pattern E lifecycle columns. The repository's
+            # end_assignment is the right entry point because it
+            # handles the idempotency guard (already-ended rows are
+            # no-ops) and stamps ended_at + ended_reason + active=false
+            # in a single UPDATE.
+            from app.repositories.scope_assignment_repository import (
+                ScopeAssignmentRepository,
+            )
+            repo = ScopeAssignmentRepository(self.db)
+            for assignment_id in ids_list:
+                repo.end_assignment(
+                    assignment_id=assignment_id,
+                    reason=EndReason.DOWNGRADE_OVERFLOW_ARCHIVE,
+                    note=(
+                        "Soft-archived as overflow at downgrade boundary "
+                        f"on admin_id={admin_id}"
+                    ),
+                    autocommit=False,
+                )
+            return
+
+        raise ValueError(f"DowngradeArchiveService: unknown axis {axis!r}")
+
+
+# ---------------------------------------------------------------------
+# Module helpers
+# ---------------------------------------------------------------------
+
+# Per-axis attribute on the TierEntitlement dataclass. Centralizing the
+# axis -> attribute mapping here keeps the per-axis branches small.
+_CAP_AXIS_TO_ATTR: dict[str, str] = {
+    AXIS_INSTANCES:   "instance_count_cap",
+    AXIS_EMBED_KEYS:  "embed_key_count_cap",
+    AXIS_CNAMES:      "widget_custom_domain_cname_cap",
+    AXIS_SEATS:       "seat_cap",
+}
+
+
+def _validate_target_tier(target_tier: str) -> None:
+    """Pin the legal downgrade destinations.
+
+    Enterprise is never a downgrade destination (it is the top tier);
+    the schema-level CHECK on ``subscriptions.pending_downgrade_target``
+    already rejects it, but we mirror the guard at the service boundary
+    so a misrouted preview call fails fast with a clear error.
+    """
+    if target_tier not in (TIER_FREE, TIER_PRO):
+        raise ValueError(
+            f"DowngradeArchiveService: target_tier {target_tier!r} is not a "
+            f"legal downgrade destination; expected one of "
+            f"{{{TIER_FREE!r}, {TIER_PRO!r}}}. Enterprise is the top tier."
+        )
+
+
+def _cap_for_axis(target_tier: str, axis: str) -> int | None:
+    """Read the destination-tier cap on a given axis.
+
+    Returns ``None`` for unlimited (Enterprise). The
+    ``TIER_ENTITLEMENTS`` map is the canonical source.
+    """
+    if target_tier == TIER_ENTERPRISE:
+        return None  # Defensive — preview/apply guard upstream.
+    attr = _CAP_AXIS_TO_ATTR.get(axis)
+    if attr is None:
+        raise ValueError(f"_cap_for_axis: unknown axis {axis!r}")
+    return getattr(TIER_ENTITLEMENTS[target_tier], attr)
+
+
+def _is_owner_seat(row: ScopeAssignment) -> bool:
+    """True iff this ScopeAssignment row is the owner seat.
+
+    Owner-seat protection: a downgrade can never archive the admin's
+    own owner row. The literal ``"owner"`` is the role string used by
+    ``TierProvisioningService._ensure_owner_scope_assignment`` and the
+    webhook's owner-seat lookup.
+    """
+    return getattr(row, "role", None) == "owner"
+
+
+def _lru_select(rows: list, n: int) -> list:
+    """Pick the ``n`` least-recently-updated row PKs.
+
+    LRU sort key (in priority order):
+      1. ``updated_at`` ascending — oldest update wins (Instance,
+         ApiKey, AdminWidgetDomain).
+      2. ``started_at`` ascending — only for ScopeAssignment, which
+         carries no ``updated_at`` on its lifecycle columns; its
+         creation time is its activity-recency proxy (seats don't
+         update in place — they're either active or ended).
+      3. PK ascending — deterministic tiebreak so two rows updated in
+         the same microsecond archive in a stable order. Important
+         for test reproducibility and replay.
+
+    Returns the PK list (``.id`` accessor) in the same order they were
+    selected.
+    """
+    if n <= 0 or not rows:
+        return []
+
+    def _sort_key(row):
+        ts = getattr(row, "updated_at", None) or getattr(row, "started_at", None)
+        # Coerce None to MIN datetime so rows lacking timestamps are
+        # picked first — they're the most "stale" possible state.
+        ts_sortable = ts or datetime.min.replace(tzinfo=timezone.utc)
+        return (ts_sortable, row.id)
+
+    sorted_rows = sorted(rows, key=_sort_key)
+    return [r.id for r in sorted_rows[:n]]

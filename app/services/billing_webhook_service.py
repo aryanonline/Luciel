@@ -59,6 +59,7 @@ from app.models.admin_audit_log import (
     ACTION_BILLING_WEBHOOK_REPLAY_REJECTED,
     ACTION_SUBSCRIPTION_CANCEL,
     ACTION_SUBSCRIPTION_CREATE,
+    ACTION_SUBSCRIPTION_DOWNGRADE_APPLIED,
     ACTION_SUBSCRIPTION_UPDATE,
     RESOURCE_SUBSCRIPTION,
 )
@@ -920,6 +921,53 @@ class BillingWebhookService:
     # -----------------------------------------------------------------
 
     def _on_subscription_deleted(self, *, event_id: str, data_object: dict, event: dict) -> dict:
+        """Branching handler for ``customer.subscription.deleted``.
+
+        Two distinct meanings flow through the same Stripe event:
+
+        **V2 downgrade path** — ``sub.pending_downgrade_target`` is set.
+          The buyer earlier clicked "downgrade" in the Account UI;
+          ``BillingService.schedule_downgrade`` set the column and
+          called ``stripe.Subscription.modify(cancel_at_period_end=True)``;
+          Stripe has now reached ``current_period_end`` and fired the
+          delete event. We:
+            1. Flip the Subscription row inactive + canceled.
+            2. Call ``TierProvisioningService.downgrade_admin_tier``
+               to change the Admin row's tier to the target.
+            3. Call ``DowngradeArchiveService.archive_overflow_for_admin``
+               to LRU-archive any rows that exceed the destination
+               tier's caps (instances / embed keys / CNAMEs / seats).
+            4. Emit ``ACTION_SUBSCRIPTION_DOWNGRADE_APPLIED`` audit row
+               with the per-axis overflow tally + the archive
+               timestamp.
+            5. NULL out ``pending_downgrade_target`` (the action is no
+               longer pending; this is what makes a re-run of the
+               handler a noop).
+          The Admin row stays ``active=True`` — a downgrade is not a
+          deactivation. The buyer keeps their account; they just have
+          less of it.
+
+        **V1 hard-cancel path** — ``sub.pending_downgrade_target`` is
+          NULL. Either a manual Stripe-Dashboard cancel or a
+          ``BillingService.process_pilot_refund`` call. We preserve
+          the Arc 5 / Step 30a behaviour:
+            1. Flip the Subscription row inactive + canceled.
+            2. Emit ``ACTION_SUBSCRIPTION_CANCEL`` audit row.
+            3. Cascade-deactivate the Admin via
+               ``AdminService.deactivate_tenant_with_cascade``.
+          The Admin row is set ``active=False``; the buyer loses
+          access entirely.
+
+        Idempotency:
+          The ``last_event_id == event_id`` guard short-circuits a
+          Stripe redeliver of the same event. On the V2 path a
+          replay would re-attempt downgrade_admin_tier, which raises
+          ``TierDowngradeNoopError`` because the tier was already
+          flipped on the first apply — the handler catches that as a
+          benign no-op. On the V1 path the deactivate-cascade is
+          itself idempotent (admin.active is already False on second
+          run).
+        """
         stripe_subscription_id = data_object.get("id")
         if not stripe_subscription_id:
             return {"applied": False, "reason": "missing_subscription_id"}
@@ -941,19 +989,215 @@ class BillingWebhookService:
             return {"applied": False, "reason": "replay"}
 
         ctx = _webhook_audit_ctx()
+        admin_id = sub.tenant_id  # legacy column name; semantically admin_id.
+        target_tier = sub.pending_downgrade_target  # branch discriminant
 
-        # 1. Flip the subscription to inactive + canceled.
+        # Shared step — flip the Subscription row inactive + canceled.
+        # Both branches do this; do it once, with the same shape.
         before_status = sub.status
+        before_pending = target_tier  # snapshot before we null it
         sub.status = STATUS_CANCELED
         sub.active = False
-        sub.canceled_at = _ts(data_object.get("canceled_at")) or datetime.now(timezone.utc)
+        sub.canceled_at = (
+            _ts(data_object.get("canceled_at")) or datetime.now(timezone.utc)
+        )
         sub.last_event_id = event_id
         sub.provider_snapshot = dict(data_object)
 
+        # --------------------------------------------------------------
+        # V2 downgrade branch — pending_downgrade_target is set.
+        # --------------------------------------------------------------
+        if target_tier is not None:
+            return self._apply_v2_downgrade(
+                sub=sub,
+                admin_id=admin_id,
+                target_tier=target_tier,
+                before_status=before_status,
+                before_pending=before_pending,
+                event_id=event_id,
+                ctx=ctx,
+            )
+
+        # --------------------------------------------------------------
+        # V1 hard-cancel branch — manual Stripe-Dashboard cancels and
+        # pilot-refund teardown. Preserves Step 30a behaviour verbatim.
+        # --------------------------------------------------------------
+        return self._apply_v1_hard_cancel(
+            sub=sub,
+            admin_id=admin_id,
+            stripe_subscription_id=stripe_subscription_id,
+            before_status=before_status,
+            event_id=event_id,
+            ctx=ctx,
+        )
+
+    # ------------------------------------------------------------------
+    # V2 downgrade apply — Arc 6 Commit 8.5b.
+    # ------------------------------------------------------------------
+
+    def _apply_v2_downgrade(
+        self,
+        *,
+        sub: Subscription,
+        admin_id: str,
+        target_tier: str,
+        before_status: str,
+        before_pending: str,
+        event_id: str,
+        ctx: AuditContext,
+    ) -> dict:
+        """V2 deferred-downgrade boundary apply.
+
+        Touches:
+          * sub row — already flipped inactive + canceled by caller;
+            we null pending_downgrade_target as the final step.
+          * admins.tier              — via TierProvisioningService
+          * instances.active + stamp — via DowngradeArchiveService
+          * api_keys.active + stamp  — via DowngradeArchiveService
+          * admin_widget_domains.stamp — via DowngradeArchiveService
+          * scope_assignments.ended_* — via DowngradeArchiveService
+
+        Atomicity: every service call here uses ``autocommit=False``;
+        the final ``self.db.commit()`` lands the entire boundary apply
+        as one transaction. A failure rolls back the sub-row mutation
+        too.
+        """
+        # Lazy imports — these services have heavier dependency graphs
+        # than this module, so we defer them to the V2 path only.
+        from app.services.downgrade_archive_service import (
+            DowngradeArchiveService,
+        )
+        from app.services.tier_provisioning_service import (
+            TierDowngradeNoopError,
+            TierProvisioningService,
+        )
+
+        audit_repo = AdminAuditRepository(self.db)
+
+        # 1. Flip the Admin row's tier via the provisioning service.
+        # The service handles the strictly-lower guard and emits its
+        # own ACTION_UPDATE audit row on admins. Catch the noop case
+        # so a Stripe redeliver after a partial apply doesn't 5xx.
+        provisioning = TierProvisioningService(self.db)
+        try:
+            tier_result = provisioning.downgrade_admin_tier(
+                admin_id=admin_id,
+                new_tier=target_tier,
+                new_tier_source="stripe_webhook_downgrade",
+                audit_ctx=ctx,
+            )
+            old_tier = tier_result["old_tier"]
+        except TierDowngradeNoopError:
+            # Replay path: the admin row is already at target_tier from
+            # a prior apply. Log + continue — we still want to run the
+            # archive sweep (idempotent) and emit the boundary audit.
+            logger.info(
+                "billing-webhook: v2-downgrade noop on admin=%s "
+                "(tier already at %s); continuing with archive sweep",
+                admin_id, target_tier,
+            )
+            old_tier = target_tier  # for audit shape; no-op
+
+        # 2. Run the LRU overflow archive sweep across all 4 axes.
+        # Autocommit=False so the entire boundary apply lands as one txn.
+        archive_service = DowngradeArchiveService(self.db)
+        summary = archive_service.archive_overflow_for_admin(
+            admin_id=admin_id,
+            target_tier=target_tier,
+            autocommit=False,
+        )
+
+        # 3. Null the pending marker — the action is no longer pending.
+        sub.pending_downgrade_target = None
+
+        # 4. Emit the boundary audit row. The after_json captures the
+        # full per-axis archive tally so a forensic engineer can
+        # reconstruct "what disappeared at this boundary?" without
+        # joining four other tables.
+        audit_repo.record(
+            ctx=ctx,
+            tenant_id=admin_id,
+            action=ACTION_SUBSCRIPTION_DOWNGRADE_APPLIED,
+            resource_type=RESOURCE_SUBSCRIPTION,
+            resource_pk=sub.id,
+            resource_natural_id=sub.stripe_subscription_id,
+            before={
+                "status": before_status,
+                "active": True,
+                "tier": old_tier,
+                "pending_downgrade_target": before_pending,
+            },
+            after={
+                "status": sub.status,
+                "active": False,
+                "tier": target_tier,
+                "pending_downgrade_target": None,
+                "stripe_event_id": event_id,
+                "archived_at": (
+                    summary.archived_at.isoformat()
+                    if summary.archived_at else None
+                ),
+                "overflow": {
+                    axis: {
+                        "cap": tally.cap,
+                        "current": tally.current,
+                        "overflow": tally.overflow,
+                    }
+                    for axis, tally in summary.axes.items()
+                },
+            },
+            note=(
+                f"stripe customer.subscription.deleted -> v2 downgrade "
+                f"{old_tier} -> {target_tier} (overflow archived: "
+                f"{summary.total_overflow})"
+            ),
+            autocommit=False,
+        )
+
+        self.db.commit()
+        logger.info(
+            "billing-webhook: v2-downgrade applied admin=%s old_tier=%s "
+            "target_tier=%s overflow_total=%d",
+            admin_id, old_tier, target_tier, summary.total_overflow,
+        )
+        return {
+            "applied": True,
+            "branch": "v2_downgrade",
+            "admin_id": admin_id,
+            "target_tier": target_tier,
+            "overflow_total": summary.total_overflow,
+        }
+
+    # ------------------------------------------------------------------
+    # V1 hard-cancel apply — Step 30a behaviour, preserved verbatim.
+    # ------------------------------------------------------------------
+
+    def _apply_v1_hard_cancel(
+        self,
+        *,
+        sub: Subscription,
+        admin_id: str,
+        stripe_subscription_id: str,
+        before_status: str,
+        event_id: str,
+        ctx: AuditContext,
+    ) -> dict:
+        """V1 hard-cancel apply — manual Stripe-Dashboard cancels and
+        pilot-refund teardown.
+
+        Behaviour is the pre-Arc-6 Step 30a path, lifted verbatim:
+          1. Audit row ACTION_SUBSCRIPTION_CANCEL.
+          2. AdminService.deactivate_tenant_with_cascade.
+
+        The Admin row is flipped active=False; the buyer loses access.
+        This is the right behaviour for a manual Stripe cancel because
+        the buyer (or Stripe ops, on a chargeback teardown) explicitly
+        chose to end the relationship — not to step down a tier.
+        """
         audit_repo = AdminAuditRepository(self.db)
         audit_repo.record(
             ctx=ctx,
-            tenant_id=sub.tenant_id,
+            tenant_id=admin_id,
             action=ACTION_SUBSCRIPTION_CANCEL,
             resource_type=RESOURCE_SUBSCRIPTION,
             resource_pk=sub.id,
@@ -967,7 +1211,7 @@ class BillingWebhookService:
             note="stripe customer.subscription.deleted -> cancel + deactivate admin cascade",
         )
 
-        # 2. Cascade deactivate the admin.
+        # Cascade deactivate the admin.
         # ``AdminService.deactivate_tenant_with_cascade`` retains its
         # Arc-5 external method name; semantically it now deactivates
         # the admin (Arc 5 B8 rename).
@@ -988,7 +1232,7 @@ class BillingWebhookService:
             luciel_service = InstanceService(self.db, admin_service=admin)
 
             admin.deactivate_tenant_with_cascade(
-                sub.tenant_id,
+                admin_id,
                 audit_ctx=ctx,
                 luciel_instance_service=luciel_service,
                 agent_repo=agent_repo,
@@ -999,12 +1243,16 @@ class BillingWebhookService:
             self.db.rollback()
             logger.exception(
                 "billing-webhook: cascade-deactivate failed admin=%s sub=%s",
-                sub.tenant_id, stripe_subscription_id,
+                admin_id, stripe_subscription_id,
             )
             raise
 
         self.db.commit()
-        return {"applied": True, "tenant_id": sub.tenant_id}
+        return {
+            "applied": True,
+            "branch": "v1_hard_cancel",
+            "tenant_id": admin_id,
+        }
 
     # -----------------------------------------------------------------
     # invoice.payment_failed

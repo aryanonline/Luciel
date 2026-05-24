@@ -15,7 +15,9 @@ Each key is scoped to a tenant and optionally to a domain and agent.
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, String
+from datetime import datetime
+
+from sqlalchemy import JSON, Boolean, DateTime, String
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -115,3 +117,16 @@ class ApiKey(Base, TimestampMixin):
     greeting_message (length-capped plaintext), display_name (length-
     capped plaintext). No logo, no font, no free-form CSS — those
     surfaces invite XSS we cannot QA on customer sites."""
+
+    # Arc 6 Commit 8.5b — Deferred-downgrade overflow archive stamp.
+    # Applies only to embed keys (key_kind='embed') which are capped
+    # per tier (Free=1, Pro=10, Ent=unlimited). Admin keys are
+    # platform-internal and uncapped, so the column stays NULL on
+    # those rows. Set when this embed key is one of the LRU losers at
+    # a downgrade boundary; pairs with active=false. Re-upgrade within
+    # the audit_retention window rehydrates stamped rows.
+    pending_downgrade_archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """Arc 6 Commit 8.5b — overflow archive stamp on embed-key rows.
+    NULL on admin keys (uncapped) and on un-archived embed keys."""

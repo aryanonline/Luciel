@@ -149,6 +149,167 @@ class UpgradeResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------
+# POST /api/v1/billing/downgrade  (Arc 6 / Commit 8.5b)
+# ---------------------------------------------------------------------
+
+
+class DowngradeRequest(BaseModel):
+    """Tier-downgrade request from a cookied (signed-in) admin owner.
+
+    Twin of ``UpgradeRequest`` for the deferred-downgrade flow locked in
+    Commit 8.5b. Unlike upgrade, downgrade does NOT round-trip through
+    Stripe Checkout -- the buyer keeps their current tier until the
+    current_period_end boundary, at which point Stripe fires
+    ``customer.subscription.deleted`` and the webhook's V2 branch flips
+    the Admin row, archives overflow (LRU), and -- for Ent->Pro --
+    emails a transactional ``/signup?tier=pro`` magic link.
+
+    The cookied user's existing Admin id is derived from the session
+    cookie's tenant_id claim server-side; the buyer cannot pass it.
+    This mirrors the cross-admin-attack mitigation in UpgradeRequest.
+
+    Three-layer Enterprise rejection (CANONICAL_RECAP \u00a717 lock):
+      * Route layer: target_tier Literal excludes ``"enterprise"``
+      * Service layer: ``BillingService.schedule_downgrade`` raises
+        ValueError if target_tier not in {free, pro}
+      * Schema layer: CHECK on subscriptions.pending_downgrade_target
+        rejects ``'enterprise'`` at the DB. Mis-routing into the
+        downgrade path with an Enterprise target is treated as a
+        logic bug at all three layers.
+    """
+    target_tier: Literal["free", "pro"] = Field(
+        ...,
+        description=(
+            "Tier to downgrade to. Must be strictly lower than the "
+            "caller's current tier (free<pro<enterprise); otherwise "
+            "the route returns 400 with detail='not_a_downgrade'. "
+            "Enterprise is never a downgrade target (it is the top)."
+        ),
+    )
+
+
+class DowngradeResponse(BaseModel):
+    """Result of arming a deferred downgrade.
+
+    Mirrors the dict returned by
+    ``BillingService.schedule_downgrade()``. The frontend uses
+    ``effective_at`` to surface the boundary date in the soft-warn
+    confirm modal ("You will keep Pro features until {effective_at};
+    after that we'll archive overflow per the audit retention window").
+
+    ``effective_at`` is an ISO-8601 UTC timestamp string and may be
+    None in the edge case where the Stripe subscription has no
+    ``current_period_end`` populated (e.g. trialing without a period
+    end set). The frontend must handle that gracefully -- show
+    "end of current billing period" as a fall-back label.
+    """
+    admin_id: str = Field(..., description="Admin (tenant) id being downgraded.")
+    old_tier: Literal["free", "pro", "enterprise"] = Field(
+        ..., description="Current tier at the moment the downgrade was armed.",
+    )
+    target_tier: Literal["free", "pro"] = Field(
+        ..., description="Tier the admin will land on at the boundary.",
+    )
+    effective_at: str | None = Field(
+        None,
+        description=(
+            "ISO-8601 UTC timestamp of the current_period_end when the "
+            "webhook will apply the downgrade. None when Stripe has no "
+            "period_end on file (rare; frontend renders 'end of period')."
+        ),
+    )
+    stripe_subscription_id: str = Field(
+        ..., description="Stripe subscription whose cancel_at_period_end was set.",
+    )
+
+
+class DowngradePreviewRequest(BaseModel):
+    """Preview the per-axis overflow that would occur if a downgrade
+    were applied right now.
+
+    Used by the soft-warn confirm modal to show the buyer exactly
+    what would be archived at the boundary. Does NOT arm anything
+    -- this is a pure read against the Admin's current entitlement
+    surface vs the target tier's caps.
+    """
+    target_tier: Literal["free", "pro"] = Field(
+        ...,
+        description=(
+            "Tier to preview overflow against. Same constraints as "
+            "DowngradeRequest.target_tier."
+        ),
+    )
+
+
+class AxisOverflowResponse(BaseModel):
+    """Per-axis overflow shape returned by the downgrade preview.
+
+    Mirrors the ``AxisOverflow`` dataclass on
+    ``DowngradeArchiveService``. Field semantics:
+      * cap       -- the target tier's cap on this axis
+      * current   -- the admin's currently-active count
+      * overflow  -- max(0, current - cap)
+      * archived_ids -- the LRU-selected resource ids that *would* be
+                        archived at the boundary (empty on preview;
+                        populated only on the apply branch in the webhook
+                        when ``DowngradeArchiveService.archive_overflow_for_admin``
+                        commits the writes).
+    """
+    axis: Literal["instances", "embed_keys", "cnames", "seats"] = Field(
+        ..., description="Which entitlement axis this overflow row is for.",
+    )
+    cap: int | None = Field(
+        ...,
+        description=(
+            "Target tier's cap on this axis. ``None`` means unlimited "
+            "(only possible when destination is Enterprise, which the "
+            "downgrade route layer already rejects -- defensive shape)."
+        ),
+    )
+    current: int = Field(..., description="Admin's currently-active count.")
+    overflow: int = Field(
+        ..., description="max(0, current - cap) -- 0 means no archive will run.",
+    )
+    archived_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "LRU-selected resource ids that would be archived, stringified "
+            "for JSON portability (ints for instance/embed/seat tables are "
+            "coerced to str; CNAMEs are already str UUIDs). Empty on "
+            "preview-with-no-overflow."
+        ),
+    )
+
+
+class DowngradePreviewResponse(BaseModel):
+    """Bundle of per-axis overflow rows for the soft-warn modal.
+
+    Frontend renders this as a four-row table (instances, embed keys,
+    CNAMEs, seats) with cap/current/overflow columns and a warning
+    badge when ``overflow > 0`` on any row. ``any_overflow`` is a
+    convenience flag so the modal can short-circuit rendering.
+    """
+    admin_id: str = Field(..., description="Admin (tenant) id being previewed.")
+    current_tier: Literal["free", "pro", "enterprise"] = Field(
+        ..., description="Admin's current tier (unchanged by preview).",
+    )
+    target_tier: Literal["free", "pro"] = Field(
+        ..., description="Tier the preview was computed against.",
+    )
+    any_overflow: bool = Field(
+        ...,
+        description=(
+            "True if any axis has overflow>0 -- the modal should render "
+            "the soft-warn banner. False means the downgrade is clean."
+        ),
+    )
+    axes: list[AxisOverflowResponse] = Field(
+        default_factory=list,
+        description="Per-axis overflow rows. Always four entries in axis-name order.",
+    )
+
+
+# ---------------------------------------------------------------------
 # POST /api/v1/billing/onboarding/claim
 # ---------------------------------------------------------------------
 

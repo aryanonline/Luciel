@@ -60,6 +60,11 @@ from app.schemas.billing import (
     SubscriptionStatusResponse,
     UpgradeRequest,
     UpgradeResponse,
+    DowngradeRequest,
+    DowngradeResponse,
+    DowngradePreviewRequest,
+    DowngradePreviewResponse,
+    AxisOverflowResponse,
 )
 from app.services.billing_service import (
     BillingNotConfiguredError,
@@ -832,6 +837,250 @@ def upgrade_tier(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return UpgradeResponse(**result)
+
+
+# ---------------------------------------------------------------------
+# POST /downgrade  (Arc 6 / Commit 8.5b)
+# POST /downgrade/preview
+# ---------------------------------------------------------------------
+
+# Tier ordinals used by both upgrade and downgrade routes. Pulled out of
+# the inner function so a single source-of-truth governs both direction
+# checks. NB: this dict intentionally mirrors the constant in
+# tier_provisioning_service so a misalignment between routes and service
+# would surface as a diff in two places. Keep them in sync; downgrade
+# direction is strictly LOWER (target_rank < current_rank), upgrade is
+# strictly HIGHER (target_rank > current_rank).
+_TIER_RANK = {"free": 0, "pro": 1, "enterprise": 2}
+
+
+def _resolve_owner_admin_id(
+    *, db, request: Request,
+) -> tuple[User, str]:
+    """Resolve (user, admin_id) for cookied-owner routes.
+
+    Shared helper for the downgrade twin routes. Returns the validated
+    cookied User plus the admin (tenant) id derived from the session
+    JWT's tenant_id claim (falling back to the user's first active
+    ScopeAssignment for single-scope users).
+
+    Raises:
+      HTTPException(401) -- invalid/missing session cookie
+      HTTPException(400, detail='no_admin_for_user') -- no active scope
+      HTTPException(403, detail='downgrade_requires_owner') -- non-owner
+        cookied user (department_lead / teammate). Downgrade is a
+        billing-authority action; only the owner role may initiate one.
+
+    Mirrors the resolution logic in ``upgrade_tier`` so the two routes
+    cannot drift on auth shape. Inline import of ScopeAssignmentRepository
+    matches the upgrade route's pattern -- it's a sibling helper, not a
+    long-lived module-level dep.
+    """
+    cookie = request.cookies.get(settings.session_cookie_name)
+    user = _resolve_cookied_user(db=db, session_cookie=cookie)
+
+    session_tenant_id: str | None = None
+    try:
+        sess_payload = validate_session_token(cookie or "")
+        session_tenant_id = sess_payload.get("tenant_id")
+    except MagicLinkError:
+        session_tenant_id = None
+
+    from app.repositories.scope_assignment_repository import (
+        ScopeAssignmentRepository,
+    )
+    sar = ScopeAssignmentRepository(db)
+    active_assignments = sar.list_for_user(user.id, active_only=True)
+    if not active_assignments:
+        raise HTTPException(status_code=400, detail="no_admin_for_user")
+    chosen = next(
+        (a for a in active_assignments if a.tenant_id == session_tenant_id),
+        active_assignments[0],
+    )
+    # Only owners may initiate a downgrade. Same gate as upgrade: a
+    # department_lead's downgrade attempt would silently strip the
+    # owner's seats -- we 403 here so the owner gets a recoverable
+    # error in the UI instead.
+    if chosen.role != "owner":
+        raise HTTPException(
+            status_code=403, detail="downgrade_requires_owner",
+        )
+    return user, chosen.tenant_id
+
+
+@router.post(
+    "/downgrade",
+    response_model=DowngradeResponse,
+    status_code=status.HTTP_200_OK,
+)
+def downgrade_tier(
+    payload: DowngradeRequest,
+    request: Request,
+    db: DbSession,
+) -> DowngradeResponse:
+    """Arm a deferred tier downgrade for the cookied admin owner.
+
+    Cookie-authenticated. Admin id is derived server-side from the
+    session JWT's tenant_id claim (with single-scope ScopeAssignment
+    fallback); the body cannot specify it. This mirrors the
+    cross-admin-attack mitigation on the upgrade route -- a hostile
+    Free user cannot post somebody else's admin_id to trigger their
+    downgrade.
+
+    Validation (returns 400 detail=...):
+      * ``not_a_downgrade``         -- target_tier >= current Admin.tier
+      * ``no_admin_for_user``       -- cookied user has no active scope
+      * ``admin_inactive``          -- admin row missing or active=False
+      * ``no_subscription``         -- caller is Free (no Stripe sub to
+                                       cancel; nothing to schedule)
+      * 403 ``downgrade_requires_owner`` -- caller is not the owner
+
+    On success returns ``DowngradeResponse`` with ``effective_at`` set
+    to the boundary timestamp. NOTHING is mutated on the Admin row or
+    entitlement surface here -- the buyer keeps their current tier
+    until Stripe fires ``customer.subscription.deleted`` at the
+    boundary, at which point the webhook V2 branch applies the tier
+    flip + LRU overflow archive.
+
+    Idempotency:
+      A second POST with the same target_tier on an admin whose sub
+      already has the same ``pending_downgrade_target`` set is a no-op
+      on both Stripe and the local row (see
+      ``BillingService.schedule_downgrade`` docstring). The webhook
+      apply branch is itself idempotent on replay (the LRU query
+      excludes rows already stamped with ``pending_downgrade_archived_at``).
+    """
+    user, admin_id = _resolve_owner_admin_id(db=db, request=request)
+
+    from app.models.admin import Admin as AdminModel
+    admin = db.get(AdminModel, admin_id)
+    if admin is None or not admin.active:
+        raise HTTPException(status_code=400, detail="admin_inactive")
+
+    current_rank = _TIER_RANK.get(admin.tier, -1)
+    target_rank = _TIER_RANK.get(payload.target_tier, -1)
+    if target_rank >= current_rank:
+        # Covers same-tier and upward targets. Same-tier is meaningful
+        # to reject because a Pro->Pro "downgrade" would still arm
+        # cancel_at_period_end on Stripe -- silently cancelling the
+        # buyer's subscription would be a foot-gun.
+        raise HTTPException(status_code=400, detail="not_a_downgrade")
+
+    # Audit context. This is a cookied-user-initiated action but the
+    # billing surface treats it as system-initiated (no api-key column
+    # in actor_key_prefix). We tag with a stable label so forensic
+    # queries can isolate cookied account-downgrade flows from the
+    # webhook-driven apply rows.
+    from app.repositories.admin_audit_repository import AuditContext
+    from dataclasses import replace as _dc_replace
+    audit_ctx = _dc_replace(
+        AuditContext.system(label=f"account_downgrade:user={user.id}"),
+        actor_tenant_id=admin_id,
+    )
+
+    svc = _service(db)
+    try:
+        result = svc.schedule_downgrade(
+            admin_id=admin_id,
+            target_tier=payload.target_tier,
+            audit_ctx=audit_ctx,
+        )
+    except BillingNotConfiguredError as exc:
+        raise _501_if_billing_not_ready(exc) from exc
+    except ValueError as exc:
+        # Map service-layer ValueErrors to 400 detail strings the
+        # frontend can switch on. The service raises a ValueError with
+        # a descriptive message for: unknown target_tier (impossible
+        # at the route layer because Literal already gates it), and
+        # Free-admin downgrade attempts (caller has no Subscription).
+        msg = str(exc).lower()
+        if "no active" in msg and "subscription" in msg:
+            raise HTTPException(
+                status_code=400, detail="no_subscription",
+            ) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return DowngradeResponse(**result)
+
+
+@router.post(
+    "/downgrade/preview",
+    response_model=DowngradePreviewResponse,
+    status_code=status.HTTP_200_OK,
+)
+def downgrade_preview(
+    payload: DowngradePreviewRequest,
+    request: Request,
+    db: DbSession,
+) -> DowngradePreviewResponse:
+    """Preview the per-axis overflow a downgrade would trigger.
+
+    Pure read. Mutates nothing. Used by Account.tsx's soft-warn
+    confirm modal so the buyer sees exactly what would be archived
+    at the boundary (\"3 instances and 1 CNAME will be archived\").
+
+    Same auth + admin resolution as ``/downgrade``; the preview is
+    also owner-gated so a teammate can't enumerate the owner's
+    overflow state. (We could relax to ScopeAssignment-only checks
+    if a UX need emerges, but the conservative posture matches our
+    pillars: traceability + security.)
+    """
+    _user, admin_id = _resolve_owner_admin_id(db=db, request=request)
+
+    from app.models.admin import Admin as AdminModel
+    admin = db.get(AdminModel, admin_id)
+    if admin is None or not admin.active:
+        raise HTTPException(status_code=400, detail="admin_inactive")
+
+    current_rank = _TIER_RANK.get(admin.tier, -1)
+    target_rank = _TIER_RANK.get(payload.target_tier, -1)
+    if target_rank >= current_rank:
+        raise HTTPException(status_code=400, detail="not_a_downgrade")
+
+    # Inline import to keep the route module's top-level import graph
+    # quiet -- archive service pulls in a chain of ORM imports we'd
+    # rather defer until the preview is actually requested.
+    from app.services.downgrade_archive_service import (
+        DowngradeArchiveService,
+    )
+    summary = DowngradeArchiveService(db).preview_overflow_for_admin(
+        admin_id=admin_id,
+        target_tier=payload.target_tier,
+    )
+
+    # Project the dataclass-shaped OverflowSummary into the response
+    # shape. Always emit the four axes in stable order so the frontend
+    # can render the table with hard-coded row labels.
+    axis_rows: list[AxisOverflowResponse] = []
+    for axis_key in ("instances", "embed_keys", "cnames", "seats"):
+        tally = summary.axes.get(axis_key)
+        if tally is None:
+            # Defensive: service guarantees all four axes are present;
+            # if a future refactor drops one, emit a zero-overflow row
+            # rather than 500ing the modal.
+            axis_rows.append(AxisOverflowResponse(
+                axis=axis_key,
+                cap=None,
+                current=0,
+                overflow=0,
+                archived_ids=[],
+            ))
+            continue
+        axis_rows.append(AxisOverflowResponse(
+            axis=axis_key,
+            cap=tally.cap,
+            current=tally.current,
+            overflow=tally.overflow,
+            archived_ids=[str(rid) for rid in tally.archived_ids],
+        ))
+
+    return DowngradePreviewResponse(
+        admin_id=admin_id,
+        current_tier=admin.tier,
+        target_tier=payload.target_tier,
+        any_overflow=summary.any_overflow,
+        axes=axis_rows,
+    )
 
 
 # ---------------------------------------------------------------------

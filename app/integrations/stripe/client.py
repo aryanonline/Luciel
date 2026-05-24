@@ -359,6 +359,34 @@ class StripeClient:
             prorate=False,
         )
 
+    def schedule_cancellation_at_period_end(
+        self, *, stripe_subscription_id: str,
+    ) -> Any:
+        """Mark a subscription to cancel at the end of its current period.
+
+        Distinct from ``cancel_subscription`` (hard, immediate cancel).
+        This call sets ``cancel_at_period_end=True`` on Stripe's side;
+        the buyer keeps the entitlements they paid for through
+        ``current_period_end``, at which point Stripe fires
+        ``customer.subscription.deleted`` to our webhook -- and the V2
+        downgrade branch of ``_on_subscription_deleted`` is what flips
+        the local Admin row + runs overflow archive (Arc 6 Commit 8.5b).
+
+        Reversibility: a buyer who changes their mind before the
+        boundary can re-upgrade (which calls
+        ``stripe.Subscription.modify(cancel_at_period_end=False)`` on
+        the same sub_id) and the scheduled cancel is dropped. That
+        reverse path is wired in the route layer's upgrade-while-
+        scheduled flow.
+
+        Returns the modified Subscription object (Stripe's view).
+        """
+        stripe.api_key = self._api_key
+        return stripe.Subscription.modify(
+            stripe_subscription_id,
+            cancel_at_period_end=True,
+        )
+
     # -----------------------------------------------------------------
     # Webhook signature verification
     # -----------------------------------------------------------------

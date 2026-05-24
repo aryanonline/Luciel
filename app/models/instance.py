@@ -67,6 +67,16 @@ class Instance(Base):
         DateTime(timezone=True), nullable=False
     )
 
+    # Arc 6 Commit 8.5b — Deferred-downgrade overflow archive stamp.
+    # Set when this Instance is one of the LRU losers at a downgrade
+    # boundary (Pro→Free or Ent→Pro/Free). Pairs with active=false at
+    # the same moment. Re-upgrade within the audit_retention window
+    # (Free=30d) rehydrates rows that still carry this stamp.
+    # NULL = not archived for downgrade reasons.
+    pending_downgrade_archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     __table_args__ = (
         UniqueConstraint(
             "admin_id", "instance_slug", name="uq_instances_admin_id_slug"

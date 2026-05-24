@@ -283,6 +283,25 @@ class Subscription(Base, TimestampMixin):
     )
 
     # -----------------------------------------------------------------
+    # Arc 6 Commit 8.5b — Deferred-downgrade marker.
+    # -----------------------------------------------------------------
+    # Set when the buyer schedules a tier downgrade via
+    # POST /billing/downgrade. NULL = no downgrade pending (the common
+    # case). The webhook ``_on_subscription_deleted`` branches on this
+    # column: when set, run the V2 downgrade path (flip admin tier +
+    # archive overflow); when NULL, run the V1 hard-cancel deactivate
+    # path (preserved for manual Stripe-Dashboard cancels). CHECK
+    # constraint at the DB level pins the legal values to {'free','pro'}
+    # — Enterprise is the top tier and is never a downgrade target.
+    pending_downgrade_target: Mapped[str | None] = mapped_column(
+        String(16), nullable=True,
+        comment=(
+            "Arc 6 Commit 8.5b — destination tier of a scheduled "
+            "downgrade. NULL = none pending. CHECK pins to {'free','pro'}."
+        ),
+    )
+
+    # -----------------------------------------------------------------
     # Provider payload + last event marker — debugging + replay.
     # -----------------------------------------------------------------
     # Last raw Stripe object snapshot (subscription.* event). Bounded

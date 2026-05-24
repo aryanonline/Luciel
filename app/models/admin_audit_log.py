@@ -172,6 +172,30 @@ ACTION_SUBSCRIPTION_CANCEL = "subscription_cancel"
 ACTION_SUBSCRIPTION_REACTIVATE = "subscription_reactivate"
 ACTION_BILLING_WEBHOOK_REPLAY_REJECTED = "billing_webhook_replay_rejected"
 
+# Arc 6 Commit 8.5b -- deferred-downgrade lifecycle. Two distinct verbs:
+#
+# ACTION_SUBSCRIPTION_DOWNGRADE_SCHEDULED
+#   Emitted at schedule time by the request-path (BillingService
+#   .schedule_downgrade), when the buyer clicks "downgrade" in the
+#   Account UI. The actor is the cookied User (not the Stripe webhook),
+#   the before_json carries the current tier, after_json carries the
+#   pending_downgrade_target + Stripe's reported current_period_end
+#   as the boundary. Stripe-side state is now
+#   cancel_at_period_end=True; nothing on the entitlement surface has
+#   changed yet -- the buyer keeps the tier they paid for until the
+#   boundary fires.
+#
+# ACTION_SUBSCRIPTION_DOWNGRADE_APPLIED
+#   Emitted by the webhook V2 branch of _on_subscription_deleted when
+#   Stripe fires the boundary event. The actor is the synthetic
+#   stripe_webhook context. The after_json carries the per-axis
+#   overflow archive tally + the archived_at timestamp. Distinct from
+#   ACTION_SUBSCRIPTION_CANCEL (V1 hard-cancel deactivate) so a
+#   dashboard query can tell a paid-tier downgrade-to-Free apart from
+#   an admin-deactivation cascade at the verb level.
+ACTION_SUBSCRIPTION_DOWNGRADE_SCHEDULED = "subscription_downgrade_scheduled"
+ACTION_SUBSCRIPTION_DOWNGRADE_APPLIED = "subscription_downgrade_applied"
+
 # Step 30a.2-pilot -- self-serve refund of the one-time $100 CAD intro
 # fee charged at signup. Distinct from ACTION_SUBSCRIPTION_CANCEL
 # because:
@@ -364,6 +388,9 @@ ALLOWED_ACTIONS = (
     ACTION_SUBSCRIPTION_CANCEL,
     ACTION_SUBSCRIPTION_REACTIVATE,
     ACTION_BILLING_WEBHOOK_REPLAY_REJECTED,
+    # Arc 6 Commit 8.5b -- deferred-downgrade lifecycle.
+    ACTION_SUBSCRIPTION_DOWNGRADE_SCHEDULED,
+    ACTION_SUBSCRIPTION_DOWNGRADE_APPLIED,
     # Step 30a.2-pilot -- self-serve refund of the one-time intro fee.
     ACTION_SUBSCRIPTION_PILOT_REFUNDED,
     # Step 30a.2-pilot Commit 3j -- best-effort courtesy email failure row.

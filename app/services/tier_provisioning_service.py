@@ -119,6 +119,22 @@ class TierUpgradeNoopError(ValueError):
     """
 
 
+class TierDowngradeNoopError(ValueError):
+    """Raised by ``downgrade_admin_tier`` when the new tier is not
+    strictly LOWER than the current tier.
+
+    Symmetric counterpart to ``TierUpgradeNoopError``. The webhook traps
+    this as a benign replay condition when the V2 downgrade branch
+    runs twice (Stripe redeliver of ``subscription.deleted`` after a
+    partial success that already flipped the Admin row).
+
+    Same-tier and upgrade-target inputs are also a no-op: there is no
+    legal scenario where a downgrade call should resolve to a higher
+    tier than current. The check is intentionally symmetric to the
+    upgrade path's strictly-higher guard.
+    """
+
+
 class TierProvisioningValidationError(ValueError):
     """Raised when ``premint_for_tier`` is called with structurally
     invalid input (today: an unparseable ``primary_user.email``).
@@ -385,6 +401,128 @@ class TierProvisioningService:
 
         logger.info(
             "tier_provisioning: upgraded admin=%s tier %s -> %s source=%s",
+            admin_id, old_tier, new_tier, new_tier_source,
+        )
+        return {
+            "admin_id": admin_id,
+            "old_tier": old_tier,
+            "new_tier": new_tier,
+            "new_tier_source": new_tier_source,
+        }
+
+    # -----------------------------------------------------------------
+    # Tier downgrade — Arc 6 Commit 8.5b.
+    # -----------------------------------------------------------------
+
+    def downgrade_admin_tier(
+        self,
+        *,
+        admin_id: str,
+        new_tier: str,
+        new_tier_source: str,
+        audit_ctx: AuditContext,
+    ) -> dict:
+        """Flip an existing Admin's tier downward.
+
+        Used by the webhook V2 downgrade-branch
+        (``_on_subscription_deleted`` with the sub's
+        ``pending_downgrade_target`` set) to convert a paid Admin into
+        Free, or to demote Enterprise -> Pro, AFTER Stripe has fired
+        ``subscription.deleted`` at ``current_period_end``.
+
+        What this method does:
+          1. Verifies the Admin exists and is active.
+          2. Verifies the new tier is strictly LOWER than the current
+             tier (else raises ``TierDowngradeNoopError`` -- callers
+             must not call this with a same-tier or upgrade target).
+          3. Updates ``admins.tier`` and ``admins.tier_source`` in a
+             single committed transaction with an audit row.
+
+        What this method DOES NOT do:
+          * Archive overflow rows. That lives in
+            ``DowngradeArchiveService.archive_overflow_for_admin``,
+            called by the webhook AFTER this method returns.
+            Separation: this method touches only ``admins``; the
+            archive service touches ``instances`` / ``api_keys`` /
+            ``admin_widget_domains`` / ``scope_assignments``.
+          * Cancel any Stripe state. The webhook fires AFTER Stripe
+            has already cancelled at period_end; nothing here calls
+            into the Stripe API.
+          * Remove or null out the buyer's owner ScopeAssignment.
+            The owner seat is exempt from overflow archive (see
+            ``DowngradeArchiveService._is_owner_seat``); a downgraded
+            admin still owns their Admin row.
+          * Touch the ``Subscription`` row. The webhook handles the
+            sub-row updates (active=False, status=canceled,
+            pending_downgrade_target=None) in its own atomic write.
+
+        Symmetric to ``upgrade_admin_tier``: same audit-shape, same
+        atomicity guarantee, mirrored strictly-lower guard.
+
+        Idempotency:
+          A Stripe webhook redeliver after a partial success that
+          already updated the Admin row will re-call this method. The
+          "strictly lower tier" guard naturally short-circuits: a
+          replay attempts new_tier=current_tier and is rejected with
+          ``TierDowngradeNoopError``. The webhook traps this and logs.
+
+        Raises:
+          ValueError                -- unknown new_tier, or admin missing/inactive.
+          TierDowngradeNoopError    -- new_tier >= current_tier (replay safety).
+        """
+        if new_tier not in self._TIER_ORDINAL:
+            raise ValueError(
+                f"TierProvisioningService.downgrade_admin_tier: unknown new_tier {new_tier!r}"
+            )
+        if new_tier == TIER_ENTERPRISE:
+            # Enterprise is never a downgrade target -- it is the top
+            # tier. Callers must not reach here with this argument; the
+            # route layer validates it, the schema CHECK on
+            # subscriptions.pending_downgrade_target also rejects it,
+            # and this is the third layer of the same gate.
+            raise ValueError(
+                "downgrade_admin_tier: new_tier='enterprise' is an upgrade, "
+                "not a downgrade. Use upgrade_admin_tier."
+            )
+
+        admin = self.admin.get_tenant_config(admin_id)
+        if admin is None or not getattr(admin, "active", False):
+            raise ValueError(
+                f"downgrade_admin_tier: admin {admin_id!r} missing or inactive"
+            )
+
+        old_tier = admin.tier
+        old_tier_source = admin.tier_source
+
+        # Strictly-lower guard. Symmetric to upgrade_admin_tier's
+        # strictly-higher guard. Same-tier and upward-target inputs
+        # are both rejected as TierDowngradeNoopError.
+        if self._TIER_ORDINAL[new_tier] >= self._TIER_ORDINAL.get(old_tier, 999):
+            raise TierDowngradeNoopError(
+                f"downgrade_admin_tier: new_tier={new_tier!r} is not strictly "
+                f"lower than current tier={old_tier!r} on admin={admin_id!r}"
+            )
+
+        # Single committed update + audit row, atomic per Invariant 4.
+        # Same pattern as upgrade_admin_tier; deliberately mirrored
+        # for symmetry and reviewer ergonomics.
+        admin.tier = new_tier
+        admin.tier_source = new_tier_source
+        self.audit.record(
+            ctx=audit_ctx,
+            tenant_id=admin_id,
+            action=ACTION_UPDATE,
+            resource_type=RESOURCE_ADMIN,
+            resource_natural_id=admin_id,
+            before={"tier": old_tier, "tier_source": old_tier_source},
+            after={"tier": new_tier, "tier_source": new_tier_source},
+            note=f"Tier downgrade {old_tier} -> {new_tier} via {new_tier_source}",
+            autocommit=False,
+        )
+        self.db.commit()
+
+        logger.info(
+            "tier_provisioning: downgraded admin=%s tier %s -> %s source=%s",
             admin_id, old_tier, new_tier, new_tier_source,
         )
         return {

@@ -75,6 +75,15 @@ class AdminWidgetDomain(Base):
         nullable=False,
     )
 
+    # Arc 6 Commit 8.5b — Deferred-downgrade overflow archive stamp.
+    # CNAMEs are a Pro-and-Enterprise entitlement; Free cap = 0. A
+    # Pro→Free downgrade archives ALL of an admin's CNAMEs; Ent→Pro
+    # archives down to Pro's cap (1). NULL = not archived.
+    pending_downgrade_archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     __table_args__ = (
         UniqueConstraint(
             "admin_id",
