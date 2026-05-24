@@ -1,16 +1,26 @@
 """
-Tenant onboarding service.
+Admin onboarding service.
 
-Orchestrates the atomic creation of everything a new tenant needs:
-  1. TenantConfig
-  2. Default DomainConfig
-  3. Default RetentionPolicies (PIPEDA-compliant)
-  4. First API key
+Orchestrates the atomic creation of everything a new Admin needs:
+  1. Admin row (formerly TenantConfig)
+  2. Default RetentionPolicies (PIPEDA-compliant)
+  3. First API key
 
 All writes happen in a single DB transaction — if any step fails,
-everything rolls back. No partial tenants.
+everything rolls back. No partial Admins.
 
-Step 23.
+Step 23 origin; Arc 5 Path A collapsed the Domain layer; Arc 6
+Commit 8 (2026-05-23) rewrote the Admin() kwargs to match the V2
+schema after the kwarg drift (display_name, description,
+escalation_contact, system_prompt_additions, created_by, allowed_domains
+were all stale post-Arc-5-B8) was discovered as a P0 during the
+unified-signup design. The function now accepts a ``tier`` parameter
+(V2 vocabulary) and writes ONLY the V2 Admin columns:
+``id, name, tier, tier_source, active``. Legacy kwargs are RETAINED on
+the signature for source-compat with the platform_admin route + the
+Stripe webhook caller, but they are NO LONGER written to the Admin row
+— they are passed through to retention defaults, api-key labelling,
+and audit metadata only.
 """
 from __future__ import annotations
 
@@ -20,14 +30,18 @@ from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import (
     ACTION_CREATE,
-    RESOURCE_DOMAIN,
     RESOURCE_RETENTION_POLICY,
     RESOURCE_TENANT,
 )
 # Arc 5 Path A: DomainConfig REMOVED. V2 onboarding creates an Admin
 # row (formerly TenantConfig) and the retention policies; there is no
 # Domain layer.
-from app.models.admin import Admin
+from app.models.admin import (
+    Admin,
+    ALLOWED_TIERS_V2,
+    TIER_PRO,
+    TIER_SOURCE_STRIPE_WEBHOOK,
+)
 from app.models.retention import RetentionPolicy
 
 # Legacy name kept for source compatibility.
@@ -59,6 +73,8 @@ class OnboardingService:
         *,
         tenant_id: str,
         display_name: str,
+        tier: str = TIER_PRO,
+        tier_source: str = TIER_SOURCE_STRIPE_WEBHOOK,
         description: str | None = None,
         escalation_contact: str | None = None,
         system_prompt_additions: str | None = None,
@@ -77,15 +93,33 @@ class OnboardingService:
         audit_ctx: AuditContext | None = None,
     ) -> dict:
         """
-        Create everything a tenant needs in one atomic transaction.
+        Create everything an Admin needs in one atomic transaction.
 
-        Returns a dict with: tenant, default_domain, api_key, raw_api_key,
-        retention_policies.
+        Returns a dict with: tenant (Admin), default_domain (always None
+        post-Arc-5), admin_api_key, admin_raw_key, retention_policies.
 
-        Raises ValueError if tenant already exists.
+        Raises ValueError if Admin already exists or ``tier`` is not in
+        the V2 allowed-tier set.
+
+        Arc 6 Commit 8 (2026-05-23): rewrote the Admin() kwargs to use
+        ONLY V2 columns (id, name, tier, tier_source, active). Legacy
+        kwargs (description, escalation_contact, system_prompt_additions,
+        created_by, allowed_domains) are RETAINED on the signature for
+        source-compat with admin.py + the Stripe webhook caller but they
+        are NO LONGER written to the Admin row -- they thread through to
+        audit metadata + api-key naming only. ``tier`` defaults to PRO so
+        the Stripe webhook caller (which does NOT pass tier today) keeps
+        its current behavior; the unified-signup caller passes
+        ``tier="free"`` + ``tier_source="free_signup"`` explicitly.
         """
         if api_key_permissions is None:
             api_key_permissions = ["chat", "sessions"]
+
+        # --- Guard: V2 tier vocabulary ---
+        if tier not in ALLOWED_TIERS_V2:
+            raise ValueError(
+                f"Invalid tier {tier!r}; must be one of {ALLOWED_TIERS_V2}"
+            )
 
         # --- Guard: no duplicates ---
         existing = self.admin.get_tenant_config(tenant_id)
@@ -95,24 +129,25 @@ class OnboardingService:
         try:
             # 1. Create Admin (formerly TenantConfig).
             # Arc 5 Path A: ``tenant_id`` is the Admin primary key (`id`).
-            tenant_kwargs = {
-                "id": tenant_id,
-                "display_name": display_name,
-                "description": description,
-                "escalation_contact": escalation_contact,
-                "system_prompt_additions": system_prompt_additions,
-                "active": True,
-                "created_by": created_by,
-            }
-            # Some legacy columns (allowed_domains) may persist on the
-            # Admin row until Revision C drops them. Set only if the
-            # column still exists on the ORM model.
-            if hasattr(Admin, "allowed_domains"):
-                tenant_kwargs["allowed_domains"] = [default_domain_id]
-            tenant = Admin(**tenant_kwargs)
+            # Arc 6 Commit 8: ONLY V2 columns. The verified V2 column set
+            # (per app/models/admin.py) is: id, name, tier, tier_source,
+            # active, stripe_customer_id, legacy_tenant_id, created_at,
+            # updated_at. We write the five business-meaningful ones; the
+            # timestamps are server-defaulted; stripe_customer_id and
+            # legacy_tenant_id are set elsewhere (webhook / data migration).
+            tenant = Admin(
+                id=tenant_id,
+                name=display_name,
+                tier=tier,
+                tier_source=tier_source,
+                active=True,
+            )
             self.db.add(tenant)
             self.db.flush()  # get ID without committing
-            logger.info("Onboard: created admin (tenant_config) for %s", tenant_id)
+            logger.info(
+                "Onboard: created admin id=%s tier=%s tier_source=%s",
+                tenant_id, tier, tier_source,
+            )
 
             # 2. Default DomainConfig: REMOVED (Arc 5 Path A).
             # V2 has no Domain layer; ``default_domain_id`` is retained
@@ -188,12 +223,22 @@ class OnboardingService:
                 resource_type=RESOURCE_TENANT,
                 resource_natural_id=tenant_id,
                 after={
-                    "display_name": display_name,
+                    # Arc 6 / Commit 8 -- audit row mirrors the V2 Admin
+                    # write. Legacy fields (description,
+                    # escalation_contact, allowed_domains) are retained
+                    # in the after-snapshot as call-site metadata (the
+                    # caller intended them as descriptive context)
+                    # rather than as column values, so platform_admin
+                    # forensic queries against admin_audit_log keep
+                    # the same shape during the transition.
+                    "name": display_name,
+                    "tier": tier,
+                    "tier_source": tier_source,
                     "description": description,
                     "escalation_contact": escalation_contact,
                     "allowed_domains": [default_domain_id],
                 },
-                note="onboard_tenant: created tenant_config",
+                note="onboard_tenant: created admin (V2 vocab)",
             )
             # Arc 5 Path A: RESOURCE_DOMAIN audit row REMOVED. V2 has no
             # Domain layer, so no domain_config row is created and no

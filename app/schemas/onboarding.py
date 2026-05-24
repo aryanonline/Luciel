@@ -7,20 +7,45 @@ Step 23 — eliminates manual multi-step tenant setup.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class TenantOnboardRequest(BaseModel):
-    """Everything needed to onboard a new tenant in one call."""
+    """Everything needed to onboard a new Admin in one call.
 
-    # --- Tenant fields (required) ---
+    Arc 6 Commit 8 (2026-05-23): added ``tier`` + ``tier_source`` to
+    align with the V2 Admin schema. Legacy descriptive fields
+    (description, escalation_contact, system_prompt_additions) are
+    retained on the request for source-compat but are no longer
+    persisted as Admin columns -- they thread into audit metadata and
+    the api-key display name only.
+    """
+
+    # --- Admin fields (required) ---
     tenant_id: str = Field(
         ..., min_length=2, max_length=100,
         pattern=r"^[a-z0-9][a-z0-9\-]*[a-z0-9]$",
-        description="URL-safe tenant slug, e.g. 'remax-crossroads'",
+        description="URL-safe Admin slug, e.g. 'remax-crossroads'",
     )
     display_name: str = Field(..., min_length=1, max_length=200)
+
+    # Arc 6 Commit 8 -- V2 tier vocabulary. Defaults match the
+    # platform-admin onboarding intent (paid tier, stripe-webhook-
+    # equivalent source); callers can override per their flow.
+    tier: Literal["free", "pro", "enterprise"] = Field(
+        default="pro",
+        description="V2 tier; one of 'free' / 'pro' / 'enterprise'",
+    )
+    tier_source: Literal[
+        "stripe_webhook", "platform_admin", "free_signup"
+    ] = Field(
+        default="stripe_webhook",
+        description="Provenance of the tier assignment",
+    )
+
+    # --- Legacy descriptive fields (retained, no longer column-bearing) ---
     description: str | None = None
     escalation_contact: str | None = None
     system_prompt_additions: str | None = None
@@ -62,11 +87,23 @@ class TenantOnboardRequest(BaseModel):
 
 
 class OnboardedTenantSummary(BaseModel):
+    """Summary of the freshly-created Admin row.
+
+    Arc 6 Commit 8 (2026-05-23): rewired to V2 Admin columns. The V2
+    Admin model uses ``id`` (string slug PK) and ``name``; the legacy
+    ``tenant_id`` / ``display_name`` shape is preserved on the wire by
+    explicit field construction in the route (see admin.py), so
+    pre-Arc-6 API consumers do not see a breaking change.
+    """
+
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
-    tenant_id: str
-    display_name: str
+    # Legacy wire shape -- preserved verbatim for API source-compat.
+    id: str
+    tenant_id: str = Field(..., description="V2 Admin slug (== id)")
+    display_name: str = Field(..., description="V2 Admin name")
+    tier: str
+    tier_source: str
     active: bool
     created_at: datetime
 
@@ -110,7 +147,11 @@ class TenantOnboardResponse(BaseModel):
     """
 
     tenant: OnboardedTenantSummary
-    default_domain: OnboardedDomainSummary
+    # Arc 5 Path A collapsed the Domain layer; ``default_domain`` is
+    # always None post-collapse. Retained on the response shape for
+    # API source-compat so older clients that read it tolerate the
+    # null.
+    default_domain: OnboardedDomainSummary | None = None
     admin_api_key: OnboardedApiKeySummary
     retention_policies: list[OnboardedRetentionSummary]
     message: str = (

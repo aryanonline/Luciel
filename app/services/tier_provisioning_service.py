@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
+from app.models.admin import TIER_FREE
 from app.models.subscription import TIER_PRO, TIER_ENTERPRISE
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.repositories.scope_assignment_repository import ScopeAssignmentRepository
@@ -66,6 +67,33 @@ _CREATED_BY = "tier_provisioning"
 # Role string on the owner-side ScopeAssignment minted at self-serve
 # checkout. Buyer becomes "owner" of their own Admin.
 _OWNER_ROLE = "owner"
+
+# Arc 6 Commit 8 (2026-05-23) -- Domain-collapse sentinel.
+#
+# The ``scope_assignments.domain_id`` column is declared
+# ``nullable=False`` at the DB layer (born under the Step 24.5b Q6
+# resolution before Arc 5 collapsed the Domain layer). V2 doctrine
+# says "no Domain layer" but the COLUMN survives until the schema
+# subtractive revision that drops it (out of scope here -- it's a
+# Pro/Enterprise schema cleanup tracked separately).
+#
+# Until that drop lands, every ScopeAssignment insert must satisfy
+# the NOT-NULL by writing a sentinel string. ``"default"`` is the
+# value chosen because:
+#   1. It matches the V1 legacy default (the only legitimate value
+#      in the post-Arc-5 world; "general" was the legacy fixture but
+#      is no longer enforced as a real domain).
+#   2. It collides with itself across all V2 ScopeAssignments under
+#      the same Admin, which is the correct V2 behaviour (V2 has
+#      ONE domain per admin, full stop).
+#   3. A future Domain-drop migration can backfill in-place from
+#      this sentinel without ambiguity.
+#
+# Pre-Arc-6-Commit-8 this code passed ``domain_id=None`` which would
+# IntegrityError at flush. The Pro pre-mint path was latent-broken;
+# only Free signup (this commit) exercises the same column today.
+# Fixing both with one constant keeps the rule legible.
+_DOMAIN_COLLAPSE_SENTINEL = "default"
 
 
 # ---------------------------------------------------------------------
@@ -169,11 +197,18 @@ class TierProvisioningService:
         Raises any exception from the underlying repos / service; the
         webhook treats this as "best effort" and traps it.
         """
-        if tier not in (TIER_PRO, TIER_ENTERPRISE):
+        # Arc 6 Commit 8 (2026-05-23) -- accept TIER_FREE alongside paid
+        # tiers. The pre-mint shape (owner ScopeAssignment + exactly one
+        # primary Instance) is IDENTICAL for Free, Pro, and Enterprise --
+        # only the downstream entitlement caps differ (§14). Rejecting
+        # Free here forced the unified-signup route to inline the same
+        # logic; routing through this service keeps the rule "there is
+        # exactly ONE place that turns an Admin into a tier-shaped Admin"
+        # honest.
+        if tier not in (TIER_FREE, TIER_PRO, TIER_ENTERPRISE):
             raise ValueError(
                 f"TierProvisioningService.premint_for_tier: unknown or "
-                f"unsupported tier {tier!r} (only paying tiers are pre-minted; "
-                f"Free admins lazy-mint via signup)"
+                f"unsupported tier {tier!r}"
             )
 
         _validate_email_shape(
@@ -279,7 +314,11 @@ class TierProvisioningService:
         sar.create(
             user_id=primary_user.id,
             tenant_id=admin.id,
-            domain_id=None,  # V2: no Domain layer
+            # Arc 6 Commit 8 -- write the Domain-collapse sentinel rather
+            # than None. The column is nullable=False at the DB layer
+            # (V1 inheritance), and the V2 model has not yet had the
+            # column dropped. See _DOMAIN_COLLAPSE_SENTINEL docstring.
+            domain_id=_DOMAIN_COLLAPSE_SENTINEL,
             role=_OWNER_ROLE,
             autocommit=False,  # we commit below, after the audit row lands
             audit_ctx=audit_ctx,

@@ -691,31 +691,47 @@ def logout() -> JSONResponse:
 
 
 # ---------------------------------------------------------------------
-# POST /signup-free  (Arc 8 Work-Unit 5 -- Free-tier self-serve signup)
+# POST /signup-free  (Arc 6 Commit 8 -- unified-signup Free flow)
 # ---------------------------------------------------------------------
 #
-# D-free-tier-captcha-missing-2026-05-22 resolution. The Free tier
-# (Arc 4 Deliverable #4) is unauthenticated at the moment of signup,
-# which makes this surface a free SES-quota drain and a free DB-row
-# drain unless we gate it. hCaptcha is the gate; verification happens
-# BEFORE any side effect.
+# History:
+#   * Arc 8 Work-Unit 5 stubbed this route as a captcha-gated
+#     placeholder returning ``status="pending-arc-5"``. The mint
+#     logic was deferred until the ``admins`` table existed.
+#   * Arc 5 Path A landed the ``admins`` table.
+#   * Arc 6 Commit 8 (2026-05-23) wires the actual mint here as the
+#     load-bearing Free-tier signup surface for the unified-signup
+#     redesign (one signup path; Free by default; in-product tier
+#     transitions from Account).
 #
-# Today (pre-Arc-5) the success path returns a 200 with
-# ``status="pending-arc-5"`` because the ``admins`` table does not
-# exist yet. Once Arc 5 lands the ``admins`` table + the
-# ``admins.last_signup_ip`` column, this handler will:
+# Flow (5 atomic steps under one OnboardingService transaction +
+# one TierProvisioning transaction):
 #
-#   1. Verify the captcha (already implemented below).
-#   2. Insert an Admin row scoped to a freshly-minted Free-tier
-#      Instance, capturing ``last_signup_ip`` from the trusted
-#      client IP.
-#   3. Mint a magic-link token and send the verification email via
-#      SES (re-using app/services/magic_link_service +
-#      app/services/email_service).
-#   4. Return 200 with ``status="ok"`` and the new admin_id.
+#   1. (Soft-gate) Verify the hCaptcha token. Captcha is Optional
+#      during the Commit 8 -> Commit 9 sandbox window; Commit 9
+#      flips it back to required + lands the front-end widget +
+#      tightens one-per-email-and-IP accounting (closes
+#      D-free-tier-captcha-missing-2026-05-22).
+#   2. Resolve-or-create the User row by email.
+#   3. Mint a fresh admin_id ("free-<8hex>") and onboard the Admin
+#      with ``tier="free"`` + ``tier_source="free_signup"``.
+#      Includes retention policies (PIPEDA-compliant) and the
+#      admin's first API key in the same transaction.
+#   4. Pre-mint the owner-side ScopeAssignment + the buyer's
+#      primary Instance via ``TierProvisioningService`` (the same
+#      surface Pro / Enterprise use; Arc 6 Commit 8 lifted the L172
+#      Free-rejection so all three tiers route through one service).
+#   5. Mint a set_password magic-link and send the welcome email.
+#      Consuming the link is BOTH proof of email reachability AND
+#      the password-set step (one click, no separate verification
+#      mailshot). See ``auth_service.set_password`` for the atomic
+#      ``email_verified=True`` flip.
 #
-# Adding step 2-4 is a code-only follow-up at Arc 5; the captcha
-# contract on this route is locked in here.
+# After the email send, the user clicks the link, lands at
+# ``/auth/set-password``, types a password, the existing
+# ``POST /api/v1/auth/set-password`` route auto-logins (mints the
+# session cookie) and redirects to ``/app`` (which the marketing
+# site routes to /dashboard).
 #
 # Auth posture: PUBLIC. The path is exempt from api-key middleware
 # via the existing ``/api/v1/billing`` prefix on SKIP_AUTH_PATHS
@@ -729,22 +745,26 @@ def logout() -> JSONResponse:
 async def signup_free(
     body: SignupFreeRequest,
     request: Request,
+    db: DbSession,
 ) -> SignupFreeResponse:
-    """Free-tier self-serve signup. hCaptcha-gated, no payment, no
-    credential required.
+    """Free-tier self-serve signup -- unified-signup entry point.
 
     Response codes:
-      * 200 -- captcha verified successfully. Body carries
-               ``status="pending-arc-5"`` until Arc 5 mints the Admin
-               row; ``status="ok"`` afterwards.
-      * 422 -- captcha verification failed (token missing, expired,
-               or rejected by hCaptcha). Body carries the hCaptcha
-               error-codes list for the marketing site to show a
-               targeted error message.
+      * 200 -- success. Body carries ``status="ok"``, ``admin_id``
+               (V2 slug ``free-<8hex>``), the echo of the email the
+               verification link was sent to, and a human-readable
+               message.
+      * 409 -- the email is already attached to an Admin ("one Admin
+               per email" V2 invariant). Body carries a plain detail
+               string for the marketing site to surface.
+      * 422 -- captcha verification failed when a token was provided
+               (token missing entirely is a Commit 8 soft-pass, see
+               schema docstring).
       * 501 -- hCaptcha is not configured on this backend
-               (``settings.hcaptcha_secret_key`` is empty). Boot-safe
-               pattern: the backend boots fine without hCaptcha; only
-               this route is unavailable until the SSM slot lands.
+               (``settings.hcaptcha_secret_key`` is empty) AND a
+               token was provided. Boot-safe pattern: the backend
+               boots fine without hCaptcha; the route still works
+               when no token is sent.
     """
     # Pull the client IP from request.client for hCaptcha's risk
     # score. We deliberately do NOT trust X-Forwarded-For at this
@@ -753,46 +773,171 @@ async def signup_free(
     # the FastAPI app sees from the ALB-target uvicorn worker.
     remote_ip = request.client.host if request.client else None
 
-    try:
-        await verify_captcha(body.captcha_token, remote_ip=remote_ip)
-    except CaptchaNotConfiguredError as exc:
-        logger.warning("signup_free.captcha_not_configured")
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=str(exc),
-        )
-    except CaptchaInvalidError as exc:
-        logger.info(
-            "signup_free.captcha_invalid error_codes=%s",
-            exc.error_codes,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "message": exc.message,
-                "error_codes": exc.error_codes,
-            },
+    # ----- 1. (Soft-gate) Captcha verification ------------------------------
+    #
+    # Arc 6 Commit 8 window: captcha_token is Optional. If absent or
+    # empty, log a structured WARN and continue. Commit 9 flips this
+    # back to hard-required. The window is sandbox-only because
+    # Commit 10 is the deploy gate and Commit 9 ships first.
+    if body.captcha_token:
+        try:
+            await verify_captcha(body.captcha_token, remote_ip=remote_ip)
+        except CaptchaNotConfiguredError as exc:
+            logger.warning("signup_free.captcha_not_configured")
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail=str(exc),
+            )
+        except CaptchaInvalidError as exc:
+            logger.info(
+                "signup_free.captcha_invalid error_codes=%s",
+                exc.error_codes,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "message": exc.message,
+                    "error_codes": exc.error_codes,
+                },
+            )
+    else:
+        # D-free-tier-captcha-missing-2026-05-22 -- intentionally
+        # logged loud at WARN so we can grep this window's signups
+        # in CloudWatch when Commit 9 lands and we audit the gap.
+        logger.warning(
+            "signup_free.captcha_soft_pass email=%s remote_ip=%s "
+            "window=commit-8-to-commit-9",
+            body.email,
+            remote_ip or "unknown",
         )
 
-    # Captcha verified. Pre-Arc-5: the ``admins`` table does not
-    # exist yet, so we cannot persist the new admin. Return a
-    # 200/pending-arc-5 placeholder; the marketing site renders it
-    # identically to the post-Arc-5 200/ok shape (a "thanks, check
-    # your email" panel -- once Arc 5 lands the email send is
-    # genuine, today it's a stub).
-    logger.info(
-        "signup_free.captcha_verified email=%s display_name_len=%d "
-        "remote_ip=%s status=pending-arc-5",
-        body.email,
-        len(body.display_name),
-        remote_ip or "unknown",
+    # ----- 2-5. Mint Admin + ScopeAssignment + Instance + email link ------
+    #
+    # Inline imports to keep the route module's top-level import
+    # graph from pulling the full service stack into every request
+    # (the route module is hot-imported by every billing API call).
+    from app.repositories.admin_audit_repository import AuditContext
+    from app.services.billing_webhook_service import (
+        _mint_admin_id_from_email,
     )
+    from app.services.onboarding_service import OnboardingService
+    from app.services.tier_provisioning_service import (
+        TierProvisioningService,
+    )
+    from app.services.magic_link_service import (
+        build_set_password_url,
+        mint_set_password_token,
+    )
+    from app.services.email_service import send_welcome_set_password_email
+    from app.services.billing_webhook_service import BillingWebhookService
+
+    email = body.email.lower()
+    display_name = body.display_name.strip()
+
+    # Audit context. Free signup is system-initiated (no api-key, no
+    # cookie); we tag the audit row with a stable label so forensic
+    # queries can isolate the Free funnel.
+    audit_ctx = AuditContext.system(label="signup_free")
+
+    # 2. Resolve-or-create the User row. We borrow the
+    #    BillingWebhookService helper because the resolve-or-create
+    #    semantics are identical (LOWER(email) lookup; new rows born
+    #    synthetic=False + active=True). Reusing the helper keeps
+    #    the User-row shape consistent across paid checkout and
+    #    free signup.
+    webhook_helper = BillingWebhookService(db)
+    user = webhook_helper._resolve_or_create_user(
+        email=email, display_name=display_name
+    )
+    # ``_resolve_or_create_user`` flushes but does not commit; the User
+    # row is staged in the current SQLAlchemy session and will be
+    # committed by ``OnboardingService.onboard_tenant`` below as part
+    # of the same atomic transaction (matches the paid-checkout
+    # webhook pattern -- see billing_webhook_service.py:333-354).
+
+    # 3. Onboard the Admin.
+    admin_id = _mint_admin_id_from_email(email, tier="free")
+    onboarding = OnboardingService(db)
+    try:
+        onboarding.onboard_tenant(
+            tenant_id=admin_id,
+            display_name=display_name,
+            tier="free",
+            tier_source="free_signup",
+            description=f"Self-serve Free signup -- email={email}",
+            api_key_display_name=f"{display_name} -- Free admin key",
+            created_by="signup_free",
+            audit_ctx=audit_ctx,
+        )
+    except ValueError as exc:
+        # Slug collision (1 in 2^32) OR the (unlikely) repeat of an
+        # admin_id from a previous Free signup retry. We surface as
+        # 409 so the marketing site can offer a "try again" affordance.
+        logger.warning(
+            "signup_free.admin_collision email=%s admin_id=%s detail=%s",
+            email, admin_id, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    # 4. Pre-mint ScopeAssignment + primary Instance.
+    #    TierProvisioningService.premint_for_tier accepts TIER_FREE as
+    #    of Arc 6 Commit 8; the pre-mint shape is identical across
+    #    Free / Pro / Enterprise (only entitlement caps differ).
+    try:
+        premint = TierProvisioningService(db)
+        premint.premint_for_tier(
+            tenant_id=admin_id,
+            tier="free",
+            primary_user=user,
+            audit_ctx=audit_ctx,
+        )
+    except Exception:  # pragma: no cover -- best-effort post-onboard
+        # The Admin row is already committed; pre-mint failure leaves
+        # the buyer with an Admin but no Instance/ScopeAssignment.
+        # Log loudly; a reconciler can re-run. We still send the
+        # welcome email so the buyer can recover via the link.
+        logger.exception(
+            "signup_free.premint_failed admin=%s email=%s",
+            admin_id, email,
+        )
+
+    # 5. Mint set-password magic-link + send welcome email.
+    try:
+        token = mint_set_password_token(
+            user_id=user.id,
+            email=email,
+            tenant_id=admin_id,
+            purpose="signup",
+        )
+        url = build_set_password_url(token)
+        send_welcome_set_password_email(
+            to_email=email,
+            set_password_url=url,
+            display_name=display_name,
+        )
+        logger.info(
+            "signup_free.welcome_email_sent admin=%s email=%s",
+            admin_id, email,
+        )
+    except Exception:  # pragma: no cover
+        # Email is best-effort. The buyer can recover via
+        # POST /api/v1/auth/forgot-password against the same email
+        # (the password-reset and set-password tokens are
+        # interchangeable at the route layer).
+        logger.exception(
+            "signup_free.welcome_email_failed admin=%s email=%s",
+            admin_id, email,
+        )
+
     return SignupFreeResponse(
-        status="pending-arc-5",
-        admin_id=None,
+        status="ok",
+        admin_id=admin_id,
+        email=email,
         message=(
-            "Captcha verified. Account creation is queued behind the "
-            "Arc 5 schema migration; the verification email will be "
-            "sent once the admins table lands."
+            "Account created. Check your email for a link to set your "
+            "password -- the link also confirms your email address."
         ),
     )

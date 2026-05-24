@@ -343,9 +343,18 @@ class BillingWebhookService:
             # We override the default api key name + created_by so the
             # admin audit trail is honest about the origin. The full
             # onboard runs in the same transaction we are in.
+            # Arc 6 Commit 8 -- thread the V2 tier vocab explicitly so
+            # the Admin row is born with the right ``tier`` /
+            # ``tier_source`` columns. Pre-Arc-6 this relied on the
+            # ``tier`` server-default of "free" and a follow-up update,
+            # which left a (brief) window where the row was tier="free"
+            # despite an active paid checkout -- the unified-signup
+            # design tightens this to a single atomic write.
             onboarding.onboard_tenant(
                 tenant_id=admin_id,
                 display_name=display_name,
+                tier=tier,
+                tier_source="stripe_webhook",
                 description=f"Self-serve {tier} subscription -- "
                             f"Stripe sub={stripe_subscription_id}",
                 api_key_display_name=f"{display_name} -- Subscription admin key",

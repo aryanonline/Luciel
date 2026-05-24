@@ -75,7 +75,12 @@ class TestSettings:
 # ---------------------------------------------------------------------
 
 class TestSignupFreeSchemas:
-    def test_request_requires_three_fields(self):
+    # Arc 6 / Commit 8 (2026-05-23) -- captcha_token is now Optional
+    # during the Commit-8-to-9 sandbox window so the marketing site can
+    # ship the unified-signup form before the hCaptcha widget lands.
+    # Commit 9 flips this back to required. See SignupFreeRequest
+    # docstring for the full rationale.
+    def test_request_accepts_with_captcha_token(self):
         from app.schemas.billing import SignupFreeRequest
         req = SignupFreeRequest(
             email="a@b.com",
@@ -86,23 +91,22 @@ class TestSignupFreeSchemas:
         assert req.display_name == "Test User"
         assert req.captcha_token == "x" * 20
 
-    def test_request_rejects_missing_captcha_token(self):
-        from pydantic import ValidationError
-
+    def test_request_accepts_without_captcha_token_commit8_window(self):
+        # Arc 6 Commit 8: captcha_token is Optional in this window.
+        # Commit 9 will reintroduce a ValidationError on this shape.
         from app.schemas.billing import SignupFreeRequest
-        with pytest.raises(ValidationError):
-            SignupFreeRequest(email="a@b.com", display_name="X")  # type: ignore[call-arg]
+        req = SignupFreeRequest(email="a@b.com", display_name="X")
+        assert req.captcha_token is None
 
-    def test_request_rejects_empty_captcha_token(self):
-        from pydantic import ValidationError
-
+    def test_request_accepts_empty_captcha_token_commit8_window(self):
+        # Arc 6 Commit 8: empty token treated like missing token.
         from app.schemas.billing import SignupFreeRequest
-        with pytest.raises(ValidationError):
-            SignupFreeRequest(
-                email="a@b.com",
-                display_name="X",
-                captcha_token="",
-            )
+        req = SignupFreeRequest(
+            email="a@b.com",
+            display_name="X",
+            captcha_token="",
+        )
+        assert req.captcha_token == ""
 
     def test_request_rejects_bad_email_shape(self):
         from pydantic import ValidationError
@@ -116,10 +120,16 @@ class TestSignupFreeSchemas:
             )
 
     def test_response_status_is_literal(self):
+        # Arc 6 Commit 8 (2026-05-23): SignupFreeResponse now carries
+        # an ``email`` echo field alongside admin_id. Both shapes still
+        # accept the legacy ``pending-arc-5`` status string for
+        # backward-compat with any older test harness that diffs the
+        # response body shape.
         from app.schemas.billing import SignupFreeResponse
         ok = SignupFreeResponse(
             status="ok",
-            admin_id="00000000-0000-0000-0000-000000000000",
+            admin_id="free-1a2b3c4d",
+            email="a@b.com",
             message="hi",
         )
         pending = SignupFreeResponse(
@@ -128,7 +138,9 @@ class TestSignupFreeSchemas:
             message="hi",
         )
         assert ok.status == "ok"
+        assert ok.email == "a@b.com"
         assert pending.status == "pending-arc-5"
+        assert pending.email is None
 
     def test_response_rejects_unknown_status(self):
         from pydantic import ValidationError
@@ -289,7 +301,18 @@ class TestSignupFreeRoute:
         )
         assert resp.status_code == 501
 
-    def test_missing_token_returns_422_pydantic(self, monkeypatch):
+    # Arc 6 / Commit 8 (2026-05-23) -- this test is RETIRED in this
+    # window because captcha_token is Optional and a missing token is
+    # now a soft-pass (WARN log) rather than a 422. Commit 9 brings the
+    # required-token contract back and this assertion will be
+    # reinstated then. The full live-route success path with a missing
+    # token is covered by tests/api/test_arc6_signup_free.py.
+    def test_missing_token_is_soft_pass_in_commit_8_window(self, monkeypatch):
+        # Arc 6 Commit 8 contract: a missing captcha_token does NOT
+        # bounce at Pydantic anymore; the route soft-passes with a
+        # WARN log. The full mint path requires a DB so we only assert
+        # that we did NOT get a 422 here; the live mint case is in
+        # test_arc6_signup_free.py with proper DB plumbing.
         from app.core.config import settings
         monkeypatch.setattr(settings, "hcaptcha_secret_key", "stub-secret")
 
@@ -299,10 +322,13 @@ class TestSignupFreeRoute:
             json={
                 "email": "alice@example.com",
                 "display_name": "Alice",
-                # captcha_token omitted
+                # captcha_token omitted -- soft-pass in Commit 8 window
             },
         )
-        assert resp.status_code == 422
+        # We accept any non-422 status -- this could be 200 (in-memory
+        # DB happy path), 5xx (no DB plumbed), etc. The contract under
+        # test is "NOT a Pydantic 422 because of the missing token".
+        assert resp.status_code != 422
 
     def test_captcha_failure_returns_422_with_error_codes(self, monkeypatch):
         from app.core.config import settings
@@ -335,33 +361,12 @@ class TestSignupFreeRoute:
         assert "error_codes" in body["detail"]
         assert "invalid-input-response" in body["detail"]["error_codes"]
 
-    def test_captcha_success_returns_200_pending_arc_5(self, monkeypatch):
-        from app.core.config import settings
-
-        monkeypatch.setattr(settings, "hcaptcha_secret_key", "stub-secret")
-
-        async def fake_verify(token, *, remote_ip=None, http_client=None):
-            return {
-                "success": True,
-                "challenge_ts": "2026-05-22T15:07:00.000Z",
-                "hostname": "www.vantagemind.ai",
-                "credit": None,
-            }
-
-        from app.api.v1 import billing as billing_module
-        monkeypatch.setattr(billing_module, "verify_captcha", fake_verify)
-
-        client = self._client()
-        resp = client.post(
-            "/api/v1/billing/signup-free",
-            json={
-                "email": "alice@example.com",
-                "display_name": "Alice",
-                "captcha_token": "good-token",
-            },
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["status"] == "pending-arc-5"
-        assert body["admin_id"] is None
-        assert "message" in body
+    # Arc 6 / Commit 8 (2026-05-23) -- the legacy
+    # ``test_captcha_success_returns_200_pending_arc_5`` is SUPERSEDED.
+    # The mint logic landed in Commit 8 so a captcha-passing request
+    # now returns ``status="ok"`` with a real ``admin_id`` and ``email``
+    # echo, not the pre-mint ``status="pending-arc-5"`` placeholder.
+    # The new contract is covered in tests/api/test_arc6_signup_free.py
+    # against a sqlite-in-memory engine so the OnboardingService /
+    # TierProvisioningService / magic-link plumb actually runs and the
+    # commit-to-database invariant is exercised end-to-end.

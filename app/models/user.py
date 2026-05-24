@@ -120,6 +120,29 @@ class User(Base):
         nullable=True,
     )
 
+    # Arc 6 / Commit 8 (2026-05-23) -- the schema-level record of
+    # "this email address has been proven reachable by its owner."
+    # Distinct from password-set and account-active state. Flipped
+    # to True atomically in two places:
+    #   1. ``auth_service.set_password`` -- consuming a set_password
+    #      or reset_password magic-link token is proof that the link
+    #      landed in the inbox, the human clicked it, and the human
+    #      is now setting a password. The unified-signup flow leans
+    #      on this dual-purpose semantic so the welcome email IS
+    #      the verification email (no redundant verify-your-email
+    #      mailshot).
+    #   2. ``billing_webhook_service`` (future / lazy) -- a paid
+    #      Stripe Checkout implicitly verifies the buyer's email
+    #      against the payment method; we may flip it there too.
+    # Default false at the schema layer (see arc6_b migration
+    # docstring for the design rationale of NOT backfilling pre-
+    # Arc-6 users).
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

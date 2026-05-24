@@ -175,6 +175,9 @@ def onboard_tenant(
         result = service.onboard_tenant(
             tenant_id=payload.tenant_id,
             display_name=payload.display_name,
+            # Arc 6 Commit 8 -- V2 tier vocabulary threaded through.
+            tier=payload.tier,
+            tier_source=payload.tier_source,
             description=payload.description,
             escalation_contact=payload.escalation_contact,
             system_prompt_additions=payload.system_prompt_additions,
@@ -199,14 +202,34 @@ def onboard_tenant(
         ) from exc
 
     tenant = result["tenant"]
+    # Arc 5 Path A: default_domain is always None post-Domain-collapse;
+    # leave the field null on the response. Pre-Arc-5 API clients that
+    # read it tolerate the null (the schema marks the field Optional).
     domain = result["default_domain"]
     # api_key = result["api_key"]
     # raw_key = result["raw_api_key"]
     # policies = result["retention_policies"]
 
     return TenantOnboardResponse(
-        tenant=OnboardedTenantSummary.model_validate(tenant),
-        default_domain=OnboardedDomainSummary.model_validate(domain),
+        # Arc 6 Commit 8 -- explicit V2 -> legacy-wire mapping. The V2
+        # Admin model has ``id`` (slug) and ``name``; we surface both
+        # under the legacy ``tenant_id`` / ``display_name`` field names
+        # so existing API consumers (the platform-admin onboarding UI,
+        # downstream test fixtures) keep working unchanged.
+        tenant=OnboardedTenantSummary(
+            id=tenant.id,
+            tenant_id=tenant.id,
+            display_name=tenant.name,
+            tier=tenant.tier,
+            tier_source=tenant.tier_source,
+            active=tenant.active,
+            created_at=tenant.created_at,
+        ),
+        default_domain=(
+            OnboardedDomainSummary.model_validate(domain)
+            if domain is not None
+            else None
+        ),
         admin_api_key=OnboardedApiKeySummary(
             key_prefix=result["admin_api_key"].key_prefix,
             display_name=result["admin_api_key"].display_name,

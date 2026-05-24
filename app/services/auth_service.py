@@ -221,11 +221,24 @@ def set_password(*, db: Session, user_id: uuid.UUID, password: str) -> None:
         raise LookupError(f"User {user_id} not found or inactive")
 
     user.password_hash = _HASHER.hash(password)
+    # Arc 6 Commit 8 (2026-05-23) -- atomic email-verified flip.
+    # Consuming a set_password or reset_password magic-link token is
+    # itself proof that the address is reachable (the link landed in
+    # the inbox, the human clicked it, and the human is now setting a
+    # password). The unified-signup flow leans on this dual-purpose
+    # semantic so the welcome email IS the verification email; the
+    # bit also flips on every subsequent password-reset so a user who
+    # predates the column (and currently sits at email_verified=false
+    # despite implicit Stripe-checkout verification) self-heals on
+    # their next reset. We flip it idempotently -- already-verified
+    # users keep their True; verification is monotonic, never un-set
+    # by this primitive.
+    user.email_verified = True
     db.add(user)
     # No commit here -- the route owns the transaction. The route
     # commits after this returns and then mints the session cookie.
     logger.info(
-        "auth: password set for user_id=%s email=%s",
+        "auth: password set for user_id=%s email=%s email_verified=True",
         user.id, user.email,
     )
 

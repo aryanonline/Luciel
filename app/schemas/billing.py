@@ -293,38 +293,53 @@ class SignupFreeRequest(BaseModel):
         description="Display name carried onto the Admin row and the "
                     "welcome SES email.",
     )
-    captcha_token: str = Field(
-        ..., min_length=1,
-        description="hCaptcha h-captcha-response token from the "
-                    "front-end widget. Verified server-side before "
-                    "any DB write or SES send.",
+    # Arc 6 Commit 8 (2026-05-23) -- temporarily Optional during the
+    # commit-8 -> commit-9 window. Commit 8 wires the actual mint
+    # logic (Admin row, ScopeAssignment, Instance, magic-link email)
+    # and Commit 9 lands the hCaptcha widget on the marketing site +
+    # flips this back to required + tightens one-per-email-and-IP
+    # accounting (closes D-free-tier-captcha-missing-2026-05-22). The
+    # window is sandbox-only because Commit 10 is the deploy gate and
+    # Commit 9 ships before it; production never sees a captcha-less
+    # /signup-free.
+    captcha_token: str | None = Field(
+        default=None, min_length=0,
+        description="hCaptcha h-captcha-response token. Required at "
+                    "Commit 9 (currently Optional during sandbox-only "
+                    "unified-signup wire-up window).",
     )
 
 
 class SignupFreeResponse(BaseModel):
     """Outbound response for the Free-tier signup endpoint.
 
-    Two shapes coexist behind one schema because the full mint logic
-    is blocked on Arc 5 (the ``admins`` table doesn't exist yet):
+    Arc 6 Commit 8 (2026-05-23): full mint logic now lands. Two shapes
+    still coexist behind one schema for backward-compat:
 
-      Pre-Arc-5 (today):
+      Post-Arc-6-Commit-8 (today):
+        status="ok", admin_id="free-XXXXXXXX", email="...",
+        message="Check your email for a link to set your password."
+
+      Pre-Arc-6-Commit-8 (legacy fallback, retained for grep):
         status="pending-arc-5", admin_id=None, message=...
 
-      Post-Arc-5 (after the schema migration lands):
-        status="ok", admin_id="<uuid>", message="Check your email
-        for a verification link."
-
     The marketing site renders both states the same way -- a
-    "Thanks, check your email" panel -- so the Arc 5 lift is a
-    backend-only change with no client-side coupling.
+    "Thanks, check your email" panel -- so this is a backend-only
+    enrichment with no client-side schema break.
     """
     status: Literal["ok", "pending-arc-5"] = Field(
-        ..., description="'ok' once Arc 5 lands; 'pending-arc-5' until "
-                        "the admins table exists.",
+        ..., description="'ok' once Arc 6 Commit 8 lands; 'pending-arc-5' "
+                        "is the legacy pre-mint shape.",
     )
     admin_id: str | None = Field(
         default=None,
-        description="UUID of the newly-minted Admin row. None pre-Arc-5.",
+        description="Admin slug of the newly-minted row (V2 shape: "
+                    "'free-<8hex>'). None for the legacy shape.",
+    )
+    email: str | None = Field(
+        default=None,
+        description="Echo of the email the verification was sent to. "
+                    "None for the legacy shape.",
     )
     message: str = Field(
         ..., description="Human-readable status message for the marketing site.",
