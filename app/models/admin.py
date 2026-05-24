@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, String
+from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -67,6 +68,15 @@ class Admin(Base):
     legacy_tenant_id: Mapped[str | None] = mapped_column(
         String(100), nullable=True
     )
+    # Arc 7 Commit 6 (2026-05-24) -- Free-signup soft gate. Postgres
+    # INET column captured at signup_free mint time. NULL for paid
+    # Stripe Checkout flows (Pro / Enterprise) and for every
+    # pre-migration row. Read by the 24h 1-per-IP gate in
+    # ``app/api/v1/billing.py:signup_free`` before the next Free
+    # mint succeeds; written immediately post-onboard.
+    last_signup_ip: Mapped[str | None] = mapped_column(
+        INET(), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -86,6 +96,14 @@ class Admin(Base):
         ),
         Index("ix_admins_tier", "tier"),
         Index("ix_admins_active", "active"),
+        # ix_admins_last_signup_ip is a PARTIAL index created in
+        # the migration (``WHERE last_signup_ip IS NOT NULL AND
+        # active = true``); we do not redeclare it here because
+        # SQLAlchemy's ``Index(..., postgresql_where=...)`` would
+        # try to create it on table-create, which conflicts with
+        # the migration owning the predicate. The model carries
+        # only the column declaration; the migration owns the
+        # partial index.
     )
 
     def __repr__(self) -> str:  # pragma: no cover

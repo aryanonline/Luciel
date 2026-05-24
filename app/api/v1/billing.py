@@ -1200,6 +1200,57 @@ async def signup_free(
     # the FastAPI app sees from the ALB-target uvicorn worker.
     remote_ip = request.client.host if request.client else None
 
+    # ----- 1.pre (Soft-gate) 1-per-IP rolling 24h gate ----------------------
+    #
+    # Arc 7 Commit 6 (2026-05-24) -- second Free-signup from the same IP
+    # within a rolling 24h window returns 429. The captcha (next gate) is
+    # the hard boundary against scripted abuse; THIS gate is the
+    # multi-account abuse boundary (a human who solves the captcha but
+    # then tries to mint a second Free admin on the same residential IP).
+    #
+    # Doctrine choices:
+    #   * SOFT gate -- 429 with a human-readable detail string, not a hard
+    #     409. The buyer might be a legitimate household behind a shared
+    #     NAT (one spouse signed up yesterday, the other today); 429 with
+    #     "try again later or contact support" is the right ergonomics.
+    #   * Free-only -- paid Stripe Checkout flows leave ``last_signup_ip``
+    #     NULL on purpose (the payment surface is the abuse boundary).
+    #     This gate runs only inside ``signup_free``.
+    #   * Fail-open on missing IP -- ``request.client.host`` can be None
+    #     on certain ALB / test paths; the captcha already covered that
+    #     surface, and a hard 500 here would be a self-inflicted DoS.
+    #   * 24h window -- short enough to not punish a household for a
+    #     month, long enough to make a single residential-IP funnel
+    #     economically uninteresting at Free's value.
+    if remote_ip is not None:
+        from datetime import datetime, timedelta, timezone
+        from sqlalchemy import select, func
+        from app.models.admin import Admin
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        recent_same_ip = db.execute(
+            select(func.count())
+            .select_from(Admin)
+            .where(
+                Admin.last_signup_ip == remote_ip,
+                Admin.active.is_(True),
+                Admin.created_at >= cutoff,
+            )
+        ).scalar_one()
+        if recent_same_ip >= 1:
+            logger.info(
+                "signup_free.ip_gate_blocked remote_ip=%s recent_same_ip=%d",
+                remote_ip, recent_same_ip,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    "An account from your network was created in the last "
+                    "24 hours. Please try again later or contact support if "
+                    "this is a shared connection (office, household, campus)."
+                ),
+            )
+
     # ----- 1. (Hard-gate) Captcha verification ------------------------------
     #
     # Arc 6 Commit 9 (2026-05-23) -- the Commit-8 soft-pass branch is
@@ -1304,6 +1355,32 @@ async def signup_free(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+
+    # 3.5 Stamp last_signup_ip on the freshly-minted Admin row.
+    #     We do this AFTER onboard_tenant returns (so we know the row
+    #     exists and the slug collision check already ran) and BEFORE
+    #     pre-mint (so a later pre-mint failure cannot leave the row
+    #     un-stamped). Best-effort: if the write fails the funnel
+    #     still completes (the gate is a soft 429, not a hard 5xx,
+    #     so degraded write here means at-most-one missed gate, not
+    #     a broken funnel).
+    if remote_ip is not None:
+        try:
+            from app.models.admin import Admin
+
+            admin_row = db.get(Admin, admin_id)
+            if admin_row is not None:
+                admin_row.last_signup_ip = remote_ip
+                db.flush()
+                logger.info(
+                    "signup_free.ip_stamped admin=%s",
+                    admin_id,
+                )
+        except Exception:  # pragma: no cover -- best-effort stamp
+            logger.exception(
+                "signup_free.ip_stamp_failed admin=%s",
+                admin_id,
+            )
 
     # 4. Pre-mint ScopeAssignment + primary Instance.
     #    TierProvisioningService.premint_for_tier accepts TIER_FREE as
