@@ -14,10 +14,19 @@ sits behind extra constraints scoped to embed keys:
   * Per-key minutely cap from api_keys.rate_limit_per_minute
 
 See app/api/widget_deps.py for the dependency that enforces the
-first three; the slowapi limit decorator below reads the per-key
-cap statically via the EMBED_WIDGET_RATE_LIMIT constant on the
-widget_deps module. The previous dynamic per-key cap shipped broken
-(see widget_deps docstring); v1 uses a conservative global cap.
+first three. The rate-limit wiring uses the Arc 8 Commit 3 (WU-3)
+per-embed-key bucket: ``get_embed_key_aware_key`` composes
+``embed:tier:{tier}:admin:{admin_id}:key:{api_key_id}`` so each
+embed key gets its own Redis bucket, and
+``get_embed_key_rate_limit_for_key`` resolves the cap via
+``per_key_api_rate_limit_rpm`` (Free=30, Pro=30, Enterprise=30 -- the
+tier-rpm cap floor-divided by the per-tier embed-key count cap).
+This closes the per-key half of
+D-pro-tier-rate-limit-abuse-surface-2026-05-23: a leaked or buggy
+embed key cannot burn the whole tier-aware admin allotment, because
+the per-key bucket caps it before the admin bucket sees the burst.
+The legacy ``EMBED_WIDGET_RATE_LIMIT`` constant in widget_deps is
+retained for backward-compat imports only.
 
 Why this is a SEPARATE endpoint from /chat/stream
 --------------------------------------------------
@@ -63,12 +72,15 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_chat_service, get_session_service
 from app.api.widget_deps import (
-    EMBED_WIDGET_RATE_LIMIT,
     cors_response_headers,
     require_embed_key,
 )
 from app.core.config import settings
-from app.middleware.rate_limit import limiter, get_api_key_or_ip
+from app.middleware.rate_limit import (
+    get_embed_key_aware_key,
+    get_embed_key_rate_limit_for_key,
+    limiter,
+)
 from app.policy.moderation import ModerationGate
 from app.schemas.chat import ChatWidgetRequest
 from app.services.chat_service import ChatService
@@ -129,7 +141,10 @@ def widget_preflight(request: Request) -> Response:
 
 
 @router.post("/widget")
-@limiter.limit(EMBED_WIDGET_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(
+    get_embed_key_rate_limit_for_key,
+    key_func=get_embed_key_aware_key,
+)
 def widget_chat_stream(
     request: Request,
     payload: ChatWidgetRequest,

@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.policy.entitlements import (
     ALL_TIERS_V2,
     TIER_FREE,
+    per_key_api_rate_limit_rpm,
     resolve_entitlement,
 )
 
@@ -265,6 +266,111 @@ def get_tier_aware_key(request: Request) -> str:
     return f"tier:{tier}:admin:{tenant_id}:inst:{inst_part}"
 
 
+def get_embed_key_aware_key(request: Request) -> str:
+    """Compose the per-embed-key Redis bucket key for one widget request.
+
+    Arc 8 Commit 3 (WU-3 abuse-surface) -- closes the per-key half of
+    D-pro-tier-rate-limit-abuse-surface-2026-05-23.
+
+    Shape: ``embed:tier:{tier}:admin:{admin_id}:key:{api_key_id}`` when
+    the request carries a resolved embed-key on ``request.state``
+    (populated by ``ApiKeyAuthMiddleware``). The widget endpoint's
+    ``require_embed_key`` dependency has already asserted
+    ``key_kind == 'embed'`` by the time the limiter consults this
+    callable, but we re-check defensively here so an admin key that
+    bypasses the dependency (impossible today, but cheap to guard)
+    cannot land in the embed-key bucket.
+
+    Shape: ``ip:{ip}`` when the request is unauthenticated -- the
+    Free=30rpm anonymous lane, same as :func:`get_tier_aware_key`.
+    We do NOT compose by raw Authorization header here for the same
+    reason as :func:`get_tier_aware_key`: state-unpopulated means
+    auth has not validated the key, and bucketing on an unvalidated
+    string lets an attacker rotate forged keys to dodge the cap.
+
+    Per-key isolation rationale: under the 2026-05-23 Option-A
+    revision Pro carries 10 embed keys against a single 300rpm cap.
+    Without a per-key bucket one leaked key can burn the whole
+    allotment, starving the other 9 keys. The composition with
+    :func:`get_embed_key_rate_limit_for_key` brings each key down to
+    its derived ``per_key_api_rate_limit_rpm`` cap (Pro: 30rpm per
+    key) while preserving the admin-level ceiling via the existing
+    tier-aware admin bucket on admin-surface routes.
+    """
+    state = getattr(request, "state", None)
+    tenant_id = getattr(state, "tenant_id", None) if state is not None else None
+    key_kind = getattr(state, "key_kind", None) if state is not None else None
+    api_key_id = getattr(state, "api_key_id", None) if state is not None else None
+
+    # Only embed keys land in the per-key bucket. Admin keys reaching
+    # this code path (shouldn't happen -- require_embed_key gates them
+    # off) fall through to the IP bucket so they cannot inherit the
+    # per-embed-key generous derivation.
+    if not tenant_id or key_kind != "embed" or not api_key_id:
+        return f"ip:{_client_ip(request)}"
+
+    tier = _lookup_admin_tier(str(tenant_id))
+    return f"embed:tier:{tier}:admin:{tenant_id}:key:{api_key_id}"
+
+
+def get_embed_key_rate_limit_for_key(key: str) -> str:
+    """SlowAPI limit-provider for the per-embed-key bucket.
+
+    Parses the ``embed:tier:{tier}:...`` prefix and returns the
+    derived ``per_key_api_rate_limit_rpm`` cap. Anonymous (``ip:...``)
+    and malformed keys fall back to Free per-key (30rpm), same
+    fail-safe posture as :func:`get_tier_rate_limit_for_key`.
+    """
+    tier = TIER_FREE
+    if isinstance(key, str) and key.startswith("embed:tier:"):
+        # ``embed:tier:{tier}:admin:...`` -- third segment is the tier.
+        parts = key.split(":", 3)
+        if len(parts) >= 3 and parts[2] in ALL_TIERS_V2:
+            tier = parts[2]
+
+    try:
+        rpm = per_key_api_rate_limit_rpm(tier=tier)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "per-key entitlement lookup failed for tier=%s falling back to free: %s",
+            tier, exc,
+        )
+        rpm = per_key_api_rate_limit_rpm(tier=TIER_FREE)
+
+    return f"{int(rpm)}/minute"
+
+
+def _classify_bucket_scope(key: str) -> str:
+    """Map a bucket key prefix back to a stable scope label.
+
+    Used by :func:`rate_limit_exceeded_handler` to surface a
+    ``bucket_scope`` field on the 429 response body so the client
+    (and our own ops) can tell WHICH bucket emptied:
+
+      * ``tier_admin_instance`` -- the per-(admin, instance) tier
+        bucket built by :func:`get_tier_aware_key`. Hit when one
+        Admin's combined load across one Instance exceeds the
+        tier-aware cap.
+      * ``embed_key`` -- the per-embed-key bucket built by
+        :func:`get_embed_key_aware_key`. Hit when one embed key
+        exceeds its derived ``per_key_api_rate_limit_rpm`` share.
+      * ``ip`` -- the anonymous bucket. Hit when an unauthenticated
+        caller burns Free=30rpm from a single IP.
+      * ``unknown`` -- defensive default; never returned in practice
+        because every key written by this module starts with one of
+        the three prefixes above.
+    """
+    if not isinstance(key, str):
+        return "unknown"
+    if key.startswith("embed:tier:"):
+        return "embed_key"
+    if key.startswith("tier:"):
+        return "tier_admin_instance"
+    if key.startswith("ip:"):
+        return "ip"
+    return "unknown"
+
+
 def get_tier_rate_limit_for_key(key: str) -> str:
     """SlowAPI limit-provider -- compute the per-minute cap from the key.
 
@@ -361,14 +467,64 @@ FALLBACK_LOG_INTERVAL_SECONDS = 60
 def rate_limit_exceeded_handler(request: Request, exc: Exception) -> JSONResponse:
     """
     Clean JSON response when a request exceeds its configured limit.
+
+    Arc 8 Commit 3 (WU-3) surfaces a stable ``bucket_scope`` field so
+    clients (and ops dashboards) can distinguish which bucket fired
+    the 429:
+
+      * ``tier_admin_instance`` -- per-(admin, instance) tier bucket
+        (admin/chat surface).
+      * ``embed_key`` -- per-embed-key bucket (widget surface).
+      * ``ip`` -- anonymous lane.
+      * ``unknown`` -- defensive default.
+
+    Recovering the scope: SlowAPI raises a ``RateLimitExceeded``
+    exception that exposes the offending ``limit`` whose
+    ``key_func(request)`` we can call to recover the bucket key. We
+    fall back through the two known key-funcs (tier-aware first,
+    then embed-key-aware) so we still classify cleanly even if
+    SlowAPI's internal exception shape changes.
     """
     detail = getattr(exc, "detail", str(exc))
+
+    bucket_scope = "unknown"
+    try:
+        limit = getattr(exc, "limit", None)
+        # SlowAPI's exception sometimes nests the LimitGroup as
+        # ``limit.limit`` (newer slowapi) or directly as ``limit``.
+        key_func = getattr(limit, "key_func", None) or getattr(
+            getattr(limit, "limit", None), "key_func", None
+        )
+        if callable(key_func):
+            try:
+                bucket_key = key_func(request)
+                bucket_scope = _classify_bucket_scope(bucket_key)
+            except Exception:
+                bucket_scope = "unknown"
+        else:
+            # Fallback: try both known key-funcs. The embed-key one
+            # only returns a non-IP shape when state.key_kind ==
+            # 'embed', so a chat/admin request flows to the tier
+            # bucket and a widget request to the embed-key bucket.
+            try:
+                bucket_key = get_embed_key_aware_key(request)
+                if bucket_key.startswith("embed:tier:"):
+                    bucket_scope = "embed_key"
+                else:
+                    bucket_key = get_tier_aware_key(request)
+                    bucket_scope = _classify_bucket_scope(bucket_key)
+            except Exception:
+                bucket_scope = "unknown"
+    except Exception:  # pragma: no cover - defensive
+        bucket_scope = "unknown"
+
     return JSONResponse(
         status_code=429,
         content={
             "error": "rate_limit_exceeded",
             "detail": str(detail),
             "message": "You have exceeded the allowed request rate. Please wait and try again.",
+            "bucket_scope": bucket_scope,
         },
     )
 

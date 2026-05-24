@@ -338,3 +338,90 @@ def get_tier_entitlement(tier: str) -> TierEntitlement:
     feature list). Raises ``KeyError`` if ``tier`` is unknown.
     """
     return TIER_ENTITLEMENTS[tier]
+
+
+# ---------------------------------------------------------------------
+# Arc 8 Commit 3 (WU-3 abuse-surface): per-bucket rate-limit derivations.
+#
+# Closes D-pro-tier-rate-limit-abuse-surface-2026-05-23.
+#
+# The 2026-05-23 Option-A revision lifted Pro from 60rpm \u2192 300rpm and
+# embed-key cap 3 \u2192 10. That widened the abuse surface in two ways:
+#
+#   (a) An attacker holding one valid embed key for a Pro Admin could
+#       burn the full 300rpm cap against that admin, starving the
+#       other 9 embed keys (one buggy/leaked key takes the whole tier
+#       allotment).
+#   (b) An Admin running 10 Instances on Pro could see one buggy
+#       Instance burn the full 300rpm cap, starving the other 9
+#       (the per-instance bucket landed at Arc 7 Commit 4 already
+#       closes the routing side of this; the per-CAP rpm value below
+#       closes the entitlement-derivation side).
+#
+# The derivation rule is: floor-divide ``api_rate_limit_rpm`` by the
+# per-Admin count cap, with a 1rpm floor so the bucket never
+# completely closes (a single legitimate request from a single
+# Instance/key must always have a token). ``None`` (unlimited) on the
+# count cap means "do not subdivide" -- Enterprise Admins get the
+# full ``api_rate_limit_rpm`` per Instance and per key, which matches
+# the unlimited-instance Option-A promise.
+#
+# These are DERIVATIONS, not new dataclass fields. The dataclass is
+# frozen and adding fields breaks every existing ``TierEntitlement(...)``
+# call-site; derivations preserve the founder-locked surface while
+# adding the per-bucket caps that the rate-limit middleware needs.
+
+
+def per_instance_api_rate_limit_rpm(
+    *,
+    tier: str,
+    overrides: dict[str, Any] | None = None,
+) -> int:
+    """Derive the per-Instance rpm bucket cap for one tier.
+
+    Floor-divides ``api_rate_limit_rpm`` by ``instance_count_cap`` so
+    no single Instance can starve siblings under the same Admin.
+    ``instance_count_cap=None`` (Enterprise, unlimited) returns the
+    full ``api_rate_limit_rpm`` -- subdividing by infinity would zero
+    every bucket.
+
+    Per-Admin numbers under the founder-locked Option A:
+        * Free:       30rpm / 1 instance   = 30rpm per Instance
+        * Pro:        300rpm / 10 instances = 30rpm per Instance
+        * Enterprise: 3000rpm / unlimited  = 3000rpm per Instance (no subdivision)
+
+    The 1rpm floor is a defence in case a future tier revision drops
+    api_rate_limit_rpm below instance_count_cap -- the floor keeps the
+    bucket open for one legitimate request rather than locking the
+    Instance out entirely.
+    """
+    rpm = resolve_entitlement(tier=tier, axis="api_rate_limit_rpm", overrides=overrides)
+    cap = resolve_entitlement(tier=tier, axis="instance_count_cap", overrides=overrides)
+    if cap is None or int(cap) <= 0:
+        return int(rpm)
+    return max(1, int(rpm) // int(cap))
+
+
+def per_key_api_rate_limit_rpm(
+    *,
+    tier: str,
+    overrides: dict[str, Any] | None = None,
+) -> int:
+    """Derive the per-embed-key rpm bucket cap for one tier.
+
+    Floor-divides ``api_rate_limit_rpm`` by ``embed_key_count_cap`` so
+    no single embed key can starve siblings (i.e. a leaked or buggy
+    key cannot burn the whole Admin allotment).
+    ``embed_key_count_cap=None`` returns the full ``api_rate_limit_rpm``
+    (no subdivision); 1rpm floor as in :func:`per_instance_api_rate_limit_rpm`.
+
+    Per-Admin numbers under the founder-locked Option A:
+        * Free:       30rpm / 1 embed key  = 30rpm per key
+        * Pro:        300rpm / 10 keys     = 30rpm per key
+        * Enterprise: 3000rpm / 100 keys   = 30rpm per key
+    """
+    rpm = resolve_entitlement(tier=tier, axis="api_rate_limit_rpm", overrides=overrides)
+    cap = resolve_entitlement(tier=tier, axis="embed_key_count_cap", overrides=overrides)
+    if cap is None or int(cap) <= 0:
+        return int(rpm)
+    return max(1, int(rpm) // int(cap))

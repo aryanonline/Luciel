@@ -26,20 +26,31 @@ Each constraint raises a 4xx with a stable error code so the
 widget bundle and the customer's debug surface can distinguish
 configuration errors from bad requests.
 
-Rate limiting on the widget endpoint is enforced via a static
-slowapi limit string ("30/minute") applied at decoration time. The
-per-embed-key dynamic cap that this module previously exposed via
-``embed_per_minute_limit_string`` shipped broken: slowapi calls a
-zero-arg or one-arg-keyed provider (slowapi/wrappers.py:85-94) and
-never passes a Request, so a provider signed as
-``(request: Request) -> str`` raised TypeError before any limit
-was computed. Rather than paper over the abstraction mismatch with
-a contextvar hack or a per-request DB hit inside the slowapi
-callback, the per-key dynamic cap is deferred to a real feature
-(tracked in DRIFTS as D-embed-key-dynamic-rate-limit-deferred); the
-v1 widget surface uses the conservative global cap, which is the
-same cap admin chat uses and which we already validated under
-load.
+Rate limiting on the widget endpoint is enforced via the Arc 8
+Commit 3 per-embed-key bucket -- see
+``app/middleware/rate_limit.get_embed_key_aware_key`` +
+``get_embed_key_rate_limit_for_key``. Each minted embed key gets
+its own Redis bucket keyed by ``api_keys.id`` so a leaked or
+buggy key cannot burn the entire admin-level tier allotment
+(closes the per-key half of
+D-pro-tier-rate-limit-abuse-surface-2026-05-23). The cap is
+derived dynamically from the tier matrix via
+``per_key_api_rate_limit_rpm(tier=...)``, which floor-divides
+``api_rate_limit_rpm`` by ``embed_key_count_cap`` (30rpm per key
+for Free, Pro, and Enterprise under the 2026-05-23 founder-locked
+Option-A table).
+
+The legacy static ``EMBED_WIDGET_RATE_LIMIT`` constant below
+remains exported for backward-compat with any test or script that
+references it, but is no longer applied to the widget endpoint
+decorator. Pre-Arc-8 the per-key dynamic cap had shipped broken
+(slowapi calls a zero-arg or one-arg-keyed provider per
+slowapi/wrappers.py:85-94 and never passes a Request, so a
+provider signed as ``(request: Request) -> str`` raised TypeError
+before any limit was computed); the Arc 8 wiring resolves this
+by encoding the tier into the bucket key and parsing it back in
+the limit-provider, so the provider takes the SlowAPI-compatible
+``(key: str) -> str`` signature.
 
 Pattern E note
 --------------
@@ -195,12 +206,12 @@ def require_embed_key(request: Request) -> dict:
     return widget_config
 
 
-# Static rate limit applied via @limiter.limit at decoration time on
-# the widget endpoint. See module docstring above for why we no
-# longer expose a per-request callable. Keeping the value as a
-# module-level constant (rather than inlined in chat_widget.py)
-# preserves a single place to revisit when the dynamic-cap feature
-# is built for real.
+# Legacy constant retained for backward-compat. Arc 8 Commit 3
+# replaced the static "30/minute" cap with a dynamic per-embed-key
+# bucket via ``app/middleware/rate_limit.get_embed_key_rate_limit_for_key``
+# -- see the module docstring. Tests / scripts that imported this
+# name continue to import cleanly; new callers should not reference
+# it.
 EMBED_WIDGET_RATE_LIMIT = "30/minute"
 
 

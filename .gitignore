@@ -193,3 +193,4 @@ d[0-9]*-*.txt
 
 # Arc 3/4 raw-form intermediates (pre-jq / pre-rewrite JSON dumps).
 *.json.raw
+.commit-msg-*.txt
