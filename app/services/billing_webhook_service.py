@@ -90,6 +90,25 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------
+# Upgrade-branch fall-through signal (Arc 6 / Commit 8.5a)
+# ---------------------------------------------------------------------
+
+class _UpgradeBranchFallthrough(Exception):
+    """Raised by ``_on_checkout_completed_upgrade`` when the upgrade
+    preconditions fail (admin missing / inactive / owner mismatch).
+
+    The main ``_on_checkout_completed`` traps this and falls back to
+    the default mint path so the paid checkout still produces a
+    working Admin (defensive against a hand-crafted Stripe event with
+    a stale ``luciel_admin_id`` -- the buyer must not be left without
+    an Admin to log into).
+    """
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+# ---------------------------------------------------------------------
 # Admin id minting (Arc 6 Commit 6 — webhook-noun rename Tenant→Admin).
 # The DB column ``subscriptions.tenant_id`` is deliberately retained
 # physically per Arc 5 Path A; this file's local vocab now matches the
@@ -326,7 +345,50 @@ class BillingWebhookService:
             )
             return {"applied": False, "reason": "no_email"}
 
+        # Arc 6 / Commit 8.5a -- upgrade-branch detection.
+        #
+        # The marketing-site signup funnel does NOT stamp
+        # ``luciel_admin_id`` into Stripe metadata; it relies on the
+        # webhook to mint a fresh Admin/User pair. The Account/Billing
+        # upgrade funnel DOES stamp it (via
+        # ``BillingService.create_upgrade_checkout``). The presence of
+        # this key is the sole signal that this checkout is an upgrade
+        # of an existing Admin rather than a fresh mint.
+        #
+        # If the metadata claims an admin_id but it doesn't resolve to
+        # an active Admin row, we fall through to the mint path -- this
+        # is defensive against a hand-crafted Stripe event with a stale
+        # or forged admin_id. The mint path will create a fresh Admin
+        # with a different id; the buyer is paid for and gets a working
+        # Admin one way or another.
+        upgrade_admin_id = (metadata.get("luciel_admin_id") or "").strip() or None
         ctx = _webhook_audit_ctx()
+        if upgrade_admin_id is not None:
+            try:
+                return self._on_checkout_completed_upgrade(
+                    event_id=event_id,
+                    data_object=data_object,
+                    admin_id=upgrade_admin_id,
+                    email=email,
+                    display_name=display_name,
+                    tier=tier,
+                    billing_cadence=billing_cadence,
+                    instance_count_cap=instance_count_cap,
+                    stripe_subscription_id=stripe_subscription_id,
+                    stripe_customer_id=stripe_customer_id,
+                    ctx=ctx,
+                )
+            except _UpgradeBranchFallthrough as fall:
+                # Upgrade branch detected a precondition failure
+                # (admin missing, admin inactive, or owner mismatch).
+                # Log and fall through to the standard mint path so
+                # the paid checkout still produces a working Admin.
+                logger.warning(
+                    "billing-webhook: upgrade-branch fall-through admin_id=%s "
+                    "reason=%s event=%s; falling back to mint path",
+                    upgrade_admin_id, fall.reason, event_id,
+                )
+
         try:
             # Resolve or create the User row first -- the onboard
             # service needs the user id for the subscription row.
@@ -548,6 +610,231 @@ class BillingWebhookService:
         # (the value is the admin id). Stripe ignores the 200 body;
         # the key is purely observability.
         return {"applied": True, "tenant_id": admin_id, "stripe_subscription_id": stripe_subscription_id}
+
+    # -----------------------------------------------------------------
+    # checkout.session.completed -- UPGRADE branch (Arc 6 / Commit 8.5a)
+    # -----------------------------------------------------------------
+
+    def _on_checkout_completed_upgrade(
+        self,
+        *,
+        event_id: str,
+        data_object: dict,
+        admin_id: str,
+        email: str,
+        display_name: str,
+        tier: str,
+        billing_cadence: str,
+        instance_count_cap: int,
+        stripe_subscription_id: str,
+        stripe_customer_id: str,
+        ctx: AuditContext,
+    ) -> dict:
+        """Upgrade-branch handler for ``checkout.session.completed``.
+
+        Called from ``_on_checkout_completed`` when Stripe metadata
+        carries ``luciel_admin_id``. Distinct from the mint path in
+        three ways:
+
+          1. We RESOLVE an existing User (not create) and verify the
+             User is the active owner of the named Admin. Owner-check
+             is via the ScopeAssignment table; a missing owner row is
+             a fall-through (not a mint of a new owner).
+          2. We UPDATE the existing Admin row's tier via
+             ``TierProvisioningService.upgrade_admin_tier`` -- no
+             re-running of ``onboard_tenant`` (which would attempt to
+             INSERT a duplicate Admin row and fail on PK conflict).
+          3. We SKIP the welcome-set-password email send -- the
+             upgrading user already has a password (Free admins set
+             one at signup-free post-mint).
+
+        Everything else mirrors the mint path: Subscription row +
+        audit row land in the same commit; pre-mint of the primary
+        Instance is skipped (one already exists from the Admin's
+        original tier provisioning at Free signup).
+
+        Raises ``_UpgradeBranchFallthrough`` on:
+          * admin_id does not resolve to an active Admin row
+          * resolved User is not the active owner of that Admin
+          * resolved User's email does not match the buyer email (a
+             forensic safety check -- an attacker who knew an admin_id
+             could otherwise upgrade somebody else's Admin by paying)
+
+        The caller traps the fall-through and proceeds with the mint
+        path. We deliberately do NOT raise on the tier-noop case
+        (replay) -- a redelivered upgrade event whose tier-flip already
+        landed is a normal idempotency outcome, handled below via
+        TierUpgradeNoopError trap.
+        """
+        from app.models.admin import Admin as AdminModel
+        from app.models.scope_assignment import ScopeAssignment
+        from app.services.tier_provisioning_service import (
+            TierProvisioningService,
+            TierUpgradeNoopError,
+        )
+
+        # 1. Resolve User by email (existing -- Free signup created it).
+        #    If the User somehow doesn't exist (forensic edge case --
+        #    someone manually deleted the row between signup-free and
+        #    upgrade), we let _resolve_or_create_user re-create it so
+        #    the upgrade still works.
+        user = self._resolve_or_create_user(
+            email=email, display_name=display_name,
+        )
+
+        # 2. Resolve and validate the named Admin.
+        admin = self.db.get(AdminModel, admin_id)
+        if admin is None:
+            raise _UpgradeBranchFallthrough("admin_not_found")
+        if not getattr(admin, "active", False):
+            raise _UpgradeBranchFallthrough("admin_inactive")
+
+        # 3. Verify the buyer owns this Admin (active owner-role
+        #    ScopeAssignment). This closes the cross-Admin upgrade-
+        #    attack vector: even if the buyer somehow guesses or
+        #    intercepts another tenant's admin_id, Stripe metadata
+        #    is buyer-influenceable only via the upgrade route, and
+        #    that route derives admin_id from the cookied session.
+        #    Here at the webhook we re-verify.
+        owner_row = self.db.execute(
+            select(ScopeAssignment).where(
+                ScopeAssignment.tenant_id == admin_id,
+                ScopeAssignment.user_id == user.id,
+                ScopeAssignment.role == "owner",
+                ScopeAssignment.active.is_(True),
+            )
+        ).scalars().first()
+        if owner_row is None:
+            raise _UpgradeBranchFallthrough("user_not_owner_of_admin")
+
+        # 4. Write the Subscription row + its audit row in one commit.
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            _period_start, _period_end = self._extract_period_fields(data_object)
+
+            stripe_subscription_obj = None
+            try:
+                stripe_subscription_obj = self.stripe.retrieve_subscription(
+                    stripe_subscription_id
+                )
+            except Exception as fetch_exc:  # noqa: BLE001 -- graceful degrade
+                logger.warning(
+                    "billing-webhook(upgrade): retrieve_subscription failed "
+                    "sub=%s err=%s; falling back to checkout.session fields",
+                    stripe_subscription_id, fetch_exc,
+                )
+
+            def _from_sub(field: str, default=None):
+                if stripe_subscription_obj is not None:
+                    val = (
+                        stripe_subscription_obj.get(field)
+                        if hasattr(stripe_subscription_obj, "get")
+                        else getattr(stripe_subscription_obj, field, default)
+                    )
+                    if val is not None:
+                        return val
+                return data_object.get(field, default)
+
+            sub = Subscription(
+                tenant_id=admin_id,
+                user_id=user.id,
+                customer_email=email,
+                stripe_customer_id=stripe_customer_id,
+                stripe_subscription_id=stripe_subscription_id,
+                stripe_price_id=self._extract_price_id(data_object),
+                tier=tier,
+                status=_from_sub("status") or "incomplete",
+                billing_cadence=billing_cadence,
+                instance_count_cap=instance_count_cap,
+                current_period_start=_ts(_from_sub("current_period_start", _period_start)),
+                current_period_end=_ts(_from_sub("current_period_end", _period_end)),
+                trial_end=_ts(_from_sub("trial_end")),
+                cancel_at_period_end=bool(_from_sub("cancel_at_period_end") or False),
+                canceled_at=_ts(_from_sub("canceled_at")),
+                active=True,
+                last_event_id=event_id,
+                provider_snapshot=dict(data_object),
+            )
+            self.db.add(sub)
+            self.db.flush()
+
+            audit_repo = AdminAuditRepository(self.db)
+            audit_repo.record(
+                ctx=ctx,
+                tenant_id=admin_id,
+                action=ACTION_SUBSCRIPTION_CREATE,
+                resource_type=RESOURCE_SUBSCRIPTION,
+                resource_pk=sub.id,
+                resource_natural_id=stripe_subscription_id,
+                after={
+                    "tenant_id": admin_id,
+                    "user_id": str(user.id),
+                    "customer_email": email,
+                    "tier": tier,
+                    "billing_cadence": billing_cadence,
+                    "instance_count_cap": instance_count_cap,
+                    "status": sub.status,
+                    "stripe_customer_id": stripe_customer_id,
+                    "stripe_subscription_id": stripe_subscription_id,
+                    "stripe_event_id": event_id,
+                    "minted_at": now_iso,
+                    "flow": "upgrade",
+                },
+                note=(
+                    f"stripe checkout.session.completed UPGRADE -> attached "
+                    f"subscription to existing admin {admin_id} "
+                    f"tier={tier} cadence={billing_cadence}"
+                ),
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            logger.exception(
+                "billing-webhook(upgrade): subscription write failed event=%s "
+                "sub=%s admin=%s",
+                event_id, stripe_subscription_id, admin_id,
+            )
+            raise
+
+        # 5. Tier-flip on the Admin row. Best-effort post-commit: a
+        #    failure here means the buyer has paid + has a Subscription
+        #    row, but admins.tier is still "free". A reconciler is
+        #    expected to re-attempt. We do NOT roll back the
+        #    Subscription -- Stripe must get a 200 to stop redelivering.
+        try:
+            premint = TierProvisioningService(self.db)
+            premint.upgrade_admin_tier(
+                admin_id=admin_id,
+                new_tier=tier,
+                new_tier_source="stripe_upgrade",
+                audit_ctx=ctx,
+            )
+        except TierUpgradeNoopError:
+            # Replay of an already-applied upgrade. Benign; log + move on.
+            logger.info(
+                "billing-webhook(upgrade): tier already at target on replay "
+                "admin=%s tier=%s event=%s",
+                admin_id, tier, event_id,
+            )
+        except Exception:  # pragma: no cover - best-effort post-commit
+            logger.exception(
+                "billing-webhook(upgrade): tier-flip failed (subscription "
+                "already committed) admin=%s target_tier=%s",
+                admin_id, tier,
+            )
+
+        # 6. NO welcome-set-password email. The upgrading user already
+        #    has a password (Free signup minted a magic link they
+        #    redeemed at /auth/set-password). Sending a second one
+        #    here would be confusing UX ("you're already signed in,
+        #    why are we emailing you a password link?").
+
+        return {
+            "applied": True,
+            "tenant_id": admin_id,
+            "stripe_subscription_id": stripe_subscription_id,
+            "flow": "upgrade",
+        }
 
     # -----------------------------------------------------------------
     # customer.subscription.updated

@@ -58,6 +58,8 @@ from app.schemas.billing import (
     SignupFreeRequest,
     SignupFreeResponse,
     SubscriptionStatusResponse,
+    UpgradeRequest,
+    UpgradeResponse,
 )
 from app.services.billing_service import (
     BillingNotConfiguredError,
@@ -565,18 +567,31 @@ def pilot_refund(request: Request, db: DbSession) -> PilotRefundResponse:
     status_code=status.HTTP_200_OK,
 )
 def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
-    """Return the cookied user's current subscription state.
+    """Return the cookied user's current tier + subscription state.
 
-    Returns 404 if the user has no subscription on file -- the
-    Account/billing UI uses that to show the "subscribe" CTA.
+    Arc 6 / Commit 8.5a (2026-05-23) -- rewritten to Option A semantics:
+    /me now answers 200 for ANY cookied user with a valid session,
+    regardless of whether a Subscription row exists. The legacy 404
+    branch ('no subscription on file') was load-bearing for the legacy
+    'pay to get an account' shape; in V2 every signed-in user has an
+    Admin row (Free admins have no Subscription by design -- Gap 1
+    lock). The Account/Billing UI now keys its tier-transition CTAs
+    off the new ``has_subscription`` boolean instead of the HTTP status.
+
+    Resolution order:
+      1. Cookie -> User (401 on bad cookie).
+      2. ScopeAssignment lookup -> Admin id + role.
+      3. Admin row -> tier (V2 source of truth for Free admins).
+      4. Optional Subscription lookup -> Stripe-derived fields when
+         the admin is on a paid tier; null when Free.
 
     Step 30a.5: also surfaces ``active_role`` -- the cookied user's
     role on their active ScopeAssignment (preferring the assignment
     matching the session JWT's tenant_id, falling back to the first
     active assignment for single-tenant common case). The dashboard
-    gates the CompanyTab on (tier=='company' AND role in
+    gates the CompanyTab on (tier=='enterprise' AND role in
     ('tenant_admin','owner')) and the TeamTab on (tier in
-    ('team','company') AND role in ('tenant_admin','owner',
+    ('pro','enterprise') AND role in ('tenant_admin','owner',
     'department_lead')) -- see design doc §11 Q5.
     """
     cookie = request.cookies.get(settings.session_cookie_name)
@@ -597,27 +612,67 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
         # leave session_tenant_id None and pick the first active scope.
         session_tenant_id = None
 
-    # Resolve active_role off the cookied user's ScopeAssignment.
-    # Users with no active assignment surface as active_role=None
-    # (rather than 403), since /billing/me is a read-only status
-    # endpoint -- the dashboard simply hides org-building tabs.
+    # Resolve the cookied user's active ScopeAssignment (preferring
+    # the assignment matching the session JWT's tenant_id). This is
+    # also where we derive ``admin_id`` for the Admin-row lookup
+    # below: ScopeAssignment.tenant_id physically retains the column
+    # name from Arc 5 Path A but semantically points at admins.id.
     from app.repositories.scope_assignment_repository import (
         ScopeAssignmentRepository,
     )
     sar = ScopeAssignmentRepository(db)
     active_assignments = sar.list_for_user(user.id, active_only=True)
     active_role: str | None = None
+    chosen_admin_id: str | None = None
     if active_assignments:
         chosen = next(
             (a for a in active_assignments if a.tenant_id == session_tenant_id),
             active_assignments[0],
         )
         active_role = chosen.role
+        chosen_admin_id = chosen.tenant_id
+
+    # Read the Admin row to source the tier (V2 source of truth).
+    # A cookied user with no active ScopeAssignment is a forensic
+    # edge case (deleted assignment, deactivated admin); answer 200
+    # with sentinel values rather than 401 so the dashboard can
+    # render a sensible "no plan yet" view.
+    from app.models.admin import Admin as AdminModel
+    admin = (
+        db.get(AdminModel, chosen_admin_id) if chosen_admin_id else None
+    )
+    admin_tier = admin.tier if admin is not None else "free"
+    resolved_admin_id = admin.id if admin is not None else (chosen_admin_id or "")
 
     svc = _service(db)
     sub = svc.get_active_subscription_for_user(user_id=user.id)
+
     if sub is None:
-        raise HTTPException(status_code=404, detail="No subscription on file.")
+        # Free admin (or transient no-sub state): build a tier-only
+        # response off the Admin row. ``status='free'`` is the
+        # sentinel; instance_count_cap reads from the tier-cap map
+        # so a Free admin still sees "1 instance" in the UI without
+        # a Subscription row.
+        from app.models.subscription import TIER_INSTANCE_CAPS
+        return SubscriptionStatusResponse(
+            has_subscription=False,
+            tenant_id=resolved_admin_id,
+            tier=admin_tier,
+            status="free",
+            active=admin is not None and admin.active,
+            is_entitled=admin is not None and admin.active,
+            current_period_start=None,
+            current_period_end=None,
+            trial_end=None,
+            cancel_at_period_end=False,
+            canceled_at=None,
+            customer_email=user.email,
+            billing_cadence="none",
+            instance_count_cap=TIER_INSTANCE_CAPS.get(admin_tier, 1) or 1,
+            is_pilot=False,
+            pilot_window_end=None,
+            active_role=active_role,
+        )
 
     # Step 30a.2-pilot: derive pilot signal from the same source the
     # refund-eligibility check uses (``provider_snapshot.metadata.
@@ -650,7 +705,13 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
     else:
         pilot_window_end = None
 
+    # When a Subscription exists, prefer its tier over the Admin
+    # row's tier for the read response (they are kept in sync by
+    # the webhook + upgrade_admin_tier path; if they ever drift
+    # the Subscription is the more recent signal because the
+    # webhook commits Subscription THEN flips Admin.tier).
     return SubscriptionStatusResponse(
+        has_subscription=True,
         tenant_id=sub.tenant_id,
         tier=sub.tier,
         status=sub.status,
@@ -671,6 +732,106 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
         # Step 30a.5 addition.
         active_role=active_role,
     )
+
+
+# ---------------------------------------------------------------------
+# POST /upgrade  (Arc 6 / Commit 8.5a)
+# ---------------------------------------------------------------------
+
+@router.post(
+    "/upgrade",
+    response_model=UpgradeResponse,
+    status_code=status.HTTP_200_OK,
+)
+def upgrade_tier(
+    payload: UpgradeRequest,
+    request: Request,
+    db: DbSession,
+) -> UpgradeResponse:
+    """Create a Stripe Checkout session for an existing-admin tier upgrade.
+
+    Cookie-authenticated. The admin id is derived from the session
+    JWT's tenant_id claim (which physically points at admins.id in
+    V2 after the Arc 5 Path A rename retained the column name); the
+    buyer cannot specify it in the body. This closes a class of
+    cross-admin-upgrade attacks where a Free user could POST another
+    admin's id to upgrade somebody else's tenant on their own card.
+
+    Validation (returns 400 detail=...):
+      * ``not_an_upgrade``      -- target_tier <= current Admin.tier
+      * ``enterprise_monthly``  -- (enterprise, monthly) not offered
+      * ``no_admin_for_user``   -- cookied user has no active scope
+
+    On success returns ``{checkout_url, session_id}`` -- the client
+    redirects to the Stripe-hosted Checkout. The webhook does the
+    tier-flip on ``checkout.session.completed`` when Stripe confirms
+    payment (proration is handled by Stripe's standard immediate-
+    proration semantics; we do not compute credits ourselves).
+    """
+    cookie = request.cookies.get(settings.session_cookie_name)
+    user = _resolve_cookied_user(db=db, session_cookie=cookie)
+
+    # Resolve admin_id off the session's tenant_id JWT claim, falling
+    # back to the cookied user's active ScopeAssignment (single-scope
+    # users). Mirrors the resolution order in /me above.
+    session_tenant_id: str | None = None
+    try:
+        sess_payload = validate_session_token(cookie or "")
+        session_tenant_id = sess_payload.get("tenant_id")
+    except MagicLinkError:
+        session_tenant_id = None
+
+    from app.repositories.scope_assignment_repository import (
+        ScopeAssignmentRepository,
+    )
+    sar = ScopeAssignmentRepository(db)
+    active_assignments = sar.list_for_user(user.id, active_only=True)
+    if not active_assignments:
+        raise HTTPException(status_code=400, detail="no_admin_for_user")
+    chosen = next(
+        (a for a in active_assignments if a.tenant_id == session_tenant_id),
+        active_assignments[0],
+    )
+    # Only owners may initiate an upgrade. department_leads and
+    # teammates do not have billing authority on a Pro/Enterprise
+    # account. (For Free, the signup-free path mints owner-role on
+    # the first user, so every Free admin has exactly one owner.)
+    if chosen.role != "owner":
+        raise HTTPException(status_code=403, detail="upgrade_requires_owner")
+    admin_id = chosen.tenant_id
+
+    # Read current Admin.tier to enforce strict upgrade direction.
+    from app.models.admin import Admin as AdminModel
+    admin = db.get(AdminModel, admin_id)
+    if admin is None or not admin.active:
+        raise HTTPException(status_code=400, detail="admin_inactive")
+
+    _tier_order = {"free": 0, "pro": 1, "enterprise": 2}
+    current_rank = _tier_order.get(admin.tier, -1)
+    target_rank = _tier_order.get(payload.target_tier, -1)
+    if target_rank <= current_rank:
+        raise HTTPException(status_code=400, detail="not_an_upgrade")
+
+    # Enterprise is annual-only at v2 (CANONICAL §14: $24K flat
+    # annual; monthly Enterprise is deferred to Arc 7 metered billing).
+    if payload.target_tier == "enterprise" and payload.billing_cadence != "annual":
+        raise HTTPException(status_code=400, detail="enterprise_monthly")
+
+    svc = _service(db)
+    try:
+        result = svc.create_upgrade_checkout(
+            admin_id=admin_id,
+            email=user.email,
+            display_name=user.display_name or user.email,
+            target_tier=payload.target_tier,
+            billing_cadence=payload.billing_cadence,
+        )
+    except BillingNotConfiguredError as exc:
+        raise _501_if_billing_not_ready(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return UpgradeResponse(**result)
 
 
 # ---------------------------------------------------------------------

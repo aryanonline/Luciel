@@ -32,11 +32,21 @@ class CheckoutSessionRequest(BaseModel):
     created and no tenant is minted. The webhook does that work once
     Stripe confirms payment.
 
-    Step 30a.1 lifted the v1 Individual-only carve-out: ``tier`` is now
-    a ``Literal['individual','team','company']`` and the new
-    ``billing_cadence`` field accepts ``Literal['monthly','annual']``.
-    The (tier, cadence) pair routes to a Stripe Price ID via
-    ``BillingService.resolve_price_id`` — see the table in that module.
+    Step 30a.1 lifted the v1 Individual-only carve-out: ``tier`` accepts
+    multiple values and the new ``billing_cadence`` field accepts
+    ``Literal['monthly','annual']``. The (tier, cadence) pair routes to
+    a Stripe Price ID via ``BillingService.resolve_price_id`` -- see the
+    table in that module.
+
+    Arc 6 / Commit 8.5a (2026-05-23) -- V2 vocab fix-in-place. The
+    ``tier`` Literal previously declared ``individual/team/company``
+    even though Commit 5 retired that vocab from the service layer.
+    Schema-validation occurs BEFORE the service call, so a marketing
+    site POST with ``tier='pro'`` 422'd at the FastAPI boundary; the
+    Pro Checkout funnel was silently broken from Commit 5 onward and
+    only surfaced when Commit 8.5a wired the upgrade endpoint onto the
+    same schema. Flipped to V2 vocab as a Path-A side-fix; tracked as
+    drift ``D-arc6-checkout-schema-tier-v1-vocab-2026-05-23``.
 
     Why tenant_id is OPTIONAL here:
       v1 self-serve mints a fresh tenant for every checkout. A buyer
@@ -55,12 +65,13 @@ class CheckoutSessionRequest(BaseModel):
         description="Buyer's name. Carried into the Stripe customer "
                     "object and onto the eventual TenantConfig.",
     )
-    tier: Literal["individual", "team", "company"] = Field(
-        default="individual",
+    tier: Literal["pro", "enterprise"] = Field(
+        default="pro",
         description=(
-            "Tier slug. Step 30a.1 accepts all three; the (tier, cadence) "
-            "pair must have a configured Stripe Price ID or the route "
-            "returns 501."
+            "V2 tier slug. Arc 6 vocab: 'pro' or 'enterprise'. Free has "
+            "its own no-card route (POST /signup-free) and never reaches "
+            "this endpoint. The (tier, cadence) pair must have a "
+            "configured Stripe Price ID or the route returns 501."
         ),
     )
     billing_cadence: Literal["monthly", "annual"] = Field(
@@ -78,6 +89,61 @@ class CheckoutSessionRequest(BaseModel):
 
 class CheckoutSessionResponse(BaseModel):
     """Stripe redirect URL the marketing site will navigate to."""
+    checkout_url: str = Field(..., description="Stripe-hosted Checkout URL.")
+    session_id: str = Field(..., description="Stripe Checkout session id (cs_...).")
+
+
+# ---------------------------------------------------------------------
+# POST /api/v1/billing/upgrade  (Arc 6 / Commit 8.5a)
+# ---------------------------------------------------------------------
+
+
+class UpgradeRequest(BaseModel):
+    """Tier-upgrade request from a cookied (signed-in) admin owner.
+
+    Used by the Account/Billing page to upgrade an existing Free or Pro
+    Admin to a higher tier. Distinct from ``CheckoutSessionRequest``:
+
+      * ``CheckoutSessionRequest`` is for *prospective* (no-cookie)
+        buyers landing from the marketing site /signup form.
+      * ``UpgradeRequest`` is for *existing* admins (cookie-auth) whose
+        Admin row already exists and just needs a tier-flip + Stripe
+        Subscription row attached.
+
+    The cookied user's existing Admin id is derived from the session
+    cookie's tenant_id claim server-side; the buyer cannot pass it.
+    This eliminates a class of cross-admin-upgrade attacks where a
+    Free user could try to upgrade someone else's admin by posting a
+    foreign admin_id.
+
+    Webhook routing: the upgrade Checkout session stamps
+    ``luciel_admin_id`` into Stripe metadata. The webhook
+    (``billing_webhook_service._on_checkout_completed``) detects this
+    metadata key and routes into the upgrade-branch (tier-flip on the
+    existing Admin) instead of the default mint-new-Admin path.
+    """
+    target_tier: Literal["pro", "enterprise"] = Field(
+        ...,
+        description=(
+            "Tier to upgrade to. Must be strictly higher than the "
+            "caller's current tier (free<pro<enterprise); otherwise "
+            "the route returns 400 with detail='not_an_upgrade'."
+        ),
+    )
+    billing_cadence: Literal["monthly", "annual"] = Field(
+        default="monthly",
+        description=(
+            "Cadence for the upgrade subscription. Enterprise is "
+            "annual-only; the route 400s on (enterprise, monthly)."
+        ),
+    )
+
+
+class UpgradeResponse(BaseModel):
+    """Same shape as CheckoutSessionResponse -- a Stripe-hosted URL
+    the marketing site navigates to. The webhook does the tier-flip
+    when Stripe confirms payment.
+    """
     checkout_url: str = Field(..., description="Stripe-hosted Checkout URL.")
     session_id: str = Field(..., description="Stripe Checkout session id (cs_...).")
 
@@ -149,19 +215,44 @@ class SubscriptionStatusResponse(BaseModel):
     Step 30a.1 extended the response with ``billing_cadence`` and
     ``instance_count_cap`` so the dashboard can render a cadence badge
     and gate the Create-Luciel form on remaining cap.
+
+    Arc 6 / Commit 8.5a (2026-05-23) -- /me now answers for ALL signed-in
+    users, not only those with a Subscription row. Free admins have no
+    Subscription row by V2 design (Gap 1 lock); the response carries the
+    tier off the Admin row instead and leaves Subscription-derived fields
+    null. The new ``has_subscription`` boolean lets the Account/Billing
+    UI choose between "current tier + upgrade CTAs" (Free admins) and
+    "current sub + manage-billing" (Pro/Enterprise admins) without
+    second-guessing the field set. Status code is now 200 for any cookied
+    user with a valid session, regardless of subscription state.
     """
     model_config = ConfigDict(from_attributes=True)
 
+    # Arc 6 / Commit 8.5a -- has_subscription is the explicit branch
+    # signal. True for Pro / Enterprise (has Subscription row), False
+    # for Free (no Stripe row by design). The Account UI keys its
+    # tier-transition CTAs off this flag rather than off the legacy
+    # 404-vs-200 status-code distinction.
+    has_subscription: bool = Field(
+        default=False,
+        description="True iff a Stripe Subscription row exists for the "
+                    "cookied user. False for Free admins (Free has no "
+                    "Subscription by V2 design).",
+    )
     tenant_id: str
     tier: str
+    # Subscription-derived fields are nullable for Free admins (no
+    # Subscription row). When has_subscription=True every field below
+    # is populated; when False, only ``status`` carries a sentinel
+    # value of ``"free"`` to keep clients happy with non-empty strings.
     status: str
     active: bool
     is_entitled: bool
-    current_period_start: datetime | None
-    current_period_end: datetime | None
-    trial_end: datetime | None
-    cancel_at_period_end: bool
-    canceled_at: datetime | None
+    current_period_start: datetime | None = None
+    current_period_end: datetime | None = None
+    trial_end: datetime | None = None
+    cancel_at_period_end: bool = False
+    canceled_at: datetime | None = None
     customer_email: str
     # Step 30a.1 additions.
     billing_cadence: str

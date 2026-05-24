@@ -440,6 +440,127 @@ class BillingService:
         }
 
     # -----------------------------------------------------------------
+    # Upgrade  (Arc 6 / Commit 8.5a)
+    # -----------------------------------------------------------------
+
+    def create_upgrade_checkout(
+        self,
+        *,
+        admin_id: str,
+        email: str,
+        display_name: str,
+        target_tier: str,
+        billing_cadence: str = BILLING_CADENCE_MONTHLY,
+    ) -> dict[str, str]:
+        """Create a Stripe Checkout session for a tier UPGRADE.
+
+        Distinct from ``create_checkout`` (the prospective-buyer path)
+        in exactly one way: the Stripe metadata stamps
+        ``luciel_admin_id`` so the webhook routes into the upgrade-branch
+        instead of minting a new Admin. The Stripe-Hosted Checkout UI is
+        otherwise identical from the buyer's perspective.
+
+        Why we still go through Stripe-hosted Checkout (not
+        ``subscription.create`` API):
+          1. One webhook code path -- the same
+             ``checkout.session.completed`` handler covers both new
+             signups and upgrades.
+          2. Stripe-managed card collection (PCI scope stays inside
+             Stripe; we never see a PAN).
+          3. Proration is handled by Stripe out of the box; we do not
+             need to compute a credit-to-issue against an existing sub
+             because the buyer has no existing sub yet (Free has no
+             Stripe row; this is the first paid subscription on the
+             Admin).
+
+        Intro-fee gate:
+          The $100 / 90-day pilot is intentionally NOT applied here.
+          ``is_first_time_customer`` is keyed on email, and a Free
+          admin who later upgrades to Pro counts as a *new* paying
+          customer in Stripe's books (no prior Charge). However, the
+          pilot was scoped in CANONICAL_RECAP §14 as a marketing-funnel
+          inducement ("sign up direct to Pro"). Granting it to Free
+          upgraders would create an arbitrage path where every Pro
+          buyer signs up Free first to claim the pilot rate. The
+          upgrade route therefore passes ``intro_fee_price_id=None``
+          and ``trial_period_days=None``, charging the full recurring
+          rate at the next billing cycle. Tracked as a deliberate
+          design choice; not a drift.
+
+        Raises ``ValueError`` on:
+          * unsupported (tier, cadence) pair
+          * missing or empty admin_id / email / display_name
+        """
+        self.require_configured()
+
+        if not admin_id:
+            raise ValueError("admin_id is required for upgrade checkout.")
+        if not email:
+            raise ValueError("email is required for upgrade checkout.")
+
+        if target_tier not in ALLOWED_TIERS:
+            raise ValueError(
+                f"Unsupported tier {target_tier!r}. Allowed: {ALLOWED_TIERS}."
+            )
+        if target_tier == TIER_FREE:
+            # Free has no Stripe row by design; the route layer should
+            # have 400'd before reaching the service.
+            raise ValueError(
+                "create_upgrade_checkout: target_tier='free' is not a "
+                "valid upgrade target. Free has no Stripe subscription."
+            )
+        if billing_cadence not in ALLOWED_BILLING_CADENCES:
+            raise ValueError(
+                f"Unsupported billing_cadence {billing_cadence!r}. "
+                f"Allowed: {ALLOWED_BILLING_CADENCES}."
+            )
+
+        price_id = self.resolve_price_id(
+            tier=target_tier, cadence=billing_cadence,
+        )
+
+        success_url = settings.billing_success_url
+        cancel_url = settings.billing_cancel_url
+
+        # ``luciel_admin_id`` is the upgrade-branch marker the webhook
+        # detects. ``luciel_intro_applied=false`` is stamped explicitly
+        # so a forensic engineer querying Stripe by metadata can tell
+        # an upgrade-Pro from a marketing-Pro at a glance.
+        metadata = {
+            "luciel_email": email,
+            "luciel_display_name": display_name,
+            "luciel_tier": target_tier,
+            "luciel_billing_cadence": billing_cadence,
+            "luciel_admin_id": admin_id,
+            "luciel_intro_applied": "false",
+            "luciel_flow": "upgrade",
+        }
+
+        session = self.stripe.create_checkout_session(
+            customer_email=email,
+            price_id=price_id,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            trial_period_days=None,
+            metadata=metadata,
+            intro_fee_price_id=None,
+        )
+
+        logger.info(
+            "billing: UPGRADE checkout session created stripe_id=%s "
+            "admin_id=%s email=%s target_tier=%s cadence=%s",
+            getattr(session, "id", "?"),
+            admin_id,
+            email,
+            target_tier,
+            billing_cadence,
+        )
+        return {
+            "checkout_url": session.url,
+            "session_id": session.id,
+        }
+
+    # -----------------------------------------------------------------
     # Portal
     # -----------------------------------------------------------------
 

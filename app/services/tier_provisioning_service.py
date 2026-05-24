@@ -39,6 +39,10 @@ from sqlalchemy.orm import Session
 
 from app.models.admin import TIER_FREE
 from app.models.subscription import TIER_PRO, TIER_ENTERPRISE
+from app.models.admin_audit_log import (
+    ACTION_UPDATE,
+    RESOURCE_ADMIN,
+)
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
 from app.repositories.scope_assignment_repository import ScopeAssignmentRepository
 from app.services.admin_service import AdminService
@@ -106,6 +110,13 @@ _DOMAIN_COLLAPSE_SENTINEL = "default"
 # ``TierProvisioningValidationError`` (4xx-class, do not retry).
 _EMAIL_MAX_LEN = 320
 _EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class TierUpgradeNoopError(ValueError):
+    """Raised by ``upgrade_admin_tier`` when the new tier is not strictly
+    higher than the current tier. The webhook traps this as a benign
+    replay condition and logs.
+    """
 
 
 class TierProvisioningValidationError(ValueError):
@@ -262,6 +273,126 @@ class TierProvisioningService:
             admin_id, tier, instance.instance_slug,
         )
         return created
+
+    # -----------------------------------------------------------------
+    # Tier UPGRADE  (Arc 6 / Commit 8.5a)
+    # -----------------------------------------------------------------
+
+    # Tier ordinal -- defines what counts as an "upgrade" vs "downgrade".
+    # Higher ordinal = strictly more capabilities. Free<Pro<Enterprise.
+    _TIER_ORDINAL: dict = {
+        TIER_FREE: 0,
+        TIER_PRO: 1,
+        TIER_ENTERPRISE: 2,
+    }
+
+    def upgrade_admin_tier(
+        self,
+        *,
+        admin_id: str,
+        new_tier: str,
+        new_tier_source: str,
+        audit_ctx: AuditContext,
+    ) -> dict:
+        """Flip an existing Admin's tier upward.
+
+        Used by the webhook upgrade-branch (``_on_checkout_completed``
+        with ``luciel_admin_id`` in metadata) to convert a Free Admin
+        into a paid Admin, or to elevate Pro -> Enterprise, WITHOUT
+        re-running the full ``premint_for_tier`` flow.
+
+        What this method does:
+          1. Verifies the Admin exists and is active.
+          2. Verifies the new tier is strictly higher than the current
+             tier (else raises ValueError -- callers must not call this
+             with a same-tier or downgrade target).
+          3. Updates ``admins.tier`` and ``admins.tier_source`` in a
+             single committed transaction with an audit row.
+
+        What this method DOES NOT do:
+          * Re-mint the primary Instance (it already exists from the
+             original ``premint_for_tier`` call at the Admin's first
+             provisioning -- Free signup or Pro signup).
+          * Touch the owner ScopeAssignment (the buyer is already the
+             Admin's owner; the role doesn't change with tier).
+          * Provision the per-tier delta-cap rows. Entitlement caps
+             are read at request time from
+             ``policy.entitlements.get_caps_for_tier(admin.tier)``, so
+             flipping the tier column automatically unlocks the new
+             caps for every subsequent API call -- no row-level changes
+             needed for caps to take effect.
+          * Issue Stripe-side changes. The Subscription row is written
+             by the webhook's existing Subscription-create path; this
+             method only mutates the Admin row.
+
+        Idempotency:
+          A Stripe webhook redeliver after a partial success that
+          already updated the Admin row will re-call this method. The
+          "strictly higher tier" guard naturally short-circuits: a
+          replay attempts new_tier=current_tier and is rejected with
+          ``TierUpgradeNoopError``. The webhook traps this and logs.
+
+        Raises:
+          ValueError              -- unknown new_tier, or admin missing/inactive.
+          TierUpgradeNoopError    -- new_tier <= current_tier (replay safety).
+        """
+        if new_tier not in self._TIER_ORDINAL:
+            raise ValueError(
+                f"TierProvisioningService.upgrade_admin_tier: unknown new_tier {new_tier!r}"
+            )
+        if new_tier == TIER_FREE:
+            # Free is never an upgrade target. Callers must not reach
+            # here with new_tier='free' -- the route layer validates
+            # this and the downgrade path lives in Commit 8.5b.
+            raise ValueError(
+                "upgrade_admin_tier: new_tier='free' is a downgrade, "
+                "not an upgrade. Use the downgrade path (Commit 8.5b)."
+            )
+
+        admin = self.admin.get_tenant_config(admin_id)
+        if admin is None or not getattr(admin, "active", False):
+            raise ValueError(
+                f"upgrade_admin_tier: admin {admin_id!r} missing or inactive"
+            )
+
+        old_tier = admin.tier
+        old_tier_source = admin.tier_source
+
+        if self._TIER_ORDINAL[new_tier] <= self._TIER_ORDINAL.get(old_tier, -1):
+            raise TierUpgradeNoopError(
+                f"upgrade_admin_tier: new_tier={new_tier!r} is not strictly "
+                f"higher than current tier={old_tier!r} on admin={admin_id!r}"
+            )
+
+        # Single committed update. We do NOT call
+        # ``AdminService.update_tenant_config`` because that method
+        # commits without writing an audit row; we want the tier-flip
+        # mutation and its audit row to commit atomically (Invariant 4).
+        admin.tier = new_tier
+        admin.tier_source = new_tier_source
+        self.audit.record(
+            ctx=audit_ctx,
+            tenant_id=admin_id,
+            action=ACTION_UPDATE,
+            resource_type=RESOURCE_ADMIN,
+            resource_natural_id=admin_id,
+            before={"tier": old_tier, "tier_source": old_tier_source},
+            after={"tier": new_tier, "tier_source": new_tier_source},
+            note=f"Tier upgrade {old_tier} -> {new_tier} via {new_tier_source}",
+            autocommit=False,
+        )
+        self.db.commit()
+
+        logger.info(
+            "tier_provisioning: upgraded admin=%s tier %s -> %s source=%s",
+            admin_id, old_tier, new_tier, new_tier_source,
+        )
+        return {
+            "admin_id": admin_id,
+            "old_tier": old_tier,
+            "new_tier": new_tier,
+            "new_tier_source": new_tier_source,
+        }
 
     # -----------------------------------------------------------------
     # Owner ScopeAssignment provisioning
