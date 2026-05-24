@@ -52,7 +52,8 @@ dataclass (and contract test) first, then surface it here for free.
 Rate limiting
 -------------
 
-The same `ADMIN_RATE_LIMIT` ("30/minute" — `app/middleware/rate_limit.py`)
+The same Arc 7 C4 tier-aware limiter (pre-Arc-7: `ADMIN_RATE_LIMIT`="30/minute" - `app/middleware/rate_limit.py`;
+now per-(tier, admin, instance) bucket with free=30 / pro=300 / enterprise=3000 rpm)
 that applies to `/api/v1/admin/*` is applied here. Dashboards are admin
 reads and share the admin envelope.
 

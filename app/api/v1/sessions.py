@@ -13,10 +13,11 @@ the privileged platform_admin cross-tenant case.
 
 Hardened contract:
 
-  1. Every route is rate-limited. ``CHAT_RATE_LIMIT`` for the POST
-     (session creation is per-conversation; chat-rate appropriate) and
-     for the per-session GETs that the chat client polls. ``ADMIN_RATE_LIMIT``
-     for the list route, which is operational.
+  1. Every route is rate-limited by the Arc 7 C4 tier-aware limiter
+     (per-(tier, admin, instance) bucket, free=30 / pro=300 / enterprise=3000
+     rpm). Pre-Arc-7 used ``CHAT_RATE_LIMIT`` for the POST (session creation is
+     per-conversation; chat-rate appropriate) and for the per-session GETs that
+     the chat client polls, plus ``ADMIN_RATE_LIMIT`` for the list route.
   2. POST ``/sessions``:
        * If the API key has a tenant binding, it wins. Body-supplied
          ``tenant_id`` is ignored unless the caller is platform_admin

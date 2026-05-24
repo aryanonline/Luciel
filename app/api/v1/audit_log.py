@@ -37,7 +37,7 @@ Security contract:
   with 400 on unknown values. No silent empty results that mask
   client bugs.
 - Hard cap limit<=500 to prevent unbounded scans.
-- Reuses ADMIN_RATE_LIMIT bucket — log-scraping abuse rate-limited.
+- Reuses the Arc 7 C4 tier-aware limiter bucket (pre-Arc-7: ADMIN_RATE_LIMIT) -- log-scraping abuse rate-limited.
 - Cross-tenant filter override is logged (warning) — defense-in-depth
   attempt is itself audit-worthy.
 """

@@ -22,9 +22,12 @@ The hardened contract:
      the auth middleware from the API key). It can never come from the
      request body for non-platform-admin callers. Platform-admin keys
      MAY override via the body but the override is logged and audited.
-  2. Every route is rate-limited (``CHAT_RATE_LIMIT`` for grant/withdraw,
+  2. Every route is rate-limited by the Arc 7 C4 tier-aware limiter
+     (pre-Arc-7: ``CHAT_RATE_LIMIT`` for grant/withdraw,
      which are user-initiated mutations bound to chat-turn cadence;
-     ``ADMIN_RATE_LIMIT`` for status, which is read-only and rare).
+     ``ADMIN_RATE_LIMIT`` for status). Today every route shares the same
+     per-(tier, admin, instance) Redis bucket; grant/withdraw and status are
+     all governed by the same tier RPM cap (free=30, pro=300, enterprise=3000).
   3. ``grant`` and ``withdraw`` write an ``admin_audit_logs`` row BEFORE
      committing the consent mutation, using the same audit-first-then-
      mutate pattern locked in admin_forensics.py:779-800. ``status`` is

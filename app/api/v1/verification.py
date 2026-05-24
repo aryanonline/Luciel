@@ -92,7 +92,7 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
 # Step 29.y Cluster 1 (G-6 resolution): the route is platform_admin-only
 # and runs N COUNT(*) queries against every probed table. Without a rate
 # limit, a misconfigured or compromised platform_admin key (or a verify
-# harness in a runaway loop) could DoS the database. Same ADMIN_RATE_LIMIT
+# harness in a runaway loop) could DoS the database. Same Arc 7 C4 tier-aware limiter
 # bucket as every other admin diagnostic route.
 @router.get("/teardown-integrity")
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)

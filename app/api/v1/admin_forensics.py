@@ -59,7 +59,7 @@ Routes
 
 All routes (4 in C.1, +1 in C.3, +1 in C.4 GET, +1 in C.5 POST = 7 today):
   - require platform_admin via ScopePolicy.is_platform_admin
-  - are rate-limited via ADMIN_RATE_LIMIT
+  - are rate-limited via the Arc 7 C4 tier-aware limiter (pre-Arc-7: ADMIN_RATE_LIMIT)
   - are SELECT-only against tables the API process's luciel_admin
     DSN already reads in production
   - return strict-projection Pydantic models (key_hash NEVER returned;
@@ -92,7 +92,7 @@ These endpoints do NOT write admin_audit_log rows on call. Rationale:
 
   3. The actual security boundary is enforced by:
        - platform_admin permission gate (this module),
-       - ADMIN_RATE_LIMIT (this module),
+       - the Arc 7 C4 tier-aware limiter (this module; pre-Arc-7 name: ADMIN_RATE_LIMIT),
        - DB role isolation (verify task's worker DSN cannot mutate
          users/scope_assignments per migration f392a842f885 from
          Phase 2 Commit 4; the API process's luciel_admin DSN that
@@ -415,7 +415,7 @@ def list_memory_items_forensic_step29c(
     reads. The projection is unchanged -- `content_contains` lets
     the caller test for substring presence without ever returning
     the substring or the surrounding content text. The probe is
-    locked behind platform_admin + ADMIN_RATE_LIMIT and is the
+    locked behind platform_admin + the Arc 7 C4 tier-aware limiter and is the
     minimum primitive needed for P13 A1's spoof-absence assertion.
 
     Filter combination semantics (all AND-joined; omit a param to
@@ -707,7 +707,7 @@ def toggle_luciel_instance_active_step29c(
     routing them through this POST migrates the last ORM-write
     surface in the four-pillar verify suite to platform-admin HTTP.
 
-    platform_admin only. Rate-limited by ADMIN_RATE_LIMIT identically
+    platform_admin only. Rate-limited by the Arc 7 C4 tier-aware limiter identically
     to the C.1-C.4 forensic GETs.
 
     Audit-row-before-mutation invariant
