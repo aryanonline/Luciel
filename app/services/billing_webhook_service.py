@@ -21,17 +21,18 @@ Event types handled at v1:
   * checkout.session.completed
       -- atomically:
          - resolve or create a ``User`` row from the buyer's email
-         - call ``OnboardingService.onboard_tenant`` to mint a fresh
-           tenant (one tenant per Individual subscriber at v1)
+         - call ``OnboardingService.onboard_tenant`` (external API name
+           retained from Arc 5; the noun on our side is now "admin")
+           to mint a fresh admin (one admin per Pro subscriber at V2)
          - INSERT a Subscription row
          - mint a magic-link JWT and send the email
   * customer.subscription.updated
       -- ``status``, cycle dates, ``cancel_at_period_end`` flip.
   * customer.subscription.deleted
       -- cancel: flip ``active=False`` on the Subscription, then
-         call ``AdminService.deactivate_tenant_with_cascade`` so the
-         tenant's children deactivate as documented in ARCHITECTURE
-         §4.5.
+         call ``AdminService.deactivate_tenant_with_cascade`` (external
+         API name retained from Arc 5) so the admin's children
+         deactivate as documented in ARCHITECTURE §4.5.
   * invoice.payment_failed
       -- update status to whatever Stripe says (typically 'past_due'
          or 'unpaid'); we do NOT cancel on first failure -- Stripe
@@ -89,7 +90,13 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------
-# Tenant id minting
+# Admin id minting (Arc 6 Commit 6 — webhook-noun rename Tenant→Admin).
+# The DB column ``subscriptions.tenant_id`` is deliberately retained
+# physically per Arc 5 Path A; this file's local vocab now matches the
+# Arc 5 B8 Admin rename, but the column attribute access
+# ``Subscription.tenant_id`` and the external service APIs
+# ``OnboardingService.onboard_tenant`` /
+# ``AdminService.deactivate_tenant_with_cascade`` keep their Arc-5 names.
 # ---------------------------------------------------------------------
 
 # Tier-aware admin-id prefix (V2 — Arc 5 B8 rename). The prefix tags
@@ -105,7 +112,7 @@ _TIER_PREFIX = {
 }
 
 
-def _mint_tenant_id_from_email(email: str, tier: str = TIER_PRO) -> str:
+def _mint_admin_id_from_email(email: str, tier: str = TIER_PRO) -> str:
     """Generate a URL-safe, collision-resistant admin slug from an email.
 
     Shape: ``<tier-prefix>-<8 hex chars>``. The prefix is one of
@@ -222,7 +229,7 @@ class BillingWebhookService:
     # -----------------------------------------------------------------
 
     def _on_checkout_completed(self, *, event_id: str, data_object: dict, event: dict) -> dict:
-        """Mint tenant + user + subscription atomically.
+        """Mint admin + user + subscription atomically.
 
         Idempotency:
           If the Stripe subscription id already has a row in
@@ -246,6 +253,10 @@ class BillingWebhookService:
             )
         ).scalars().first()
         if existing is not None:
+            # ``existing.tenant_id`` is the DB column attribute (Arc 5
+            # Path A kept it physically). Locally we treat the value as
+            # the admin id; the dict key remains ``tenant_id`` for
+            # observability symmetry with the column.
             self._record_replay(
                 event_id=event_id,
                 tenant_id=existing.tenant_id,
@@ -321,8 +332,11 @@ class BillingWebhookService:
             # service needs the user id for the subscription row.
             user = self._resolve_or_create_user(email=email, display_name=display_name)
 
-            # Mint the tenant via the existing onboarding primitive.
-            tenant_id = _mint_tenant_id_from_email(email, tier=tier)
+            # Mint the admin via the existing onboarding primitive.
+            # ``OnboardingService.onboard_tenant`` keeps its Arc-5
+            # external method name; the ``tenant_id`` kwarg threads
+            # through to the DB column of the same name.
+            admin_id = _mint_admin_id_from_email(email, tier=tier)
             from app.services.onboarding_service import OnboardingService
 
             onboarding = OnboardingService(self.db)
@@ -330,7 +344,7 @@ class BillingWebhookService:
             # admin audit trail is honest about the origin. The full
             # onboard runs in the same transaction we are in.
             onboarding.onboard_tenant(
-                tenant_id=tenant_id,
+                tenant_id=admin_id,
                 display_name=display_name,
                 description=f"Self-serve {tier} subscription -- "
                             f"Stripe sub={stripe_subscription_id}",
@@ -391,7 +405,10 @@ class BillingWebhookService:
                 return data_object.get(field, default)
 
             sub = Subscription(
-                tenant_id=tenant_id,
+                # DB column attribute ``Subscription.tenant_id`` retained
+                # physically by Arc 5 Path A; the value is the minted
+                # admin id.
+                tenant_id=admin_id,
                 user_id=user.id,
                 customer_email=email,
                 stripe_customer_id=stripe_customer_id,
@@ -420,13 +437,18 @@ class BillingWebhookService:
             audit_repo = AdminAuditRepository(self.db)
             audit_repo.record(
                 ctx=ctx,
-                tenant_id=tenant_id,
+                # ``AdminAuditRepository.record`` keeps its Arc-5
+                # ``tenant_id`` kwarg (column-mirrored); we pass
+                # ``admin_id`` into it.
+                tenant_id=admin_id,
                 action=ACTION_SUBSCRIPTION_CREATE,
                 resource_type=RESOURCE_SUBSCRIPTION,
                 resource_pk=sub.id,
                 resource_natural_id=stripe_subscription_id,
                 after={
-                    "tenant_id": tenant_id,
+                    # Audit-row payload key retained as ``tenant_id``
+                    # for column symmetry; the value is the admin id.
+                    "tenant_id": admin_id,
                     "user_id": str(user.id),
                     "customer_email": email,
                     "tier": tier,
@@ -440,7 +462,7 @@ class BillingWebhookService:
                 },
                 note=(
                     f"stripe checkout.session.completed -> minted "
-                    f"tenant {tenant_id} tier={tier} cadence={billing_cadence}"
+                    f"admin {admin_id} tier={tier} cadence={billing_cadence}"
                 ),
             )
 
@@ -449,15 +471,18 @@ class BillingWebhookService:
             # Step 30a.1 pre-mint of tier-differentiating LucielInstances.
             # Happens AFTER the subscription commit so the cap-enforcement
             # path can see the subscription row. A pre-mint failure does
-            # NOT roll back the subscription (the tenant is still paid for);
-            # we log loudly and let a follow-up reconciliation handle it.
+            # NOT roll back the subscription (the admin is still paid
+            # for); we log loudly and let a follow-up reconciliation
+            # handle it.
             try:
                 from app.services.tier_provisioning_service import (
                     TierProvisioningService,
                 )
                 premint = TierProvisioningService(self.db)
                 premint.premint_for_tier(
-                    tenant_id=tenant_id,
+                    # ``TierProvisioningService.premint_for_tier`` retains
+                    # its Arc-5 ``tenant_id`` kwarg (column-mirrored).
+                    tenant_id=admin_id,
                     tier=tier,
                     primary_user=user,
                     audit_ctx=ctx,
@@ -465,8 +490,8 @@ class BillingWebhookService:
             except Exception:  # pragma: no cover - best-effort post-commit
                 logger.exception(
                     "billing-webhook: tier pre-mint failed (subscription "
-                    "already committed) tenant=%s tier=%s",
-                    tenant_id, tier,
+                    "already committed) admin=%s tier=%s",
+                    admin_id, tier,
                 )
         except Exception:
             self.db.rollback()
@@ -491,7 +516,9 @@ class BillingWebhookService:
             token = mint_set_password_token(
                 user_id=user.id,
                 email=email,
-                tenant_id=tenant_id,
+                # ``mint_set_password_token`` retains its Arc-5
+                # ``tenant_id`` kwarg (column-mirrored).
+                tenant_id=admin_id,
                 purpose="signup",
             )
             url = build_set_password_url(token)
@@ -504,11 +531,14 @@ class BillingWebhookService:
         except Exception:  # pragma: no cover - email is best-effort post-commit
             logger.exception(
                 "billing-webhook: welcome-set-password email send failed "
-                "(tenant minted ok) tenant=%s",
-                tenant_id,
+                "(admin minted ok) admin=%s",
+                admin_id,
             )
 
-        return {"applied": True, "tenant_id": tenant_id, "stripe_subscription_id": stripe_subscription_id}
+        # Return-dict key ``tenant_id`` retained for column symmetry
+        # (the value is the admin id). Stripe ignores the 200 body;
+        # the key is purely observability.
+        return {"applied": True, "tenant_id": admin_id, "stripe_subscription_id": stripe_subscription_id}
 
     # -----------------------------------------------------------------
     # customer.subscription.updated
@@ -638,10 +668,13 @@ class BillingWebhookService:
                 "active": False,
                 "stripe_event_id": event_id,
             },
-            note="stripe customer.subscription.deleted -> cancel + deactivate tenant cascade",
+            note="stripe customer.subscription.deleted -> cancel + deactivate admin cascade",
         )
 
-        # 2. Cascade deactivate the tenant.
+        # 2. Cascade deactivate the admin.
+        # ``AdminService.deactivate_tenant_with_cascade`` retains its
+        # Arc-5 external method name; semantically it now deactivates
+        # the admin (Arc 5 B8 rename).
         # The cascade method commits if autocommit=True; we pass
         # autocommit=False so the subscription mutation and cascade
         # land in one transaction.
@@ -669,7 +702,7 @@ class BillingWebhookService:
         except Exception:
             self.db.rollback()
             logger.exception(
-                "billing-webhook: cascade-deactivate failed tenant=%s sub=%s",
+                "billing-webhook: cascade-deactivate failed admin=%s sub=%s",
                 sub.tenant_id, stripe_subscription_id,
             )
             raise
@@ -751,8 +784,9 @@ class BillingWebhookService:
     def _record_unknown_event(self, *, event_id: str, event_type: str) -> None:
         ctx = _webhook_audit_ctx()
         audit_repo = AdminAuditRepository(self.db)
-        # The tenant_id for an unknown event is unknowable; use the
-        # 'platform' sentinel reserved by AdminAuditRepository.
+        # The ``tenant_id`` column value for an unknown event is
+        # unknowable (no admin can be resolved); use the 'platform'
+        # sentinel reserved by AdminAuditRepository.
         audit_repo.record(
             ctx=ctx,
             tenant_id="platform",
