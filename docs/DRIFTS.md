@@ -354,7 +354,7 @@ Surfaced 2026-05-22 in the Arc 4 tier-shape revision pass. The Free tier ships a
 
 **Cross-refs:** `D-prod-credential-scope-expansion-protocol-2026-05-23` (the parent doctrine that gates the fix — the singular `ssm:GetParameter` addition is itself a scope-expansion event subject to the 5-gate protocol; this drift is what gets cleared at that future expansion); `CANONICAL_RECAP.md` §17 Arc 6 Commit 10 entry (where this drift's existence is recorded under the Continuous-improvement pillar mapping); `docs/runbooks/aws-sandbox-credential-posture.md` §8 expansion-log entry for Arc 6 Commit 10 SSM-hcaptcha-write (which records the policy that has this gap); Arc 6 Commit 4 Stripe SSM params (the comparator that carries the correct tag set); the AWS IAM service documentation for `ssm:GetParameter` vs `ssm:GetParameters` (the upstream gotcha that produced the drift).
 
-### D-pro-tier-rate-limit-abuse-surface-2026-05-23
+### ~~D-pro-tier-rate-limit-abuse-surface-2026-05-23~~
 **Status:** OPEN — P1, abuse-control gap surfaced by the 2026-05-23 Option A entitlement revision. Surfaced 2026-05-23 in the Arc 5 Commit 2 doctrine-revision pass.
 
 The 2026-05-23 Option A entitlement table revision raises Pro caps to **10 instances × 25 admin-team seats × 300rpm API × 10 embed keys** per Admin. Composed, a single Pro Admin's worst-case API-load surface is **300rpm aggregate** across all 25 seats and all 10 instances and all 10 embed keys, because the API rate-limit middleware (`app/middleware/rate_limit.py`) today applies the limit at the **Admin scope**, not at the per-Instance, per-Seat, or per-Key scope. This produces two abuse-surface compositions worth tracking:
@@ -838,7 +838,7 @@ The drift is **not** a defect today — the policy at Commit 6 is correctly mini
 **Validation evidence:** Closure evidence will be a smoke email out, a manual reply from a test inbox, and the reply landing in the configured monitored inbox.
 **Cross-refs:** `D-ses-sandbox-exit-pending-2026-05-22` (the umbrella deliverability drift); `arc3-out/B4-ses-sandbox-exit-request.md` (the ticket text that promises this posture).
 
-### D-no-internal-smoke-path-for-direct-alb-2026-05-22
+### ~~D-no-internal-smoke-path-for-direct-alb-2026-05-22~~
 **Status:** OPEN — P3 observability hygiene. Surfaced 2026-05-22 in Arc 3 B.1/B.2.5 deploy-smoke work. There is no internal smoke path that hits the ALB directly with a trusted TLS chain; the only path through the ALB to `/health` is via the custom domain `https://www.vantagemind.ai/health`, which works for the customer-facing surface but cannot be used as a deploy-gate (it depends on Amplify DNS + custom-domain TLS chain). The ALB DNS name `luciel-targets-...` does not have a trusted cert, so a direct `Invoke-WebRequest` against it fails the certificate-trust check.
 **Section that raised it:** Arc 3 B.1/B.2.5 deploy-smoke walks, 2026-05-22 ≈00:50 EDT and 2026-05-21 evening.
 **Raised by:** Agent during the post-rollout ALB-health verification step.
@@ -1087,7 +1087,7 @@ The drift is **not** a defect today — the policy at Commit 6 is correctly mini
 **Validation evidence:** The 2026-05-18 ≈18:48 EDT deploy registered `luciel-backend:72` / `luciel-worker:27` / `luciel-migrate:16` cleanly, the migrate probe ran to `exitCode: 0`, the backend service rolled to steady state, and the OpenAPI wire check confirmed the new schema is live.
 **Cross-refs:** Step 30a.5 design §12 (the deploy section the doc-truth pass updates); `D-ecs-exec-powershell-python-c-quoting-fragile-2026-05-16` (sibling deploy-hygiene drift on the laptop-side quoting).
 
-### D-stripe-checkout-no-email-validation-2026-05-18
+### ~~D-stripe-checkout-no-email-validation-2026-05-18~~
 **Status:** OPEN — P3 product polish. Surfaced when the partner accidentally completed the Step 30a.5 $1,000 Stripe checkout with the literal placeholder email `aryan+smoke-30a5@yourdomain.com` — a non-deliverable address. The checkout accepted the address and minted a tenant, owner user, and welcome-email send (which failed in SES with `AccessDeniedException`, see sibling drift). A simple deliverability check at the checkout step would have caught this before payment.
 **Section that raised it:** Step 30a.5 live smoke walk, 2026-05-18 ≈15:05 EDT, when the partner noticed the welcome email never arrived to a real inbox and traced it back to the typo.
 **Raised by:** Aryan (partner) on 2026-05-18 ≈15:05 EDT.
@@ -1100,7 +1100,7 @@ The drift is **not** a defect today — the policy at Commit 6 is correctly mini
 **Validation evidence:** Discovery evidence is the 2026-05-18 ≈15:05 EDT smoke walk where the placeholder address minted a tenant and the welcome email failed at SES. Closure evidence is a deliberate typo-injection test in `tests/services/test_tier_provisioning_email_validation.py` plus a clean live smoke against a deliverable but previously-untested address.
 **Cross-refs:** `D-luciel-ecs-web-role-missing-ses-send-permission-2026-05-18` (the sibling email-deliverability drift surfaced in the same walk); `D-pilot-account-billing-no-subscription-on-file-2026-05-16` (predecessor billing-hardening drift); ARCHITECTURE §3.2.13 (the Option B welcome-email mechanic this drift defends).
 
-### D-tier-provisioning-tenant-id-kwarg-mismatch-2026-05-24
+### ~~D-tier-provisioning-tenant-id-kwarg-mismatch-2026-05-24~~
 **Status:** RESOLVED on 2026-05-24 in Arc 8 Commit 2 (closure stanza below; resolution in the same commit that closes the sibling deliverability drift). Discovered during Arc 8 C2 recon while inspecting `app/services/tier_provisioning_service.py` for the email-deliverability gate site. P0-class: every paid (Pro/Enterprise) signup AND every Free signup since Arc 5 silently raised `TypeError` at the pre-mint walk -- both production callsites (`BillingWebhookService._on_checkout_completed` line 554 and `app/api/v1/billing.py` `signup_free` line 1391) pass `tenant_id=...` to `premint_for_tier(*, admin_id: str, ...)` after the Arc-5 doctrine pass renamed the parameter to `admin_id` without updating either callsite. Both callers' `except Exception:` traps swallow the `TypeError`, the customer's Admin row commits, but the `ScopeAssignment` and primary `Instance` never mint -- the C9 ops runbook flags this end-state as "broken account requires manual rebuild".
 **Section that raised it:** Arc 8 C2 recon, 2026-05-24 ≈12:50 EDT, while reading `tier_provisioning_service.py` to plan the deliverability gate placement. Cross-referenced against the two callsites and confirmed via a minimal repro: `TierProvisioningService(MagicMock()).premint_for_tier(tenant_id='admin-test', ...)` raises `TypeError: premint_for_tier() got an unexpected keyword argument 'tenant_id'`.
 **Raised by:** Computer (advisor) on 2026-05-24 ≈12:50 EDT during Arc 8 C2 recon.
