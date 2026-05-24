@@ -64,6 +64,13 @@ logger = logging.getLogger(__name__)
 
 SKIP_AUTH_PATHS = {
     "/health",
+    # Arc 8 Commit 1 (WU-1 Reliability): /ready readiness probe — same posture
+    # as /health (no auth gate) so the Arc 8 Commit 4 in-cluster Fargate
+    # deploy-gate smoke probe and uptime monitors can hit it without holding
+    # a JWT. The endpoint itself is rate-limited and exposes only subsystem
+    # status (no connection strings or internals). Closes
+    # D-health-endpoint-shallow-no-db-readiness-check-2026-05-22.
+    "/ready",
     "/docs",
     "/openapi.json",
     "/redoc",

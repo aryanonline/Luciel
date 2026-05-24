@@ -21,6 +21,8 @@ logging.basicConfig(
     force=True,
 )
 
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
@@ -35,6 +37,11 @@ from app.middleware.rate_limit import (
     create_rate_limit_middleware,
 )
 from app.repositories.audit_chain import install_audit_chain_event
+
+# Arc 8 Commit 1 (WU-1 Reliability): dedicated logger for the /ready probe so
+# probe-failure rows land under a stable name in CloudWatch (luciel.ready.*)
+# rather than the unstructured root logger.
+ready_logger = logging.getLogger("luciel.ready")
 
 # Step 29.y gap-fix C13 (D-celery-app-not-imported-on-uvicorn-boot-2026-05-07):
 # Import the configured Celery app at uvicorn boot. Without this import, the
@@ -141,4 +148,113 @@ app.include_router(api_router, prefix=settings.api_v1_prefix)
 
 @app.get("/health")
 def health() -> dict:
+    """Liveness probe — process is up.
+
+    Strict process-liveness only. No external dependencies (no DB, no Redis,
+    no SES). The ALB target-group health check binds to this endpoint, so
+    any external-dependency failure must NOT remove a healthy task from the
+    target group — that would amplify a downstream outage into a full-cluster
+    outage. Downstream-dependency probing lives at ``/ready`` (Arc 8 Commit 1).
+    """
     return {"status": "ok", "service": settings.app_name}
+
+
+# Arc 8 Commit 1 (WU-1 Reliability): ``/ready`` readiness probe.
+#
+# Distinct from ``/health`` (liveness) by design. The ALB target-group health
+# check stays bound to ``/health`` because a transient Redis or RDS blip must
+# not remove a healthy task from rotation (that amplifies a downstream outage
+# into a full-cluster outage). ``/ready`` is a richer signal consumed by:
+#
+#   - the Arc 8 Commit 4 in-cluster Fargate deploy-gate smoke probe (which
+#     gates rolling-deploy completion on actual ALB→app→DB+Redis reachability,
+#     closing ``D-no-internal-smoke-path-for-direct-alb-2026-05-22``);
+#   - uptime monitors that want a true "can serve a real request" signal
+#     rather than just "the process answers TCP";
+#   - human operators investigating customer-reported slowdowns who need to
+#     localise the failure to DB, Redis, or app-layer before paging deeper.
+#
+# Closes ``D-health-endpoint-shallow-no-db-readiness-check-2026-05-22``.
+#
+# Probe shape:
+#   - DB:    ``SELECT 1`` through the shared SQLAlchemy engine; bounded by the
+#            engine's own pool_pre_ping timeout (~1.5s in default psycopg2
+#            settings) and our explicit ``connect_timeout`` query parameter
+#            on ``DATABASE_URL`` (set in prod via SSM, defaults to 5s).
+#   - Redis: ``PING`` against ``settings.redis_url`` with 1.0s socket timeouts.
+#            We construct a one-shot client (NOT the shared limiter pool) so a
+#            slow-probe scenario can never starve the limiter of pool slots.
+#
+# Failure posture (return 503 with a structured body):
+#   {
+#     "status": "not_ready",
+#     "checks": {"db": "ok" | "<err-class>", "redis": "ok" | "<err-class>"}
+#   }
+# The body never leaks the underlying exception message (which can carry
+# connection strings or table names) — only the exception class name.
+#
+# Public surface — no auth gate (same posture as ``/health`` and ``/version``).
+# Listed in ApiKeyAuthMiddleware.SKIP_AUTH_PATHS via the existing ``/health``
+# entry pattern + an explicit ``/ready`` entry added in this commit.
+@app.get("/ready")
+def ready() -> Any:  # noqa: ANN401 — FastAPI handles JSONResponse return path
+    """Readiness probe — process can serve a real request end-to-end."""
+    from fastapi.responses import JSONResponse
+
+    checks: dict[str, str] = {"db": "ok", "redis": "ok"}
+    failed = False
+
+    # DB probe — SELECT 1 through the shared engine. We deliberately use the
+    # engine directly (not a SessionLocal scope) so we don't pay the per-call
+    # session bootstrap cost (audit-chain listener install check, etc.) on
+    # every probe.
+    try:
+        from sqlalchemy import text as _sa_text
+        from app.db.session import engine as _db_engine
+
+        with _db_engine.connect() as _conn:
+            _conn.execute(_sa_text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001 — probe must surface any failure
+        checks["db"] = type(exc).__name__
+        failed = True
+        ready_logger.warning("ready_probe_db_failed exc=%s", type(exc).__name__)
+
+    # Redis probe — one-shot client at settings.redis_url. Construct fresh so
+    # we never starve the limiter's shared pool; tight socket timeouts so a
+    # genuinely-unreachable Redis returns 503 in ~1s rather than stalling the
+    # probe (and the deploy gate) for the OS connect timeout.
+    if settings.redis_url:
+        try:
+            import redis as _redis_pkg
+
+            _r = _redis_pkg.Redis.from_url(
+                settings.redis_url,
+                socket_connect_timeout=1.0,
+                socket_timeout=1.0,
+            )
+            try:
+                _r.ping()
+            finally:
+                try:
+                    _r.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            checks["redis"] = type(exc).__name__
+            failed = True
+            ready_logger.warning(
+                "ready_probe_redis_failed exc=%s", type(exc).__name__
+            )
+    else:
+        # No Redis configured (dev fallback to memory:// in the limiter).
+        # That's fine — readiness is still "ok" because the limiter and any
+        # other consumer will degrade gracefully. We label it explicitly so
+        # a probe reader can tell "Redis not configured" from "Redis ok".
+        checks["redis"] = "not_configured"
+
+    if failed:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "checks": checks},
+        )
+    return {"status": "ready", "checks": checks}
