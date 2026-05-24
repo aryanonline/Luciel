@@ -393,15 +393,30 @@ class TestSignupFreeLiveRouteOk:
 
 
 # ---------------------------------------------------------------------
-# 7. Live route -- captcha-soft-pass log fires when token omitted
+# 7. Live route -- missing captcha_token is hard-rejected (Pydantic 422)
 # ---------------------------------------------------------------------
 
 
 @_skip_no_psycopg
-class TestSignupFreeCaptchaSoftPassLog:
-    """When captcha_token is omitted in the Commit 8 window, the
-    route must emit a structured WARN log so we can audit-grep the
-    set of signups that bypassed the gate before Commit 9 lands.
+class TestSignupFreeCaptchaHardRequired:
+    """Arc 6 Commit 9 (2026-05-23) -- the Commit-8 soft-pass window
+    is closed. A request that omits ``captcha_token`` MUST bounce
+    with a Pydantic-level 422 BEFORE the route function executes;
+    the verify_captcha service call is never reached, no DB session
+    is touched, no log line is emitted by the handler.
+
+    Replaces the legacy ``TestSignupFreeCaptchaSoftPassLog`` which
+    asserted the (now-removed) WARN log that fired in the Commit-8
+    window. The soft-pass branch and its ``signup_free.captcha_soft_pass``
+    log line are deleted from the route source -- a regression on
+    that surface is pinned by test_arc6_commit9_captcha.py.
+
+    The ``_skip_no_psycopg`` gate matches the rest of the live-route
+    classes in this file: ``app.main`` import constructs the
+    SQLAlchemy engine eagerly and needs the psycopg DBAPI. Even
+    though Pydantic bounces the request before any DB write happens,
+    importing ``app.main`` to build the TestClient still requires
+    the engine to come up cleanly.
     """
 
     def _client(self):
@@ -410,59 +425,63 @@ class TestSignupFreeCaptchaSoftPassLog:
         from app.main import app
         return TestClient(app)
 
-    def test_missing_token_logs_soft_pass_warn(self, monkeypatch, caplog):
+    def test_missing_token_returns_422_validation_envelope(
+        self, monkeypatch, caplog,
+    ):
         from app.core.config import settings
-        from app.api.v1 import billing as billing_module
 
         monkeypatch.setattr(settings, "hcaptcha_secret_key", "stub-secret")
 
-        # Make the route fail fast AFTER the soft-pass log emits, so
-        # we can assert the log message without depending on the full
-        # mint chain. We do that by making the inline-imported
-        # OnboardingService raise -- the route handles ValueError by
-        # returning 409; any other exception bubbles to a 500 which
-        # is fine for this log-shape assertion.
-        class _FakeWebhookHelper:
-            def __init__(self, db):
-                self.db = db
-
-            def _resolve_or_create_user(self, *, email, display_name):
-                # Raise here so we never reach the Admin mint; the
-                # soft-pass log has already fired upstream.
-                raise RuntimeError("short-circuit-after-soft-pass-log")
-
-        from app.services import billing_webhook_service as bws_mod
-        monkeypatch.setattr(
-            bws_mod, "BillingWebhookService", _FakeWebhookHelper
-        )
-
         client = self._client()
         with caplog.at_level("WARNING"):
-            # The route raises 500 because of the RuntimeError short-
-            # circuit, but that is AFTER the soft-pass log emits.
-            try:
-                client.post(
-                    "/api/v1/billing/signup-free",
-                    json={
-                        "email": "bob@example.com",
-                        "display_name": "Bob",
-                        # captcha_token omitted -- soft-pass path
-                    },
-                )
-            except Exception:
-                # TestClient surfaces server-side exceptions; we only
-                # care about the log emitted before the exception.
-                pass
+            resp = client.post(
+                "/api/v1/billing/signup-free",
+                json={
+                    "email": "bob@example.com",
+                    "display_name": "Bob",
+                    # captcha_token omitted -- required in Commit 9
+                },
+            )
 
-        matched = [
+        # Pydantic-level 422 with the standard FastAPI envelope:
+        # {"detail": [{"loc": ["body", "captcha_token"], ...}, ...]}
+        assert resp.status_code == 422, resp.text
+        body = resp.json()
+        assert isinstance(body.get("detail"), list), body
+        locs = [tuple(err.get("loc", [])) for err in body["detail"]]
+        assert any(
+            "captcha_token" in loc for loc in locs
+        ), f"Expected captcha_token in 422 detail locs, got: {locs}"
+
+        # The legacy Commit-8 soft-pass WARN log MUST NOT fire any
+        # more -- the branch that emitted it is gone from the route.
+        soft_pass_lines = [
             r for r in caplog.records
             if "signup_free.captcha_soft_pass" in r.getMessage()
         ]
-        assert matched, (
-            "Expected a structured WARN log "
-            "'signup_free.captcha_soft_pass' when captcha_token is "
-            "omitted in the Commit 8 window."
+        assert not soft_pass_lines, (
+            "Commit-8 soft-pass WARN log should be REMOVED in Commit 9 "
+            f"but found: {[r.getMessage() for r in soft_pass_lines]}"
         )
+
+    def test_empty_token_returns_422_validation_envelope(self, monkeypatch):
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "hcaptcha_secret_key", "stub-secret")
+
+        client = self._client()
+        resp = client.post(
+            "/api/v1/billing/signup-free",
+            json={
+                "email": "bob@example.com",
+                "display_name": "Bob",
+                "captcha_token": "",
+            },
+        )
+        # min_length=1 violation -> Pydantic 422
+        assert resp.status_code == 422, resp.text
+        body = resp.json()
+        assert isinstance(body.get("detail"), list), body
 
 
 # ---------------------------------------------------------------------

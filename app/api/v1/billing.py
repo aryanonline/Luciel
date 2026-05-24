@@ -1117,11 +1117,14 @@ def logout() -> JSONResponse:
 # Flow (5 atomic steps under one OnboardingService transaction +
 # one TierProvisioning transaction):
 #
-#   1. (Soft-gate) Verify the hCaptcha token. Captcha is Optional
-#      during the Commit 8 -> Commit 9 sandbox window; Commit 9
-#      flips it back to required + lands the front-end widget +
-#      tightens one-per-email-and-IP accounting (closes
-#      D-free-tier-captcha-missing-2026-05-22).
+#   1. (Hard-gate, Arc 6 Commit 9) Verify the hCaptcha token. The
+#      token is required at the schema layer (Pydantic 422 if
+#      missing entirely); a present-but-invalid token returns 422
+#      from the route via CaptchaInvalidError; a missing server-side
+#      configuration returns 501. The Commit-8 soft-pass window is
+#      closed by this commit; production never serves /signup-free
+#      without a verified captcha. Closes
+#      D-free-tier-captcha-missing-2026-05-22 (P1).
 #   2. Resolve-or-create the User row by email.
 #   3. Mint a fresh admin_id ("free-<8hex>") and onboard the Admin
 #      with ``tier="free"`` + ``tier_source="free_signup"``.
@@ -1167,14 +1170,19 @@ async def signup_free(
       * 409 -- the email is already attached to an Admin ("one Admin
                per email" V2 invariant). Body carries a plain detail
                string for the marketing site to surface.
-      * 422 -- captcha verification failed when a token was provided
-               (token missing entirely is a Commit 8 soft-pass, see
-               schema docstring).
+      * 422 -- captcha verification failed. Two shapes: (a) the
+               Pydantic schema layer rejects a request body that
+               omits ``captcha_token`` entirely (schema-level 422
+               with the standard FastAPI validation envelope); (b)
+               the route handler rejects a present-but-invalid
+               token from hCaptcha (route-level 422 with
+               ``{message, error_codes}``).
       * 501 -- hCaptcha is not configured on this backend
-               (``settings.hcaptcha_secret_key`` is empty) AND a
-               token was provided. Boot-safe pattern: the backend
-               boots fine without hCaptcha; the route still works
-               when no token is sent.
+               (``settings.hcaptcha_secret_key`` is empty). Boot-safe
+               pattern: the backend boots fine without hCaptcha; the
+               route fails 501 (not 500) at request time so an ops
+               misconfiguration is debuggable from a single
+               structured log line + a clean client-side error.
     """
     # Pull the client IP from request.client for hCaptcha's risk
     # score. We deliberately do NOT trust X-Forwarded-For at this
@@ -1183,42 +1191,38 @@ async def signup_free(
     # the FastAPI app sees from the ALB-target uvicorn worker.
     remote_ip = request.client.host if request.client else None
 
-    # ----- 1. (Soft-gate) Captcha verification ------------------------------
+    # ----- 1. (Hard-gate) Captcha verification ------------------------------
     #
-    # Arc 6 Commit 8 window: captcha_token is Optional. If absent or
-    # empty, log a structured WARN and continue. Commit 9 flips this
-    # back to hard-required. The window is sandbox-only because
-    # Commit 10 is the deploy gate and Commit 9 ships first.
-    if body.captcha_token:
-        try:
-            await verify_captcha(body.captcha_token, remote_ip=remote_ip)
-        except CaptchaNotConfiguredError as exc:
-            logger.warning("signup_free.captcha_not_configured")
-            raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail=str(exc),
-            )
-        except CaptchaInvalidError as exc:
-            logger.info(
-                "signup_free.captcha_invalid error_codes=%s",
-                exc.error_codes,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "message": exc.message,
-                    "error_codes": exc.error_codes,
-                },
-            )
-    else:
-        # D-free-tier-captcha-missing-2026-05-22 -- intentionally
-        # logged loud at WARN so we can grep this window's signups
-        # in CloudWatch when Commit 9 lands and we audit the gap.
+    # Arc 6 Commit 9 (2026-05-23) -- the Commit-8 soft-pass branch is
+    # removed. `captcha_token` is required at the schema layer, so a
+    # missing/empty token is rejected as Pydantic 422 BEFORE this
+    # handler runs; the only paths to consider here are
+    # (verify success) -> fall through to mint; (CaptchaNotConfigured)
+    # -> 501; (CaptchaInvalid) -> 422 with structured error codes.
+    # Closes D-free-tier-captcha-missing-2026-05-22 (P1).
+    try:
+        await verify_captcha(body.captcha_token, remote_ip=remote_ip)
+    except CaptchaNotConfiguredError as exc:
         logger.warning(
-            "signup_free.captcha_soft_pass email=%s remote_ip=%s "
-            "window=commit-8-to-commit-9",
-            body.email,
+            "signup_free.captcha_not_configured remote_ip=%s",
             remote_ip or "unknown",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(exc),
+        )
+    except CaptchaInvalidError as exc:
+        logger.info(
+            "signup_free.captcha_invalid error_codes=%s remote_ip=%s",
+            exc.error_codes,
+            remote_ip or "unknown",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": exc.message,
+                "error_codes": exc.error_codes,
+            },
         )
 
     # ----- 2-5. Mint Admin + ScopeAssignment + Instance + email link ------

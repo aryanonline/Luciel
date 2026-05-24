@@ -545,20 +545,23 @@ class SignupFreeRequest(BaseModel):
         description="Display name carried onto the Admin row and the "
                     "welcome SES email.",
     )
-    # Arc 6 Commit 8 (2026-05-23) -- temporarily Optional during the
-    # commit-8 -> commit-9 window. Commit 8 wires the actual mint
-    # logic (Admin row, ScopeAssignment, Instance, magic-link email)
-    # and Commit 9 lands the hCaptcha widget on the marketing site +
-    # flips this back to required + tightens one-per-email-and-IP
-    # accounting (closes D-free-tier-captcha-missing-2026-05-22). The
-    # window is sandbox-only because Commit 10 is the deploy gate and
-    # Commit 9 ships before it; production never sees a captcha-less
-    # /signup-free.
-    captcha_token: str | None = Field(
-        default=None, min_length=0,
-        description="hCaptcha h-captcha-response token. Required at "
-                    "Commit 9 (currently Optional during sandbox-only "
-                    "unified-signup wire-up window).",
+    # Arc 6 Commit 9 (2026-05-23) -- hard-required. The Commit-8
+    # window where this field was Optional with a backend soft-pass
+    # is closed by this commit; Commit 9 ships the hCaptcha widget
+    # on the marketing site and flips this schema slot to required.
+    # Closes D-free-tier-captcha-missing-2026-05-22 (the P1 gate on
+    # the Free-tier launch). The IP-bucket accounting that the
+    # Commit-8 prose mentioned is deliberately deferred to a follow-up
+    # commit and tracked at D-free-tier-ip-bucket-deferred-2026-05-23
+    # -- the captcha plus the existing one-Admin-per-email collision
+    # at OnboardingService is the bot gate; the per-IP bucket is an
+    # anti-distributed-bot defense and is post-launch hardening.
+    captcha_token: str = Field(
+        ..., min_length=1,
+        description="hCaptcha h-captcha-response token from the front-end "
+                    "widget. Required (Arc 6 Commit 9). Verified "
+                    "server-side against api.hcaptcha.com/siteverify "
+                    "before any DB write.",
     )
 
 
