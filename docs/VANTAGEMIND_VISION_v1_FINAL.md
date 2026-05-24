@@ -444,10 +444,9 @@ These are decisions the founder still needs to lock. None block Arc 9 (tenant is
 
 This vision document is the canonical reference. The following downstream artifacts must remain consistent with it; when they diverge, this document wins:
 
-- `app/policy/entitlements.py` — tier entitlement matrix
-- `docs/CANONICAL_RECAP.md` — running history of doctrine commits
-- `docs/DRIFTS.md` — drift register
-- `arc8-out/arc8-commit6-e2e-test-plan.md` — E2E test plan (Arc 8 regression scope)
+- `docs/VANTAGEMIND_ARCHITECTURE_v1_FINAL.md` — the architecture downstream of this vision
+- `docs/VANTAGEMIND_CUSTOMER_JOURNEY_v1_FINAL.md` — the customer-facing journey downstream of this vision
+- `app/policy/entitlements.py` — tier entitlement matrix (live production code)
 - All future arc plans + deploy records
 
 **Amendment process:** Any change to this vision is a `VISION_v2` revision — never an in-place edit. v1 is preserved in git history as the founder-approved baseline.
