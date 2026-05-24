@@ -151,10 +151,14 @@ PRICE_ID_KEY: dict[tuple[str, str], str] = {
     #     CAD/mo) + `stripe_price_enterprise_annual` ($24,000 CAD/yr,
     #     28.6% annual discount matching Pro's ratio). The (enterprise,
     #     monthly) 400 reject at app/api/v1/billing.py is REMOVED in the
-    #     same commit. Rate-limit ceilings + leads_per_month_cap +
-    #     instance_count_cap are now the entitlement gates that separate
-    #     Pro from Enterprise — see app/policy/entitlements.py TIER_*
-    #     rows and the (Arc 7 WU-2) rate-limit middleware wiring.
+    #     same commit. Rate-limit ceilings (api_rate_limit_rpm,
+    #     Arc 7 Commit 4 tier-aware middleware) + instance_count_cap +
+    #     embed_key_count_cap are now the entitlement gates that
+    #     separate Pro from Enterprise — see app/policy/entitlements.py
+    #     TIER_* rows. ``leads_per_month_cap`` was retired entirely at
+    #     Arc 7 Commit 5 (2026-05-24); rate-limit is the abuse boundary
+    #     and a monthly count cap on a flat-recurring customer punishes
+    #     success without protecting any surface RPM does not already.
     #
     # If a future tier is added: add a row here and a parallel
     # ``stripe_price_*`` field on ``Settings``. No code change in

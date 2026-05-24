@@ -156,11 +156,15 @@ class Settings(BaseSettings):
     # Enterprise is now FLAT-recurring symmetric with Pro; hybrid /
     # metered-overage shape RETIRED by doctrine change 2026-05-24,
     # closes D-enterprise-metering-not-implemented-2026-05-22 as
-    # retired-not-shipped; rate-limit ceilings + leads_per_month_cap
-    # are now the entitlement gates that separate the tiers, per
-    # partner direction: "Since we have abuse limits for each tier I
-    # don't think we need to include the metering option for
-    # enterprise."):
+    # retired-not-shipped; rate-limit ceilings (api_rate_limit_rpm,
+    # Arc 7 Commit 4 tier-aware middleware) are the entitlement gates
+    # that separate the tiers, per partner direction: "Since we have
+    # abuse limits for each tier I don't think we need to include the
+    # metering option for enterprise." The earlier ``leads_per_month_cap``
+    # field was retired entirely at Arc 7 Commit 5 (2026-05-24) for the
+    # same reason -- rate is the abuse boundary, and a monthly count
+    # cap on a flat-recurring customer punishes success without
+    # protecting any surface rate-limiting does not already cover.):
     #   Free        — $0 CAD, CAPTCHA-gated signup, no Stripe row at all.
     #   Pro         — flat-rate self-serve. $349 CAD/mo or $2,990 CAD/yr
     #                 (~28% annual discount). Stripe Checkout via

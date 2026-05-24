@@ -88,8 +88,21 @@ class TierEntitlement:
     # Axis 1 -- Instance count
     instance_count_cap: int | None
 
-    # Axis 2 -- Leads per month (per Admin, summed across all Instances)
-    leads_per_month_cap: int | None
+    # Axis 2 (Leads per month) RETIRED at Arc 7 Commit 5 (2026-05-24).
+    # The previous ``leads_per_month_cap`` field was a metering ghost from
+    # the pre-Arc-7 hybrid doctrine: under Arc 7's flat-recurring pivot we
+    # bill a fixed monthly/annual price and never meter, so a monthly lead
+    # count carries no billing meaning. The abuse surface it nominally
+    # addressed (someone hammering the capture endpoint) is already closed
+    # by ``api_rate_limit_rpm`` (Arc 7 Commit 4 tier-aware middleware): a
+    # Free admin tops out at 30 rpm, Pro at 300 rpm, Enterprise at
+    # 3,000 rpm -- rate is the boundary; monthly count is a value lever we
+    # never actually wanted to lever (capping a paying customer for
+    # converting well is anti-value). See Arc 7 doctrine note in
+    # ``arc7-out/arc7-commit5-leads-cap-retirement-record.md``. The
+    # corresponding ``admin_tier_overrides.leads_per_month_override``
+    # column also stops being read by code post-C5 (deferred drop to keep
+    # this commit code-only; alembic drop lands at Arc 8 schema sweep).
 
     # Axis 3 -- Model tier per Instance ("base" / "mid" / "top")
     model_tier_default: str
@@ -168,7 +181,6 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         # 2026-05-23 revision: leads 10\u2192100, API disabled\u2192enabled at
         # 30rpm, embed keys 0\u21921 (more generous Free per Option A).
         instance_count_cap=1,
-        leads_per_month_cap=100,
         model_tier_default="base",
         composition_enabled=False,
         max_composition_depth=0,
@@ -198,7 +210,6 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         # expansion per Option A; opens
         # D-pro-tier-rate-limit-abuse-surface-2026-05-23 P1).
         instance_count_cap=10,
-        leads_per_month_cap=5000,
         model_tier_default="mid",
         composition_enabled=True,
         max_composition_depth=2,
@@ -228,15 +239,17 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         # 2026-05-24 Arc 7 doctrine pivot: Enterprise is now FLAT-recurring
         # symmetric with Pro (monthly $2,800 CAD or annual $24,000 CAD,
         # self-serve via Stripe Checkout). Metering RETIRED -- abuse-prevention
-        # caps (leads_per_month_cap=50000, api_rate_limit_rpm=3000,
-        # embed_key_count_cap=100, instance_count_cap=None=unlimited)
-        # replace the previous unlimited+metered shape. Overflow beyond
-        # 50k leads/month routes to enterprise_overflow_archive (Commit 5)
-        # rather than billing a metered charge. Every field below remains
-        # overrideable per-Admin via admin_tier_overrides (Arc 5 Revision A)
-        # for sales-negotiated contracts above the self-serve ceiling.
+        # caps (api_rate_limit_rpm=3000, embed_key_count_cap=100,
+        # instance_count_cap=None=unlimited) replace the previous
+        # unlimited+metered shape. Arc 7 Commit 5 (2026-05-24) further
+        # retired the leads_per_month_cap field entirely: rate-limit
+        # middleware (Commit 4) is the abuse boundary, and a monthly
+        # business-metric cap on a flat-recurring customer punishes
+        # success without protecting anything new. Every field below
+        # remains overrideable per-Admin via admin_tier_overrides
+        # (Arc 5 Revision A) for sales-negotiated contracts above the
+        # self-serve ceiling.
         instance_count_cap=None,  # unlimited (self-serve default; override per contract)
-        leads_per_month_cap=50000,  # Arc 7 abuse cap; overflow -> archive, no metering
         model_tier_default="top",
         composition_enabled=True,
         max_composition_depth=None,  # unlimited
