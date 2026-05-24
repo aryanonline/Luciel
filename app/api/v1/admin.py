@@ -76,9 +76,8 @@ from app.api.deps import DbSession, get_ingestion_service
 from app.knowledge.ingestion import IngestionService
 from app.middleware.rate_limit import (
     limiter,
-    get_api_key_or_ip,
-    ADMIN_RATE_LIMIT,
-    KNOWLEDGE_UPLOAD_RATE_LIMIT,
+    get_tier_aware_key,
+    get_tier_rate_limit_for_key,
 )
 from app.schemas.admin import (
     AgentConfigCreate,
@@ -140,7 +139,7 @@ def _load_active_instance(
     response_model=TenantOnboardResponse,
     status_code=status.HTTP_201_CREATED,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def onboard_tenant(
     request: Request,
     payload: TenantOnboardRequest,
@@ -252,7 +251,7 @@ def onboard_tenant(
     )
 
 @router.post("/tenants", response_model=TenantConfigRead, status_code=status.HTTP_201_CREATED)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def create_tenant(
     request: Request,
     payload: TenantConfigCreate,
@@ -275,7 +274,7 @@ def create_tenant(
 
 
 @router.get("/tenants", response_model=list[TenantConfigRead])
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_tenants(
     request: Request,
     db: DbSession,
@@ -291,7 +290,7 @@ def list_tenants(
 
 
 @router.get("/tenants/{tenant_id}", response_model=TenantConfigRead)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_tenant(
     request: Request,
     tenant_id: str,
@@ -309,7 +308,7 @@ def get_tenant(
 
 
 @router.patch("/tenants/{tenant_id}", response_model=TenantConfigRead)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def update_tenant(
     request: Request,
     tenant_id: str,
@@ -360,7 +359,7 @@ def update_tenant(
 
 
 @router.post("/knowledge/ingest", response_model=KnowledgeIngestResponse)
-@limiter.limit(KNOWLEDGE_UPLOAD_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def ingest_knowledge(
     request: Request,
     payload: KnowledgeIngestRequest,
@@ -425,7 +424,7 @@ def ingest_knowledge(
 
 
 @router.post("/api-keys", response_model=ApiKeyCreateResponse, status_code=status.HTTP_201_CREATED)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def create_api_key(
     request: Request,
     payload: ApiKeyCreate,
@@ -511,7 +510,7 @@ def create_api_key(
 
 
 @router.get("/api-keys", response_model=list[ApiKeyRead])
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_api_keys(
     request: Request,
     db: DbSession,
@@ -574,7 +573,7 @@ def list_api_keys(
     response_model=EmbedKeyCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def create_embed_key(
     request: Request,
     payload: EmbedKeyCreate,
@@ -784,7 +783,7 @@ def create_embed_key(
 
 
 @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def deactivate_api_key(
     request: Request,
     key_id: int,
@@ -849,7 +848,7 @@ def deactivate_api_key(
 # =====================================================================
 
 @router.get("/memory-items", response_model=list[MemoryRead])
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_memory_items(
     request: Request,
     db: DbSession,
@@ -879,7 +878,7 @@ def list_memory_items(
 
 
 @router.delete("/memory-items/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def deactivate_memory_item(
     request: Request,
     memory_id: int,
@@ -909,7 +908,7 @@ def deactivate_memory_item(
     response_model=LucielInstanceRead,
     status_code=status.HTTP_201_CREATED,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def create_luciel_instance(
     request: Request,
     payload: LucielInstanceCreate,
@@ -1265,7 +1264,7 @@ def revoke_invite_route(
     "/instances",
     response_model=list[LucielInstanceRead],
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_luciel_instances(
     request: Request,
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
@@ -1309,7 +1308,7 @@ def list_luciel_instances(
     "/instances/{pk}",
     response_model=LucielInstanceRead,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_luciel_instance(
     request: Request,
     pk: int,
@@ -1326,7 +1325,7 @@ def get_luciel_instance(
     "/instances/{pk}",
     response_model=LucielInstanceRead,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def update_luciel_instance(
     request: Request,
     pk: int,
@@ -1351,7 +1350,7 @@ def update_luciel_instance(
     "/instances/{pk}",
     response_model=LucielInstanceRead,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def deactivate_luciel_instance(
     request: Request,
     pk: int,
@@ -1432,7 +1431,7 @@ def deactivate_luciel_instance(
     "/instances/{instance_id}/chunking-config",
     response_model=kschemas.EffectiveChunkingConfigRead,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_effective_chunking_config(
     request: Request,
     instance_id: int,
@@ -1465,7 +1464,7 @@ def get_effective_chunking_config(
     response_model=kschemas.KnowledgeSourceRead,
     status_code=status.HTTP_201_CREATED,
 )
-@limiter.limit(KNOWLEDGE_UPLOAD_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 async def upload_knowledge_file(
     request: Request,
     instance_id: int,
@@ -1568,7 +1567,7 @@ async def upload_knowledge_file(
     response_model=kschemas.KnowledgeSourceRead,
     status_code=status.HTTP_201_CREATED,
 )
-@limiter.limit(KNOWLEDGE_UPLOAD_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def ingest_knowledge_text(
     request: Request,
     instance_id: int,
@@ -1650,7 +1649,7 @@ def ingest_knowledge_text(
     "/instances/{instance_id}/knowledge",
     response_model=kschemas.KnowledgeListResponse,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_knowledge_sources(
     request: Request,
     instance_id: int,
@@ -1682,7 +1681,7 @@ def list_knowledge_sources(
 @router.get(
     "/instances/{instance_id}/knowledge/{source_id}",
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_knowledge_source(
     request: Request,
     instance_id: int,
@@ -1732,7 +1731,7 @@ def get_knowledge_source(
     "/instances/{instance_id}/knowledge/{source_id}",
     response_model=kschemas.KnowledgeDeleteResponse,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def delete_knowledge_source(
     request: Request,
     instance_id: int,
@@ -1782,7 +1781,7 @@ def delete_knowledge_source(
     "/instances/{instance_id}/knowledge/{source_id}",
     response_model=kschemas.KnowledgeSourceRead,
 )
-@limiter.limit(KNOWLEDGE_UPLOAD_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def replace_knowledge_source_text(
     request: Request,
     instance_id: int,
@@ -1876,7 +1875,7 @@ _logger_27b = _logging_27b.getLogger(__name__)
 
 
 @router.get("/worker/queue-depth")
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_worker_queue_depth(
     request: Request,
     main_queue_name: str = Query(
@@ -2077,7 +2076,7 @@ def _resolve_actor_p2c12(
     response_model=_ScopeAssignmentRead_p2c12,
     status_code=status.HTTP_201_CREATED,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def create_scope_assignment_p2c12(
     request: Request,
     body: _ScopeAssignmentCreatePayload_p2c12,
@@ -2119,7 +2118,7 @@ def create_scope_assignment_p2c12(
     "/scope-assignments/{assignment_id}",
     response_model=_ScopeAssignmentRead_p2c12,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_scope_assignment_p2c12(
     request: Request,
     assignment_id: _uuid_p2c12.UUID,
@@ -2148,7 +2147,7 @@ def get_scope_assignment_p2c12(
     "/scope-assignments/{assignment_id}/end",
     response_model=_ScopeAssignmentRead_p2c12,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def end_scope_assignment_p2c12(
     request: Request,
     assignment_id: _uuid_p2c12.UUID,
@@ -2190,7 +2189,7 @@ def end_scope_assignment_p2c12(
     "/scope-assignments/promote",
     response_model=dict,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def promote_scope_assignment_p2c12(
     request: Request,
     body: _ScopeAssignmentPromotePayload_p2c12,
@@ -2255,7 +2254,7 @@ def promote_scope_assignment_p2c12(
     "/users/{user_id}/deactivate",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def deactivate_user_p2c12(
     request: Request,
     user_id: _uuid_p2c12.UUID,

@@ -336,7 +336,7 @@ def test_g6_teardown_integrity_has_rate_limit():
     )
     assert _has_rate_limit(fn), (
         "G-6: GET /admin/verification/teardown-integrity must carry "
-        "@limiter.limit(ADMIN_RATE_LIMIT). Without it, a misconfigured "
+        "@limiter.limit(get_tier_rate_limit_for_key). Without it, a misconfigured "
         "platform_admin key (or a runaway verify harness) can DoS the "
         "database by polling N COUNT(*) queries unboundedly."
     )

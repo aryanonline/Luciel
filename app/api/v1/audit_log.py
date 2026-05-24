@@ -50,9 +50,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.api.deps import get_admin_audit_repository
 from app.middleware.rate_limit import (
-    ADMIN_RATE_LIMIT,
-    get_api_key_or_ip,
     limiter,
+    get_tier_aware_key,
+    get_tier_rate_limit_for_key,
 )
 from app.models.admin_audit_log import (
     ALLOWED_ACTIONS,
@@ -275,7 +275,7 @@ def _validate_resource_types(resource_types: Iterable[str] | None) -> tuple[str,
 # ---------------------------------------------------------------------
 
 @router.get("", response_model=AdminAuditLogPage)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_audit_log(
     request: Request,
     repo: Annotated[AdminAuditRepository, Depends(get_admin_audit_repository)],
@@ -359,7 +359,7 @@ def list_audit_log(
     "/resource/{resource_type}/{resource_pk}",
     response_model=list[AdminAuditLogRead],
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_audit_log_for_resource(
     request: Request,
     resource_type: str,
@@ -422,7 +422,7 @@ def list_audit_log_for_resource(
     "/actor/{actor_key_prefix}",
     response_model=list[AdminAuditLogRead],
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_audit_log_for_actor(
     request: Request,
     actor_key_prefix: str,

@@ -3,14 +3,127 @@ from __future__ import annotations
 import logging
 import os
 import time
+from typing import Optional
 
 from slowapi import Limiter
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app.core.config import settings
+from app.policy.entitlements import (
+    ALL_TIERS_V2,
+    TIER_FREE,
+    resolve_entitlement,
+)
 
 logger = logging.getLogger("luciel.ratelimit")
+
+# Arc 7 Commit 4 (WU-2): tier-aware rate limiting.
+#
+# Pre-Arc-7 the limiter ran on three hard-coded fixed strings
+# (CHAT_RATE_LIMIT="20/minute", ADMIN_RATE_LIMIT="30/minute",
+# KNOWLEDGE_UPLOAD_RATE_LIMIT="10/minute") that were the same for
+# every tier, so the founder-locked Option-A api_rate_limit_rpm axis
+# (Free=30, Pro=300, Enterprise=3000) at
+# ``app/policy/entitlements.py`` was decorative -- it appeared in the
+# matrix but nothing read it. Path A doctrine ("whatever we ship out
+# in our code and prod and schema must be aligned with this vision")
+# requires that the value Pro buyers pay for ACTUALLY apply.
+#
+# The wiring works because ApiKeyAuthMiddleware runs ahead of the
+# route's ``@limiter.limit(...)`` decorator (the decorator fires
+# inside the route, after auth has populated request.state). So the
+# key-func + limit-provider pair can both read request.state.tenant_id
+# (== admin_id) and request.state.luciel_instance_id to form a
+# per-(admin, instance) Redis bucket -- tenant cross-talk is
+# impossible and one Instance going hot doesn't starve sibling
+# Instances of the same Admin.
+#
+# SlowAPI's LimitGroup invokes the limit_provider callable with the
+# result of key_func(request) if the callable's signature has a
+# ``key`` parameter, else with no args. We encode the tier into the
+# key (``tier:{tier}:admin:{admin_id}:inst:{inst_id}``) and parse it
+# back in the limit provider -- one cached DB hit per request gets
+# reused for both the bucket key and the cap lookup.
+#
+# Failure posture (fail-safe to Free=30rpm):
+#   * No admin context (anonymous, widget, health) -> ``ip:{ip}`` key,
+#     30rpm cap. The widget has its own EMBED_WIDGET_RATE_LIMIT path
+#     in app/api/widget_deps.py and is not touched here.
+#   * Admin tier lookup raises -> log warning + treat as Free. We do
+#     NOT silently apply the highest cap; an unknown caller is the
+#     LEAST trustworthy, not the MOST.
+#   * Cache stale -> 60s TTL on the admin->tier map means a tier
+#     upgrade is visible inside one minute. Buyers who just upgraded
+#     may see one minute of the lower cap; that's an acceptable
+#     trade for keeping the DB hit off the hot path.
+_ADMIN_TIER_CACHE_TTL_SECONDS = 60.0
+_ADMIN_TIER_CACHE_MAX_ENTRIES = 4096
+# {admin_id: (tier, expires_at_monotonic)}
+_admin_tier_cache: dict[str, tuple[str, float]] = {}
+
+
+def _lookup_admin_tier(admin_id: str) -> str:
+    """Resolve admin_id -> tier with 60s LRU+TTL cache.
+
+    Fail-safe: any exception (DB down, admin row missing, unknown
+    tier value) returns ``TIER_FREE`` so the caller is held to the
+    most restrictive cap rather than the most permissive.
+    """
+    now = time.monotonic()
+    cached = _admin_tier_cache.get(admin_id)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+
+    # Cheap eviction: if the cache grew past the max, drop the
+    # oldest-expiring entry. This keeps memory bounded without
+    # importing a heavier LRU.
+    if len(_admin_tier_cache) >= _ADMIN_TIER_CACHE_MAX_ENTRIES:
+        try:
+            stale_key = min(_admin_tier_cache, key=lambda k: _admin_tier_cache[k][1])
+            _admin_tier_cache.pop(stale_key, None)
+        except ValueError:
+            pass
+
+    tier = TIER_FREE
+    try:
+        # Lazy import: this module is imported at app boot, but
+        # SessionLocal needs the DB engine, which is built from
+        # settings -- avoid the circular by deferring to call-time.
+        from app.db.session import SessionLocal
+        from app.models.admin import Admin
+
+        db = SessionLocal()
+        try:
+            row = db.get(Admin, admin_id)
+            if row is not None and row.tier in ALL_TIERS_V2:
+                tier = row.tier
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "tier-lookup failed for admin_id=%s falling back to free: %s",
+            admin_id, exc,
+        )
+        tier = TIER_FREE
+
+    _admin_tier_cache[admin_id] = (tier, now + _ADMIN_TIER_CACHE_TTL_SECONDS)
+    return tier
+
+
+def _reset_admin_tier_cache() -> None:
+    """Test hook -- flush the in-process tier cache.
+
+    Tests that mutate admin tiers in the same process need to
+    invalidate the cache between assertions; production callers
+    must NOT use this -- the 60s TTL is the only correct
+    invalidation path so we never read stale across processes.
+    """
+    _admin_tier_cache.clear()
 
 # Step 29.y Cluster 5 (B-1): correct env-var name. Pre-29.y this
 # read os.getenv("REDISURL") (no underscore), which silently
@@ -68,10 +181,37 @@ else:
 logger.info("Rate limit storage: %s", storage_note)
 
 
-def get_api_key_or_ip(request: Request) -> str:
+def _client_ip(request: Request) -> str:
+    """Extract the best-available caller IP for anonymous buckets.
+
+    Prefers the X-Forwarded-For first hop (ALB injects this), falls
+    back to the direct client host, and finally to the literal
+    ``unknown`` sentinel so the bucket key remains a well-defined
+    string even when neither header is present (test client / unit
+    tests).
     """
-    Identify the caller by API key if present, otherwise by IP address.
-    This keeps tenant limits fair even when multiple users share one IP.
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        first = forwarded_for.split(",")[0].strip()
+        if first:
+            return first
+    client = getattr(request, "client", None)
+    if client and client.host:
+        return client.host
+    return "unknown"
+
+
+def get_api_key_or_ip(request: Request) -> str:
+    """Legacy key-func -- caller by raw API key, else by IP.
+
+    Retained for the embed-widget path in ``app/api/v1/chat_widget.py``
+    (its rate-limit is the per-embed-key ``rate_limit_per_minute``
+    column, enforced separately from the tier matrix) and for any
+    future caller that genuinely wants the raw-key bucket. All admin
+    + chat routes have moved to :func:`get_tier_aware_key` below,
+    which encodes tier + admin + instance into the bucket name so
+    SlowAPI's limit-provider can recover the cap without an extra
+    DB round-trip.
     """
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -83,15 +223,83 @@ def get_api_key_or_ip(request: Request) -> str:
     if x_api_key:
         return x_api_key
 
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+    return _client_ip(request)
 
-    client = getattr(request, "client", None)
-    if client and client.host:
-        return client.host
 
-    return "unknown"
+def get_tier_aware_key(request: Request) -> str:
+    """Compose the tier-aware Redis bucket key for one request.
+
+    Shape: ``tier:{tier}:admin:{admin_id}:inst:{instance_id|none}``
+    when ``request.state.tenant_id`` is populated by
+    ``ApiKeyAuthMiddleware`` (or ``SessionCookieAuthMiddleware``).
+
+    Shape: ``ip:{ip}`` when the request is unauthenticated -- this is
+    the anonymous-bucket lane that gets the Free=30rpm cap from
+    :func:`get_tier_rate_limit_for_key`. We deliberately do NOT fall
+    back to the raw API key here even when ``Authorization: Bearer
+    ...`` is present but state is unpopulated: that state-unpopulated
+    code path means auth has not run yet, which means we have NO
+    proof the key is valid -- bucketing by an unvalidated string
+    would let a single attacker rotate forged keys to dodge the cap.
+    The IP bucket is the strictly safer fallback.
+
+    Per-instance isolation: an Enterprise admin running 50 Instances
+    gets 50 independent 3000rpm buckets, not one shared 3000rpm cap.
+    This matches the Option-A founder-lock that
+    ``instance_count_cap=None`` means "unlimited" -- if all 50
+    Instances shared a single cap, the seller's promise breaks the
+    moment two Instances burst at the same time. Per-instance also
+    closes the noisy-neighbour drift
+    (D-pro-tier-rate-limit-abuse-surface-2026-05-23) called out in
+    the Pro entitlement comment: one buggy Instance can no longer
+    starve siblings under the same Admin.
+    """
+    state = getattr(request, "state", None)
+    tenant_id = getattr(state, "tenant_id", None) if state is not None else None
+    if not tenant_id:
+        return f"ip:{_client_ip(request)}"
+
+    instance_id = getattr(state, "luciel_instance_id", None) if state is not None else None
+    tier = _lookup_admin_tier(str(tenant_id))
+    inst_part = str(instance_id) if instance_id is not None else "none"
+    return f"tier:{tier}:admin:{tenant_id}:inst:{inst_part}"
+
+
+def get_tier_rate_limit_for_key(key: str) -> str:
+    """SlowAPI limit-provider -- compute the per-minute cap from the key.
+
+    The key string is whatever :func:`get_tier_aware_key` returned
+    for this request. We parse the ``tier:`` prefix back out so we
+    don't pay another DB hit; the cap value comes straight from
+    :func:`resolve_entitlement` on the ``api_rate_limit_rpm`` axis,
+    which means a future change to the founder-locked numbers (e.g.
+    a Pro upsell) automatically propagates here with no edit to this
+    file.
+
+    Anonymous bucket (``ip:...`` keys) falls through to Free=30rpm.
+    Malformed keys (shouldn't happen, but defence in depth) also map
+    to Free=30rpm rather than raising -- a 429 is a worse user
+    experience than a 500, but a 500 from the limit-provider is a
+    catastrophic outage because every authenticated request burns on
+    the same code path.
+    """
+    tier = TIER_FREE
+    if isinstance(key, str) and key.startswith("tier:"):
+        # ``tier:{tier}:admin:...`` -- second segment is the tier.
+        parts = key.split(":", 2)
+        if len(parts) >= 2 and parts[1] in ALL_TIERS_V2:
+            tier = parts[1]
+
+    try:
+        rpm = resolve_entitlement(tier=tier, axis="api_rate_limit_rpm")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "entitlement lookup failed for tier=%s falling back to free: %s",
+            tier, exc,
+        )
+        rpm = resolve_entitlement(tier=TIER_FREE, axis="api_rate_limit_rpm")
+
+    return f"{int(rpm)}/minute"
 
 
 # Step 29.y Cluster 5 (B-1): in_memory_fallback_enabled lets SlowAPI
@@ -101,17 +309,41 @@ def get_api_key_or_ip(request: Request) -> str:
 # instead of cluster-wide) rather than 500ing every request. Writes
 # are handled separately by the fallback middleware below, which
 # returns 503 so write quota integrity is preserved.
+# Arc 7 Commit 4 (WU-2): the limiter's default key-func is now the
+# tier-aware composer. Routes that pass an explicit ``key_func=...``
+# to ``@limiter.limit(...)`` (currently only the embed-widget path
+# in chat_widget.py, which uses ``get_api_key_or_ip``) keep their
+# bucket shape. The default-limits string remains the pre-Arc-7
+# 60/minute floor and applies ONLY to routes with no explicit
+# ``@limiter.limit`` decorator -- there are none on the admin/chat
+# surfaces today, but the value is kept conservative as a defence
+# in case a future route gets added without an explicit decorator.
 limiter = Limiter(
-    key_func=get_api_key_or_ip,
+    key_func=get_tier_aware_key,
     default_limits=["60/minute"],
     storage_uri=storage_uri,
     storage_options=storage_options,
     in_memory_fallback_enabled=True,
 )
 
-CHAT_RATE_LIMIT = "20/minute"
-KNOWLEDGE_UPLOAD_RATE_LIMIT = "10/minute"
-ADMIN_RATE_LIMIT = "30/minute"
+# Pre-Arc-7 static rate-limit constants RETIRED at Arc 7 Commit 4
+# (2026-05-24). Every admin + chat route now decorates with
+# ``@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)``
+# which resolves the cap from the founder-locked
+# ``api_rate_limit_rpm`` axis (Free=30, Pro=300, Enterprise=3000)
+# at request time. Path A doctrine forbids keeping the fixed
+# strings as aliases -- a stale constant is a foot-gun the next
+# time someone decorates a new route.
+#
+#   CHAT_RATE_LIMIT             (was "20/minute")  -> retired
+#   KNOWLEDGE_UPLOAD_RATE_LIMIT (was "10/minute")  -> retired
+#   ADMIN_RATE_LIMIT            (was "30/minute")  -> retired
+#
+# The widget surface keeps its own ``EMBED_WIDGET_RATE_LIMIT`` in
+# ``app/api/widget_deps.py`` because that path enforces the
+# per-embed-key ``rate_limit_per_minute`` column, which is a
+# different abstraction (admin sets the cap when they mint the
+# embed key) and is not driven by the tier matrix.
 
 # Step 29.y Cluster 5 (B-1): write methods fail CLOSED when the
 # rate-limit backend bubbles an exception that escapes the

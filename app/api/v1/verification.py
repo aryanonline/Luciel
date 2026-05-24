@@ -31,9 +31,9 @@ from sqlalchemy import inspect, text
 
 from app.api.deps import DbSession
 from app.middleware.rate_limit import (
-    ADMIN_RATE_LIMIT,
-    get_api_key_or_ip,
     limiter,
+    get_tier_aware_key,
+    get_tier_rate_limit_for_key,
 )
 
 
@@ -95,7 +95,7 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
 # harness in a runaway loop) could DoS the database. Same ADMIN_RATE_LIMIT
 # bucket as every other admin diagnostic route.
 @router.get("/teardown-integrity")
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def teardown_integrity(
     request: Request,
     db: DbSession,

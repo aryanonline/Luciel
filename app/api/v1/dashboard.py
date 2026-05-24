@@ -85,9 +85,9 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession
 from app.middleware.rate_limit import (
-    ADMIN_RATE_LIMIT,
-    get_api_key_or_ip,
     limiter,
+    get_tier_aware_key,
+    get_tier_rate_limit_for_key,
 )
 from app.policy.scope import ScopePolicy
 from app.services.dashboard_service import DashboardService
@@ -181,7 +181,7 @@ def _to_envelope(result: Any) -> dict[str, Any]:
 
 
 @router.get("/tenant")
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_tenant_dashboard(
     request: Request,
     service: DashboardServiceDep,
@@ -213,7 +213,7 @@ def get_tenant_dashboard(
 
 
 @router.get("/domain/{domain_id}")
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_domain_dashboard(
     request: Request,
     domain_id: str,
@@ -241,7 +241,7 @@ def get_domain_dashboard(
 
 
 @router.get("/agent/{agent_id}")
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_agent_dashboard(
     request: Request,
     agent_id: str,

@@ -197,10 +197,16 @@ class TestEndpointWiring:
 
 
 class TestRateLimit:
-    """Every handler must carry the @limiter.limit(ADMIN_RATE_LIMIT, ...)
-    decorator. Dashboards share the admin rate-limit envelope -- 30/min.
-    A missing decorator silently uplifts the per-handler ceiling to no
-    limit at all.
+    """Every handler must carry the tier-aware ``@limiter.limit`` decorator.
+
+    Pre-Arc-7 the dashboards shared a fixed ``ADMIN_RATE_LIMIT="30/minute"``
+    envelope; at Arc 7 Commit 4 (WU-2) every admin/chat decorator was
+    rewritten to call ``get_tier_rate_limit_for_key`` so the cap is
+    resolved from the founder-locked ``api_rate_limit_rpm`` axis
+    (Free=30, Pro=300, Enterprise=3000 rpm) at request time. A missing
+    decorator still silently uplifts the per-handler ceiling to no
+    limit at all, so we keep the structural lock here -- only the
+    expected first-arg name moved.
     """
 
     def _has_limiter(self, fn: ast.FunctionDef) -> bool:
@@ -214,9 +220,12 @@ class TestRateLimit:
                 and isinstance(f.value, ast.Name)
                 and f.value.id == "limiter"
             ):
-                # Must reference ADMIN_RATE_LIMIT, not a hard-coded string.
+                # Arc 7 Commit 4 (WU-2): must reference the dynamic
+                # tier-aware limit provider, not a hard-coded string.
+                # The pre-Arc-7 sentinel was ``ADMIN_RATE_LIMIT``; the
+                # new sentinel is ``get_tier_rate_limit_for_key``.
                 if deco.args and isinstance(deco.args[0], ast.Name):
-                    if deco.args[0].id == "ADMIN_RATE_LIMIT":
+                    if deco.args[0].id == "get_tier_rate_limit_for_key":
                         return True
         return False
 

@@ -57,10 +57,9 @@ from app.repositories.admin_audit_repository import (
     AuditContext,
 )
 from app.middleware.rate_limit import (
-    ADMIN_RATE_LIMIT,
-    CHAT_RATE_LIMIT,
-    get_api_key_or_ip,
     limiter,
+    get_tier_aware_key,
+    get_tier_rate_limit_for_key,
 )
 from app.models.admin_audit_log import (
     ACTION_CONSENT_GRANT,
@@ -138,7 +137,7 @@ def _resolve_tenant_id(request: Request, body_tenant_id: str | None) -> str:
 
 
 @router.post("/grant", response_model=ConsentActionResponse)
-@limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def grant_consent(
     request: Request,
     body: ConsentGrantRequest,
@@ -212,7 +211,7 @@ def grant_consent(
 
 
 @router.post("/withdraw", response_model=ConsentActionResponse)
-@limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def withdraw_consent(
     request: Request,
     body: ConsentWithdrawRequest,
@@ -273,7 +272,7 @@ def withdraw_consent(
 
 
 @router.get("/status", response_model=ConsentStatusResponse)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def consent_status(
     request: Request,
     user_id: Annotated[str, Query(min_length=1, max_length=200)],

@@ -41,9 +41,9 @@ from app.api.deps import (
     get_audit_context,
 )
 from app.middleware.rate_limit import (
-    ADMIN_RATE_LIMIT,
-    get_api_key_or_ip,
     limiter,
+    get_tier_aware_key,
+    get_tier_rate_limit_for_key,
 )
 from app.models.admin_audit_log import (
     ACTION_CREATE,
@@ -171,7 +171,7 @@ def _policy_snapshot(policy: RetentionPolicy) -> dict[str, Any]:
     response_model=RetentionPolicyRead,
     status_code=status.HTTP_201_CREATED,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def create_policy(
     request: Request,
     payload: RetentionPolicyCreate,
@@ -244,7 +244,7 @@ def create_policy(
 
 
 @router.get("/policies", response_model=list[RetentionPolicyRead])
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_policies(
     request: Request,
     db: DbSession,
@@ -257,7 +257,7 @@ def list_policies(
 
 
 @router.get("/policies/{policy_id}", response_model=RetentionPolicyRead)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_policy(
     request: Request,
     policy_id: int,
@@ -269,7 +269,7 @@ def get_policy(
 
 
 @router.patch("/policies/{policy_id}", response_model=RetentionPolicyRead)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def update_policy(
     request: Request,
     policy_id: int,
@@ -320,7 +320,7 @@ def update_policy(
     "/policies/{policy_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def delete_policy(
     request: Request,
     policy_id: int,
@@ -362,7 +362,7 @@ def delete_policy(
 
 
 @router.get("/logs", response_model=list[DeletionLogRead])
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_logs(
     request: Request,
     db: DbSession,
@@ -384,7 +384,7 @@ def list_logs(
 
 
 @router.post("/enforce", response_model=list[EnforceResult])
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def enforce_policies(
     request: Request,
     db: DbSession,
@@ -441,7 +441,7 @@ def enforce_policies(
 
 
 @router.post("/purge", response_model=EnforceResult)
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def manual_purge(
     request: Request,
     payload: ManualPurgeRequest,

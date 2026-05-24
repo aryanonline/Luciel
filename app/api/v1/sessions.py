@@ -45,10 +45,9 @@ from app.api.deps import (
     get_session_service,
 )
 from app.middleware.rate_limit import (
-    ADMIN_RATE_LIMIT,
-    CHAT_RATE_LIMIT,
-    get_api_key_or_ip,
     limiter,
+    get_tier_aware_key,
+    get_tier_rate_limit_for_key,
 )
 from app.models.admin_audit_log import (
     ACTION_SESSION_CREATE_CROSS_TENANT,
@@ -130,7 +129,7 @@ def _resolve_session_tenant(
     response_model=SessionRead,
     status_code=status.HTTP_201_CREATED,
 )
-@limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def create_session(
     request: Request,
     payload: SessionCreate,
@@ -218,7 +217,7 @@ def create_session(
 
 
 @router.get("", response_model=list[SessionRead])
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_sessions(
     request: Request,
     service: Annotated[SessionService, Depends(get_session_service)],
@@ -245,7 +244,7 @@ def list_sessions(
 
 
 @router.get("/{session_id}", response_model=SessionRead)
-@limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_session(
     request: Request,
     session_id: str,
@@ -277,7 +276,7 @@ def get_session(
 
 
 @router.get("/{session_id}/messages", response_model=list[MessageRead])
-@limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_messages(
     request: Request,
     session_id: str,

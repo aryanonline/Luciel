@@ -12,7 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_chat_service
-from app.middleware.rate_limit import limiter, get_api_key_or_ip, CHAT_RATE_LIMIT
+from app.middleware.rate_limit import (
+    limiter,
+    get_tier_aware_key,
+    get_tier_rate_limit_for_key,
+)
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import ChatService
 
@@ -30,7 +34,12 @@ logger = logging.getLogger(__name__)
     response_model=ChatResponse,
     status_code=status.HTTP_200_OK,
 )
-@limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
+# Arc 7 Commit 4 (WU-2): cap is now resolved per-request from the
+# caller's tier (Free=30, Pro=300, Enterprise=3000 rpm) instead of
+# the pre-Arc-7 fixed CHAT_RATE_LIMIT="20/minute". The bucket key
+# (`tier:{tier}:admin:{id}:inst:{id}`) gives per-Admin AND
+# per-Instance isolation so a noisy Instance can't starve siblings.
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def chat(
     request: Request,
     payload: ChatRequest,
@@ -62,7 +71,8 @@ def chat(
 
 
 @router.post("/stream")
-@limiter.limit(CHAT_RATE_LIMIT, key_func=get_api_key_or_ip)
+# Arc 7 Commit 4 (WU-2): tier-aware cap (see chat() above).
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def chat_stream(
     request: Request,
     payload: ChatRequest,

@@ -134,9 +134,9 @@ from sqlalchemy import select
 
 from app.api.deps import DbSession
 from app.middleware.rate_limit import (
-    ADMIN_RATE_LIMIT,
-    get_api_key_or_ip,
     limiter,
+    get_tier_aware_key,
+    get_tier_rate_limit_for_key,
 )
 from app.models.admin_audit_log import (
     ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE,
@@ -352,7 +352,7 @@ _LIMIT_MAX = 1000
     "/api_keys_step29c",
     response_model=ApiKeyForensic,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_api_key_forensic_step29c(
     request: Request,
     db: DbSession,
@@ -388,7 +388,7 @@ def get_api_key_forensic_step29c(
     "/memory_items_step29c",
     response_model=MemoryItemsForensic,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_memory_items_forensic_step29c(
     request: Request,
     db: DbSession,
@@ -484,7 +484,7 @@ def list_memory_items_forensic_step29c(
     "/admin_audit_logs_step29c",
     response_model=AdminAuditLogsForensic,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_admin_audit_logs_forensic_step29c(
     request: Request,
     db: DbSession,
@@ -557,7 +557,7 @@ def list_admin_audit_logs_forensic_step29c(
     "/luciel_instances_step29c/{instance_id}",
     response_model=LucielInstanceForensic,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_luciel_instance_forensic_step29c(
     request: Request,
     db: DbSession,
@@ -593,7 +593,7 @@ def get_luciel_instance_forensic_step29c(
     "/users_step29c/{user_id}",
     response_model=UserForensic,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_user_forensic_step29c(
     request: Request,
     db: DbSession,
@@ -641,7 +641,7 @@ def get_user_forensic_step29c(
     "/messages_step29c",
     response_model=MessagesForensic,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_messages_forensic_step29c(
     request: Request,
     db: DbSession,
@@ -689,7 +689,7 @@ def list_messages_forensic_step29c(
     "/luciel_instances_step29c/{instance_id}/toggle_active",
     response_model=LucielInstanceForensic,
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def toggle_luciel_instance_active_step29c(
     request: Request,
     db: DbSession,
@@ -965,7 +965,7 @@ _PROBE_POLL_INTERVAL = 0.5
     response_model=WorkerPipelineProbeResponse,
     responses={504: {"model": WorkerPipelineProbeTimeout}},
 )
-@limiter.limit(ADMIN_RATE_LIMIT, key_func=get_api_key_or_ip)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def worker_pipeline_probe_step29y(
     request: Request,
     db: DbSession,
