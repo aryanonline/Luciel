@@ -1,0 +1,11 @@
+[arc7-mint] loaded Stripe Live key from SSM (/luciel/production/stripe_secret_key) -- key value not echoed.
+[arc7-mint] pre-mutation control assertions...
+[arc7-mint] pre-mutation controls OK: intro_fee active, Pro/Enterprise products active, pro_monthly active, pro_annual active, floor_annual active (will be archived).
+[arc7-mint] created Price (Enterprise monthly): price_1TacunRytQVRVXw71i6eCx1K -> $2,800 CAD/mo
+[arc7-mint] created Price (Enterprise annual): price_1TacunRytQVRVXw72JTSAmmq -> $24,000 CAD/yr
+[arc7-mint] archived Price (Enterprise floor_annual): price_1TaOmPRytQVRVXw7ozfKMFps active=False
+[arc7-mint] put SSM /luciel/production/stripe_price_enterprise_monthly -> price_1TacunRytQVRVXw71i6eCx1K (version 1)
+[arc7-mint] put SSM /luciel/production/stripe_price_enterprise_annual -> price_1TacunRytQVRVXw72JTSAmmq (version 1)
+[arc7-mint] post-mutation control assertions...
+[arc7-mint] post-mutation controls OK: intro_fee active, pro_monthly active, pro_annual active, new enterprise_monthly active, new enterprise_annual active, floor_annual archived.
+[arc7-mint] DONE.
