@@ -54,26 +54,16 @@ TIER_PRO = "pro"
 TIER_ENTERPRISE = "enterprise"
 ALL_TIERS_V2: tuple[str, ...] = (TIER_FREE, TIER_PRO, TIER_ENTERPRISE)
 
-# Billing-model constants (v2). Backs ``subscriptions.billing_model``
-# (column added at Arc 5 Revision A per ARCHITECTURE §3.2.14). Free has
-# no ``subscriptions`` row at all; Pro and Enterprise are both flat
-# (Arc 7 doctrine pivot 2026-05-24 retired the Enterprise hybrid shape
-# in favour of flat-recurring symmetric self-serve with abuse-prevention
-# caps in entitlements). ``BILLING_MODEL_HYBRID`` and
-# ``BILLING_MODEL_CONSUMPTION`` remain defined as historical/reserved
-# constants but no tier in the v2 map references them; the
-# ``subscriptions.billing_model`` column itself is retired at Arc 7
-# Commit 2 via Alembic migration. ``ALL_BILLING_MODELS`` keeps every
-# constant for downstream validators that may still see the legacy
-# column in row-level snapshots until the migration lands.
-BILLING_MODEL_FLAT = "flat"
-BILLING_MODEL_HYBRID = "hybrid"  # RETIRED at Arc 7; not used by any tier
-BILLING_MODEL_CONSUMPTION = "consumption"  # reserved; not used by any tier
-ALL_BILLING_MODELS: tuple[str, ...] = (
-    BILLING_MODEL_FLAT,
-    BILLING_MODEL_HYBRID,
-    BILLING_MODEL_CONSUMPTION,
-)
+# Billing-model constants RETIRED at Arc 7 Commit 2 (2026-05-24).
+# The Arc 7 doctrine pivot made every paying tier flat-recurring
+# (Pro + Enterprise symmetric self-serve), so the enum had a single
+# legal value and carried zero information. ``BILLING_MODEL_FLAT``,
+# ``BILLING_MODEL_HYBRID``, ``BILLING_MODEL_CONSUMPTION``, and
+# ``ALL_BILLING_MODELS`` are removed alongside the
+# ``subscriptions.billing_model`` + ``admin_tier_overrides.billing_model``
+# column drops in ``alembic/versions/arc7_a_retire_billing_model.py``.
+# Path A ("whatever we ship out in our code and prod and schema must
+# be aligned with this vision") forbids keeping unreachable shapes.
 
 # Support-SLA literal labels (v2). Free has no SLA; Pro is 48h email;
 # Enterprise is 24h email + dedicated CSM (contract may negotiate up).
@@ -159,16 +149,12 @@ class TierEntitlement:
     # admins.stripe_customer_id NULL, lazy-created on upgrade).
     stripe_customer_record_required: bool
 
-    # Axis 16 -- Billing model (backs ``subscriptions.billing_model``
-    # added at Arc 5 Revision A per ARCHITECTURE \u00a73.2.14).
-    #
-    # Free is populated as ``flat`` even though Free Admins have no
-    # ``subscriptions`` row at all (Gap 1 resolution): the field
-    # describes the *upgrade-shape* the Admin takes on conversion to a
-    # paid tier, NOT the live DB state. Treat the static map as the
-    # buyer-facing pricing shape; check ``stripe_customer_record_required``
-    # to know whether a ``subscriptions`` row is expected to exist.
-    billing_model: str
+    # Axis 16 (Billing model) RETIRED at Arc 7 Commit 2 (2026-05-24).
+    # Every paying tier is flat-recurring under the Arc 7 doctrine
+    # pivot, so the field carried zero information. See
+    # ``alembic/versions/arc7_a_retire_billing_model.py`` for the
+    # accompanying schema drop on ``subscriptions.billing_model`` +
+    # ``admin_tier_overrides.billing_model``.
 
 
 # Per-tier v2 entitlement map. Numeric values are the founder-locked
@@ -205,7 +191,6 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         export_csv_enabled=False,
         export_audit_chain_enabled=False,
         stripe_customer_record_required=False,  # Gap 1: NULL until upgrade
-        billing_model=BILLING_MODEL_FLAT,  # aspirational; no subs row exists
     ),
     TIER_PRO: TierEntitlement(
         # 2026-05-23 revision: instances 3\u219210, leads 2000\u21925000,
@@ -238,7 +223,6 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         export_csv_enabled=True,
         export_audit_chain_enabled=False,
         stripe_customer_record_required=True,
-        billing_model=BILLING_MODEL_FLAT,
     ),
     TIER_ENTERPRISE: TierEntitlement(
         # 2026-05-24 Arc 7 doctrine pivot: Enterprise is now FLAT-recurring
@@ -281,7 +265,6 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         export_csv_enabled=True,
         export_audit_chain_enabled=True,
         stripe_customer_record_required=True,
-        billing_model=BILLING_MODEL_FLAT,  # Arc 7 doctrine: symmetric with Pro
     ),
 }
 
