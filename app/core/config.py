@@ -485,6 +485,39 @@ class Settings(BaseSettings):
     hcaptcha_verify_url: str = "https://api.hcaptcha.com/siteverify"
     hcaptcha_site_key: str = ""
 
+    # --- Arc 8 Commit 2: post-checkout email deliverability gate ---
+    # When True, ``TierProvisioningService.premint_for_tier`` runs the
+    # buyer's email through ``email_validator.validate_email`` with
+    # ``check_deliverability=True`` (DNS MX lookup). On failure the
+    # gate does NOT abort pre-mint -- Stripe has already collected
+    # payment and the admin row is committed; instead it records a
+    # structured warning that the welcome-email send path consults
+    # to decide whether to skip the send (and surface a Support
+    # touchpoint in CloudWatch).
+    #
+    # Set to False to disable the lookup entirely (e.g. when running
+    # in a sandbox / CI environment with no outbound DNS, or when a
+    # third-party MX-check provider is being rolled in via a
+    # different code path). Default True in prod; the test suite
+    # patches this False at the unit level and exercises a true-path
+    # injection test against a controlled synthetic typo.
+    #
+    # Synthetic ``*.luciel.local`` emails (identity-resolver mints,
+    # Option-B onboarding) are ALWAYS bypassed regardless of this
+    # flag -- they are real internal identifiers, not external
+    # deliverable addresses. See
+    # ``app.services.tier_provisioning_service._SYNTHETIC_EMAIL_DOMAIN_SUFFIX``.
+    #
+    # Closes drift D-stripe-checkout-no-email-validation-2026-05-18.
+    email_deliverability_check_enabled: bool = True
+    # Soft network timeout for the MX lookup. The email-validator
+    # library uses the system resolver under the hood; this cap
+    # exists so a slow/hostile DNS resolver cannot stall a webhook
+    # handler past Stripe's 30s ACK budget. Two seconds is enough
+    # for a healthy resolver and tight enough to fail-fast against
+    # a degraded one (the gate then no-ops with a logged warning).
+    email_deliverability_check_timeout_seconds: float = 2.0
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

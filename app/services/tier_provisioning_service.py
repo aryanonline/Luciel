@@ -111,6 +111,37 @@ _DOMAIN_COLLAPSE_SENTINEL = "default"
 _EMAIL_MAX_LEN = 320
 _EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# Arc 8 Commit 2 (2026-05-24) -- synthetic-email domain sentinel.
+#
+# Two sources mint ``*.luciel.local`` addresses today:
+#   * ``app.identity.resolver._SYNTHETIC_EMAIL_TEMPLATE`` -- bridges a
+#     resolver session that lacks a real address (anon chat lift,
+#     internal fixture, agent-side identity).
+#   * Option-B onboarding short-lived stand-ins for accounts that have
+#     not yet completed the welcome-email round-trip.
+#
+# These are real INTERNAL identifiers, not deliverable external
+# addresses. The MX-deliverability gate MUST bypass them or every
+# anon-to-paid upgrade and every Option-B intermediate state would
+# log a false deliverability warning. Synthetic addresses are also
+# never used as a welcome-email destination -- the send path
+# refuses to dispatch to ``*.luciel.local`` independently -- so the
+# bypass here cannot leak a non-deliverable address downstream.
+_SYNTHETIC_EMAIL_DOMAIN_SUFFIX = ".luciel.local"
+
+# Arc 8 Commit 2 -- deliverability gate outcome sentinels written into
+# the ``premint_for_tier`` return dict (``created['email_deliverability']``).
+# The webhook does not inspect these today; they are reserved for the
+# welcome-email send path follow-up and for observability assertions in
+# integration tests.
+DELIVERABILITY_OK = "ok"                   # MX lookup succeeded.
+DELIVERABILITY_BYPASS_SYNTHETIC = "bypass_synthetic"  # *.luciel.local.
+DELIVERABILITY_BYPASS_DISABLED = "bypass_disabled"    # feature-flag off.
+DELIVERABILITY_FAILED = "failed"           # MX lookup returned NXDOMAIN /
+                                           # no MX / SERVFAIL.
+DELIVERABILITY_ERROR = "error"             # network/timeout fault --
+                                           # treat as soft-pass.
+
 
 class TierUpgradeNoopError(ValueError):
     """Raised by ``upgrade_admin_tier`` when the new tier is not strictly
@@ -175,6 +206,113 @@ def _validate_email_shape(email: str | None) -> str:
     return candidate
 
 
+def _check_email_deliverability(email: str) -> tuple[str, str | None]:
+    """Run an MX-record lookup on ``email`` and report the outcome.
+
+    Arc 8 Commit 2 (closes ``D-stripe-checkout-no-email-validation-
+    2026-05-18``). Called from ``premint_for_tier`` AFTER
+    ``_validate_email_shape`` has produced a normalised
+    ``local@domain.tld`` candidate. Returns a two-tuple
+    ``(status, detail)`` where ``status`` is one of the
+    ``DELIVERABILITY_*`` sentinels and ``detail`` is a short
+    machine-friendly reason string (``None`` on success / bypass).
+
+    Contract:
+
+    1. **Never raises.** Stripe has already collected payment by the
+       time this code runs; aborting pre-mint on a network blip would
+       be strictly worse for the customer than logging a warning and
+       letting Support reach out. The function traps every exception
+       and reports ``DELIVERABILITY_ERROR``.
+    2. **Bypasses synthetic identifiers.** Any address whose domain
+       ends in ``.luciel.local`` returns
+       ``DELIVERABILITY_BYPASS_SYNTHETIC`` without DNS traffic. The
+       internal-identifier doctrine (see
+       ``_SYNTHETIC_EMAIL_DOMAIN_SUFFIX`` docstring) requires this.
+    3. **Honours the kill switch.** If
+       ``settings.email_deliverability_check_enabled`` is False the
+       function returns ``DELIVERABILITY_BYPASS_DISABLED`` without
+       importing the validator library (CI sandboxes with no DNS
+       remain green even before the library is installed).
+    4. **Bounded latency.** The underlying
+       ``email_validator.validate_email`` resolver call is bounded by
+       ``settings.email_deliverability_check_timeout_seconds`` to
+       protect the Stripe-webhook 30s ACK budget. On timeout the
+       gate reports ``DELIVERABILITY_ERROR`` (soft pass).
+    5. **Failure does not block.** The caller in ``premint_for_tier``
+       records the outcome in the return dict and proceeds. The
+       welcome-email send path consults the outcome in a follow-up
+       commit (Arc 8 C2.5 / C5 polish, see C2 deploy record); for
+       now the structured log line is the operator signal.
+    """
+    # Late import keeps the module import-time cheap and makes the
+    # CI-no-DNS environment safe even when the validator library is
+    # not pinned. The feature-flag short-circuit below also skips
+    # the import in that scenario; we keep this guard for the case
+    # where the flag is on but the library is missing at runtime.
+    from app.core.config import settings
+
+    if not settings.email_deliverability_check_enabled:
+        return DELIVERABILITY_BYPASS_DISABLED, None
+
+    if email.endswith(_SYNTHETIC_EMAIL_DOMAIN_SUFFIX):
+        return DELIVERABILITY_BYPASS_SYNTHETIC, None
+
+    try:
+        # Imported inside the function so a sandbox without the
+        # library available (or with the flag flipped off after
+        # the boot snapshot) still imports this module cleanly.
+        from email_validator import (
+            EmailNotValidError,
+            validate_email,
+        )
+    except ImportError:
+        logger.warning(
+            "tier_provisioning: email_validator import failed -- "
+            "deliverability gate soft-passed (install email-validator "
+            "to enable). email_domain=%s",
+            email.split("@", 1)[-1],
+        )
+        return DELIVERABILITY_ERROR, "import_failed"
+
+    timeout = max(0.1, float(settings.email_deliverability_check_timeout_seconds))
+    try:
+        validate_email(
+            email,
+            check_deliverability=True,
+            # The shape gate already normalised; we just want the
+            # MX lookup here. ``test_environment=False`` lets the
+            # library use the system resolver; ``timeout`` caps it.
+            timeout=timeout,
+        )
+    except EmailNotValidError as exc:
+        # Hard MX failure (NXDOMAIN, no MX records, invalid TLD).
+        # This is the case the drift was raised against -- a real
+        # typo a real customer might make at checkout.
+        logger.warning(
+            "tier_provisioning: email deliverability check failed "
+            "email_domain=%s reason=%s",
+            email.split("@", 1)[-1],
+            exc.__class__.__name__,
+        )
+        return DELIVERABILITY_FAILED, exc.__class__.__name__
+    except Exception as exc:  # noqa: BLE001 -- soft-fail by design
+        # Resolver flapped (SERVFAIL, transient timeout, socket
+        # error). Soft-pass: do not block the customer on a
+        # network blip; Support can investigate via the structured
+        # log if downstream evidence (bounced welcome email) shows
+        # up later.
+        logger.warning(
+            "tier_provisioning: email deliverability check errored "
+            "(soft-pass) email_domain=%s exc=%s",
+            email.split("@", 1)[-1],
+            exc.__class__.__name__,
+        )
+        return DELIVERABILITY_ERROR, exc.__class__.__name__
+
+    return DELIVERABILITY_OK, None
+
+
 # ---------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------
@@ -199,10 +337,32 @@ class TierProvisioningService:
     def premint_for_tier(
         self,
         *,
-        admin_id: str,
+        admin_id: str | None = None,
         tier: str,
         primary_user: "User",
         audit_ctx: AuditContext,
+        # Arc 8 Commit 2 (2026-05-24) -- backward-compat kwarg alias.
+        #
+        # Both production callers (``BillingWebhookService._on_checkout_completed``
+        # and ``api.v1.billing.signup_free``) still pass ``tenant_id=...`` --
+        # the original V1 column name -- because the rename to
+        # ``admin_id`` in this signature was made in the Arc-5 doctrine
+        # pass but the two callsites were not updated. The mismatch
+        # silently raised ``TypeError`` at every paid + free signup,
+        # was swallowed by both callers' ``except Exception:`` traps,
+        # and the customer ended up with an Admin row but no
+        # ScopeAssignment / no primary Instance -- exactly the failure
+        # mode the C9 ops runbook flags as "broken account requires
+        # manual rebuild".
+        #
+        # We accept BOTH kwargs here and prefer ``admin_id`` when both
+        # are supplied. The callers will be updated to the new name in
+        # a follow-up Arc-8 commit; this alias is purely the "don't
+        # leave prod broken while the file is open" fix.
+        #
+        # Closes drift D-tier-provisioning-tenant-id-kwarg-mismatch-2026-05-24
+        # (discovered during Arc 8 C2 recon).
+        tenant_id: str | None = None,
     ) -> dict:
         """Pre-mint the V2 primary Instance for ``admin_id``.
 
@@ -238,9 +398,41 @@ class TierProvisioningService:
                 f"unsupported tier {tier!r}"
             )
 
-        _validate_email_shape(
+        # Arc 8 C2 backward-compat kwarg resolution. Exactly one of
+        # ``admin_id`` and ``tenant_id`` must be set; both-or-neither is
+        # programmer error. ``admin_id`` wins if both are passed (matches
+        # the post-Arc-5 doctrine).
+        if admin_id is None and tenant_id is None:
+            raise TypeError(
+                "TierProvisioningService.premint_for_tier: one of "
+                "admin_id= or tenant_id= must be supplied"
+            )
+        if admin_id is None:
+            admin_id = tenant_id
+
+        normalised_email = _validate_email_shape(
             getattr(primary_user, "email", None) if primary_user is not None else None
         )
+
+        # Arc 8 Commit 2 -- deliverability gate. Soft-fails on MX
+        # failure (Stripe already collected payment; the right move
+        # is to log + continue, not to abort the pre-mint). See
+        # ``_check_email_deliverability`` docstring for the full
+        # contract. Closes D-stripe-checkout-no-email-validation-
+        # 2026-05-18.
+        deliverability_status, deliverability_detail = _check_email_deliverability(
+            normalised_email
+        )
+        if deliverability_status == DELIVERABILITY_FAILED:
+            logger.warning(
+                "tier_provisioning: pre-mint proceeding for admin=%s tier=%s "
+                "despite undeliverable email_domain=%s -- welcome email send "
+                "will be skipped downstream and Support follow-up is "
+                "required (drift D-stripe-checkout-no-email-validation).",
+                admin_id,
+                tier,
+                normalised_email.split("@", 1)[-1],
+            )
 
         admin = self.admin.get_tenant_config(admin_id)
         if admin is None or not getattr(admin, "active", False):
@@ -253,6 +445,14 @@ class TierProvisioningService:
             "admin_id": admin_id,
             "tier": tier,
             "instance": None,
+            # Arc 8 Commit 2 -- deliverability outcome surfaced on the
+            # return dict for the webhook (today: observability only;
+            # tomorrow: the welcome-email send path consumes this to
+            # decide whether to dispatch).
+            "email_deliverability": {
+                "status": deliverability_status,
+                "detail": deliverability_detail,
+            },
         }
 
         # 1. Mint the owner-side ScopeAssignment binding the buyer to the
