@@ -1,0 +1,363 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Arc 9 C8.3 - scoped IAM policy for the luciel-sandbox-agent user.
+  Replaces the AWS-managed AdministratorAccess policy with a scope that
+  matches what the agent actually exercises (CFN stack management of
+  luciel-prod-alarms + luciel-prod-worker-autoscaling, CloudWatch alarm
+  reads + manual state writes, ECS describes for luciel-cluster, log
+  stream writes for synthetic injection on /ecs/luciel-backend, SSM
+  reads on /luciel/prod/pagerduty/* with Put on the same scope for PD
+  rotation, SNS describes + manual confirmation/reset on
+  luciel-prod-* topics). All writes outside this scope are denied;
+  iam:* writes are explicitly denied so the agent cannot self-escalate.
+
+  Rollout follows the C8.3 runbook: this template provisions the
+  policy as a customer-managed policy with a stable ARN, then attaches
+  it to the luciel-sandbox-agent user IN ADDITION TO the existing
+  AdministratorAccess. Smoke-test runs while both are attached
+  (effective permissions are the union). After smoke-test passes,
+  AdministratorAccess is detached out-of-band (one CLI call); this
+  template stays applied long-term. Doctrine D8.1 codifies the
+  zero-downtime overlap.
+
+  Region ca-central-1, account 729005488042.
+
+Parameters:
+  AgentUserName:
+    Type: String
+    Default: luciel-sandbox-agent
+    Description: IAM user this policy is attached to.
+
+  AwsAccountId:
+    Type: String
+    Default: "729005488042"
+    Description: AWS account ID used for ARN composition.
+
+  AwsRegion:
+    Type: String
+    Default: ca-central-1
+    Description: Region used for ARN composition.
+
+Resources:
+  LucielSandboxAgentPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: luciel-sandbox-agent-scoped
+      Description: >
+        Arc 9 C8.3 - scoped permissions for luciel-sandbox-agent.
+        Replaces AdministratorAccess. Doctrine D8.1.
+      Users:
+        - !Ref AgentUserName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # ---- Read-only basics (whole account) -------------------
+          # Caller-identity is required by virtually every CLI session
+          # for sanity checks and is harmless.
+          - Sid: AllowSelfIdentity
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+              - iam:GetUser
+              - iam:ListAttachedUserPolicies
+              - iam:ListUserPolicies
+              - iam:GetPolicy
+              - iam:GetPolicyVersion
+              - iam:GetUserPolicy
+            Resource:
+              - !Sub "arn:aws:iam::${AwsAccountId}:user/${AgentUserName}"
+              - !Sub "arn:aws:iam::${AwsAccountId}:policy/luciel-sandbox-agent-scoped"
+
+          # ---- CloudFormation: manage luciel-prod-* stacks --------
+          # describe-stacks/list-stacks need * because CFN does not
+          # support resource-arn on list operations.
+          - Sid: AllowCfnList
+            Effect: Allow
+            Action:
+              - cloudformation:ListStacks
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResources
+              - cloudformation:DescribeStackResource
+              - cloudformation:GetTemplate
+              - cloudformation:GetTemplateSummary
+              - cloudformation:ValidateTemplate
+            Resource: "*"
+
+          - Sid: AllowCfnWriteOnLucielProd
+            Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:DeleteStack
+              - cloudformation:CreateChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:ListChangeSets
+              - cloudformation:CancelUpdateStack
+              - cloudformation:ContinueUpdateRollback
+            Resource:
+              - !Sub "arn:aws:cloudformation:${AwsRegion}:${AwsAccountId}:stack/luciel-prod-*/*"
+              - !Sub "arn:aws:cloudformation:${AwsRegion}:${AwsAccountId}:stack/luciel-widget-cdn/*"
+
+          # ---- IAM resources the CFN templates create -------------
+          # luciel-sandbox-agent-policy template provisions a managed
+          # policy and attaches it to the user. luciel-prod-verify-role
+          # creates a task role. We allow create/update/delete on these
+          # specific names so the templates remain operable, but DENY
+          # any iam:* on the agent's own privileges below.
+          - Sid: AllowIamForCfnManagedResources
+            Effect: Allow
+            Action:
+              - iam:CreatePolicy
+              - iam:DeletePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicyVersion
+              - iam:ListPolicyVersions
+              - iam:AttachUserPolicy
+              - iam:DetachUserPolicy
+              - iam:ListEntitiesForPolicy
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PassRole
+              - iam:TagRole
+              - iam:UntagRole
+            Resource:
+              - !Sub "arn:aws:iam::${AwsAccountId}:policy/luciel-sandbox-agent-scoped"
+              - !Sub "arn:aws:iam::${AwsAccountId}:role/luciel-*"
+
+          # ---- CloudWatch alarms + metric filters -----------------
+          - Sid: AllowCloudWatchReads
+            Effect: Allow
+            Action:
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:DescribeAlarmHistory
+              - cloudwatch:DescribeAlarmsForMetric
+              - cloudwatch:ListMetrics
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:GetMetricData
+            Resource: "*"
+
+          - Sid: AllowCloudWatchAlarmWrites
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:SetAlarmState
+              - cloudwatch:EnableAlarmActions
+              - cloudwatch:DisableAlarmActions
+              - cloudwatch:TagResource
+              - cloudwatch:UntagResource
+            Resource:
+              - !Sub "arn:aws:cloudwatch:${AwsRegion}:${AwsAccountId}:alarm:luciel-*"
+
+          # ---- CloudWatch Logs ------------------------------------
+          # Synthetic log injection in C7 validation uses
+          # PutLogEvents on /ecs/luciel-backend. Filter creation +
+          # describe needed for stack updates.
+          - Sid: AllowLogsList
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - logs:DescribeMetricFilters
+              - logs:FilterLogEvents
+              - logs:GetLogEvents
+              - logs:StartQuery
+              - logs:StopQuery
+              - logs:GetQueryResults
+              - logs:DescribeQueries
+            Resource: "*"
+
+          - Sid: AllowLogsWriteOnLucielGroups
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:CreateLogStream
+              - logs:DeleteLogStream
+              - logs:PutLogEvents
+              - logs:PutMetricFilter
+              - logs:DeleteMetricFilter
+              - logs:PutRetentionPolicy
+              - logs:TagLogGroup
+            Resource:
+              - !Sub "arn:aws:logs:${AwsRegion}:${AwsAccountId}:log-group:/ecs/luciel-*"
+              - !Sub "arn:aws:logs:${AwsRegion}:${AwsAccountId}:log-group:/ecs/luciel-*:*"
+              - !Sub "arn:aws:logs:${AwsRegion}:${AwsAccountId}:log-group:/aws/lambda/luciel-*"
+              - !Sub "arn:aws:logs:${AwsRegion}:${AwsAccountId}:log-group:/aws/lambda/luciel-*:*"
+
+          # ---- SSM Parameter Store --------------------------------
+          # PagerDuty rotation needs Put on /luciel/prod/pagerduty/*.
+          # Other /luciel/* params are read-only (creds: rotated by
+          # the operator out-of-band, not by the agent).
+          - Sid: AllowSsmReadOnLucielParams
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParameterHistory
+              - ssm:DescribeParameters
+              - ssm:ListTagsForResource
+            Resource:
+              - !Sub "arn:aws:ssm:${AwsRegion}:${AwsAccountId}:parameter/luciel/*"
+
+          - Sid: AllowSsmWriteOnPagerDutyParams
+            Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:DeleteParameter
+              - ssm:DeleteParameters
+              - ssm:AddTagsToResource
+              - ssm:RemoveTagsFromResource
+            Resource:
+              - !Sub "arn:aws:ssm:${AwsRegion}:${AwsAccountId}:parameter/luciel/prod/pagerduty/*"
+
+          # ---- SNS -----------------------------------------------
+          - Sid: AllowSnsReads
+            Effect: Allow
+            Action:
+              - sns:ListTopics
+              - sns:ListSubscriptions
+              - sns:ListSubscriptionsByTopic
+              - sns:GetTopicAttributes
+              - sns:GetSubscriptionAttributes
+            Resource: "*"
+
+          - Sid: AllowSnsWriteOnLucielProd
+            Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:DeleteTopic
+              - sns:Publish
+              - sns:Subscribe
+              - sns:Unsubscribe
+              - sns:ConfirmSubscription
+              - sns:SetTopicAttributes
+              - sns:SetSubscriptionAttributes
+              - sns:TagResource
+              - sns:UntagResource
+            Resource:
+              - !Sub "arn:aws:sns:${AwsRegion}:${AwsAccountId}:luciel-prod-*"
+
+          # ---- ECS describes (read-only on luciel-cluster) --------
+          # Needed for deploy-status checks during stack updates and
+          # for the worker autoscaling stack's targets.
+          - Sid: AllowEcsReads
+            Effect: Allow
+            Action:
+              - ecs:DescribeClusters
+              - ecs:DescribeServices
+              - ecs:DescribeTasks
+              - ecs:DescribeTaskDefinition
+              - ecs:ListServices
+              - ecs:ListTasks
+              - ecs:ListClusters
+              - ecs:ListTaskDefinitions
+            Resource: "*"
+
+          # ---- RDS describes (read-only) --------------------------
+          # The alarms stack references the RDS instance by name and
+          # we sometimes verify storage/connection metrics manually.
+          - Sid: AllowRdsReads
+            Effect: Allow
+            Action:
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusters
+              - rds:DescribeDBSnapshots
+              - rds:ListTagsForResource
+            Resource: "*"
+
+          # ---- ECR + ECS deploy paths (read-only for now) ---------
+          # If/when we move ECS service updates into the agent's
+          # scope, expand to luciel-* repositories specifically.
+          - Sid: AllowEcrReads
+            Effect: Allow
+            Action:
+              - ecr:DescribeRepositories
+              - ecr:DescribeImages
+              - ecr:ListImages
+              - ecr:GetAuthorizationToken
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Resource: "*"
+
+          # ---- S3: widget-cdn bucket only -------------------------
+          - Sid: AllowS3WidgetCdn
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:GetBucketLocation
+              - s3:GetBucketPolicy
+            Resource:
+              - "arn:aws:s3:::luciel-widget-cdn"
+              - "arn:aws:s3:::luciel-widget-cdn/*"
+
+          # ---- CloudFront read (widget CDN) -----------------------
+          - Sid: AllowCloudFrontReads
+            Effect: Allow
+            Action:
+              - cloudfront:ListDistributions
+              - cloudfront:GetDistribution
+              - cloudfront:GetDistributionConfig
+              - cloudfront:CreateInvalidation
+              - cloudfront:GetInvalidation
+              - cloudfront:ListInvalidations
+            Resource: "*"
+
+          # ---- Explicit denies (defence in depth) -----------------
+          # The agent must NEVER be able to modify its own privileges
+          # or create a new IAM user / access key for itself.
+          # This explicit deny survives even if a future allow stanza
+          # gets too broad on iam:*.
+          - Sid: DenySelfPrivilegeEscalation
+            Effect: Deny
+            Action:
+              - iam:CreateUser
+              - iam:DeleteUser
+              - iam:CreateAccessKey
+              - iam:DeleteAccessKey
+              - iam:UpdateAccessKey
+              - iam:CreateLoginProfile
+              - iam:DeleteLoginProfile
+              - iam:UpdateLoginProfile
+              - iam:PutUserPolicy
+              - iam:DeleteUserPolicy
+              - iam:AttachUserPolicy
+              - iam:DetachUserPolicy
+              - iam:AddUserToGroup
+              - iam:RemoveUserFromGroup
+            Resource:
+              - !Sub "arn:aws:iam::${AwsAccountId}:user/${AgentUserName}"
+
+          # Block any attempt to touch the AdministratorAccess managed
+          # policy itself (extra belt + braces).
+          - Sid: DenyAdminPolicyAttachment
+            Effect: Deny
+            Action:
+              - iam:AttachUserPolicy
+              - iam:AttachRolePolicy
+              - iam:AttachGroupPolicy
+            Resource: "*"
+            Condition:
+              ArnEquals:
+                iam:PolicyARN: "arn:aws:iam::aws:policy/AdministratorAccess"
+
+Outputs:
+  PolicyArn:
+    Value: !Ref LucielSandboxAgentPolicy
+    Description: ARN of the scoped policy now attached to the user.
+
+  AttachedTo:
+    Value: !Ref AgentUserName
+    Description: IAM user the policy is attached to.

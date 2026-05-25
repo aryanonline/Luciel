@@ -152,6 +152,25 @@ jobs:
           OPENAI_API_KEY: "ci-not-a-real-key-backend-free-tests-only"
         run: python -m pytest tests/api/test_step24_5c_models_shape.py -v
 
+      - name: run Arc 9 C8.3 sandbox-agent scoped IAM policy shape
+        # Arc 9 doctrine D8.1 -- "luciel-sandbox-agent uses a scoped
+        # policy that names every action it needs. *:* never returns
+        # to the scope." These 5 AST guards lock the CloudFormation
+        # template `cfn/luciel-sandbox-agent-policy.yaml` against:
+        #   (1) wildcard Action='*' paired with Resource='*'
+        #   (2) drift in the DenySelfPrivilegeEscalation stanza
+        #   (3) drift in the DenyAdminPolicyAttachment condition
+        #   (4) write actions escaping the luciel-* resource scope
+        #   (5) rename of the customer-managed policy name (the IAM
+        #       Allow stanza references it by ARN)
+        # Backend-free -- only parses YAML, no DB/network.
+        env:
+          DATABASE_URL: "sqlite:///:memory:"
+          OPENAI_API_KEY: "ci-not-a-real-key-backend-free-tests-only"
+        run: |
+          python -m pip install pyyaml
+          python -m pytest tests/infra/test_c8_3_sandbox_agent_policy_shape.py -v
+
       - name: run Arc 9 C7.1 ops-connect log-format contract
         # Arc 9 doctrine D7.1 -- "Every grant the ops role exercises
         # emits a CloudWatch event." This test locks the literal string
