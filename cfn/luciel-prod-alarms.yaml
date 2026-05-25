@@ -1,37 +1,14 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Luciel production CloudWatch alarm pack.
-
-  ORIGINAL SCOPE (Step 28 Phase 2 Commit 5):
-  SNS topic + email subscription, three CloudWatch Logs
-  MetricFilters scoped to /ecs/luciel-worker, and seven CloudWatch
-  alarms covering worker liveness (heartbeat from Commit 7 rev 11),
-  worker task health, worker error rate, RDS connection count, RDS CPU,
-  RDS free storage, and SSM GetParameter access failures.
-
-  ARC 9 C7 EXTENSION (2026-05-25):
-  Four NEW CloudWatch Logs MetricFilters scoped to /ecs/luciel-backend,
-  four NEW CloudWatch alarms (2 High-severity + 2 Medium-severity)
-  covering admin-audit immutability tamper attempts, C6.4 GUC-leak
-  guard violations, luciel_ops BYPASSRLS connect velocity, and
-  per-admin admin_audit_logs write velocity. The two High-severity
-  alarms additionally publish to a PagerDuty SNS-HTTPS subscription
-  whose endpoint URL is supplied by the SSM parameter named in
-  ``PagerDutyServiceKeySsmParam`` (default placeholder; founder fills
-  in the real PD service-integration URL after stack deploy).
-
-  Region: ca-central-1
-  Account: 729005488042
-  Worker service: luciel-worker-service (cluster luciel-cluster)
-  Worker log group: /ecs/luciel-worker
-  Backend log group: /ecs/luciel-backend (Arc 9 C7)
-  RDS instance: luciel-db (db.t3.micro, max_connections derived = ~112)
-
-  Connection-count threshold derivation:
-    max_connections = LEAST(DBInstanceClassMemory / 9531392, 5000)
-    db.t3.micro RAM = 1 GiB = 1073741824 bytes
-    max_connections approximately 112
-    80% threshold = 90 (rounded down)
+  Luciel CloudWatch alarm pack. Step 28: 3 worker metric filters +
+  7 alarms (worker liveness/health/errors, RDS connections/CPU/storage,
+  SSM failures). Arc 9 C7 extension: 4 backend metric filters + 4
+  alarms (audit-immutability tamper [High], GUC-leak guard [High],
+  ops-role connect velocity [Medium], audit-write velocity [Medium]),
+  plus PD SNS-HTTPS subscription resolved from SSM. Region
+  ca-central-1, account 729005488042. Full design notes in
+  docs/runbooks/arc9-c7-observability.md and the docs/runbooks/
+  step-28-phase-2-deploy.md.
 
 Parameters:
   AlertEmail:
@@ -87,17 +64,32 @@ Parameters:
       per-admin audit-log write events from this group.
   PagerDutyServiceKeySsmParam:
     Type: String
-    Default: /luciel/production/pagerduty/arc9_c7_service_key
+    Default: /luciel/prod/pagerduty/integration_url
     Description: >
       SSM parameter NAME that holds the PagerDuty Events-API v2
-      integration URL (HTTPS endpoint). Default is the placeholder
-      path; the value at that path is intentionally empty at PR-
-      merge time and the founder fills it in post-deploy. The
-      PagerDuty SNS-HTTPS subscription resolves the parameter at
-      stack-deploy time via ``{{resolve:ssm:...}}`` -- which means
-      the stack MUST be re-deployed (or the subscription resource
-      updated) after the SSM value is set. See
+      integration URL (HTTPS endpoint). The PagerDuty SNS-HTTPS
+      subscription resolves the parameter at stack-deploy time via
+      ``{{resolve:ssm:NAME:VERSION}}`` -- which means the URL never
+      lives in this repo, never lives in the CloudFormation
+      parameter overrides log, and is opaque to anyone who only has
+      describe-stacks access. Rotating the URL is a put-parameter
+      (creates a new SSM version) + update-stack bumping
+      PagerDutyServiceKeySsmVersion. See
       docs/runbooks/arc9-c7-observability.md for the deploy order.
+
+  PagerDutyServiceKeySsmVersion:
+    Type: String
+    Default: "1"
+    AllowedPattern: "^[1-9][0-9]*$"
+    Description: >
+      Version number of the SSM parameter named in
+      PagerDutyServiceKeySsmParam to resolve. CFN requires a version
+      pin when the parameter NAME itself is built via Sub ${...}.
+      Bump this on every PD-URL rotation: ``aws ssm put-parameter``
+      creates a new version; then ``aws cloudformation update-stack``
+      with the bumped version makes CFN pick it up. The CFN stack
+      history then records an audit trail of when each PD URL was
+      activated.
   OpsRoleConnectVelocityThreshold:
     Type: Number
     Default: 10
@@ -388,14 +380,38 @@ Resources:
       TopicArn: !Ref PagerDutyTopic
       Protocol: https
       # Resolved at stack deploy from the SSM parameter named in
-      # PagerDutyServiceKeySsmParam. The value at that parameter is
-      # the PagerDuty Events API v2 integration URL, e.g.
+      # PagerDutyServiceKeySsmParam, pinned at the version named in
+      # PagerDutyServiceKeySsmVersion. The value at that parameter
+      # is the PagerDuty Events API v2 integration URL, e.g.
       #   https://events.pagerduty.com/integration/<key>/enqueue
+      #
+      # CFN requires a VERSION pin when the SSM resolver name is
+      # itself built via Sub ${...}. This is actually a useful
+      # operational property: rotating the PD URL is a two-step
+      # ritual -- (1) ``aws ssm put-parameter`` (creates v+1), then
+      # (2) ``aws cloudformation update-stack`` with
+      # PagerDutyServiceKeySsmVersion=v+1. The CFN history then
+      # carries an audit trail of every PD URL rotation tied to a
+      # stack-update timestamp.
+      #
       # If the parameter is empty at deploy time the stack fails;
       # see docs/runbooks/arc9-c7-observability.md for the bootstrap
-      # sequence (set SSM placeholder -> deploy stack -> fill SSM
-      # with real PD URL -> redeploy or update-subscription).
-      Endpoint: !Sub "{{resolve:ssm:${PagerDutyServiceKeySsmParam}}}"
+      # sequence.
+      # NOTE: plain ``ssm`` resolver, not ``ssm-secure``. CFN does
+      # not support ssm-secure on AWS::SNS::Subscription/Endpoint
+      # (only RDS MasterUserPassword and a small allowlist of other
+      # secret-shaped properties accept it). The PD integration URL
+      # is therefore stored as a String SSM parameter, not a
+      # SecureString. Access control falls to IAM on the SSM
+      # parameter path -- the URL never reaches the repo or the
+      # describe-stacks output and is only readable by principals
+      # with ssm:GetParameter on /luciel/prod/pagerduty/*.
+      #
+      # Worst-case compromise impact is limited: the URL is a
+      # write-only event ingest, not a credential. An attacker with
+      # it can spam PD incidents but cannot read or exfiltrate
+      # anything from PD, AWS, or Luciel.
+      Endpoint: !Sub "{{resolve:ssm:${PagerDutyServiceKeySsmParam}:${PagerDutyServiceKeySsmVersion}}}"
       DeliveryPolicy:
         healthyRetryPolicy:
           numRetries: 3

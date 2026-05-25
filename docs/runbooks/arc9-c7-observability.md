@@ -57,13 +57,24 @@ Before `aws cloudformation deploy`, all four of these must be true:
   ```bash
   aws ssm put-parameter \
     --name /luciel/prod/pagerduty/integration_url \
-    --type SecureString \
+    --type String \
     --value "https://events.pagerduty.com/integration/<KEY>/enqueue" \
     --region ca-central-1
   ```
   Use `--overwrite` if the parameter already exists. The CFN resolver
   reads at stack-update time, so the parameter MUST exist before the
   stack is updated.
+
+  **Why `--type String` and not `SecureString`?** CFN does not allow
+  the `ssm-secure` resolver in `AWS::SNS::Subscription/Endpoint`
+  (only a small allowlist of secret-shaped properties accept it,
+  e.g. `AWS::RDS::DBInstance/MasterUserPassword`). We therefore
+  store the PD integration URL as plain SSM String. This is an
+  acceptable trade because: (a) IAM controls who can read the
+  parameter (`ssm:GetParameter` on `/luciel/prod/pagerduty/*`); (b)
+  the URL is a write-only event ingest endpoint, not a credential
+  — worst-case compromise lets an attacker spam your PD service,
+  it does not let them read PD, AWS, or Luciel data.
 - [ ] **Existing alarm pack version** confirmed:
   ```bash
   aws cloudformation describe-stacks \
@@ -76,23 +87,78 @@ Before `aws cloudformation deploy`, all four of these must be true:
 If you do not have a PagerDuty account yet, you may temporarily write
 a placeholder URL into SSM (`https://events.pagerduty.com/integration/placeholder/enqueue`)
 to unblock the deploy — the HTTPS subscription will still create but
-no events will be delivered. Replace the parameter value and re-run
-`update-stack` (no template change required, just a parameter
-refresh) once the real key is provisioned.
+no events will be delivered.
+
+### PD URL rotation (after the real key is provisioned)
+
+The CFN template resolves the PD URL via
+`{{resolve:ssm:NAME:VERSION}}` — name AND version are both
+parameter-driven, so swapping the URL is a 2-step ritual:
+
+```bash
+# 1. Write the new URL (creates a new SSM version automatically)
+aws ssm put-parameter \
+  --name /luciel/prod/pagerduty/integration_url \
+  --type String \
+  --overwrite \
+  --value "https://events.pagerduty.com/integration/<REAL_KEY>/enqueue" \
+  --region ca-central-1
+
+# 2. Capture the new version number
+NEW_VERSION=$(aws ssm get-parameter \
+  --name /luciel/prod/pagerduty/integration_url \
+  --query "Parameter.Version" --output text)
+echo "New SSM version: $NEW_VERSION"
+
+# 3. Update the stack with the bumped version. Everything else
+#    uses previous values, so this is a single-parameter swap.
+aws cloudformation update-stack \
+  --stack-name luciel-prod-alarms \
+  --use-previous-template \
+  --parameters \
+    ParameterKey=PagerDutyServiceKeySsmVersion,ParameterValue="$NEW_VERSION" \
+    ParameterKey=AlertEmail,UsePreviousValue=true \
+    ParameterKey=RdsConnectionThreshold,UsePreviousValue=true \
+    ParameterKey=WorkerServiceName,UsePreviousValue=true \
+    ParameterKey=RdsInstanceIdentifier,UsePreviousValue=true \
+    ParameterKey=WorkerErrorThreshold,UsePreviousValue=true \
+    ParameterKey=WorkerLogGroupName,UsePreviousValue=true \
+    ParameterKey=WorkerClusterName,UsePreviousValue=true \
+    ParameterKey=RdsFreeStorageThresholdBytes,UsePreviousValue=true \
+    ParameterKey=RdsCpuThresholdPercent,UsePreviousValue=true \
+    ParameterKey=BackendLogGroupName,UsePreviousValue=true \
+    ParameterKey=PagerDutyServiceKeySsmParam,UsePreviousValue=true \
+    ParameterKey=OpsRoleConnectVelocityThreshold,UsePreviousValue=true \
+    ParameterKey=AdminAuditWriteVelocityThreshold,UsePreviousValue=true \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --region ca-central-1
+```
+
+The CFN stack history then carries an audit trail of every PD URL
+rotation tied to a stack-update timestamp — that is the operational
+upside of CFN demanding the version pin in the first place.
 
 ---
 
 ## 2 — Deploy command
 
 ```bash
+# Capture the current SSM version of the PD URL parameter -- the
+# CFN resolver demands a pinned version when the SSM name itself
+# comes from a Sub ${...} interpolation.
+PD_SSM_VERSION=$(aws ssm get-parameter \
+  --name /luciel/prod/pagerduty/integration_url \
+  --query "Parameter.Version" --output text)
+
 aws cloudformation deploy \
   --stack-name luciel-prod-alarms \
   --template-file cfn/luciel-prod-alarms.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --region ca-central-1 \
   --parameter-overrides \
-    AlertEmail=alerts@luciel.example \
+    AlertEmail=aryans.www@gmail.com \
     PagerDutyServiceKeySsmParam=/luciel/prod/pagerduty/integration_url \
+    PagerDutyServiceKeySsmVersion="$PD_SSM_VERSION" \
     BackendLogGroupName=/ecs/luciel-backend
 ```
 
@@ -193,7 +259,7 @@ Order of operations:
    ```bash
    aws ssm put-parameter \
      --name /luciel/prod/pagerduty/integration_url \
-     --type SecureString \
+     --type String \
      --overwrite \
      --value "https://events.pagerduty.com/integration/<PROD_KEY>/enqueue" \
      --region ca-central-1
@@ -342,7 +408,7 @@ dark and we lose the D7.1 guarantee.
 | Decision | Value | Rationale |
 |---|---|---|
 | Paging channel | SNS → PagerDuty for High; SNS → email for Medium | Two-tier severity matches the two-tier doctrine (D7.2 pages, D7.1 logs). |
-| PD URL storage | SSM SecureString resolved at stack-update | Keeps secret out of repo + IAC parameter-overrides logs. |
+| PD URL storage | SSM String (plain) + version-pin resolved at stack-update | Keeps secret out of repo + IAC parameter-overrides logs. |
 | Velocity defaults | 4 (ops connect) / 20 (audit write) per 5 min | Conservative starting points; tune in §6 after baseline. |
 | Flag gating of connect log | `audit_log_immutability_enabled` | Avoids dev/CI noise that would skew velocity baseline. |
 | Single stack vs new stack | Extend `luciel-prod-alarms` | Keeps the alarm pack a single artifact for `describe-stacks` audits. |
