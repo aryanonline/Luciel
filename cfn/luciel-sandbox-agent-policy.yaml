@@ -76,8 +76,7 @@ Resources:
               - cloudformation:CancelUpdateStack
               - cloudformation:ContinueUpdateRollback
             Resource:
-              - !Sub "arn:aws:cloudformation:${AwsRegion}:${AwsAccountId}:stack/luciel-prod-*/*"
-              - !Sub "arn:aws:cloudformation:${AwsRegion}:${AwsAccountId}:stack/luciel-widget-cdn/*"
+              - !Sub "arn:aws:cloudformation:${AwsRegion}:${AwsAccountId}:stack/luciel-*/*"
 
           # ---- IAM resources the CFN templates create -------------
           # luciel-sandbox-agent-policy template provisions a managed
@@ -271,8 +270,8 @@ Resources:
               - s3:GetBucketLocation
               - s3:GetBucketPolicy
             Resource:
-              - "arn:aws:s3:::luciel-widget-cdn"
-              - "arn:aws:s3:::luciel-widget-cdn/*"
+              - "arn:aws:s3:::luciel-widget-cdn*"
+              - "arn:aws:s3:::luciel-widget-cdn*/*"
 
           # ---- CloudFront read (widget CDN) -----------------------
           - Sid: AllowCloudFrontReads
