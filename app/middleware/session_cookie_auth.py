@@ -188,41 +188,28 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
             svc = BillingService(db, get_stripe_client())
             sub = svc.get_active_subscription_for_user(user_id=user.id)
 
-            # Arc 9 C20 — Free-tier fallback via SECURITY DEFINER.
+            # Arc 9 C22 -- Free-tier fallback via consolidated identity
+            # bootstrap.
             #
             # The Subscription model's own doctrine (app/models/
             # subscription.py line ~242-247) states: "In V2 Free admins
             # have no Subscription row at all (lazy-create on upgrade
             # per Gap 1 lock)." Before C20 the middleware enforced a
-            # blanket "no Subscription → 401" rule which silently broke
-            # every Free signup the moment C18 stopped pre-minting a
-            # placeholder Instance. The hidden bug surfaced when the
-            # first Free user tried to create their own Luciel.
+            # blanket "no Subscription -> 401" rule which silently broke
+            # every Free signup. C20 narrowed that with a single-row
+            # SECDEF lookup; C22 consolidates the discovery into ONE
+            # bootstrap call shared by every pre-tenant-context caller.
             #
-            # Fix: when no Subscription is found we look up the user's
-            # active owner ScopeAssignment via the C20 SECURITY DEFINER
-            # function ``arc9_c20_resolve_tenant_for_user(uuid)`` owned
-            # by luciel_ops (BYPASSRLS). Direct ORM reads on
-            # scope_assignments are blocked by FORCE RLS at this point
-            # in the request (we have not yet set app.admin_id — that
-            # GUC is what we're trying to discover). The function
-            # returns ONLY the tenant_id, scoped to one row by
-            # (user_id, role='owner', active, ended_at IS NULL). See
-            # alembic/versions/arc9_c20_resolve_tenant_secdef.py for
-            # the full doctrine.
+            # See ``app/identity/bootstrap.py`` for the full doctrine.
             #
             # Pro/Enterprise users still match the Subscription path
             # first so this branch is a strict superset, not a
             # regression.
             if sub is None:
-                tenant_id_row = db.execute(
-                    text(
-                        "SELECT public.arc9_c20_resolve_tenant_for_user(:uid)"
-                    ),
-                    {"uid": str(user.id)},
-                ).scalar()
-                if not tenant_id_row:
-                    # No Subscription AND no owner ScopeAssignment —
+                from app.identity import IdentityBootstrap
+                snapshot = IdentityBootstrap(db).resolve(user.id)
+                if not snapshot.has_scope:
+                    # No Subscription AND no active ScopeAssignment --
                     # this user genuinely has nothing to administer.
                     # Could be a teammate invite that was revoked, or
                     # a webhook race for a paid signup where Stripe is
@@ -232,10 +219,11 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
                         status_code=401,
                         content={"detail": "No active subscription for this user."},
                     )
-                tenant_id = tenant_id_row
+                tenant_id = snapshot.canonical_tenant_id
                 logger.info(
-                    "cookie auth: free-tier fallback owner-scope user=%s tenant=%s",
-                    user.id, tenant_id,
+                    "cookie auth: free-tier fallback via C22 bootstrap "
+                    "user=%s tenant=%s tier=%s",
+                    user.id, tenant_id, snapshot.canonical_tier,
                 )
             else:
                 tenant_id = sub.tenant_id

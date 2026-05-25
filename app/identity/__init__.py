@@ -15,6 +15,7 @@ Public surface:
 
 See ARCHITECTURE §3.2.11 for the design contract.
 """
+from app.identity.bootstrap import IdentityBootstrap, IdentitySnapshot
 from app.identity.resolver import (
     IdentityResolution,
     IdentityResolver,
@@ -22,6 +23,8 @@ from app.identity.resolver import (
 )
 
 __all__ = [
+    "IdentityBootstrap",
+    "IdentitySnapshot",
     "IdentityResolution",
     "IdentityResolver",
     "normalise_claim_value",

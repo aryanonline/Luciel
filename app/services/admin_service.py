@@ -1493,15 +1493,41 @@ class AdminService:
         requested_level: str | None = None,
         **_legacy_kwargs,
     ) -> None:
-        """V2 cap-enforcement guard. Asserts the Admin has an active
-        subscription AND has not exceeded its instance_count_cap.
+        """V2 cap-enforcement guard. Asserts the Admin is entitled to
+        create another LucielInstance, sourced from the active
+        Subscription if present and from ``Admin.tier`` +
+        ``TIER_INSTANCE_CAPS`` otherwise.
 
         Raises ``TierScopeViolationError`` (mapped to 402 by the route
         layer). On success returns silently.
+
+        Arc 9 C22 -- Free-tier fix
+        --------------------------
+        Per the V2 entitlement doctrine (app/models/subscription.py
+        ~L93-118 and CANONICAL_RECAP §6.5 founder-locks): Free admins
+        have NO Subscription row at all (lazy-create on upgrade per
+        Gap 1 lock) but they DO have an entitlement of
+        ``TIER_INSTANCE_CAPS['free'] == 1`` instance. The previous
+        version of this guard returned ``REASON_NO_ACTIVE_SUBSCRIPTION``
+        for every Free user, contradicting the published tier matrix.
+
+        The fix: when no Subscription row exists, look up the Admin
+        row's ``tier`` and use the static ``TIER_INSTANCE_CAPS`` map
+        as the cap source. This keeps Subscription as the canonical
+        source for paid tiers (so Stripe-driven changes still flow
+        through one place) while admitting Free into the same gate.
+        If the Admin row itself is missing or has a tier we don't
+        recognise, we fail closed -- defence in depth against
+        unsynchronised provisioning.
         """
         # Local imports keep AdminService importable from contexts that
         # don't have the LucielInstance / Subscription stack loaded.
-        from app.models.subscription import Subscription
+        from app.models.admin import Admin
+        from app.models.subscription import (
+            Subscription,
+            TIER_FREE,
+            TIER_INSTANCE_CAPS,
+        )
         from app.repositories.instance_repository import (
             InstanceRepository,
         )
@@ -1516,24 +1542,58 @@ class AdminService:
             .order_by(Subscription.id.desc())
             .first()
         )
-        if sub is None:
-            # No active subscription -- fail closed. Sales-assisted /
-            # manually-provisioned tenants don't hit this path because
-            # they go through admin tooling that bypasses the self-serve
-            # cap; the route layer is the only caller of this guard.
-            raise TierScopeViolationError(
-                f"Tenant {tenant_id!r} has no active subscription; "
-                f"cannot create LucielInstance via self-serve path.",
-                reason=TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION,
-            )
 
-        # Arc 5 Path A — V2 has no scope hierarchy below the Admin; the
+        cap: int | None
+        if sub is not None:
+            # Paid tier path: Subscription row is canonical. cap=0 means
+            # "unmetered" (sales-assisted backfills); cap>0 enforces.
+            raw_cap = sub.instance_count_cap
+            cap = None if raw_cap is None or int(raw_cap) == 0 else int(raw_cap)
+        else:
+            # No Subscription -- look up the Admin row's tier and read
+            # the cap from the static entitlement table. Free admins
+            # legitimately land here per the V2 lazy-create doctrine;
+            # paid admins SHOULD have a Subscription row by the time
+            # the post-checkout provisioning leg completes.
+            admin_row = (
+                self.db.query(Admin)
+                .filter(Admin.id == tenant_id)
+                .first()
+            )
+            if admin_row is None:
+                # Genuinely no Admin row -- fail closed. This is the
+                # only path that should ever raise NO_ACTIVE_SUBSCRIPTION
+                # for a self-serve request in V2: the user logged in
+                # with a session cookie but the tenant they resolved
+                # to has been hard-deleted or never provisioned.
+                raise TierScopeViolationError(
+                    f"Tenant {tenant_id!r} has no Admin row and no "
+                    f"active subscription; cannot create LucielInstance.",
+                    reason=TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION,
+                )
+            tier = admin_row.tier
+            if tier not in TIER_INSTANCE_CAPS:
+                # Unrecognised tier -- fail closed. The only way to
+                # reach this branch is a forward-compat regression
+                # (someone added a tier string to admins.tier without
+                # updating TIER_INSTANCE_CAPS); the right answer is
+                # a tight 402 with a clear server log, not a free pass.
+                logger.warning(
+                    "_enforce_tier_scope: tenant=%s has unknown tier=%r; "
+                    "failing closed pending entitlement-map update.",
+                    tenant_id, tier,
+                )
+                raise TierScopeViolationError(
+                    f"Tenant {tenant_id!r} tier={tier!r} has no entitlement "
+                    f"mapping; cannot create LucielInstance.",
+                    reason=TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION,
+                )
+            cap = TIER_INSTANCE_CAPS[tier]  # 1 for free, None for unlimited
+
+        # Arc 5 Path A -- V2 has no scope hierarchy below the Admin; the
         # legacy "scope_level permitted by tier" check is dropped here.
-        # Only the cap-enforcement guard remains, sourced from the V2
-        # entitlement map's ``instance_count_cap`` axis (which the
-        # Subscription row mirrors on the per-Admin column).
-        cap = int(sub.instance_count_cap or 0)
-        if cap > 0:
+        # Only the cap-enforcement guard remains.
+        if cap is not None:
             used = InstanceRepository(self.db).count_active_for_admin(tenant_id)
             if used >= cap:
                 raise TierScopeViolationError(
@@ -1542,5 +1602,5 @@ class AdminService:
                     f"Deactivate an existing Luciel or upgrade your tier.",
                     reason=TierScopeViolationError.REASON_CAP_EXCEEDED,
                 )
-        # else: cap=0 means "unmetered" (used by sales-assisted tenants we
-        # backfill manually). We do not enforce here.
+        # else: cap=None means "unmetered" (Enterprise tier, sales-assisted
+        # backfills). No enforcement at this layer.

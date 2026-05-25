@@ -180,8 +180,8 @@ class ScopeAssignmentRepository:
         access-request flows and tenant-admin role-history dashboards.
         Sorted by started_at ascending so history reads chronologically.
 
-        Arc 9 C21 -- RLS-aware discovery path
-        --------------------------------------
+        Arc 9 C22 -- RLS-aware discovery via consolidated bootstrap
+        ------------------------------------------------------------
         ``scope_assignments`` has FORCE ROW LEVEL SECURITY with
         policies gating visibility on ``app.admin_id``. Several
         callers invoke list_for_user BEFORE app.admin_id has been
@@ -191,25 +191,24 @@ class ScopeAssignmentRepository:
         reads is to *discover* which tenant the user belongs to.
 
         Under FORCE RLS the direct ORM query returns [] silently in
-        that window, which surfaces to the frontend as ``tenant_id=""``
-        in /billing/me and cascades into 405 / 422 errors on the
-        downstream admin endpoints.
+        that window. When ``app.admin_id`` is empty we delegate to
+        the C22 ``IdentityBootstrap`` service (single SECURITY DEFINER
+        round-trip; see ``app/identity/bootstrap.py``) and hand back
+        its ``active_scopes`` list. When the GUC is already set, the
+        normal ORM path runs and RLS evaluates as usual.
 
-        The fix mirrors the C20 single-row resolver: when
-        ``app.admin_id`` is empty we route the read through
-        ``public.arc9_c21_list_scopes_for_user(uuid, boolean)`` -- a
-        SECURITY DEFINER function owned by luciel_ops -- and hydrate
-        the rows into ScopeAssignment ORM instances. When the GUC is
-        already set, the existing ORM path runs and RLS evaluates
-        normally.
-
-        The SECDEF escape hatch is read-only and returns ONLY one
-        user's rows (no cross-user enumeration); see
-        alembic/versions/arc9_c21_list_scopes_secdef.py for the full
-        doctrine.
+        Note: ``active_only=False`` requests full history including
+        ended rows; the C22 bootstrap returns ONLY active rows by
+        design (it's a discovery primitive, not a history accessor).
+        If a caller in the discovery window asks for the full history
+        we still return only active rows -- the four pre-tenant-context
+        callers documented above all already pass ``active_only=True``,
+        so this is observed behaviour, not a regression. Audit-history
+        callers (PIPEDA access requests, tenant-admin dashboards) all
+        run AFTER app.admin_id has been set and take the ORM path.
         """
         # Step 1: probe the tenant GUC. If unset/empty we're in the
-        # discovery window and must use the SECDEF function to avoid
+        # discovery window and must use the C22 bootstrap to avoid
         # the silent-empty-list RLS trap.
         try:
             admin_id_guc = self.db.execute(
@@ -219,9 +218,14 @@ class ScopeAssignmentRepository:
             admin_id_guc = None
 
         if not admin_id_guc:
-            return self._list_for_user_secdef(
-                user_id, active_only=active_only
-            )
+            # Local import to keep the repository decoupled from the
+            # identity package at module load (avoids any future
+            # import cycle if IdentityBootstrap ever grows a
+            # repository dependency).
+            from app.identity import IdentityBootstrap
+
+            snapshot = IdentityBootstrap(self.db).resolve(user_id)
+            return list(snapshot.active_scopes)
 
         # Step 2: GUC is set -- the normal ORM path with RLS in effect.
         query = self.db.query(ScopeAssignment).filter(
@@ -233,55 +237,6 @@ class ScopeAssignmentRepository:
                 ScopeAssignment.active.is_(True),
             )
         return query.order_by(ScopeAssignment.started_at.asc()).all()
-
-    def _list_for_user_secdef(
-        self,
-        user_id: uuid.UUID,
-        *,
-        active_only: bool,
-    ) -> list[ScopeAssignment]:
-        """Read scope rows via the C21 SECURITY DEFINER function.
-
-        Hydrates the returned columns into transient (detached)
-        ScopeAssignment instances so callers receive the same shape
-        they expect from the ORM path. The instances are NOT added to
-        the session -- they represent a read-only view and should not
-        be mutated.
-        """
-        rows = self.db.execute(
-            _sa_text(
-                "SELECT id, user_id, tenant_id, domain_id, role, "
-                "started_at, ended_at, ended_reason, ended_note, "
-                "ended_by_api_key_id, active "
-                "FROM public.arc9_c21_list_scopes_for_user(:uid, :ao)"
-            ),
-            {"uid": str(user_id), "ao": active_only},
-        ).all()
-
-        out: list[ScopeAssignment] = []
-        for r in rows:
-            sa = ScopeAssignment(
-                id=r.id,
-                user_id=r.user_id,
-                tenant_id=r.tenant_id,
-                domain_id=r.domain_id,
-                role=r.role,
-                started_at=r.started_at,
-                ended_at=r.ended_at,
-                ended_reason=(
-                    EndReason(r.ended_reason)
-                    if r.ended_reason is not None
-                    else None
-                ),
-                ended_note=r.ended_note,
-                ended_by_api_key_id=r.ended_by_api_key_id,
-                active=r.active,
-            )
-            # No db.add() above -- instances stay transient by default,
-            # which is exactly what we want: they represent a
-            # SECDEF-sourced read view that must never be flushed back.
-            out.append(sa)
-        return out
 
     def list_for_tenant(
         self,

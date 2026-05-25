@@ -138,36 +138,24 @@ def _resolve_tenant_for_user(db, user_id) -> str:
       3. Else ``""``. Downstream session middleware re-resolves on the
          next request when a scope finally lands.
     """
-    # Arc 9 C20 — RLS-aware fast path via SECURITY DEFINER function.
+    # Arc 9 C22 -- consolidated identity bootstrap.
     #
     # Direct ORM reads on scope_assignments are blocked by FORCE RLS
-    # at login time because we have not yet set app.admin_id — that
-    # GUC is precisely what we're trying to discover. Calling the
-    # SECURITY DEFINER function ``arc9_c20_resolve_tenant_for_user``
-    # (owned by luciel_ops, BYPASSRLS) executes the lookup with the
-    # owner's privileges and returns ONLY a tenant_id string. The
-    # function applies the same (owner-first, else most-recent
-    # active) priority that the legacy ORM path below would have
-    # used, so behaviour is unchanged for tenants where RLS happens
-    # to be permissive.
+    # at login time because we have not yet set app.admin_id -- that
+    # GUC is precisely what we're trying to discover. The C22
+    # ``IdentityBootstrap`` service wraps a single SECURITY DEFINER
+    # function (owned by luciel_ops, BYPASSRLS) that returns the
+    # canonical tenant + tier + active-scope list in one round-trip.
+    # See ``app/identity/bootstrap.py`` for the full doctrine.
     #
-    # If the function returns a non-empty string we trust it and
-    # return immediately. If it returns NULL/empty we fall through
-    # to the mid-checkout Stripe race fallback (step 2 below).
-    #
-    # See alembic/versions/arc9_c20_resolve_tenant_secdef.py for the
-    # full doctrine of why a SECURITY DEFINER function is the right
-    # tool here (vs BYPASSRLS ops session, vs row_security=off, etc.).
-    from sqlalchemy import text as _sa_text
+    # If the snapshot has scope we trust it and return immediately.
+    # If empty, we fall through to the mid-checkout Stripe race
+    # fallback (step 2 below) for one last narrow-window check.
+    from app.identity import IdentityBootstrap
 
-    secdef_tid = db.execute(
-        _sa_text(
-            "SELECT public.arc9_c20_resolve_tenant_for_user(:uid)"
-        ),
-        {"uid": str(user_id)},
-    ).scalar()
-    if secdef_tid:
-        return secdef_tid
+    snapshot = IdentityBootstrap(db).resolve(user_id)
+    if snapshot.has_scope:
+        return snapshot.canonical_tenant_id
 
     # 2. Mid-checkout race fallback (preserves pre-30a.5 owner-only
     #    behavior for that narrow window). BillingService reads
