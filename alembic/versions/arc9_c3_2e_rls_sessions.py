@@ -33,7 +33,7 @@ from alembic import op
 
 
 revision = "arc9_c3_2e_rls_sessions"
-down_revision = "arc9_c3_2d_rls_agent_configs"
+down_revision = "arc9_c3_2c_rls_conversations"
 branch_labels = None
 depends_on = None
 

@@ -73,7 +73,13 @@ Tables the ops role can DELETE (matches the 12-step DELETE chain in
 2026-05-24 against admin_service.py:1365-1432):
 
   sessions, conversations, identity_claims, memory_items, api_keys,
-  luciel_instances, agents, agent_configs
+  instances
+
+NOTE (C10 reality-check, 2026-05-25): The original C6.1 design listed
+`luciel_instances`, `agents`, and `agent_configs` here. Those tables
+were dropped in arc5_c when the data model consolidated into `admins`
+and `instances`. The grant lists below have been pruned to match the
+actual post-arc5_c schema. See ARC9_ENVELOPE corrigendum.
 
 Tables explicitly EXCLUDED from DELETE grant:
 
@@ -145,9 +151,7 @@ SELECT_DELETE_TABLES = (
     "identity_claims",
     "memory_items",
     "api_keys",
-    "luciel_instances",
-    "agents",
-    "agent_configs",
+    "instances",
 )
 
 
