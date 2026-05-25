@@ -75,6 +75,7 @@ _TRANSIENT_EXC = (_SAOperationalError, _redis_exc.ConnectionError)
 from sqlalchemy import select
 
 from app.db.session import SessionLocal
+from app.db.tenant_scope import bind_tenant_scope  # Arc 9 C4.4
 from app.integrations.llm.router import ModelRouter
 from app.memory.service import MemoryService
 from app.models.admin_audit_log import (
@@ -233,319 +234,328 @@ def extract_memory_from_turn(
     """
     task_id = self.request.id or "no-task-id"
 
-    db = SessionLocal()
-    try:
-        # ---------- Gate 1: payload shape ----------
-        if not (
-            isinstance(session_id, str)
-            and isinstance(user_id, str) and user_id
-            and isinstance(tenant_id, str) and tenant_id
-            and isinstance(message_id, int)
-            and isinstance(actor_key_prefix, str) and actor_key_prefix
-        ):
-            logger.error(
-                "gate1 malformed payload task=%s tenant=%s session=%s",
-                task_id, tenant_id, session_id,
-            )
-            _reject_with_audit(
-                db,
-                action=ACTION_WORKER_MALFORMED_PAYLOAD,
-                tenant_id=tenant_id if isinstance(tenant_id, str) else None,
-                session_id=session_id if isinstance(session_id, str) else None,
-                message_id=message_id if isinstance(message_id, int) else None,
-                actor_key_prefix=actor_key_prefix
-                if isinstance(actor_key_prefix, str) else None,
-                note="malformed payload",
-                task_id=task_id,
-                trace_id=trace_id if isinstance(trace_id, str) else None,
-            )
-
-        # ---------- Gate 2: API key still active ----------
-        key_row = db.scalars(
-            select(ApiKey).where(ApiKey.key_prefix == actor_key_prefix).limit(1)
-        ).first()
-        if key_row is None or not key_row.active:
-            logger.warning(
-                "gate2 key revoked task=%s prefix=%s",
-                task_id, actor_key_prefix,
-            )
-            _reject_with_audit(
-                db,
-                action=ACTION_WORKER_KEY_REVOKED,
-                tenant_id=tenant_id,
-                session_id=session_id,
-                message_id=message_id,
-                actor_key_prefix=actor_key_prefix,
-                note="enqueuing key no longer active",
-                task_id=task_id,
-                trace_id=trace_id,
-            )
-
-        # ---------- Gate 3: session.tenant_id == payload.tenant_id ----------
-        session_row = db.get(SessionModel, session_id)
-        if session_row is None or session_row.tenant_id != tenant_id:
-            logger.warning(
-                "gate3 cross-tenant reject task=%s payload_tenant=%s session=%s",
-                task_id, tenant_id, session_id,
-            )
-            _reject_with_audit(
-                db,
-                action=ACTION_WORKER_CROSS_TENANT_REJECT,
-                tenant_id=tenant_id,
-                session_id=session_id,
-                message_id=message_id,
-                actor_key_prefix=actor_key_prefix,
-                note="session.tenant_id mismatch or session missing",
-                task_id=task_id,
-                trace_id=trace_id,
-            )
-
-        # ---------- Gate 4: LucielInstance active ----------
-        if luciel_instance_id is not None:
-            instance = db.get(LucielInstance, luciel_instance_id)
-            if instance is None or not instance.active:
-                logger.warning(
-                    "gate4 instance deactivated task=%s instance=%s",
-                    task_id, luciel_instance_id,
-                )
-                _reject_with_audit(
-                    db,
-                    action=ACTION_WORKER_INSTANCE_DEACTIVATED,
-                    tenant_id=tenant_id,
-                    session_id=session_id,
-                    message_id=message_id,
-                    actor_key_prefix=actor_key_prefix,
-                    note="luciel_instance deactivated between enqueue and dequeue",
-                    task_id=task_id,
-                    trace_id=trace_id,
-                )
-        
-        # ---------- Gate 5: actor_user_id parse + User.active (Step 24.5b) ----------
-        actor_user_uuid: uuid.UUID | None = None
-        if actor_user_id is not None:
-            # Parse string -> UUID. Malformed actor_user_id is treated as
-            # gate 1 (malformed payload) -- the enqueue side serialized
-            # this from a real uuid.UUID, so a parse failure here means
-            # the payload was tampered with in transit.
-            try:
-                actor_user_uuid = uuid.UUID(actor_user_id)
-            except (ValueError, TypeError):
+    # Arc 9 C4.4: bind Wall-1 + Wall-3 scopes BEFORE opening the DB
+    # session so the very first BEGIN on the session sees the GUCs.
+    # SessionLocal() is opened inside the with-block intentionally;
+    # opening it outside would emit empty GUCs on the first lazy
+    # BEGIN, which then linger on the pooled connection.
+    with bind_tenant_scope(
+        admin_id=tenant_id if isinstance(tenant_id, str) and tenant_id else None,
+        instance_id=luciel_instance_id,
+    ):
+        db = SessionLocal()
+        try:
+            # ---------- Gate 1: payload shape ----------
+            if not (
+                isinstance(session_id, str)
+                and isinstance(user_id, str) and user_id
+                and isinstance(tenant_id, str) and tenant_id
+                and isinstance(message_id, int)
+                and isinstance(actor_key_prefix, str) and actor_key_prefix
+            ):
                 logger.error(
-                    "gate5 actor_user_id unparseable task=%s tenant=%s",
-                    task_id, tenant_id,
+                    "gate1 malformed payload task=%s tenant=%s session=%s",
+                    task_id, tenant_id, session_id,
                 )
                 _reject_with_audit(
                     db,
                     action=ACTION_WORKER_MALFORMED_PAYLOAD,
-                    tenant_id=tenant_id,
-                    session_id=session_id,
-                    message_id=message_id,
-                    actor_key_prefix=actor_key_prefix,
-                    note="actor_user_id failed UUID parse",
+                    tenant_id=tenant_id if isinstance(tenant_id, str) else None,
+                    session_id=session_id if isinstance(session_id, str) else None,
+                    message_id=message_id if isinstance(message_id, int) else None,
+                    actor_key_prefix=actor_key_prefix
+                    if isinstance(actor_key_prefix, str) else None,
+                    note="malformed payload",
                     task_id=task_id,
-                    trace_id=trace_id,
+                    trace_id=trace_id if isinstance(trace_id, str) else None,
                 )
 
-            # User.active check. Deactivated users cannot have memory
-            # written for them mid-flight after enqueue.
-            user_row = db.get(User, actor_user_uuid)
-            if user_row is None or not user_row.active:
-                logger.warning(
-                    "gate5 user inactive/missing task=%s actor_user_id=%s",
-                    task_id, actor_user_uuid,
-                )
-                _reject_with_audit(
-                    db,
-                    action=ACTION_WORKER_USER_INACTIVE,
-                    tenant_id=tenant_id,
-                    session_id=session_id,
-                    message_id=message_id,
-                    actor_key_prefix=actor_key_prefix,
-                    note=(
-                        f"actor_user inactive or missing: "
-                        f"{actor_user_uuid}"
-                    ),
-                    task_id=task_id,
-                    trace_id=trace_id,
-                )
-
-        # ---------- Gate 6: cross-tenant identity-spoof guard (Step 24.5b -- Q6) ----------
-        # Arc 5 Path A: V2 binding is ScopeAssignment(user_id, tenant_id).
-        # When actor_user_uuid is present and agent_id is supplied (legacy
-        # field name preserved on the payload for transition), the actor
-        # MUST have an active ScopeAssignment under this tenant.
-        if actor_user_uuid is not None and agent_id is not None:
-            spoof_agent = db.scalars(
-                select(ScopeAssignment).where(
-                    ScopeAssignment.tenant_id == tenant_id,
-                    ScopeAssignment.user_id == actor_user_uuid,
-                    ScopeAssignment.active.is_(True),
-                ).limit(1)
+            # ---------- Gate 2: API key still active ----------
+            key_row = db.scalars(
+                select(ApiKey).where(ApiKey.key_prefix == actor_key_prefix).limit(1)
             ).first()
-            if spoof_agent is None:
+            if key_row is None or not key_row.active:
                 logger.warning(
-                    "gate6 identity spoof task=%s payload_actor_user=%s "
-                    "agent_user=%s tenant=%s agent_id=%s",
-                    task_id,
-                    actor_user_uuid,
-                    spoof_agent.user_id if spoof_agent else None,
-                    tenant_id,
-                    agent_id,
+                    "gate2 key revoked task=%s prefix=%s",
+                    task_id, actor_key_prefix,
                 )
                 _reject_with_audit(
                     db,
-                    action=ACTION_WORKER_IDENTITY_SPOOF_REJECT,
+                    action=ACTION_WORKER_KEY_REVOKED,
                     tenant_id=tenant_id,
                     session_id=session_id,
                     message_id=message_id,
                     actor_key_prefix=actor_key_prefix,
-                    note=(
-                        f"actor_user_id mismatch: payload claims "
-                        f"{actor_user_uuid}, agent ({tenant_id},"
-                        f"{agent_id}) has "
-                        f"{spoof_agent.user_id if spoof_agent else 'None'}"
-                    ),
+                    note="enqueuing key no longer active",
                     task_id=task_id,
                     trace_id=trace_id,
                 )
 
-        # ---------- Re-read turn window from DB (Invariant 13: tenant-scoped) ----------
-        stmt = (
-            select(MessageModel)
-            .join(SessionModel, SessionModel.id == MessageModel.session_id)
-            .where(
-                SessionModel.id == session_id,
-                SessionModel.tenant_id == tenant_id,
-                MessageModel.id <= message_id,
-            )
-            .order_by(MessageModel.id.desc())
-            .limit(TURN_WINDOW_SIZE)
-        )
-        rows = list(db.scalars(stmt).all())
-        rows.reverse()  # chronological order for the extractor
+            # ---------- Gate 3: session.tenant_id == payload.tenant_id ----------
+            session_row = db.get(SessionModel, session_id)
+            if session_row is None or session_row.tenant_id != tenant_id:
+                logger.warning(
+                    "gate3 cross-tenant reject task=%s payload_tenant=%s session=%s",
+                    task_id, tenant_id, session_id,
+                )
+                _reject_with_audit(
+                    db,
+                    action=ACTION_WORKER_CROSS_TENANT_REJECT,
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    message_id=message_id,
+                    actor_key_prefix=actor_key_prefix,
+                    note="session.tenant_id mismatch or session missing",
+                    task_id=task_id,
+                    trace_id=trace_id,
+                )
 
-        if not rows:
+            # ---------- Gate 4: LucielInstance active ----------
+            if luciel_instance_id is not None:
+                instance = db.get(LucielInstance, luciel_instance_id)
+                if instance is None or not instance.active:
+                    logger.warning(
+                        "gate4 instance deactivated task=%s instance=%s",
+                        task_id, luciel_instance_id,
+                    )
+                    _reject_with_audit(
+                        db,
+                        action=ACTION_WORKER_INSTANCE_DEACTIVATED,
+                        tenant_id=tenant_id,
+                        session_id=session_id,
+                        message_id=message_id,
+                        actor_key_prefix=actor_key_prefix,
+                        note="luciel_instance deactivated between enqueue and dequeue",
+                        task_id=task_id,
+                        trace_id=trace_id,
+                    )
+        
+            # ---------- Gate 5: actor_user_id parse + User.active (Step 24.5b) ----------
+            actor_user_uuid: uuid.UUID | None = None
+            if actor_user_id is not None:
+                # Parse string -> UUID. Malformed actor_user_id is treated as
+                # gate 1 (malformed payload) -- the enqueue side serialized
+                # this from a real uuid.UUID, so a parse failure here means
+                # the payload was tampered with in transit.
+                try:
+                    actor_user_uuid = uuid.UUID(actor_user_id)
+                except (ValueError, TypeError):
+                    logger.error(
+                        "gate5 actor_user_id unparseable task=%s tenant=%s",
+                        task_id, tenant_id,
+                    )
+                    _reject_with_audit(
+                        db,
+                        action=ACTION_WORKER_MALFORMED_PAYLOAD,
+                        tenant_id=tenant_id,
+                        session_id=session_id,
+                        message_id=message_id,
+                        actor_key_prefix=actor_key_prefix,
+                        note="actor_user_id failed UUID parse",
+                        task_id=task_id,
+                        trace_id=trace_id,
+                    )
+
+                # User.active check. Deactivated users cannot have memory
+                # written for them mid-flight after enqueue.
+                user_row = db.get(User, actor_user_uuid)
+                if user_row is None or not user_row.active:
+                    logger.warning(
+                        "gate5 user inactive/missing task=%s actor_user_id=%s",
+                        task_id, actor_user_uuid,
+                    )
+                    _reject_with_audit(
+                        db,
+                        action=ACTION_WORKER_USER_INACTIVE,
+                        tenant_id=tenant_id,
+                        session_id=session_id,
+                        message_id=message_id,
+                        actor_key_prefix=actor_key_prefix,
+                        note=(
+                            f"actor_user inactive or missing: "
+                            f"{actor_user_uuid}"
+                        ),
+                        task_id=task_id,
+                        trace_id=trace_id,
+                    )
+
+            # ---------- Gate 6: cross-tenant identity-spoof guard (Step 24.5b -- Q6) ----------
+            # Arc 5 Path A: V2 binding is ScopeAssignment(user_id, tenant_id).
+            # When actor_user_uuid is present and agent_id is supplied (legacy
+            # field name preserved on the payload for transition), the actor
+            # MUST have an active ScopeAssignment under this tenant.
+            if actor_user_uuid is not None and agent_id is not None:
+                spoof_agent = db.scalars(
+                    select(ScopeAssignment).where(
+                        ScopeAssignment.tenant_id == tenant_id,
+                        ScopeAssignment.user_id == actor_user_uuid,
+                        ScopeAssignment.active.is_(True),
+                    ).limit(1)
+                ).first()
+                if spoof_agent is None:
+                    logger.warning(
+                        "gate6 identity spoof task=%s payload_actor_user=%s "
+                        "agent_user=%s tenant=%s agent_id=%s",
+                        task_id,
+                        actor_user_uuid,
+                        spoof_agent.user_id if spoof_agent else None,
+                        tenant_id,
+                        agent_id,
+                    )
+                    _reject_with_audit(
+                        db,
+                        action=ACTION_WORKER_IDENTITY_SPOOF_REJECT,
+                        tenant_id=tenant_id,
+                        session_id=session_id,
+                        message_id=message_id,
+                        actor_key_prefix=actor_key_prefix,
+                        note=(
+                            f"actor_user_id mismatch: payload claims "
+                            f"{actor_user_uuid}, agent ({tenant_id},"
+                            f"{agent_id}) has "
+                            f"{spoof_agent.user_id if spoof_agent else 'None'}"
+                        ),
+                        task_id=task_id,
+                        trace_id=trace_id,
+                    )
+
+            # ---------- Re-read turn window from DB (Invariant 13: tenant-scoped) ----------
+            stmt = (
+                select(MessageModel)
+                .join(SessionModel, SessionModel.id == MessageModel.session_id)
+                .where(
+                    SessionModel.id == session_id,
+                    SessionModel.tenant_id == tenant_id,
+                    MessageModel.id <= message_id,
+                )
+                .order_by(MessageModel.id.desc())
+                .limit(TURN_WINDOW_SIZE)
+            )
+            rows = list(db.scalars(stmt).all())
+            rows.reverse()  # chronological order for the extractor
+
+            if not rows:
+                logger.warning(
+                    "empty turn window task=%s session=%s message=%s",
+                    task_id, session_id, message_id,
+                )
+                # Not a rejection — just nothing to extract. Idempotent no-op.
+                return
+
+            messages_payload = [
+                {"role": r.role, "content": r.content}
+                for r in rows
+            ]
+
+            # ---------- Execute extraction ----------
+            repository = MemoryRepository(db)
+            service = MemoryService(
+                repository=repository,
+                model_router=ModelRouter(),
+            )
+
+            saved_count = service.extract_and_save(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                messages=messages_payload,
+                message_id=message_id,
+                luciel_instance_id=luciel_instance_id,
+                actor_user_id=actor_user_uuid,  # Step 24.5b File 2.6d
+            )
+
+            # ---------- Audit row in same txn (Invariant 4) ----------
+            # Content digest only — never raw content in audit.
+            content_digest = _content_sha256(
+                "\n".join(f"{m['role']}:{m['content']}" for m in messages_payload)
+            )
+            ctx = AuditContext.worker(
+                task_id=f"memory_extraction:{task_id}",
+                actor_key_prefix=actor_key_prefix,
+            )
+            AdminAuditRepository(db).record(
+                ctx=ctx,
+                tenant_id=tenant_id,
+                action=ACTION_MEMORY_EXTRACTED,
+                resource_type=RESOURCE_MEMORY,
+                resource_pk=None,   # memory_items are append-only; no single pk
+                resource_natural_id=f"session={session_id};message={message_id}",
+                domain_id=session_row.domain_id,
+                agent_id=agent_id,
+                luciel_instance_id=luciel_instance_id,
+                before=None,
+                after={
+                    "actor_key_prefix": actor_key_prefix,
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "trace_id": trace_id,
+                    "turn_window_size": len(messages_payload),
+                    "saved_count": saved_count,
+                    "content_sha256": content_digest,
+                    "actor_user_id": (
+                        str(actor_user_uuid) if actor_user_uuid else None
+                    ),  # Step 24.5b File 2.6d
+                },
+                note="async memory extraction",
+                autocommit=False,
+            )
+
+            # Commit memory rows + audit row together.
+            db.commit()
+
+            logger.info(
+                "extraction ok task=%s tenant=%s session=%s message=%s saved=%d",
+                task_id, tenant_id, session_id, message_id, saved_count,
+            )
+
+        except Reject:
+            # Rejection path already wrote its own audit row; do not retry.
+            raise
+        except Retry:
+            # self.retry() raises Retry; let Celery handle the redelivery.
+            raise
+        except _TRANSIENT_EXC as exc:
+            # Step 29.y Cluster 4 (E-3): transient-class failures are
+            # explicitly retried via self.retry(). Anything outside
+            # _TRANSIENT_EXC is treated as permanent and routes through
+            # the rejection path below so the message lands in DLQ
+            # immediately instead of cycling through 3 retries that
+            # cannot succeed.
+            db.rollback()
             logger.warning(
-                "empty turn window task=%s session=%s message=%s",
-                task_id, session_id, message_id,
+                "transient failure task=%s type=%s attempt=%d/%d",
+                task_id,
+                type(exc).__name__,
+                self.request.retries + 1,
+                self.max_retries + 1,
             )
-            # Not a rejection — just nothing to extract. Idempotent no-op.
-            return
-
-        messages_payload = [
-            {"role": r.role, "content": r.content}
-            for r in rows
-        ]
-
-        # ---------- Execute extraction ----------
-        repository = MemoryRepository(db)
-        service = MemoryService(
-            repository=repository,
-            model_router=ModelRouter(),
-        )
-
-        saved_count = service.extract_and_save(
-            user_id=user_id,
-            tenant_id=tenant_id,
-            session_id=session_id,
-            agent_id=agent_id,
-            messages=messages_payload,
-            message_id=message_id,
-            luciel_instance_id=luciel_instance_id,
-            actor_user_id=actor_user_uuid,  # Step 24.5b File 2.6d
-        )
-
-        # ---------- Audit row in same txn (Invariant 4) ----------
-        # Content digest only — never raw content in audit.
-        content_digest = _content_sha256(
-            "\n".join(f"{m['role']}:{m['content']}" for m in messages_payload)
-        )
-        ctx = AuditContext.worker(
-            task_id=f"memory_extraction:{task_id}",
-            actor_key_prefix=actor_key_prefix,
-        )
-        AdminAuditRepository(db).record(
-            ctx=ctx,
-            tenant_id=tenant_id,
-            action=ACTION_MEMORY_EXTRACTED,
-            resource_type=RESOURCE_MEMORY,
-            resource_pk=None,   # memory_items are append-only; no single pk
-            resource_natural_id=f"session={session_id};message={message_id}",
-            domain_id=session_row.domain_id,
-            agent_id=agent_id,
-            luciel_instance_id=luciel_instance_id,
-            before=None,
-            after={
-                "actor_key_prefix": actor_key_prefix,
-                "user_id": user_id,
-                "session_id": session_id,
-                "message_id": message_id,
-                "trace_id": trace_id,
-                "turn_window_size": len(messages_payload),
-                "saved_count": saved_count,
-                "content_sha256": content_digest,
-                "actor_user_id": (
-                    str(actor_user_uuid) if actor_user_uuid else None
-                ),  # Step 24.5b File 2.6d
-            },
-            note="async memory extraction",
-            autocommit=False,
-        )
-
-        # Commit memory rows + audit row together.
-        db.commit()
-
-        logger.info(
-            "extraction ok task=%s tenant=%s session=%s message=%s saved=%d",
-            task_id, tenant_id, session_id, message_id, saved_count,
-        )
-
-    except Reject:
-        # Rejection path already wrote its own audit row; do not retry.
-        raise
-    except Retry:
-        # self.retry() raises Retry; let Celery handle the redelivery.
-        raise
-    except _TRANSIENT_EXC as exc:
-        # Step 29.y Cluster 4 (E-3): transient-class failures are
-        # explicitly retried via self.retry(). Anything outside
-        # _TRANSIENT_EXC is treated as permanent and routes through
-        # the rejection path below so the message lands in DLQ
-        # immediately instead of cycling through 3 retries that
-        # cannot succeed.
-        db.rollback()
-        logger.warning(
-            "transient failure task=%s type=%s attempt=%d/%d",
-            task_id,
-            type(exc).__name__,
-            self.request.retries + 1,
-            self.max_retries + 1,
-        )
-        raise self.retry(exc=exc)
-    except Exception as exc:
-        # Step 29.y Cluster 4 (E-3): permanent failure. Do NOT retry.
-        # Route to DLQ via the same audit-then-reject path that
-        # malformed-payload rejections use. The
-        # ACTION_WORKER_PERMANENT_FAILURE action lands a single
-        # audit row keyed on (action, tenant_id, resource_natural_id)
-        # so a worker-crash redelivery is idempotent (E-2 partial
-        # unique index).
-        db.rollback()
-        logger.exception(
-            "permanent failure task=%s type=%s",
-            task_id,
-            type(exc).__name__,
-        )
-        _reject_with_audit(
-            db=db,
-            action=ACTION_WORKER_PERMANENT_FAILURE,
-            tenant_id=tenant_id,
-            session_id=session_id,
-            message_id=message_id,
-            actor_key_prefix=actor_key_prefix,
-            note=f"permanent failure: {type(exc).__name__}",
-            task_id=task_id,
-            trace_id=trace_id,
-        )
-    finally:
-        db.close()
+            raise self.retry(exc=exc)
+        except Exception as exc:
+            # Step 29.y Cluster 4 (E-3): permanent failure. Do NOT retry.
+            # Route to DLQ via the same audit-then-reject path that
+            # malformed-payload rejections use. The
+            # ACTION_WORKER_PERMANENT_FAILURE action lands a single
+            # audit row keyed on (action, tenant_id, resource_natural_id)
+            # so a worker-crash redelivery is idempotent (E-2 partial
+            # unique index).
+            db.rollback()
+            logger.exception(
+                "permanent failure task=%s type=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            _reject_with_audit(
+                db=db,
+                action=ACTION_WORKER_PERMANENT_FAILURE,
+                tenant_id=tenant_id,
+                session_id=session_id,
+                message_id=message_id,
+                actor_key_prefix=actor_key_prefix,
+                note=f"permanent failure: {type(exc).__name__}",
+                task_id=task_id,
+                trace_id=trace_id,
+            )
+        finally:
+            db.close()
