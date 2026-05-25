@@ -46,9 +46,10 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     """Legacy (pre-Step-24.5). New writes use luciel_instance_id instead."""
 
     # ---- Step 25b: Instance binding (Arc 5 Revision C re-pointed) ----
-    # FK target moved from luciel_instances.id to instances.id at
-    # Revision C; column name kept for call-site compatibility.
-    luciel_instance_id: Mapped[int | None] = mapped_column(
+    # Arc 9.1 Phase A (2026-05-25): NOT NULL. See arc9_1_a_tenant_isolation_seal.
+    # Pre-Arc-9.1 doctrine permitted NULL for legacy/shared rows; this was
+    # the P3 leak surface (204 NULL rows visible across tenants).
+    luciel_instance_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey(
             "instances.id",
@@ -56,11 +57,9 @@ class KnowledgeEmbedding(Base, TimestampMixin):
             name="fk_knowledge_embeddings_luciel_instance_id",
         ),
         index=True,
-        nullable=True,
+        nullable=False,
     )
-    """The Luciel instance this chunk belongs to (Step 25b writes set this).
-    NULL for legacy pre-Step-25b rows and for domain/tenant-level shared
-    knowledge attached only via the scope triple."""
+    """The Luciel instance this chunk belongs to. Required."""
 
     # Arc 5 Revision C — luciel_instance_id now FKs directly to instances.id;
     # the relationship resolves through the natural FK (no longer via the

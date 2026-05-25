@@ -55,14 +55,15 @@ class ApiKey(Base, TimestampMixin):
     # Arc 5 Revision C: FK re-pointed from luciel_instances.id to
     # instances.id (luciel_instances was dropped). Column name kept for
     # call-site compatibility.
-    luciel_instance_id: Mapped[int | None] = mapped_column(
+    # Arc 9.1 Phase A (2026-05-25): NOT NULL. See arc9_1_a_tenant_isolation_seal.
+    luciel_instance_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey(
             "instances.id",
             ondelete="SET NULL",
             name="fk_api_keys_luciel_instance_id",
         ),
-        nullable=True,
+        nullable=False,
         index=True,
     )
 

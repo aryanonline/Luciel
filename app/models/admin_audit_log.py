@@ -626,9 +626,10 @@ class AdminAuditLog(Base, TimestampMixin):
     agent_id: Mapped[str | None] = mapped_column(
         String(100), nullable=True, index=True
     )
-    luciel_instance_id: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, index=True,
-        comment="PK of the luciel_instances row, when applicable.",
+    # Arc 9.1 Phase A (2026-05-25): NOT NULL. See arc9_1_a_tenant_isolation_seal.
+    luciel_instance_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, index=True,
+        comment="PK of the luciel_instances row. Arc 9.1: required.",
     )
 
     # -----------------------------------------------------------------
