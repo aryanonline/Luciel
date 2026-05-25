@@ -642,7 +642,6 @@ Resources:
         - MetricNamespace: Luciel/Backend
           MetricName: PerAdminHttp5xxCount
           MetricValue: "1"
-          DefaultValue: 0
           Unit: Count
           Dimensions:
             - Key: AdminId
@@ -660,7 +659,6 @@ Resources:
         - MetricNamespace: Luciel/Backend
           MetricName: PerAdminHttpLatencyMs
           MetricValue: $.duration_ms
-          DefaultValue: 0
           Unit: Milliseconds
           Dimensions:
             - Key: AdminId
@@ -684,7 +682,6 @@ Resources:
         - MetricNamespace: Luciel/Backend
           MetricName: PerAdminZeroRowCount
           MetricValue: "1"
-          DefaultValue: 0
           Unit: Count
           Dimensions:
             - Key: AdminId
