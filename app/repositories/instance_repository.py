@@ -63,6 +63,7 @@ class InstanceRepository:
         description: str | None = None,
         active: bool = True,
         created_by: str | None = None,
+        system_prompt_additions: str | None = None,
         autocommit: bool = True,
         audit_ctx: AuditContext | None = None,
     ) -> Instance:
@@ -83,6 +84,7 @@ class InstanceRepository:
             display_name=display_name,
             description=description,
             active=active,
+            system_prompt_additions=system_prompt_additions,
         )
         self.db.add(instance)
         self.db.flush()  # assigns instance.id
@@ -101,6 +103,7 @@ class InstanceRepository:
                     "display_name": display_name,
                     "description": description,
                     "active": active,
+                    "system_prompt_additions_set": system_prompt_additions is not None,
                 },
                 autocommit=False,
             )
@@ -189,6 +192,7 @@ class InstanceRepository:
             "display_name",
             "description",
             "active",
+            "system_prompt_additions",
         }
     )
 

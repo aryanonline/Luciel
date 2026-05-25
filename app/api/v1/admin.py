@@ -942,6 +942,7 @@ def create_luciel_instance(
             description=payload.description,
             active=payload.active,
             created_by=payload.created_by,
+            system_prompt_additions=payload.system_prompt_additions,
         )
     except DuplicateInstanceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

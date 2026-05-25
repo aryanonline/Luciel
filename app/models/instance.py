@@ -30,6 +30,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -53,6 +54,14 @@ class Instance(Base):
     instance_slug: Mapped[str] = mapped_column(String(100), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # Arc 9 C17 — per-Instance persona / system prompt addition.
+    # Composed by app.services.chat_service into the four-layer prompt:
+    #   Luciel Core → tenant additions → domain additions → instance additions.
+    # NULL = no instance-level additions; chat falls back to upstream layers.
+    # Bounded at 8000 chars at the Pydantic layer (see app/schemas/instance.py).
+    system_prompt_additions: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
     )
