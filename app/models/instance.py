@@ -31,6 +31,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,10 +57,13 @@ class Instance(Base):
         Boolean, nullable=False, server_default="true"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+        server_onupdate=text("now()"),
     )
 
     # Arc 6 Commit 8.5b — Deferred-downgrade overflow archive stamp.
