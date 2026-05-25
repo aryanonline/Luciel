@@ -22,16 +22,16 @@ class SessionModel(Base, TimestampMixin):
     domain_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
 
-    # Step 24.5 File 15 — nullable FK to the LucielInstance that served this session.
-    # NULL = legacy/unbound (chat resolved via tenant/domain/agent config path).
-    luciel_instance_id: Mapped[int | None] = mapped_column(
+    # Arc 9.1 Phase A (2026-05-25): NOT NULL. See arc9_1_a_tenant_isolation_seal.
+    # Every session is now bound to its Instance at creation time.
+    luciel_instance_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey(
             "luciel_instances.id",
             ondelete="SET NULL",
             name="fk_sessions_luciel_instance_id",
         ),
-        nullable=True,
+        nullable=False,
         index=True,
     )
 
