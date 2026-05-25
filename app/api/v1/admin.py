@@ -908,17 +908,6 @@ def deactivate_memory_item(
     response_model=LucielInstanceRead,
     status_code=status.HTTP_201_CREATED,
 )
-# Arc 9 C19 — legacy URL alias. The deployed frontend bundle still
-# POSTs to /api/v1/admin/luciel-instances (Arc 4 path); the V2 route is
-# /api/v1/admin/instances. FastAPI registers both decorators against
-# the same handler so existing CloudFront-cached clients keep working.
-# Delete once the frontend is rebuilt against the V2 path.
-@router.post(
-    "/luciel-instances",
-    response_model=LucielInstanceRead,
-    status_code=status.HTTP_201_CREATED,
-    include_in_schema=False,
-)
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def create_luciel_instance(
     request: Request,
@@ -1276,15 +1265,6 @@ def revoke_invite_route(
     "/instances",
     response_model=list[LucielInstanceRead],
 )
-# Arc 9 C21 -- legacy URL alias mirroring the C19 POST alias. The
-# deployed frontend bundle GETs /api/v1/admin/luciel-instances to
-# populate the dashboard; the V2 route is /api/v1/admin/instances.
-# Delete once the frontend is rebuilt against the V2 path.
-@router.get(
-    "/luciel-instances",
-    response_model=list[LucielInstanceRead],
-    include_in_schema=False,
-)
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_luciel_instances(
     request: Request,
@@ -1317,13 +1297,6 @@ def list_luciel_instances(
     "/instances/{pk}",
     response_model=LucielInstanceRead,
 )
-# Arc 9 C21 -- legacy URL alias. Frontend bundle issues
-# GET /api/v1/admin/luciel-instances/{pk}.
-@router.get(
-    "/luciel-instances/{pk}",
-    response_model=LucielInstanceRead,
-    include_in_schema=False,
-)
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_luciel_instance(
     request: Request,
@@ -1340,13 +1313,6 @@ def get_luciel_instance(
 @router.patch(
     "/instances/{pk}",
     response_model=LucielInstanceRead,
-)
-# Arc 9 C21 -- legacy URL alias. Frontend bundle issues
-# PATCH /api/v1/admin/luciel-instances/{pk}.
-@router.patch(
-    "/luciel-instances/{pk}",
-    response_model=LucielInstanceRead,
-    include_in_schema=False,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def update_luciel_instance(
@@ -1372,13 +1338,6 @@ def update_luciel_instance(
 @router.delete(
     "/instances/{pk}",
     response_model=LucielInstanceRead,
-)
-# Arc 9 C21 -- legacy URL alias. Frontend bundle issues
-# DELETE /api/v1/admin/luciel-instances/{pk}.
-@router.delete(
-    "/luciel-instances/{pk}",
-    response_model=LucielInstanceRead,
-    include_in_schema=False,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def deactivate_luciel_instance(
