@@ -127,6 +127,22 @@ DROP FUNCTION IF EXISTS public.arc9_c20_resolve_tenant_for_user(uuid);
 
 
 def upgrade() -> None:
+    # Step 0: grant SELECT on scope_assignments to luciel_ops.
+    #
+    # The SECURITY DEFINER function executes as its OWNER (luciel_ops).
+    # luciel_ops has BYPASSRLS, but BYPASSRLS only suppresses RLS
+    # policy evaluation -- it does NOT grant the underlying table
+    # privileges. Without an explicit SELECT grant the function call
+    # raises "permission denied for table scope_assignments" even
+    # though the RLS policies would otherwise admit it.
+    #
+    # Grant is SELECT-only. We deliberately do NOT extend luciel_ops's
+    # grant matrix to INSERT/UPDATE/DELETE on scope_assignments --
+    # the only reason ops needs this table is the discovery read
+    # below, and writes remain the exclusive province of luciel_app
+    # (which still has its full DML grants under FORCE RLS).
+    op.execute("GRANT SELECT ON public.scope_assignments TO luciel_ops")
+
     # Step 1: create the function with the current role (luciel_admin)
     # as the temporary owner. We immediately re-assign ownership.
     op.execute(_CREATE_FN_SQL)
@@ -155,3 +171,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(_DROP_FN_SQL)
+    # Revoke the SELECT grant we added in upgrade step 0. Idempotent;
+    # if a future migration also depends on this grant the downgrade
+    # here will need to be coordinated.
+    op.execute("REVOKE SELECT ON public.scope_assignments FROM luciel_ops")
