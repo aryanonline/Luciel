@@ -234,16 +234,26 @@ class ChatService:
             return ctx
 
         # Apply overrides.
+        # Arc 5 Path A / Arc 9.2 PR #99: the V2 Instance row carries
+        # system_prompt_additions and display_name; preferred_provider
+        # and allowed_tools were never migrated onto it (they lived on
+        # the dropped DomainConfig / AgentConfig rows). Read defensively
+        # with getattr so a future model that adds them re-engages the
+        # override path without code change here.
         ctx.luciel_instance_id = instance.id
-        ctx.instance_prompt = instance.system_prompt_additions
-        ctx.assistant_name = instance.display_name or ctx.assistant_name
+        ctx.instance_prompt = getattr(instance, "system_prompt_additions", None)
+        ctx.assistant_name = (
+            getattr(instance, "display_name", None) or ctx.assistant_name
+        )
 
-        if instance.preferred_provider:
-            ctx.preferred_provider = instance.preferred_provider
+        preferred_provider = getattr(instance, "preferred_provider", None)
+        if preferred_provider:
+            ctx.preferred_provider = preferred_provider
 
-        if instance.allowed_tools is not None:
+        allowed_tools = getattr(instance, "allowed_tools", None)
+        if allowed_tools is not None:
             # Empty list means "explicitly no tools" and is respected.
-            ctx.allowed_tools = instance.allowed_tools
+            ctx.allowed_tools = allowed_tools
 
         return ctx
 
