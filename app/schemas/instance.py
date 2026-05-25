@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------
@@ -43,7 +43,46 @@ class InstanceCreate(BaseModel):
     no discriminator, no sub-scope identifiers, no parent-scope
     validation. The DB enforces ``UNIQUE(admin_id, instance_slug)``
     and the FK to ``admins.id`` (RESTRICT-on-delete).
+
+    Arc 9 C19 — back-compat shim. The deployed frontend bundle
+    (CloudFront cache, build ~Arc 4/5 vintage) still posts the legacy
+    Arc 4 body shape:
+
+        {
+            instance_id: <slug>,
+            scope_owner_tenant_id: <admin slug>,
+            scope_level: 'agent'|'domain'|'tenant',
+            display_name, description, system_prompt_additions,
+        }
+
+    The V2 schema expects ``instance_slug`` / ``admin_id`` and has no
+    ``scope_level``. A ``model_validator(mode='before')`` translates
+    the legacy shape into the V2 shape and silently drops the
+    obsolete ``scope_level`` discriminator. Once the frontend is
+    rebuilt to post the V2 shape directly, this shim can be deleted.
     """
+
+    # ----- Arc 9 C19 — legacy-shape coercion ------------------------
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_body(cls, data):
+        if not isinstance(data, dict):
+            return data
+        # Translate only when the V2 key is absent so an explicit V2
+        # caller wins if both keys are sent.
+        if "instance_slug" not in data and "instance_id" in data:
+            data["instance_slug"] = data.pop("instance_id")
+        if "admin_id" not in data and "scope_owner_tenant_id" in data:
+            data["admin_id"] = data.pop("scope_owner_tenant_id")
+        # Drop legacy discriminator fields that no longer exist on V2.
+        for legacy_key in (
+            "scope_level",
+            "scope_owner_domain_id",
+            "scope_owner_agent_id",
+            "tenant_id",  # very-legacy callers
+        ):
+            data.pop(legacy_key, None)
+        return data
 
     admin_id: str = Field(
         ...,
