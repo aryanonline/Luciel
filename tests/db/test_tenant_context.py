@@ -209,10 +209,36 @@ class TestAfterBeginListener(unittest.TestCase):
             "regression that would add latency to every v1 request.",
         )
 
+    # NOTE on call count (Arc 9 C4.1 update):
+    #
+    # Before C4.1 the listener issued exactly ONE set_config() call
+    # per BEGIN (for app.admin_id). C4.1 added a second set_config()
+    # call alongside it for app.instance_id. Tests below now expect
+    # 2 calls when the flag is on. The admin_id call is verified by
+    # filtering the call list to the call whose SQL mentions
+    # 'app.admin_id' -- the instance_id call is covered separately
+    # in test_instance_context.py.
+
+    def _admin_id_call(self, calls):
+        """Return the single call_args whose SQL is the app.admin_id
+        set_config. Fails fast if not exactly one match."""
+        matches = [
+            c for c in calls if "app.admin_id" in c.args[0]
+        ]
+        self.assertEqual(
+            len(matches),
+            1,
+            f"Expected exactly 1 app.admin_id set_config call, "
+            f"got {len(matches)}. All calls: {calls}",
+        )
+        return matches[0]
+
     def test_flag_on_with_slug_emits_slug_string(self):
         calls = self._invoke_listener(_SLUG_A, flag_enabled=True)
-        self.assertEqual(len(calls), 1)
-        sql, params = calls[0].args[0], calls[0].args[1]
+        # C4.1: now expect 2 set_config calls (admin_id + instance_id).
+        self.assertEqual(len(calls), 2)
+        admin_call = self._admin_id_call(calls)
+        sql, params = admin_call.args[0], admin_call.args[1]
         self.assertIn("set_config", sql)
         self.assertIn("app.admin_id", sql)
         # is_local=true (third positional in set_config) means SET LOCAL
@@ -226,8 +252,9 @@ class TestAfterBeginListener(unittest.TestCase):
         actions. The listener MUST pass the literal through unchanged
         so platform-tier RLS policies can match it."""
         calls = self._invoke_listener("platform", flag_enabled=True)
-        self.assertEqual(len(calls), 1)
-        _, params = calls[0].args[0], calls[0].args[1]
+        self.assertEqual(len(calls), 2)  # C4.1: admin_id + instance_id
+        admin_call = self._admin_id_call(calls)
+        _, params = admin_call.args[0], admin_call.args[1]
         self.assertEqual(params, ("platform",))
 
     def test_flag_on_with_no_admin_id_emits_empty_string(self):
@@ -235,8 +262,9 @@ class TestAfterBeginListener(unittest.TestCase):
         still issue the SET so any leftover GUC from a previous
         transaction on this connection is cleared."""
         calls = self._invoke_listener(admin_id=None, flag_enabled=True)
-        self.assertEqual(len(calls), 1)
-        sql, params = calls[0].args[0], calls[0].args[1]
+        self.assertEqual(len(calls), 2)  # C4.1: admin_id + instance_id
+        admin_call = self._admin_id_call(calls)
+        sql, params = admin_call.args[0], admin_call.args[1]
         self.assertIn("set_config", sql)
         self.assertEqual(params, ("",))
 
