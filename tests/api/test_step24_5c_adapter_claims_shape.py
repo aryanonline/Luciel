@@ -247,7 +247,12 @@ class _CountingRepo:
     def create_session(
         self, *, session_id, tenant_id, domain_id, agent_id, user_id,
         channel, status="active", conversation_id=None,
+        luciel_instance_id=None,
     ):
+        # Arc 9.2 PR #99 follow-up 5: SessionRepository.create_session()
+        # gained a luciel_instance_id kwarg threaded by SessionService.
+        # The fake here must accept it or the End-to-End wiring tests
+        # type-error before reaching the contract assertions.
         captured = {
             "session_id": session_id,
             "tenant_id": tenant_id,
@@ -257,6 +262,7 @@ class _CountingRepo:
             "channel": channel,
             "status": status,
             "conversation_id": conversation_id,
+            "luciel_instance_id": luciel_instance_id,
         }
         self.created_sessions.append(captured)
 

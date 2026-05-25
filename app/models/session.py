@@ -22,16 +22,23 @@ class SessionModel(Base, TimestampMixin):
     domain_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
 
-    # Step 24.5 File 15 — nullable FK to the LucielInstance that served this session.
-    # NULL = legacy/unbound (chat resolved via tenant/domain/agent config path).
-    luciel_instance_id: Mapped[int | None] = mapped_column(
+    # Arc 9.1 Phase A (2026-05-25): NOT NULL. See arc9_1_a_tenant_isolation_seal.
+    # Every session is now bound to its Instance at creation time.
+    # Arc 5 Revision C / Arc 9.2 PR #99 — FK target is `instances.id`
+    # (the `luciel_instances` table was dropped in Arc 5 Revision C
+    # and the column kept its legacy name only). The earlier model
+    # still pointed the SQLAlchemy FK at the dropped table, which
+    # raised NoReferencedTableError on every widget chat. The DB-side
+    # FK constraint is named `fk_sessions_luciel_instance_id` and is
+    # the migration of record; this string is metadata-only.
+    luciel_instance_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey(
-            "luciel_instances.id",
+            "instances.id",
             ondelete="SET NULL",
             name="fk_sessions_luciel_instance_id",
         ),
-        nullable=True,
+        nullable=False,
         index=True,
     )
 

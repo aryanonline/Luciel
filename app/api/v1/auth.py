@@ -138,34 +138,36 @@ def _resolve_tenant_for_user(db, user_id) -> str:
       3. Else ``""``. Downstream session middleware re-resolves on the
          next request when a scope finally lands.
     """
-    # Local import keeps the module header unchanged and mirrors the
-    # already-established pattern used by the audit-context import at
-    # line ~241 below.
-    from app.repositories.scope_assignment_repository import (
-        ScopeAssignmentRepository,
-    )
+    # Arc 9 C22 -- consolidated identity bootstrap.
+    #
+    # Direct ORM reads on scope_assignments are blocked by FORCE RLS
+    # at login time because we have not yet set app.admin_id -- that
+    # GUC is precisely what we're trying to discover. The C22
+    # ``IdentityBootstrap`` service wraps a single SECURITY DEFINER
+    # function (owned by luciel_ops, BYPASSRLS) that returns the
+    # canonical tenant + tier + active-scope list in one round-trip.
+    # See ``app/identity/bootstrap.py`` for the full doctrine.
+    #
+    # If the snapshot has scope we trust it and return immediately.
+    # If empty, we fall through to the mid-checkout Stripe race
+    # fallback (step 2 below) for one last narrow-window check.
+    from app.identity import IdentityBootstrap
 
-    sa_repo = ScopeAssignmentRepository(db)
-    assignments = sa_repo.list_for_user(user_id=user_id, active_only=True)
-    if assignments:
-        # 1a. Prefer the owner-role assignment if present (the canonical
-        #     primary scope). An owner always has exactly one.
-        owner_sa = next(
-            (a for a in assignments if a.role == "owner"), None
-        )
-        if owner_sa is not None:
-            return owner_sa.tenant_id
-        # 1b. No owner scope -- this user is a teammate / department
-        #     lead / tenant_admin. list_for_user orders started_at
-        #     ASC, so the most-recently-started active assignment is
-        #     the last element. If the user later belongs to multiple
-        #     tenants (e.g. a consultant on two companies), a future
-        #     "switch tenant" UI will let them override; for now this
-        #     deterministic pick is sufficient and audit-traceable.
-        return assignments[-1].tenant_id
+    snapshot = IdentityBootstrap(db).resolve(user_id)
+    if snapshot.has_scope:
+        return snapshot.canonical_tenant_id
 
     # 2. Mid-checkout race fallback (preserves pre-30a.5 owner-only
-    #    behavior for that narrow window).
+    #    behavior for that narrow window). BillingService reads
+    #    subscriptions, which has its own RLS policy keyed on
+    #    app.admin_id too — but the post-Stripe-webhook code path
+    #    that lands a Subscription row before any ScopeAssignment
+    #    exists is exceedingly rare in V2 (Free has no Subscription;
+    #    Pro/Enterprise mint ScopeAssignment in the same provisioning
+    #    txn). Leaving this fallback in place preserves the historical
+    #    contract; if it ever fires under prod RLS it will return
+    #    None and we fall through to "" which is the existing
+    #    "no tenant yet" sentinel.
     svc = BillingService(db=db, stripe_client=None)  # type: ignore[arg-type]
     sub = svc.get_active_subscription_for_user(user_id=user_id)
     return sub.tenant_id if sub is not None else ""

@@ -942,6 +942,7 @@ def create_luciel_instance(
             description=payload.description,
             active=payload.active,
             created_by=payload.created_by,
+            system_prompt_additions=payload.system_prompt_additions,
         )
     except DuplicateInstanceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1269,36 +1270,24 @@ def list_luciel_instances(
     request: Request,
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     tenant_id: str | None = Query(default=None),
-    domain_id: str | None = Query(default=None),
-    agent_id: str | None = Query(default=None),
-    include_inherited: bool = Query(default=False),
     active_only: bool = Query(default=False),
 ) -> list[LucielInstanceRead]:
+    # Arc 9 C22 -- Arc 5 Path A collapsed the tenant/domain/agent
+    # hierarchy into a single admin scope. "tenant_id" here is the
+    # caller's admin_id and is the only scope axis the service
+    # understands. Platform admins must pass it explicitly; tenant
+    # admins inherit it from the cookie/session scope.
     if not ScopePolicy.is_platform_admin(request):
-        caller_tenant, caller_domain, caller_agent, _ = ScopePolicy._caller(request)
+        caller_tenant, _caller_domain, _caller_agent, _ = ScopePolicy._caller(request)
         if caller_tenant is None:
             raise HTTPException(status_code=403, detail="Admin key has no tenant scope.")
         tenant_id = caller_tenant
-        if caller_domain is not None:
-            if domain_id is None:
-                domain_id = caller_domain
-            elif domain_id != caller_domain:
-                raise HTTPException(status_code=403, detail="This key is scoped to a different domain.")
-        if caller_agent is not None:
-            if agent_id is None:
-                agent_id = caller_agent
-                domain_id = caller_domain
-            elif agent_id != caller_agent:
-                raise HTTPException(status_code=403, detail="This key is scoped to a different agent.")
     else:
         if tenant_id is None:
             raise HTTPException(status_code=400, detail="platform_admin must specify tenant_id.")
 
-    instances = service.list_for_scope(
-        tenant_id=tenant_id,
-        domain_id=domain_id,
-        agent_id=agent_id,
-        include_inherited=include_inherited,
+    instances = service.list_for_admin(
+        admin_id=tenant_id,
         active_only=active_only,
     )
     return [LucielInstanceRead.model_validate(i) for i in instances]

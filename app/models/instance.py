@@ -15,7 +15,8 @@ Schema anchors
   Admins, never hard-delete).
 * ``instance_slug`` is unique within an Admin.
 * Back-pointers ``legacy_luciel_instance_id`` and ``legacy_agent_id``
-  are dropped at Revision C alongside the legacy tables.
+  were dropped at Revision C alongside the legacy tables (Arc 9 C15:
+  ORM declarations removed to match production schema).
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -51,20 +54,25 @@ class Instance(Base):
     instance_slug: Mapped[str] = mapped_column(String(100), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # Arc 9 C17 — per-Instance persona / system prompt addition.
+    # Composed by app.services.chat_service into the four-layer prompt:
+    #   Luciel Core → tenant additions → domain additions → instance additions.
+    # NULL = no instance-level additions; chat falls back to upstream layers.
+    # Bounded at 8000 chars at the Pydantic layer (see app/schemas/instance.py).
+    system_prompt_additions: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
     )
-    legacy_luciel_instance_id: Mapped[int | None] = mapped_column(
-        Integer, nullable=True
-    )
-    legacy_agent_id: Mapped[int | None] = mapped_column(
-        Integer, nullable=True
-    )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+        server_onupdate=text("now()"),
     )
 
     # Arc 6 Commit 8.5b — Deferred-downgrade overflow archive stamp.

@@ -67,6 +67,13 @@ class InstanceCreate(BaseModel):
     active: bool = Field(default=True)
     created_by: str | None = Field(default=None, max_length=100)
 
+    # Arc 9 C17 — per-Instance persona/system_prompt_additions. Composed
+    # by chat_service into the four-layer system prompt (Luciel Core →
+    # tenant → domain → instance). 8 000 chars is the hard ceiling so a
+    # full persona + few-shot examples fit comfortably while leaving
+    # headroom inside model context windows.
+    system_prompt_additions: str | None = Field(default=None, max_length=8000)
+
 
 # ---------------------------------------------------------------------
 # Update (PATCH semantics — all fields optional)
@@ -84,6 +91,7 @@ class InstanceUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)
     active: bool | None = None
+    system_prompt_additions: str | None = Field(default=None, max_length=8000)
 
 
 # ---------------------------------------------------------------------
@@ -102,6 +110,7 @@ class InstanceRead(BaseModel):
     description: str | None = None
 
     active: bool
+    system_prompt_additions: str | None = None
 
     created_at: datetime
     updated_at: datetime

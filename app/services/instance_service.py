@@ -125,6 +125,7 @@ class InstanceService:
         description: str | None = None,
         active: bool = True,
         created_by: str | None = None,
+        system_prompt_additions: str | None = None,
     ) -> Instance:
         """Create a new Instance atomically.
 
@@ -146,6 +147,7 @@ class InstanceService:
                 description=description,
                 active=active,
                 created_by=created_by,
+                system_prompt_additions=system_prompt_additions,
                 autocommit=False,
                 audit_ctx=audit_ctx,
             )

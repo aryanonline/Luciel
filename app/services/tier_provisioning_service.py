@@ -444,6 +444,12 @@ class TierProvisioningService:
         created: dict = {
             "admin_id": admin_id,
             "tier": tier,
+            # Arc 9 C18 — we no longer pre-mint an Instance at signup
+            # for ANY tier. The buyer creates their first Luciel
+            # themselves with their persona/system_prompt_additions
+            # filled in (C17). Returning ``None`` preserves the legacy
+            # response shape so existing webhook + billing callers
+            # remain forward-compatible without a co-deploy.
             "instance": None,
             # Arc 8 Commit 2 -- deliverability outcome surfaced on the
             # return dict for the webhook (today: observability only;
@@ -466,27 +472,29 @@ class TierProvisioningService:
             audit_ctx=audit_ctx,
         )
 
-        # 2. Mint exactly one Instance — the buyer's primary Luciel they
-        #    chat with from day one. Pro tier can add up to 9 more via
-        #    self-serve; Enterprise unlimited; this is the seed.
-        instance = self.luciel.create_instance(
-            audit_ctx=audit_ctx,
-            admin_id=admin_id,
-            instance_slug=_INSTANCE_SLUG_PRIMARY,
-            display_name=f"{admin.name} Luciel",
-            description=(
-                f"Pre-minted at {tier} signup — primary Instance for the Admin."
-            ),
-            created_by=_CREATED_BY,
-        )
-        created["instance"] = {
-            "instance_slug": instance.instance_slug,
-            "pk": instance.id,
-        }
+        # 2. Arc 9 C18 — Instance pre-mint REMOVED.
+        #
+        #    Pre-mint was a legacy Arc 5/6 artifact preserving the "one
+        #    Admin = one Luciel ready on day one" invariant from the old
+        #    tenant→domain→agent→luciel hierarchy. Under the V2 doctrine
+        #    a pre-minted placeholder:
+        #      (a) wastes Free's instance_count_cap=1 before the buyer
+        #          can create their real Luciel,
+        #      (b) confuses the dashboard with a "VantageMind Demo
+        #          Luciel" the buyer never asked for, and
+        #      (c) bypasses the C17 persona contract (a placeholder has
+        #          no system_prompt_additions).
+        #
+        #    The first-Luciel flow is now: dashboard empty-state CTA →
+        #    POST /api/v1/admin/instances with display_name, description,
+        #    and system_prompt_additions filled in by the buyer.
+        #
+        #    ApiKey + RetentionPolicy continue to be provisioned by
+        #    sibling helpers; ScopeAssignment above is unchanged.
 
         logger.info(
-            "tier_provisioning: pre-minted admin=%s tier=%s instance=%s",
-            admin_id, tier, instance.instance_slug,
+            "tier_provisioning: pre-minted admin=%s tier=%s instance=<deferred-to-first-create>",
+            admin_id, tier,
         )
         return created
 

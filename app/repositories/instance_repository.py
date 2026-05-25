@@ -63,6 +63,7 @@ class InstanceRepository:
         description: str | None = None,
         active: bool = True,
         created_by: str | None = None,
+        system_prompt_additions: str | None = None,
         autocommit: bool = True,
         audit_ctx: AuditContext | None = None,
     ) -> Instance:
@@ -83,11 +84,19 @@ class InstanceRepository:
             display_name=display_name,
             description=description,
             active=active,
+            system_prompt_additions=system_prompt_additions,
         )
         self.db.add(instance)
         self.db.flush()  # assigns instance.id
 
         if audit_ctx is not None:
+            # Arc 9.1 Phase A made admin_audit_logs.luciel_instance_id
+            # NOT NULL. The instance we just flushed is exactly the
+            # row this audit entry is about, so wire instance.id
+            # through as the luciel_instance_id field. Without this
+            # the audit row INSERT fails with NotNullViolation and
+            # the whole transaction rolls back, surfacing as a
+            # confusing 409 DuplicateInstanceError at the HTTP layer.
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
                 tenant_id=admin_id,
@@ -95,12 +104,14 @@ class InstanceRepository:
                 resource_type=RESOURCE_INSTANCE,
                 resource_pk=instance.id,
                 resource_natural_id=instance_slug,
+                luciel_instance_id=instance.id,
                 after={
                     "admin_id": admin_id,
                     "instance_slug": instance_slug,
                     "display_name": display_name,
                     "description": description,
                     "active": active,
+                    "system_prompt_additions_set": system_prompt_additions is not None,
                 },
                 autocommit=False,
             )
@@ -189,6 +200,7 @@ class InstanceRepository:
             "display_name",
             "description",
             "active",
+            "system_prompt_additions",
         }
     )
 

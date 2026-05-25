@@ -39,7 +39,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import and_
+from sqlalchemy import and_, text as _sa_text
 from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import (
@@ -179,7 +179,55 @@ class ScopeAssignmentRepository:
         active_only=False returns full role history -- used by PIPEDA
         access-request flows and tenant-admin role-history dashboards.
         Sorted by started_at ascending so history reads chronologically.
+
+        Arc 9 C22 -- RLS-aware discovery via consolidated bootstrap
+        ------------------------------------------------------------
+        ``scope_assignments`` has FORCE ROW LEVEL SECURITY with
+        policies gating visibility on ``app.admin_id``. Several
+        callers invoke list_for_user BEFORE app.admin_id has been
+        set -- the cookied /billing/me handler, the upgrade /
+        downgrade endpoints, the invite-acceptance path, and the
+        audit_role_change helper -- because the whole point of those
+        reads is to *discover* which tenant the user belongs to.
+
+        Under FORCE RLS the direct ORM query returns [] silently in
+        that window. When ``app.admin_id`` is empty we delegate to
+        the C22 ``IdentityBootstrap`` service (single SECURITY DEFINER
+        round-trip; see ``app/identity/bootstrap.py``) and hand back
+        its ``active_scopes`` list. When the GUC is already set, the
+        normal ORM path runs and RLS evaluates as usual.
+
+        Note: ``active_only=False`` requests full history including
+        ended rows; the C22 bootstrap returns ONLY active rows by
+        design (it's a discovery primitive, not a history accessor).
+        If a caller in the discovery window asks for the full history
+        we still return only active rows -- the four pre-tenant-context
+        callers documented above all already pass ``active_only=True``,
+        so this is observed behaviour, not a regression. Audit-history
+        callers (PIPEDA access requests, tenant-admin dashboards) all
+        run AFTER app.admin_id has been set and take the ORM path.
         """
+        # Step 1: probe the tenant GUC. If unset/empty we're in the
+        # discovery window and must use the C22 bootstrap to avoid
+        # the silent-empty-list RLS trap.
+        try:
+            admin_id_guc = self.db.execute(
+                _sa_text("SELECT current_setting('app.admin_id', true)")
+            ).scalar()
+        except Exception:  # pragma: no cover - extremely defensive
+            admin_id_guc = None
+
+        if not admin_id_guc:
+            # Local import to keep the repository decoupled from the
+            # identity package at module load (avoids any future
+            # import cycle if IdentityBootstrap ever grows a
+            # repository dependency).
+            from app.identity import IdentityBootstrap
+
+            snapshot = IdentityBootstrap(self.db).resolve(user_id)
+            return list(snapshot.active_scopes)
+
+        # Step 2: GUC is set -- the normal ORM path with RLS in effect.
         query = self.db.query(ScopeAssignment).filter(
             ScopeAssignment.user_id == user_id
         )

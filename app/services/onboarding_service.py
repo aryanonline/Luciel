@@ -149,6 +149,41 @@ class OnboardingService:
                 tenant_id, tier, tier_source,
             )
 
+            # Arc 9 C13 hotfix (demo-day-2026-05-25): bootstrap GUC.
+            # Free signup is unauthenticated -- the `after_begin` engine
+            # listener saw no admin_id in the ContextVar and set
+            # app.admin_id to ''. The RLS with_check on retention_policies
+            # (and api_keys, audit rows) requires app.admin_id ==
+            # tenant_id::text. We just minted the Admin row, so it is
+            # now safe to push the new tenant_id.
+            #
+            # We push at BOTH layers:
+            #   1. SET LOCAL on the live transaction so the immediate
+            #      child INSERTs see the GUC.
+            #   2. ContextVar via set_current_admin_id() so subsequent
+            #      transactions in this request (e.g. the post-commit
+            #      db.refresh() calls below, which open a NEW txn, AND
+            #      the last_signup_ip UPDATE / magic-link mint in
+            #      signup_free after onboard_tenant returns) also see
+            #      the GUC via the after_begin listener.
+            # We intentionally do NOT reset the ContextVar at method
+            # exit -- the ContextVar is request-scoped and will clear
+            # at request end. This matches the authenticated path,
+            # where the JWT-extracted admin_id stays set for the whole
+            # request. Resetting here would break the follow-up code
+            # in signup_free that runs under this tenant identity.
+            #
+            # The Admin row insert above is safe under empty GUC
+            # because the admins table has RLS disabled (it is the
+            # tenant directory; the fence sits AROUND it, not ON it).
+            from sqlalchemy import text as _text
+            from app.db.tenant_context import set_current_admin_id as _set_admin
+            self.db.execute(
+                _text("SELECT set_config('app.admin_id', :tid, true)"),
+                {"tid": tenant_id},
+            )
+            _set_admin(tenant_id)
+
             # 2. Default DomainConfig: REMOVED (Arc 5 Path A).
             # V2 has no Domain layer; ``default_domain_id`` is retained
             # only as a label inside the audit-row payload below.

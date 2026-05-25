@@ -62,15 +62,19 @@ class Trace(Base, TimestampMixin):
     agent_config_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     """Which agent config was active. Enables per-agent audit."""
 
-    # Step 24.5 File 15 — LucielInstance that served this chat turn.
-    # NULL = legacy/unbound (chat resolved via tenant/domain/agent config path).
-    luciel_instance_id: Mapped[int | None] = mapped_column(
+    # Arc 9.1 Phase A (2026-05-25): NOT NULL.
+    # Pre-Arc 9.1 doctrine: NULL = legacy/unbound. That doctrine created
+    # the P2 RLS bypass (luciel_instance_id IS NULL clause in policy).
+    # All NULL rows were wiped in arc9_1_a_tenant_isolation_seal.
+    # Arc 5 Revision C / Arc 9.2 PR #99 — FK target is `instances.id`
+    # (the `luciel_instances` table was dropped in Arc 5 Revision C).
+    luciel_instance_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey(
-            "luciel_instances.id",
+            "instances.id",
             ondelete="SET NULL",
             name="fk_traces_luciel_instance_id",
         ),
-        nullable=True,
+        nullable=False,
         index=True,
     )

@@ -30,14 +30,13 @@ class MessageModel(Base, TimestampMixin):
         String(100), nullable=False, index=False,
     )
 
-    # Arc 9 C5.0b/C5.3 -- denormalised instance scope for Wall-3 RLS
-    # (messages_instance_isolation policy). Nullable -- NULL means the
-    # parent session row also has NULL luciel_instance_id (legacy /
-    # pre-Step 24.5 unbound). Populated from the parent session row
-    # at insert time by SessionRepository.add_message. Indexed via
+    # Arc 9 C5.0b/C5.3 -- denormalised instance scope for Wall-3 RLS.
+    # Arc 9.1 Phase A (2026-05-25): NOT NULL. The session row this message
+    # belongs to is now guaranteed NOT NULL on luciel_instance_id, so the
+    # add_message denormalisation is no longer best-effort. Indexed via
     # ix_messages_luciel_instance_id_session_id (C5.0b Phase 3).
-    luciel_instance_id: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, index=False,
+    luciel_instance_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, index=False,
     )
 
     role: Mapped[str] = mapped_column(String(20), nullable=False)

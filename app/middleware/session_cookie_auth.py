@@ -79,6 +79,8 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from sqlalchemy import text
+
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.integrations.stripe import get_stripe_client
@@ -185,22 +187,46 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
             # required arg. T9 leg 5 surfaced it on prod.
             svc = BillingService(db, get_stripe_client())
             sub = svc.get_active_subscription_for_user(user_id=user.id)
-            if sub is None:
-                # User exists but has no active subscription. Possible
-                # if a checkout webhook is still in flight (microseconds
-                # window) or if their subscription was just cancelled.
-                # 401 is the right code; the marketing site can show a
-                # "Subscription not active" panel and a "Manage billing"
-                # link that exercises the /billing/portal path (which
-                # cookied users can still reach by per-route cookie
-                # check, bypassing this middleware via the path filter
-                # above).
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "No active subscription for this user."},
-                )
 
-            tenant_id = sub.tenant_id
+            # Arc 9 C22 -- Free-tier fallback via consolidated identity
+            # bootstrap.
+            #
+            # The Subscription model's own doctrine (app/models/
+            # subscription.py line ~242-247) states: "In V2 Free admins
+            # have no Subscription row at all (lazy-create on upgrade
+            # per Gap 1 lock)." Before C20 the middleware enforced a
+            # blanket "no Subscription -> 401" rule which silently broke
+            # every Free signup. C20 narrowed that with a single-row
+            # SECDEF lookup; C22 consolidates the discovery into ONE
+            # bootstrap call shared by every pre-tenant-context caller.
+            #
+            # See ``app/identity/bootstrap.py`` for the full doctrine.
+            #
+            # Pro/Enterprise users still match the Subscription path
+            # first so this branch is a strict superset, not a
+            # regression.
+            if sub is None:
+                from app.identity import IdentityBootstrap
+                snapshot = IdentityBootstrap(db).resolve(user.id)
+                if not snapshot.has_scope:
+                    # No Subscription AND no active ScopeAssignment --
+                    # this user genuinely has nothing to administer.
+                    # Could be a teammate invite that was revoked, or
+                    # a webhook race for a paid signup where Stripe is
+                    # still in flight. Preserve the original 401 so
+                    # the marketing site behaviour is unchanged.
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "No active subscription for this user."},
+                    )
+                tenant_id = snapshot.canonical_tenant_id
+                logger.info(
+                    "cookie auth: free-tier fallback via C22 bootstrap "
+                    "user=%s tenant=%s tier=%s",
+                    user.id, tenant_id, snapshot.canonical_tier,
+                )
+            else:
+                tenant_id = sub.tenant_id
 
             # ----------------------------------------------------------
             # Step 30a.7 -- belt-and-suspenders tenant-active gate.

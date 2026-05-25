@@ -311,18 +311,24 @@ def test_run_widget_e2e_script_uses_set_pipefail() -> None:
     )
 
 
-def test_run_widget_e2e_script_hits_all_four_admin_endpoints() -> None:
+def test_run_widget_e2e_script_hits_v2_admin_endpoints() -> None:
     """The harness's whole point is exercising the real admin
     provisioning surface end-to-end. If a refactor changed a URL
     path or replaced an endpoint, the harness would either fail
     loudly (good) or, with a mocked-out URL, silently provision
     nothing while still calling /api/v1/chat/widget (very bad).
-    Pin each path."""
+    Pin each path.
+
+    Arc 9.2 PR #99 — endpoint set updated to the V2 Admin -> Instance
+    hierarchy. The legacy ``/api/v1/admin/domains`` route was removed
+    in Arc 5 Path A (V2 has no Domain layer); the harness now provisions
+    an Instance row via POST /api/v1/admin/instances instead.
+    """
 
     src = _read("ci/e2e/run_widget_e2e.sh")
     for path in (
         "/api/v1/admin/tenants",
-        "/api/v1/admin/domains",
+        "/api/v1/admin/instances",
         "/api/v1/admin/embed-keys",
     ):
         assert path in src, (
@@ -331,6 +337,14 @@ def test_run_widget_e2e_script_hits_all_four_admin_endpoints() -> None:
             f"in app/api/v1/admin.py, update the harness in the same "
             f"commit so the gate keeps testing the real surface."
         )
+
+    # Negative pin: the legacy /admin/domains route was removed in Arc 5
+    # Path A. The harness MUST NOT reintroduce it.
+    assert "/api/v1/admin/domains" not in src, (
+        "ci/e2e/run_widget_e2e.sh references /api/v1/admin/domains, "
+        "which was removed in Arc 5 Path A. The V2 provisioning chain "
+        "is Admin -> Instance, not Admin -> Domain."
+    )
 
 
 def test_run_widget_e2e_script_pins_refusal_sentinel() -> None:
