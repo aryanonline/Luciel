@@ -335,6 +335,17 @@ class _CapturingDb:
         self.captured_stmt = None
 
     def execute(self, stmt):
+        # Arc 9.1 D1: tolerate the new GUC probe — retrieve() now
+        # calls execute("SELECT current_setting('app.admin_id', true)")
+        # before its main SQL. We return a result whose .scalar()
+        # yields a non-empty admin id so the gate passes; we then
+        # capture the SECOND execute() (the real SELECT) as before.
+        sql_str = str(stmt)
+        if "app.admin_id" in sql_str:
+            class _GR:
+                def scalar(_self):
+                    return "capturing-db-admin"
+            return _GR()
         self.captured_stmt = stmt
         # Return an object whose .all() returns an empty list, so
         # retrieve() walks the empty-result path without DB I/O.
@@ -362,7 +373,29 @@ def _captured_limit(db: _CapturingDb) -> int | None:
     return getattr(lc, "value", None)
 
 
+# Arc 9.1 D1: the four tests below now traverse the post-gate path,
+# which requires LUCIEL_CROSS_SESSION_RETRIEVER_ENABLED=1. We wrap
+# each test with an env mutation; the production gate is proved by
+# tests/api/test_arc91_d1_cross_session_retriever_gate.py.
+import os as _os_d1
+from unittest import mock as _mock_d1
+
+_D1_ENV = _mock_d1.patch.dict(
+    _os_d1.environ,
+    {"LUCIEL_CROSS_SESSION_RETRIEVER_ENABLED": "1"},
+)
+
+
 class TestLimitClamping:
+    def setup_method(self, _method):
+        _D1_ENV.start()
+
+    def teardown_method(self, _method):
+        try:
+            _D1_ENV.stop()
+        except RuntimeError:
+            pass
+
     def test_limit_below_one_clamps_up(self):
         from app.memory.cross_session_retriever import (
             CrossSessionRetriever,

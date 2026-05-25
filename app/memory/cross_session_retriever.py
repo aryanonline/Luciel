@@ -176,6 +176,54 @@ class CrossSessionRetriever:
         if not domain_id or not domain_id.strip():
             raise ValueError("domain_id must be a non-empty string")
 
+        # ---- Arc 9.1 Phase D1 feature-flag gate (G1) -----------------
+        #
+        # This retriever has zero production callers as of Arc 9.1. It
+        # was authored under Step 24.5c as a Memory v1 runtime surface
+        # but never wired into a chat-runtime code path. Until it is,
+        # we refuse to execute its SQL — even though the SQL is itself
+        # scope-bounded, defense-in-depth says an unused runtime is
+        # safer dormant than live.
+        #
+        # To enable in production, set the env var
+        # LUCIEL_CROSS_SESSION_RETRIEVER_ENABLED=1 at the task-def
+        # level. The gate sits AFTER input validation so the existing
+        # shape tests (which assert TypeError / ValueError on bad
+        # input) continue to pass without setting the flag.
+        #
+        # The gate ALSO refuses if the calling DB session does not
+        # have the tenant GUC set — a second wall in case the flag is
+        # ever flipped on without the standard middleware that binds
+        # app.admin_id on every BEGIN. We probe the GUC via
+        # current_setting('app.admin_id', true) which returns NULL if
+        # unset (the `true` flag suppresses the "unrecognised parameter"
+        # error). An unset GUC raises RuntimeError.
+        import os
+        if os.environ.get("LUCIEL_CROSS_SESSION_RETRIEVER_ENABLED") != "1":
+            raise RuntimeError(
+                "CrossSessionRetriever is quarantined (Arc 9.1 G1). "
+                "Set LUCIEL_CROSS_SESSION_RETRIEVER_ENABLED=1 to enable. "
+                "Until then this module exists for shape conformance only."
+            )
+        # GUC presence assertion — belt + braces with RLS.
+        try:
+            from sqlalchemy import text as _sa_text
+            admin_guc = self.db.execute(
+                _sa_text("SELECT current_setting('app.admin_id', true)")
+            ).scalar()
+        except Exception as _e:
+            # If the probe itself fails, refuse rather than fall through.
+            raise RuntimeError(
+                f"CrossSessionRetriever could not verify tenant GUC: {_e!r}"
+            ) from _e
+        if not admin_guc:
+            raise RuntimeError(
+                "CrossSessionRetriever refusal: app.admin_id GUC is unset "
+                "on the calling DB session. Tenant binding must be "
+                "established by the standard request-scope middleware "
+                "BEFORE invoking the retriever."
+            )
+
         # Clamp limit silently — a misconfigured caller does not break
         # retrieval, but the SQL row count is always bounded.
         effective_limit = max(1, min(int(limit), MAX_LIMIT))
