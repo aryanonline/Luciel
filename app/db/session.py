@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Generator
 from contextlib import contextmanager
 
@@ -7,6 +8,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 # Step 30a.7 gap-fix
@@ -242,6 +245,34 @@ if settings.luciel_ops_db_url is not None:
     # here as defense-in-depth so the intent is documented at the
     # ops sessionmaker construction site.
     install_audit_chain_event()
+
+    # Arc 9 C7.1 (D7.1): emit a structured log line on every
+    # BYPASSRLS ops connection. CloudWatch metric filter
+    # ``luciel-backend-ops-role-connect`` parses this exact string
+    # (see cfn/luciel-prod-alarms.yaml) and feeds the
+    # ``OpsRoleConnectCount`` metric that powers the Medium-severity
+    # ``luciel-ops-role-connect-velocity`` alarm.
+    #
+    # Flag-gated on ``audit_log_immutability_enabled``: the line is
+    # only emitted once C9 has flipped the master switch, so dev /
+    # CI / staging environments that legitimately stand up
+    # OpsSessionLocal for integration tests don't spam CloudWatch
+    # with noise that would skew the velocity baseline.
+    #
+    # The log line format is contract-locked with
+    # tests/db/test_c7_1_ops_connect_log_format.py -- changing
+    # either the prefix or the field order requires updating both
+    # the CloudWatch FilterPattern and the test.
+    @event.listens_for(ops_engine, "connect")
+    def _arc9_c7_emit_ops_connect_event(dbapi_connection, connection_record):
+        if not settings.audit_log_immutability_enabled:
+            return
+        # Single-line, key=value, machine-parseable. CloudWatch
+        # MetricFilter uses the literal prefix as its FilterPattern
+        # so a copy/paste of this string (with any pid) matches.
+        logger.info(
+            "arc9.c7.ops_role_connect role=luciel_ops event=connect"
+        )
 
 
 @contextmanager

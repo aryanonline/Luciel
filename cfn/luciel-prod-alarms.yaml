@@ -1,16 +1,30 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Luciel production CloudWatch alarm pack for Step 28 Phase 2 Commit 5.
-  Deploys an SNS topic + email subscription, three CloudWatch Logs
+  Luciel production CloudWatch alarm pack.
+
+  ORIGINAL SCOPE (Step 28 Phase 2 Commit 5):
+  SNS topic + email subscription, three CloudWatch Logs
   MetricFilters scoped to /ecs/luciel-worker, and seven CloudWatch
   alarms covering worker liveness (heartbeat from Commit 7 rev 11),
   worker task health, worker error rate, RDS connection count, RDS CPU,
   RDS free storage, and SSM GetParameter access failures.
 
+  ARC 9 C7 EXTENSION (2026-05-25):
+  Four NEW CloudWatch Logs MetricFilters scoped to /ecs/luciel-backend,
+  four NEW CloudWatch alarms (2 High-severity + 2 Medium-severity)
+  covering admin-audit immutability tamper attempts, C6.4 GUC-leak
+  guard violations, luciel_ops BYPASSRLS connect velocity, and
+  per-admin admin_audit_logs write velocity. The two High-severity
+  alarms additionally publish to a PagerDuty SNS-HTTPS subscription
+  whose endpoint URL is supplied by the SSM parameter named in
+  ``PagerDutyServiceKeySsmParam`` (default placeholder; founder fills
+  in the real PD service-integration URL after stack deploy).
+
   Region: ca-central-1
   Account: 729005488042
   Worker service: luciel-worker-service (cluster luciel-cluster)
   Worker log group: /ecs/luciel-worker
+  Backend log group: /ecs/luciel-backend (Arc 9 C7)
   RDS instance: luciel-db (db.t3.micro, max_connections derived = ~112)
 
   Connection-count threshold derivation:
@@ -59,6 +73,46 @@ Parameters:
     Type: Number
     Default: 5
     Description: ERROR log lines per 5 min that trigger the alarm.
+
+  # ------------------------------------------------------------------
+  # Arc 9 C7 parameters
+  # ------------------------------------------------------------------
+  BackendLogGroupName:
+    Type: String
+    Default: /ecs/luciel-backend
+    Description: >
+      CloudWatch Logs group for the FastAPI backend service. The
+      Arc 9 C7 metric filters parse audit-immutability denials,
+      ops-role connect events, GUC-leak guard violations, and
+      per-admin audit-log write events from this group.
+  PagerDutyServiceKeySsmParam:
+    Type: String
+    Default: /luciel/production/pagerduty/arc9_c7_service_key
+    Description: >
+      SSM parameter NAME that holds the PagerDuty Events-API v2
+      integration URL (HTTPS endpoint). Default is the placeholder
+      path; the value at that path is intentionally empty at PR-
+      merge time and the founder fills it in post-deploy. The
+      PagerDuty SNS-HTTPS subscription resolves the parameter at
+      stack-deploy time via ``{{resolve:ssm:...}}`` -- which means
+      the stack MUST be re-deployed (or the subscription resource
+      updated) after the SSM value is set. See
+      docs/runbooks/arc9-c7-observability.md for the deploy order.
+  OpsRoleConnectVelocityThreshold:
+    Type: Number
+    Default: 10
+    Description: >
+      luciel_ops BYPASSRLS connections per 15-minute window that
+      trigger the Medium-severity velocity alarm. Normal cleanup
+      activity is <=2/day, so 10/15min is a generous anomaly floor.
+  AdminAuditWriteVelocityThreshold:
+    Type: Number
+    Default: 50
+    Description: >
+      admin_audit_logs writes per 5-minute window across the whole
+      backend before the Medium-severity velocity alarm fires.
+      Catches mass-mutation runaways (cascade bugs, accidental bulk
+      ops, compromised-admin runs).
 
 Resources:
 
@@ -305,6 +359,240 @@ Resources:
       OKActions:
         - !Ref AlertTopic
 
+  # ==================================================================
+  # Arc 9 C7 -- Backend observability for tenant isolation
+  # ==================================================================
+  #
+  # Doctrine references:
+  #   D7.1 -- Every grant the ops role exercises emits a CloudWatch event
+  #   D7.2 -- Every denial by an immutability policy emits a
+  #           High-severity alarm
+  #
+  # The two High-severity alarms (AuditLogIntegrityBreach,
+  # GUCLeakGuardViolation) publish to BOTH AlertTopic (SNS email)
+  # and PagerDutyTopic (SNS HTTPS to PD Events API v2). Medium
+  # alarms publish only to AlertTopic.
+  #
+  # All four metric filters parse /ecs/luciel-backend; the worker
+  # log group is untouched.
+
+  PagerDutyTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: luciel-prod-pagerduty-high
+      DisplayName: Luciel Prod High-Severity (PagerDuty)
+
+  PagerDutySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref PagerDutyTopic
+      Protocol: https
+      # Resolved at stack deploy from the SSM parameter named in
+      # PagerDutyServiceKeySsmParam. The value at that parameter is
+      # the PagerDuty Events API v2 integration URL, e.g.
+      #   https://events.pagerduty.com/integration/<key>/enqueue
+      # If the parameter is empty at deploy time the stack fails;
+      # see docs/runbooks/arc9-c7-observability.md for the bootstrap
+      # sequence (set SSM placeholder -> deploy stack -> fill SSM
+      # with real PD URL -> redeploy or update-subscription).
+      Endpoint: !Sub "{{resolve:ssm:${PagerDutyServiceKeySsmParam}}}"
+      DeliveryPolicy:
+        healthyRetryPolicy:
+          numRetries: 3
+          minDelayTarget: 5
+          maxDelayTarget: 30
+          numMinDelayRetries: 1
+          numMaxDelayRetries: 1
+          backoffFunction: exponential
+
+  # ------------------------------------------------------------------
+  # C7 MetricFilters on /ecs/luciel-backend
+  # ------------------------------------------------------------------
+
+  AdminAuditLogWriteMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BackendLogGroupName
+      FilterName: luciel-backend-admin-audit-log-write
+      # The repositories.audit_chain before_flush listener emits a
+      # debug line containing "admin_audit_logs chain row=" for
+      # each row hashed and persisted. We match on the substring
+      # "admin_audit_logs chain row=" so the count tracks the
+      # number of audit rows landed (not the number of API calls
+      # that happened to touch the table without inserting).
+      FilterPattern: '"admin_audit_logs chain row="'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Backend
+          MetricName: AdminAuditLogWriteCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  OpsRoleConnectMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BackendLogGroupName
+      FilterName: luciel-backend-ops-role-connect
+      # app.db.session emits exactly this prefix on every
+      # OpsSessionLocal connect (Arc 9 C7.1 listener); the
+      # python-side string is contract-locked with
+      # tests/db/test_c7_1_ops_connect_log_format.py.
+      FilterPattern: '"arc9.c7.ops_role_connect"'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Backend
+          MetricName: OpsRoleConnectCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  GUCLeakGuardViolationMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BackendLogGroupName
+      FilterName: luciel-backend-guc-leak-guard-violation
+      # The C6.4 guard raises AssertionError with the literal
+      # phrase "OpsSessionLocal must not carry app.admin_id" when
+      # an ops session is somehow seen with a tenant GUC set.
+      # Any occurrence in prod is structurally impossible (the
+      # sessionmaker boundary makes it so) -- a single hit is a
+      # high-severity invariant violation.
+      FilterPattern: '"OpsSessionLocal must not carry app.admin_id"'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Backend
+          MetricName: GUCLeakGuardViolationCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  AuditLogIntegrityBreachMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BackendLogGroupName
+      FilterName: luciel-backend-audit-log-integrity-breach
+      # Postgres raises errors with code 42501 / message containing
+      # "new row violates row-level security policy" or the
+      # C6.2 RESTRICTIVE policy denial phrases. The two strings
+      # below cover both Postgres-level denial messages that fire
+      # when ANYTHING attempts to UPDATE or DELETE admin_audit_logs
+      # (including superuser, including a compromised app role).
+      FilterPattern: '?"row violates row-level security policy for table \"admin_audit_logs\"" ?"new row violates row-level security policy for table \"admin_audit_logs\""'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Backend
+          MetricName: AuditLogIntegrityBreachCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  # ------------------------------------------------------------------
+  # C7 Alarms
+  # ------------------------------------------------------------------
+
+  AuditLogIntegrityBreachAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: AuditLogIntegrityBreachMetricFilter
+    Properties:
+      AlarmName: luciel-audit-log-integrity-breach
+      AlarmDescription: >
+        HIGH SEVERITY (D7.2). The C6.2 RESTRICTIVE policy on
+        admin_audit_logs denied an UPDATE or DELETE attempt. The
+        policy DID block the attempt -- this alarm exists so we
+        learn about the attempt in real time, regardless of the
+        actor (app role, ops role, superuser, compromised
+        credentials). A single occurrence pages.
+      Namespace: Luciel/Backend
+      MetricName: AuditLogIntegrityBreachCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+        - !Ref PagerDutyTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  GUCLeakGuardViolationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: GUCLeakGuardViolationMetricFilter
+    Properties:
+      AlarmName: luciel-guc-leak-guard-violation
+      AlarmDescription: >
+        HIGH SEVERITY (D7.2). The C6.4 GUC-leak guard fired in
+        prod -- meaning an OpsSessionLocal session was opened
+        while a tenant ContextVar was set. This should be
+        structurally impossible (the sessionmaker boundary
+        prevents GUC propagation), so any hit indicates either a
+        framework regression or a manual override. Pages
+        immediately.
+      Namespace: Luciel/Backend
+      MetricName: GUCLeakGuardViolationCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+        - !Ref PagerDutyTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  OpsRoleConnectVelocityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: OpsRoleConnectMetricFilter
+    Properties:
+      AlarmName: luciel-ops-role-connect-velocity
+      AlarmDescription: >
+        MEDIUM SEVERITY (D7.1). luciel_ops BYPASSRLS connections
+        exceeded the velocity threshold in a 15-minute window.
+        Normal ops cleanup is <=2/day; sustained high velocity
+        signals an automation runaway, a debugging session
+        someone forgot to close, or unauthorized access. Pages
+        AlertTopic only (no PagerDuty).
+      Namespace: Luciel/Backend
+      MetricName: OpsRoleConnectCount
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: !Ref OpsRoleConnectVelocityThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  AdminAuditWriteVelocityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: AdminAuditLogWriteMetricFilter
+    Properties:
+      AlarmName: luciel-admin-audit-write-velocity
+      AlarmDescription: >
+        MEDIUM SEVERITY (D7.1). admin_audit_logs write velocity
+        exceeded the configured threshold in a 5-minute window.
+        Catches cascade bugs, accidental bulk operations, and
+        compromised-admin runs without paging on the steady-state
+        click-by-click admin traffic. Pages AlertTopic only.
+      Namespace: Luciel/Backend
+      MetricName: AdminAuditLogWriteCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: !Ref AdminAuditWriteVelocityThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
 Outputs:
   AlertTopicArn:
     Description: ARN of the SNS topic for alarm notifications.
@@ -316,4 +604,12 @@ Outputs:
     Value: Luciel/Worker
   AlarmsCreated:
     Description: Number of CloudWatch alarms in this stack.
-    Value: "7"
+    Value: "11"
+  PagerDutyTopicArn:
+    Description: ARN of the PagerDuty High-severity SNS topic (Arc 9 C7).
+    Value: !Ref PagerDutyTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-PagerDutyTopicArn"
+  BackendMetricNamespace:
+    Description: CloudWatch metric namespace used by Arc 9 C7 backend filters.
+    Value: Luciel/Backend
