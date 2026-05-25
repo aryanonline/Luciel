@@ -37,10 +37,20 @@ from __future__ import annotations
 import asyncio
 import sys
 import unittest
-import uuid
-from contextvars import copy_context
+from contextvars import copy_context  # noqa: F401  (kept for future tests)
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+
+# Arc 9 C2 hot-fix: admin_id is a STRING SLUG (e.g. "acme-corp"), not
+# a UUID. The model column is String(100) on every customer-data
+# table. Tests use slug-style fixtures that match real production
+# data. We DO include a uuid-like string in one test to confirm the
+# system handles both shapes gracefully (Stripe-generated admins
+# tend to use UUID-ish slugs, hand-provisioned ones use kebab-case).
+_SLUG_A = "acme-corp"
+_SLUG_B = "globex-industries"
+_SLUG_UUIDLIKE = "a1b2c3d4-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
 
 
 class TestTenantContextVar(unittest.TestCase):
@@ -56,14 +66,33 @@ class TestTenantContextVar(unittest.TestCase):
         from app.db.tenant_context import get_current_admin_id
         self.assertIsNone(get_current_admin_id())
 
-    def test_set_get_round_trip(self):
+    def test_set_get_round_trip_slug(self):
         from app.db.tenant_context import (
             get_current_admin_id,
             set_current_admin_id,
         )
-        admin_id = uuid.uuid4()
-        set_current_admin_id(admin_id)
-        self.assertEqual(get_current_admin_id(), admin_id)
+        set_current_admin_id(_SLUG_A)
+        self.assertEqual(get_current_admin_id(), _SLUG_A)
+
+    def test_set_get_round_trip_uuidlike_slug(self):
+        """Stripe-flow admins sometimes have uuid-shaped slug ids.
+        Confirm the plumbing handles both."""
+        from app.db.tenant_context import (
+            get_current_admin_id,
+            set_current_admin_id,
+        )
+        set_current_admin_id(_SLUG_UUIDLIKE)
+        self.assertEqual(get_current_admin_id(), _SLUG_UUIDLIKE)
+
+    def test_set_get_round_trip_platform_sentinel(self):
+        """admin_audit_logs uses 'platform' literal for system actions.
+        ContextVar must accept it without coercion."""
+        from app.db.tenant_context import (
+            get_current_admin_id,
+            set_current_admin_id,
+        )
+        set_current_admin_id("platform")
+        self.assertEqual(get_current_admin_id(), "platform")
 
     def test_clear_resets_to_none(self):
         from app.db.tenant_context import (
@@ -71,7 +100,7 @@ class TestTenantContextVar(unittest.TestCase):
             get_current_admin_id,
             set_current_admin_id,
         )
-        set_current_admin_id(uuid.uuid4())
+        set_current_admin_id(_SLUG_A)
         clear_current_admin_id()
         self.assertIsNone(get_current_admin_id())
 
@@ -81,14 +110,12 @@ class TestTenantContextVar(unittest.TestCase):
             reset_current_admin_id,
             set_current_admin_id,
         )
-        first = uuid.uuid4()
-        second = uuid.uuid4()
-        set_current_admin_id(first)
-        token = set_current_admin_id(second)
-        self.assertEqual(get_current_admin_id(), second)
+        set_current_admin_id(_SLUG_A)
+        token = set_current_admin_id(_SLUG_B)
+        self.assertEqual(get_current_admin_id(), _SLUG_B)
         reset_current_admin_id(token)
-        # After reset, we're back to ``first``.
-        self.assertEqual(get_current_admin_id(), first)
+        # After reset, we're back to slug_a.
+        self.assertEqual(get_current_admin_id(), _SLUG_A)
 
     def test_isolation_across_asyncio_tasks(self):
         """The whole point of ContextVar over threading.local.
@@ -103,8 +130,8 @@ class TestTenantContextVar(unittest.TestCase):
             set_current_admin_id,
         )
 
-        admin_a = uuid.uuid4()
-        admin_b = uuid.uuid4()
+        admin_a = _SLUG_A
+        admin_b = _SLUG_B
         observed: dict[str, Any] = {}
 
         async def task_a():
@@ -174,8 +201,7 @@ class TestAfterBeginListener(unittest.TestCase):
     def test_flag_off_is_noop(self):
         """When rls_tenant_context_enabled is False, the listener
         MUST NOT touch the DB connection. Zero traffic added."""
-        admin_id = uuid.uuid4()
-        calls = self._invoke_listener(admin_id, flag_enabled=False)
+        calls = self._invoke_listener(_SLUG_A, flag_enabled=False)
         self.assertEqual(
             calls,
             [],
@@ -183,9 +209,8 @@ class TestAfterBeginListener(unittest.TestCase):
             "regression that would add latency to every v1 request.",
         )
 
-    def test_flag_on_with_admin_id_emits_uuid_string(self):
-        admin_id = uuid.uuid4()
-        calls = self._invoke_listener(admin_id, flag_enabled=True)
+    def test_flag_on_with_slug_emits_slug_string(self):
+        calls = self._invoke_listener(_SLUG_A, flag_enabled=True)
         self.assertEqual(len(calls), 1)
         sql, params = calls[0].args[0], calls[0].args[1]
         self.assertIn("set_config", sql)
@@ -194,7 +219,16 @@ class TestAfterBeginListener(unittest.TestCase):
         # semantics -- the GUC clears at transaction end.
         self.assertIn("true", sql.lower())
         # Value passed as a parameter, not interpolated into SQL.
-        self.assertEqual(params, (str(admin_id),))
+        self.assertEqual(params, (_SLUG_A,))
+
+    def test_flag_on_with_platform_sentinel_passes_through(self):
+        """admin_audit_logs writes tenant_id='platform' for system
+        actions. The listener MUST pass the literal through unchanged
+        so platform-tier RLS policies can match it."""
+        calls = self._invoke_listener("platform", flag_enabled=True)
+        self.assertEqual(len(calls), 1)
+        _, params = calls[0].args[0], calls[0].args[1]
+        self.assertEqual(params, ("platform",))
 
     def test_flag_on_with_no_admin_id_emits_empty_string(self):
         """No-context path (background job, health check). We MUST
@@ -215,7 +249,7 @@ class TestFastAPIDependency(unittest.TestCase):
     def test_dep_binds_tenant_id_from_request_state(self):
         from app.db.tenant_context import get_current_admin_id
 
-        admin_id = uuid.uuid4()
+        admin_id = _SLUG_A
         # Synthetic request whose state has tenant_id.
         mock_request = MagicMock()
         mock_request.state.tenant_id = admin_id
