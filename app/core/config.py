@@ -545,6 +545,53 @@ class Settings(BaseSettings):
     # rows. L3 + L2 together make that impossible.
     rls_tenant_context_enabled: bool = False
 
+    # Arc 9 C6.3 -- BYPASSRLS ops connection (Wall 1 escape hatch).
+    #
+    # The luciel_ops Postgres role created in Arc 9 C6.1 carries
+    # BYPASSRLS and a narrow grant matrix (SELECT-only on
+    # admin_audit_logs; SELECT + DELETE on the eight retention tables
+    # listed in admin_service.delete_admin_cascade). It exists so
+    # forensic queries and retention DELETEs can cross the tenant
+    # fence cleanly without temporarily disabling RLS or running as
+    # superuser. Application code that needs that capability calls
+    # ``app.db.session.get_ops_db_session()``, which binds against
+    # this URL.
+    #
+    # When ``luciel_ops_db_url`` is None (the default) the helper
+    # raises ``RuntimeError`` -- fail closed. Production sets this
+    # via SSM parameter ``/luciel/production/ops_database_url``
+    # (minted by ``scripts/mint_ops_db_password_ssm.py``) which the
+    # ECS task definition injects as the LUCIEL_OPS_DB_URL env var.
+    # Local dev / CI leave it unset so the ops session is unreachable
+    # outside production.
+    #
+    # SECURITY: the ops session MUST NOT emit ``app.admin_id`` /
+    # ``app.instance_id`` GUCs -- ops queries have no tenant scope and
+    # leaking a stale GUC onto a BYPASSRLS connection would be a
+    # cross-tenant footgun. ``app/db/session.py`` enforces this by
+    # attaching the after_begin tenant-context listener to
+    # SessionLocal only; the separate OpsSessionLocal is naturally
+    # GUC-free.
+    luciel_ops_db_url: str | None = None
+
+    # Arc 9 C6.3 -- forward-only audit-log immutability flag.
+    #
+    # The C6.2 migration installs two RESTRICTIVE policies on
+    # admin_audit_logs (admin_audit_logs_no_update,
+    # admin_audit_logs_no_delete) that allow UPDATE/DELETE only when
+    # ``current_user = 'luciel_ops'``. The migration creates the
+    # policies unconditionally, but the policies' effect is
+    # behaviourally identical to today's posture until
+    # ``ENABLE ROW LEVEL SECURITY`` is also applied (the same
+    # dark-deploy pattern Arc 9 C2/C3 uses for the tenant fence).
+    #
+    # This flag is the master switch for application-side guards
+    # (assertions in tests, future runtime checks) that should only
+    # fire once immutability is fully active in prod. It stays False
+    # until C9 envelope close flips it True at the same deploy that
+    # tags arc-9-tenant-isolation-complete.
+    audit_log_immutability_enabled: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
