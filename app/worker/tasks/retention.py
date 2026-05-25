@@ -89,6 +89,7 @@ from celery import shared_task
 from sqlalchemy import text
 
 from app.db.session import SessionLocal
+from app.db.tenant_scope import bind_tenant_scope  # Arc 9 C4.4
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -166,37 +167,72 @@ def run_retention_purge(self):
         # AdminService.hard_delete_tenant_after_retention runs the
         # 12-step DELETE chain atomically; any error inside it rolls
         # back ONLY that tenant.
-        per_tenant_db: Session = SessionLocal()
-        try:
-            # Import here (not at module top) to avoid a circular
-            # import: admin_service imports from app.models which
-            # imports from app.worker via the Celery audit-chain
-            # signal wiring.
-            from app.services.admin_service import AdminService
-
-            admin_svc = AdminService(per_tenant_db)
-            row_counts = admin_svc.hard_delete_tenant_after_retention(
-                tenant_id=tenant_id,
-                retention_window_days=RETENTION_WINDOW_DAYS,
-            )
-            per_tenant_db.commit()
-            purged_count += 1
-            _log.info(
-                "retention_purge OK tenant_id=%s row_counts=%s",
-                tenant_id,
-                row_counts,
-            )
-        except Exception:
-            per_tenant_db.rollback()
+        #
+        # Arc 9 C4.4: bind Wall-1 scope to THIS tenant so every
+        # DELETE in the 12-step chain runs under RLS policies that
+        # match the tenant. instance_id is bound to None because
+        # retention is an admin-level purge that crosses ALL
+        # instances of the tenant.
+        #
+        # KNOWN GAP (BLOCKED ON C6): the Wall-3 policy is
+        #   luciel_instance_id::text = current_setting('app.instance_id', true)
+        #   OR luciel_instance_id IS NULL
+        # which with instance_id=None (empty GUC) admits ONLY rows
+        # with luciel_instance_id IS NULL. Instance-scoped Wall-3
+        # rows (memory_items, sessions, traces) would SURVIVE the
+        # purge under the master flag.
+        #
+        # The correct fix is a dedicated DB role with BYPASSRLS,
+        # scheduled for C6 alongside the audit-log immutability
+        # role. Until C6 lands, retention MUST run with the master
+        # flag OFF -- guard below enforces this so we cannot ship
+        # a deploy that silently produces inconsistent purges.
+        #
+        # Refs ARC9_RUNBOOK §C4.4, §C6; _arc9/C4_service_audit.md.
+        from app.core.config import settings as _settings
+        if getattr(_settings, "rls_tenant_context_enabled", False):
             errored_count += 1
             errored_tenant_ids.append(tenant_id)
             _log.error(
-                "retention_purge FAILED tenant_id=%s traceback:\n%s",
+                "retention_purge BLOCKED tenant_id=%s reason=%s",
                 tenant_id,
-                traceback.format_exc(),
+                "rls_tenant_context_enabled=True but C6 BYPASSRLS "
+                "role not yet wired; refusing to run for safety.",
             )
-        finally:
-            per_tenant_db.close()
+            continue
+
+        with bind_tenant_scope(admin_id=tenant_id, instance_id=None):
+            per_tenant_db: Session = SessionLocal()
+            try:
+                # Import here (not at module top) to avoid a circular
+                # import: admin_service imports from app.models which
+                # imports from app.worker via the Celery audit-chain
+                # signal wiring.
+                from app.services.admin_service import AdminService
+
+                admin_svc = AdminService(per_tenant_db)
+                row_counts = admin_svc.hard_delete_tenant_after_retention(
+                    tenant_id=tenant_id,
+                    retention_window_days=RETENTION_WINDOW_DAYS,
+                )
+                per_tenant_db.commit()
+                purged_count += 1
+                _log.info(
+                    "retention_purge OK tenant_id=%s row_counts=%s",
+                    tenant_id,
+                    row_counts,
+                )
+            except Exception:
+                per_tenant_db.rollback()
+                errored_count += 1
+                errored_tenant_ids.append(tenant_id)
+                _log.error(
+                    "retention_purge FAILED tenant_id=%s traceback:\n%s",
+                    tenant_id,
+                    traceback.format_exc(),
+                )
+            finally:
+                per_tenant_db.close()
 
     summary = {
         "scanned_count": len(eligible_tenant_ids),
