@@ -171,6 +171,27 @@ jobs:
           python -m pip install pyyaml
           python -m pytest tests/infra/test_c8_3_sandbox_agent_policy_shape.py -v
 
+      - name: run Arc 9 C9.1 prod alarms shape contract
+        # Arc 9 doctrine D9.1 -- "Every prod alarm reads from a
+        # namespace that actually emits its metric." The pre-C9.1
+        # luciel-worker-unhealthy-task-count alarm was wired to
+        # AWS/ECS (which does not emit RunningTaskCount), so it sat
+        # at INSUFFICIENT_DATA -> Breaching on a perfectly healthy
+        # service. This test file:
+        #   (1) blocks AWS/ECS + any non-native metric (only
+        #       CPUUtilization and MemoryUtilization live there)
+        #   (2) locks WorkerUnhealthyTaskCountAlarm to
+        #       ECS/ContainerInsights
+        #   (3) requires every alarm to wire AlarmActions + OKActions
+        #   (4) requires the C7+C9 critical-path alarms to exist
+        # Backend-free -- only parses YAML.
+        env:
+          DATABASE_URL: "sqlite:///:memory:"
+          OPENAI_API_KEY: "ci-not-a-real-key-backend-free-tests-only"
+        run: |
+          python -m pip install pyyaml
+          python -m pytest tests/infra/test_c9_1_prod_alarms_shape.py -v
+
       - name: run Arc 9 C7.1 ops-connect log-format contract
         # Arc 9 doctrine D7.1 -- "Every grant the ops role exercises
         # emits a CloudWatch event." This test locks the literal string
