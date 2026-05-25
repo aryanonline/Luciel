@@ -27,9 +27,7 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: luciel-sandbox-agent-scoped
-      Description: >
-        Arc 9 C8.3 - scoped permissions for luciel-sandbox-agent.
-        Replaces AdministratorAccess. Doctrine D8.1.
+      Description: "Arc 9 C8.3 scoped permissions for luciel-sandbox-agent. Replaces AdministratorAccess. Doctrine D8.1."
       Users:
         - !Ref AgentUserName
       PolicyDocument:
