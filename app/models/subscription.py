@@ -176,6 +176,15 @@ class Subscription(Base, TimestampMixin):
         comment="FK to tenant_configs.tenant_id. Scope-as-billing-boundary.",
     )
 
+
+    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
+    # tenant_id remains during alias window; admin_id is source of truth.
+    admin_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
     # -----------------------------------------------------------------
     # Identity — email-stable, survives role changes (CANONICAL_RECAP Q5).
     # -----------------------------------------------------------------

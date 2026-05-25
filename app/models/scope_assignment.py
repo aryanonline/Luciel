@@ -116,6 +116,15 @@ class ScopeAssignment(Base, TimestampMixin):
         index=True,
     )
 
+
+    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
+    # tenant_id remains during alias window; admin_id is source of truth.
+    admin_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
     # domain_id is validated at the service layer against domain_configs
     # (which uses (tenant_id, domain_id) as natural key), matching the same
     # pattern Agent.domain_id uses. No direct FK to avoid composite-key

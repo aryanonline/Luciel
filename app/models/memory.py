@@ -52,6 +52,14 @@ class MemoryItem(Base, TimestampMixin):
     platform identity FK."""
 
     tenant_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
+    # tenant_id remains during alias window; admin_id is source of truth.
+    admin_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
     agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
     """Memories are scoped to user + tenant + agent so they stay isolated."""
 

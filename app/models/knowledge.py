@@ -41,6 +41,14 @@ class KnowledgeEmbedding(Base, TimestampMixin):
 
     # ---- Scope triple (legacy + new) ----
     tenant_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
+    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
+    # tenant_id remains during alias window; admin_id is source of truth.
+    admin_id: Mapped[str | None] = mapped_column(
+        String(100),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     domain_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
     agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
     """Legacy (pre-Step-24.5). New writes use luciel_instance_id instead."""

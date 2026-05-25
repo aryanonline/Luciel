@@ -47,10 +47,12 @@ class TestMessageModelShape(unittest.TestCase):
 
     def test_luciel_instance_id_column_declared(self):
         # Required for Wall-3 RLS (messages_instance_isolation).
-        self.assertIn("luciel_instance_id: Mapped[int | None]", self.text)
+        # Arc 9.1 Phase A (2026-05-25): flipped to NOT NULL --
+        # the parent session row is now guaranteed NOT NULL on
+        # luciel_instance_id, so the denormalised copy here is too.
+        self.assertIn("luciel_instance_id: Mapped[int]", self.text)
         self.assertIn("Integer", self.text)
-        # NULL-permissive -- C4/C5.2 doctrine.
-        self.assertIn("nullable=True", self.text)
+        self.assertIn("nullable=False", self.text)
 
     def test_integer_import_present(self):
         self.assertIn("Integer", self.text)

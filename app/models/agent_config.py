@@ -11,7 +11,7 @@ persona additions, and scoped data access.
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -24,6 +24,15 @@ class AgentConfig(Base, TimestampMixin):
 
     tenant_id: Mapped[str] = mapped_column(
         String(100), index=True, nullable=False
+    )
+
+    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
+    # tenant_id remains during alias window; admin_id is source of truth.
+    admin_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
     )
     """Which tenant this agent belongs to."""
 

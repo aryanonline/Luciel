@@ -33,7 +33,7 @@ Domain-agnostic: no vertical enums, no imports from app/domain/.
 """
 from __future__ import annotations
 
-from sqlalchemy import CHAR, Index, Integer, String, Text
+from sqlalchemy import CHAR, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -617,6 +617,15 @@ class AdminAuditLog(Base, TimestampMixin):
     # invariant and make 'WHERE tenant_id = :x' queries cheap.
     tenant_id: Mapped[str] = mapped_column(
         String(100),
+        nullable=False,
+        index=True,
+    )
+
+    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
+    # tenant_id remains during alias window; admin_id is source of truth.
+    admin_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )

@@ -30,6 +30,15 @@ class MessageModel(Base, TimestampMixin):
         String(100), nullable=False, index=False,
     )
 
+
+    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
+    # tenant_id remains during alias window; admin_id is source of truth.
+    admin_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
     # Arc 9 C5.0b/C5.3 -- denormalised instance scope for Wall-3 RLS.
     # Arc 9.1 Phase A (2026-05-25): NOT NULL. The session row this message
     # belongs to is now guaranteed NOT NULL on luciel_instance_id, so the
