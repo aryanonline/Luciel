@@ -111,8 +111,44 @@ class SessionRepository:
         content: str,
         trace_id: str | None = None,
     ) -> MessageModel:
+        # Arc 9 C5.3 -- copy parent session's tenant_id and
+        # luciel_instance_id into the new message row. These fields
+        # are required by:
+        #   * messages.tenant_id NOT NULL (post C5.0a Phase 3)
+        #   * messages_tenant_isolation RLS policy (Wall-1, C5.1)
+        #   * messages_instance_isolation RLS policy (Wall-3, C5.2)
+        #
+        # Without this denormalisation:
+        #   - NOT NULL violation on insert if tenant_id is missing.
+        #   - Even if NULL were allowed, the Wall-1 RLS policy uses
+        #     strict equality (no NULL carveout), so a NULL row would
+        #     be invisible to its own tenant.
+        #
+        # We fetch the parent session inside the same DB session that
+        # will do the insert -- this guarantees consistency with the
+        # RLS scope (the engine listener already SET LOCAL'd the GUCs
+        # to the caller's tenant + instance, so this SELECT is itself
+        # tenant-scoped).
+        #
+        # If the session is not found inside the current RLS scope,
+        # we refuse to write -- the caller is attempting to add a
+        # message to a session they cannot see, which is a Wall-1
+        # leak attempt. The L1 caller_tenant_id check in ChatService
+        # SHOULD have caught this, but we fail loudly here as the
+        # second-to-last line of defence before PG itself blocks the
+        # insert via WITH CHECK.
+        parent = self.db.get(SessionModel, session_id)
+        if parent is None:
+            raise ValueError(
+                f"add_message: session {session_id!r} not found within "
+                "current tenant scope (Wall-1 RLS may have hidden it). "
+                "Refusing to insert orphan message."
+            )
+
         message = MessageModel(
             session_id=session_id,
+            tenant_id=parent.tenant_id,
+            luciel_instance_id=parent.luciel_instance_id,
             role=role,
             content=content,
             trace_id=trace_id,
