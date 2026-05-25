@@ -146,6 +146,40 @@ def test_writes_scoped_to_luciel_resources() -> None:
             )
 
 
+def test_allow_self_detach_admin_present_and_scoped() -> None:
+    """The AllowSelfDetachAdmin stanza is required for the C8.3
+    zero-downtime overlap pattern to complete: after the scoped policy
+    is attached and smoke-tested alongside AdministratorAccess, the
+    agent must be able to detach Admin from itself. Detachment is
+    purely de-privileging and never escalates.
+
+    The stanza MUST be Effect=Allow, scoped to the agent's own user
+    ARN, AND conditioned on the AdministratorAccess policy ARN -- any
+    other policy detachment would re-open the original problem.
+    """
+    doc = _load_policy_doc()
+    sids = {stmt.get("Sid") for stmt in doc["Statement"]}
+    assert "AllowSelfDetachAdmin" in sids, (
+        "AllowSelfDetachAdmin stanza missing -- the agent cannot "
+        "complete the C8.3 overlap detach without it."
+    )
+    stmt = next(s for s in doc["Statement"] if s.get("Sid") == "AllowSelfDetachAdmin")
+    assert stmt["Effect"] == "Allow"
+    actions = stmt["Action"]
+    if isinstance(actions, str):
+        actions = [actions]
+    assert actions == ["iam:DetachUserPolicy"], (
+        f"AllowSelfDetachAdmin must allow ONLY iam:DetachUserPolicy, "
+        f"got {actions}."
+    )
+    cond = stmt.get("Condition", {})
+    arn_eq = cond.get("ArnEquals", {})
+    assert arn_eq.get("iam:PolicyARN") == "arn:aws:iam::aws:policy/AdministratorAccess", (
+        f"AllowSelfDetachAdmin must be conditioned on PolicyARN == "
+        f"AdministratorAccess, got {arn_eq!r}."
+    )
+
+
 def test_managed_policy_name_is_stable() -> None:
     """The ManagedPolicyName is part of the ARN the deny condition
     keys on -- it must be the literal we documented in the runbook."""

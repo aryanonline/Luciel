@@ -285,6 +285,23 @@ Resources:
               - cloudfront:ListInvalidations
             Resource: "*"
 
+          # ---- One-shot self-detach of AdministratorAccess -------
+          # Required by the C8.3 zero-downtime overlap pattern: after
+          # the scoped policy is attached and smoke-tested alongside
+          # Admin, the agent detaches Admin from itself. Detachment
+          # only de-privileges -- re-attachment is blocked by
+          # DenyAdminPolicyAttachment below. Scoped to the Admin
+          # policy ARN only.
+          - Sid: AllowSelfDetachAdmin
+            Effect: Allow
+            Action:
+              - iam:DetachUserPolicy
+            Resource:
+              - !Sub "arn:aws:iam::${AwsAccountId}:user/${AgentUserName}"
+            Condition:
+              ArnEquals:
+                iam:PolicyARN: "arn:aws:iam::aws:policy/AdministratorAccess"
+
           # ---- Explicit denies (defence in depth) -----------------
           # The agent must NEVER be able to modify its own privileges
           # or create a new IAM user / access key for itself.
@@ -303,8 +320,13 @@ Resources:
               - iam:UpdateLoginProfile
               - iam:PutUserPolicy
               - iam:DeleteUserPolicy
+              # iam:DetachUserPolicy intentionally NOT denied here --
+              # detaching only DE-privileges and never escalates.
+              # Allowing self-detach lets the agent clean up
+              # AdministratorAccess after the C8.3 zero-downtime
+              # overlap. Reattachment of Admin remains blocked by
+              # DenyAdminPolicyAttachment below.
               - iam:AttachUserPolicy
-              - iam:DetachUserPolicy
               - iam:AddUserToGroup
               - iam:RemoveUserFromGroup
             Resource:
