@@ -17,6 +17,11 @@ from app.db.tenant_context import (
     reset_current_admin_id,
     set_current_admin_id,
 )
+from app.db.instance_context import (
+    clear_current_instance_id,
+    reset_current_instance_id,
+    set_current_instance_id,
+)
 from app.integrations.llm.router import ModelRouter
 from app.knowledge.ingestion import IngestionService
 from app.knowledge.retriever import KnowledgeRetriever
@@ -53,47 +58,65 @@ DbSession = Annotated[Session, Depends(get_db)]
 
 
 # Arc 9 C2 — In-app RLS connection-pool wrapper (Layer 3 of Wall 1).
+# Arc 9 C4.2 — Extended to also bind Wall 3 (instance_id) ContextVar.
 #
 # ``get_tenant_scoped_db`` is the parallel dependency to ``get_db``
-# that, on entry, reads the authenticated admin's UUID off
-# ``request.state.tenant_id`` (populated by ApiKeyAuthMiddleware /
-# SessionCookieAuthMiddleware -- both write tenant_id which IS the
-# admin_id under the Arc 5 Revision C aliasing convention) and pushes
-# it into the in-process ContextVar. The engine-level ``after_begin``
-# listener in ``app.db.session`` then issues
-# ``SELECT set_config('app.admin_id', '<uuid>', true)`` on each BEGIN.
+# that, on entry, reads the authenticated admin's slug off
+# ``request.state.tenant_id`` AND the authenticated instance id off
+# ``request.state.luciel_instance_id`` (both populated by
+# ApiKeyAuthMiddleware / SessionCookieAuthMiddleware) and pushes them
+# into the in-process ContextVars. The engine-level ``after_begin``
+# listener in ``app.db.session`` (updated at C4.1) then issues TWO
+# set_config() calls on each BEGIN:
+#
+#   SELECT set_config('app.admin_id',    '<slug>',    true);
+#   SELECT set_config('app.instance_id', '<int|empty>', true);
+#
+# The Arc 9 C3 and C4.3 RLS policies then enforce ``tenant_id`` and
+# ``luciel_instance_id`` respectively against the GUCs.
 #
 # C2 lands this as a PARALLEL dep, not a replacement. Existing routes
-# keep using ``DbSession`` -> ``get_db``. C3 opts each route group in
-# by switching its annotation to ``TenantScopedDbSession``. This
-# staged migration limits blast radius and lets us roll back any
+# keep using ``DbSession`` -> ``get_db``. C3 + C4.3 opt each route
+# group in by switching its annotation to ``TenantScopedDbSession``.
+# Staged migration limits blast radius and lets us roll back any
 # single route group without affecting the rest.
 def get_tenant_scoped_db(request: Request) -> Generator[Session, None, None]:
-    """Yield a DB session bound to the requesting admin's tenant scope.
+    """Yield a DB session bound to the requesting admin + instance scope.
 
-    Reads ``request.state.tenant_id`` (the admin_id under Arc 5
-    Revision C aliasing) and binds it to the async-context-local
-    admin_id. The session-level ``after_begin`` listener in
-    ``app.db.session`` translates that ContextVar into a PostgreSQL
-    ``SET LOCAL app.admin_id`` on every transaction begin, which the
-    Arc 9 C3 RLS policies then enforce against ``tenant_id`` columns.
+    Reads two pieces of state off the FastAPI request (both populated
+    by the auth middleware):
 
-    When ``request.state.tenant_id`` is missing or None (unauth path,
-    health checks, public widget bootstrap), we still set the
-    ContextVar to None -- the after_begin listener will issue an
-    empty-string SET, and RLS policies will deny customer-data reads.
-    This is the correct fail-closed posture.
+      * ``request.state.tenant_id`` -- the admin slug under Arc 5
+        Revision C aliasing. Bound to ``app.db.tenant_context`` and
+        emitted as ``SET LOCAL app.admin_id`` by the listener.
 
-    The ``finally`` clear via ``reset_current_admin_id(token)`` is
-    critical: ContextVar is per-async-task but the FastAPI worker
+      * ``request.state.luciel_instance_id`` -- the bound Instance
+        primary key (Integer) or None for admin-level keys.
+        Bound to ``app.db.instance_context`` and emitted as
+        ``SET LOCAL app.instance_id`` by the listener.
+
+    When either is missing or None (unauth path, health checks,
+    admin-level API key without an instance binding), we still set
+    the matching ContextVar to None and the listener emits an empty-
+    string SET. Wall 1 strict policies treat empty as deny;
+    Wall 1 NULL-permissive + Wall 3 (all NULL-permissive) policies
+    treat empty as 'cross-tenant read OK if the row is NULL'.
+
+    The ``finally`` reset via the saved token is critical for BOTH
+    ContextVars: ContextVar is per-async-task but the FastAPI worker
     coroutine outlives any single request. Without the reset, an
     authenticated request followed by an unauthenticated one on the
-    same coroutine could leave the previous admin_id lingering in
-    context between this dep yielding and the next request entering
-    the dep -- a window we don't want to leave open.
+    same coroutine could leave the previous admin_id and/or
+    instance_id lingering -- a leak window we don't want open.
+
+    The two ContextVars are reset INDEPENDENTLY -- a failure to
+    reset one MUST NOT prevent the other from being reset (the
+    clear_*() fallback path).
     """
     tenant_id = getattr(request.state, "tenant_id", None)
-    token = set_current_admin_id(tenant_id)
+    instance_id = getattr(request.state, "luciel_instance_id", None)
+    admin_token = set_current_admin_id(tenant_id)
+    instance_token = set_current_instance_id(instance_id)
     db = SessionLocal()
     try:
         yield db
@@ -102,10 +125,17 @@ def get_tenant_scoped_db(request: Request) -> Generator[Session, None, None]:
         raise
     finally:
         db.close()
+        # Reset both ContextVars independently. If either reset
+        # raises (token-out-of-context, etc.) we fall back to
+        # clear() so the other still runs.
         try:
-            reset_current_admin_id(token)
+            reset_current_admin_id(admin_token)
         except Exception:
             clear_current_admin_id()
+        try:
+            reset_current_instance_id(instance_token)
+        except Exception:
+            clear_current_instance_id()
 
 
 TenantScopedDbSession = Annotated[Session, Depends(get_tenant_scoped_db)]

@@ -15,8 +15,11 @@ CONTRACT GUARDED:
           flag is True but no ContextVar value is set (no-context
           path, expected to deny customer-data reads at RLS).
     4. The FastAPI dep ``get_tenant_scoped_db`` reads
-       ``request.state.tenant_id`` and binds it to the ContextVar,
-       and clears it on exit.
+       ``request.state.tenant_id`` and binds it to the admin_id
+       ContextVar, AND reads ``request.state.luciel_instance_id``
+       and binds it to the instance_id ContextVar (C4.2). Both are
+       cleared on exit, and the resets are independent so a failure
+       to reset one MUST NOT prevent the other from being reset.
 
 WHY UNIT (not DB-backed):
     The mechanism under test is pure in-process plumbing:
@@ -276,11 +279,15 @@ class TestFastAPIDependency(unittest.TestCase):
 
     def test_dep_binds_tenant_id_from_request_state(self):
         from app.db.tenant_context import get_current_admin_id
+        from app.db.instance_context import get_current_instance_id
 
         admin_id = _SLUG_A
-        # Synthetic request whose state has tenant_id.
+        instance_id = 42
+        # Synthetic request whose state has BOTH tenant_id and
+        # luciel_instance_id (the normal authenticated path).
         mock_request = MagicMock()
         mock_request.state.tenant_id = admin_id
+        mock_request.state.luciel_instance_id = instance_id
 
         # Stub SessionLocal so we don't actually open a DB connection.
         with patch("app.api.deps.SessionLocal") as mock_session_local:
@@ -289,28 +296,35 @@ class TestFastAPIDependency(unittest.TestCase):
             gen = get_tenant_scoped_db(mock_request)
             db = next(gen)
             self.assertIsNotNone(db)
-            # Inside the dep scope, ContextVar MUST hold the admin_id.
+            # Inside the dep scope, BOTH ContextVars MUST hold the
+            # request-state values (C4.2 dual binding).
             self.assertEqual(get_current_admin_id(), admin_id)
+            self.assertEqual(get_current_instance_id(), instance_id)
             # Exit the generator (mimic FastAPI finishing the request).
             try:
                 next(gen)
             except StopIteration:
                 pass
 
-        # After exit, ContextVar MUST be cleared (or restored to its
-        # pre-dep value -- which was None for this test).
+        # After exit, BOTH ContextVars MUST be cleared (or restored
+        # to pre-dep value -- which was None for this test).
         self.assertIsNone(get_current_admin_id())
+        self.assertIsNone(get_current_instance_id())
 
     def test_dep_missing_tenant_id_binds_none(self):
         """Health check / unauth path -- request.state has no
-        tenant_id. The dep MUST bind None, not raise."""
+        tenant_id NOR luciel_instance_id. The dep MUST bind both to
+        None, not raise."""
         from app.db.tenant_context import get_current_admin_id
+        from app.db.instance_context import get_current_instance_id
 
         mock_request = MagicMock()
         # spec=set([]) trick: any attribute access on .state that
-        # ISN'T tenant_id would auto-create a MagicMock; we want
-        # tenant_id to be missing entirely so getattr returns None.
+        # ISN'T deleted would auto-create a MagicMock; we want both
+        # tenant_id and luciel_instance_id missing entirely so
+        # getattr returns None for both.
         del mock_request.state.tenant_id
+        del mock_request.state.luciel_instance_id
 
         with patch("app.api.deps.SessionLocal") as mock_session_local:
             mock_session_local.return_value = MagicMock()
@@ -318,10 +332,115 @@ class TestFastAPIDependency(unittest.TestCase):
             gen = get_tenant_scoped_db(mock_request)
             next(gen)
             self.assertIsNone(get_current_admin_id())
+            self.assertIsNone(get_current_instance_id())
             try:
                 next(gen)
             except StopIteration:
                 pass
+
+        # Both still None after exit.
+        self.assertIsNone(get_current_admin_id())
+        self.assertIsNone(get_current_instance_id())
+
+    def test_dep_binds_instance_id_zero(self):
+        """C4.2 regression canary: instance_id=0 is a LEGAL Integer
+        primary key in Postgres. The dep MUST bind 0, NOT coerce
+        it to None (which would degrade to NULL-permissive cross-
+        tenant read at the RLS layer -- a leak).
+        """
+        from app.db.tenant_context import get_current_admin_id
+        from app.db.instance_context import get_current_instance_id
+
+        mock_request = MagicMock()
+        mock_request.state.tenant_id = _SLUG_A
+        mock_request.state.luciel_instance_id = 0
+
+        with patch("app.api.deps.SessionLocal") as mock_session_local:
+            mock_session_local.return_value = MagicMock()
+            from app.api.deps import get_tenant_scoped_db
+            gen = get_tenant_scoped_db(mock_request)
+            next(gen)
+            # CRITICAL: must be 0, not None. Use assertEqual with an
+            # explicit type check -- `assertEqual(0, None)` would
+            # also pass under a buggy truthiness coercion.
+            value = get_current_instance_id()
+            self.assertEqual(value, 0)
+            self.assertIsNotNone(value)
+            self.assertIsInstance(value, int)
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+
+        self.assertIsNone(get_current_instance_id())
+
+    def test_dep_admin_level_key_binds_admin_only(self):
+        """Admin-level API key path: tenant_id is set but no instance
+        is bound. The dep MUST bind admin_id and leave instance_id as
+        None. RLS Wall 3 policies are NULL-permissive (per C4.3
+        doctrine) so an admin-level key can still read rows where
+        luciel_instance_id IS NULL, while instance-scoped rows are
+        invisible.
+        """
+        from app.db.tenant_context import get_current_admin_id
+        from app.db.instance_context import get_current_instance_id
+
+        mock_request = MagicMock()
+        mock_request.state.tenant_id = _SLUG_A
+        del mock_request.state.luciel_instance_id
+
+        with patch("app.api.deps.SessionLocal") as mock_session_local:
+            mock_session_local.return_value = MagicMock()
+            from app.api.deps import get_tenant_scoped_db
+            gen = get_tenant_scoped_db(mock_request)
+            next(gen)
+            self.assertEqual(get_current_admin_id(), _SLUG_A)
+            self.assertIsNone(get_current_instance_id())
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+
+        self.assertIsNone(get_current_admin_id())
+        self.assertIsNone(get_current_instance_id())
+
+    def test_dep_resets_instance_id_even_if_admin_reset_raises(self):
+        """C4.2 independent-reset guarantee: if the admin_id reset
+        raises (corrupt token, ContextVar machinery glitch), the
+        instance_id reset MUST STILL run. Otherwise an exception
+        during cleanup of one wall would leave the other wall's
+        value lingering on the worker coroutine -- a leak window.
+
+        We assert by patching ``reset_current_admin_id`` to raise,
+        then verifying instance_id is still cleared after the dep
+        exits.
+        """
+        from app.db.instance_context import get_current_instance_id
+
+        mock_request = MagicMock()
+        mock_request.state.tenant_id = _SLUG_A
+        mock_request.state.luciel_instance_id = 7
+
+        with patch("app.api.deps.SessionLocal") as mock_session_local, \
+             patch(
+                 "app.api.deps.reset_current_admin_id",
+                 side_effect=RuntimeError("simulated token corruption"),
+             ):
+            mock_session_local.return_value = MagicMock()
+            from app.api.deps import get_tenant_scoped_db
+            gen = get_tenant_scoped_db(mock_request)
+            next(gen)
+            self.assertEqual(get_current_instance_id(), 7)
+            # Exhaust the generator. The dep's finally block catches
+            # the simulated reset failure via clear_current_admin_id
+            # and must STILL proceed to reset instance_id.
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+
+        # Even though admin reset blew up, instance_id MUST be clear.
+        self.assertIsNone(get_current_instance_id())
 
 
 if __name__ == "__main__":
