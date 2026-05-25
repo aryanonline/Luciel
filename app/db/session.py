@@ -118,28 +118,57 @@ install_audit_chain_event()
 from app.core.config import settings  # noqa: E402
 from sqlalchemy import event  # noqa: E402
 from app.db.tenant_context import get_current_admin_id  # noqa: E402
+from app.db.instance_context import get_current_instance_id  # noqa: E402
 
 
 @event.listens_for(SessionLocal, "after_begin")
 def _set_tenant_context_on_begin(session, transaction, connection):
-    """Push the in-process admin_id into PostgreSQL on every BEGIN.
+    """Push the in-process admin_id + instance_id into PostgreSQL on every BEGIN.
+
+    Arc 9 C2 introduced the admin_id (Wall 1) push.
+    Arc 9 C4.1 added the instance_id (Wall 3) push alongside it. Both
+    GUCs are set on the same after_begin event so they bind to the
+    same transaction lifecycle and clear together at COMMIT/ROLLBACK
+    when SET LOCAL goes out of scope.
 
     No-op when the master feature flag is False. Idempotent within a
     transaction (SQLAlchemy guarantees one after_begin per BEGIN).
+
+    Both GUCs use the same is_local=true scoping. Both treat empty
+    string as "no context" and the matching RLS policies treat that
+    state as either deny (Wall 1 strict tables) or NULL-permissive
+    read (Wall 3 + asymmetric Wall 1 tables -- knowledge_embeddings,
+    retention_policies, deletion_logs, api_keys).
     """
     if not settings.rls_tenant_context_enabled:
         return
-    admin_id = get_current_admin_id()
+
+    # --- Wall 1 (admin_id) --------------------------------------
     # set_config(name, value, is_local) is the parameterisable
     # equivalent of ``SET LOCAL``. is_local=true scopes the change to
     # the current transaction so the connection returns to the pool
     # clean. Passing empty string for no-context is intentional --
     # RLS policies SHOULD compare to current_setting('app.admin_id',
     # true) and treat empty/missing as deny.
-    value = str(admin_id) if admin_id is not None else ""
+    admin_id = get_current_admin_id()
+    admin_value = str(admin_id) if admin_id is not None else ""
     connection.exec_driver_sql(
         "SELECT set_config('app.admin_id', %s, true)",
-        (value,),
+        (admin_value,),
+    )
+
+    # --- Wall 3 (instance_id) -- Arc 9 C4.1 ---------------------
+    # instances.id is Integer, not a slug. We serialise to decimal
+    # text here and the C4.3 RLS policies cast the column to text
+    # before comparing (``luciel_instance_id::text =
+    # current_setting(...)``). Empty string means "no instance
+    # context" and matches NULL-permissive reads on every Wall 3
+    # table.
+    instance_id = get_current_instance_id()
+    instance_value = str(instance_id) if instance_id is not None else ""
+    connection.exec_driver_sql(
+        "SELECT set_config('app.instance_id', %s, true)",
+        (instance_value,),
     )
 
 
