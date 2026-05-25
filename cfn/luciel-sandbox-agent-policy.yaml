@@ -1,25 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Arc 9 C8.3 - scoped IAM policy for the luciel-sandbox-agent user.
-  Replaces the AWS-managed AdministratorAccess policy with a scope that
-  matches what the agent actually exercises (CFN stack management of
-  luciel-prod-alarms + luciel-prod-worker-autoscaling, CloudWatch alarm
-  reads + manual state writes, ECS describes for luciel-cluster, log
-  stream writes for synthetic injection on /ecs/luciel-backend, SSM
-  reads on /luciel/prod/pagerduty/* with Put on the same scope for PD
-  rotation, SNS describes + manual confirmation/reset on
-  luciel-prod-* topics). All writes outside this scope are denied;
-  iam:* writes are explicitly denied so the agent cannot self-escalate.
-
-  Rollout follows the C8.3 runbook: this template provisions the
-  policy as a customer-managed policy with a stable ARN, then attaches
-  it to the luciel-sandbox-agent user IN ADDITION TO the existing
-  AdministratorAccess. Smoke-test runs while both are attached
-  (effective permissions are the union). After smoke-test passes,
-  AdministratorAccess is detached out-of-band (one CLI call); this
-  template stays applied long-term. Doctrine D8.1 codifies the
-  zero-downtime overlap.
-
+  Arc 9 C8.3 - scoped IAM policy for luciel-sandbox-agent. Replaces
+  AdministratorAccess with named-action scope for CFN/CW/Logs/SSM/SNS/
+  ECS/RDS/ECR/S3-widget-cdn/CloudFront, plus explicit denies for
+  self-escalation and AdministratorAccess reattachment. Doctrine D8.1.
   Region ca-central-1, account 729005488042.
 
 Parameters:
