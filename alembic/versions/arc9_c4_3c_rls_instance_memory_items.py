@@ -101,9 +101,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # No C3 policy on this table; safe to disable RLS on downgrade.
+    # Arc 9 C5.4 fix: the previous downgrade DISABLED RLS on this
+    # table, which would have neutered the sibling Wall-1 policy
+    # ``memory_items_tenant_isolation`` shipped by C3.2b. Drop ONLY
+    # our own Wall-3 policy; leave RLS enabled so the Wall-1 sibling
+    # keeps enforcing tenant isolation under rollback.
     op.execute(
         "DROP POLICY IF EXISTS memory_items_instance_isolation "
         "ON memory_items;"
     )
-    op.execute("ALTER TABLE memory_items DISABLE ROW LEVEL SECURITY;")
