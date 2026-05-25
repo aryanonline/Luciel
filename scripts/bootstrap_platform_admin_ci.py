@@ -120,6 +120,37 @@ def _guard_database_url() -> None:
             sys.exit(2)
 
 
+def _seed_ci_sentinel(db) -> tuple[str, int]:
+    """Seed a sentinel CI Admin + Instance and return (tenant_id, instance_id).
+
+    Required since Arc 9.1 Phase A made luciel_instance_id NOT NULL on
+    api_keys. The platform-admin CI key still has platform_admin
+    permissions, but it now has to be FK'd to a real Admin/Instance.
+    The sentinel rows are wiped at the start of every CI run because
+    the test DB is ephemeral.
+    """
+    import uuid
+    from sqlalchemy import text
+
+    sentinel_tenant = str(uuid.uuid4())
+    # Use an upsert-style insert so re-running against a partially-
+    # populated DB doesn't blow up. RLS is bypassed because alembic+
+    # bootstrap run as the migration role.
+    db.execute(text(
+        "INSERT INTO admins (id, name, tier, tier_source, active, "
+        "created_at, updated_at) VALUES (:id, :name, 'enterprise', "
+        "'ci-bootstrap', true, NOW(), NOW()) ON CONFLICT DO NOTHING"
+    ), {"id": sentinel_tenant, "name": "CI sentinel Admin (Step 30d-C)"})
+    row = db.execute(text(
+        "INSERT INTO instances (admin_id, instance_slug, display_name, "
+        "active, created_at, updated_at) VALUES (:aid, 'ci-sentinel', "
+        "'CI Sentinel Instance', true, NOW(), NOW()) RETURNING id"
+    ), {"aid": sentinel_tenant}).fetchone()
+    instance_id = int(row[0])
+    db.commit()
+    return sentinel_tenant, instance_id
+
+
 def main() -> int:
     _guard_env()
     _guard_database_url()
@@ -133,12 +164,20 @@ def main() -> int:
 
     db = SessionLocal()
     try:
+        sentinel_tenant, sentinel_instance = _seed_ci_sentinel(db)
+    except Exception as exc:  # noqa: BLE001
+        print(f"FATAL: sentinel seed failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        db.close()
+        return 3
+
+    try:
         svc = ApiKeyService(db)
         api_key, raw_key = svc.create_key(
-            tenant_id=None,
+            tenant_id=sentinel_tenant,
             domain_id=None,
             agent_id=None,
-            luciel_instance_id=None,
+            luciel_instance_id=sentinel_instance,
             display_name="CI E2E platform-admin (Step 30d-C)",
             permissions=["chat", "sessions", "admin", "platform_admin"],
             rate_limit=10000,
