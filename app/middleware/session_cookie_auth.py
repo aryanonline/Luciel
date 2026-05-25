@@ -79,6 +79,8 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from sqlalchemy import text
+
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.integrations.stripe import get_stripe_client
@@ -185,22 +187,58 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
             # required arg. T9 leg 5 surfaced it on prod.
             svc = BillingService(db, get_stripe_client())
             sub = svc.get_active_subscription_for_user(user_id=user.id)
-            if sub is None:
-                # User exists but has no active subscription. Possible
-                # if a checkout webhook is still in flight (microseconds
-                # window) or if their subscription was just cancelled.
-                # 401 is the right code; the marketing site can show a
-                # "Subscription not active" panel and a "Manage billing"
-                # link that exercises the /billing/portal path (which
-                # cookied users can still reach by per-route cookie
-                # check, bypassing this middleware via the path filter
-                # above).
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "No active subscription for this user."},
-                )
 
-            tenant_id = sub.tenant_id
+            # Arc 9 C20 — Free-tier fallback via SECURITY DEFINER.
+            #
+            # The Subscription model's own doctrine (app/models/
+            # subscription.py line ~242-247) states: "In V2 Free admins
+            # have no Subscription row at all (lazy-create on upgrade
+            # per Gap 1 lock)." Before C20 the middleware enforced a
+            # blanket "no Subscription → 401" rule which silently broke
+            # every Free signup the moment C18 stopped pre-minting a
+            # placeholder Instance. The hidden bug surfaced when the
+            # first Free user tried to create their own Luciel.
+            #
+            # Fix: when no Subscription is found we look up the user's
+            # active owner ScopeAssignment via the C20 SECURITY DEFINER
+            # function ``arc9_c20_resolve_tenant_for_user(uuid)`` owned
+            # by luciel_ops (BYPASSRLS). Direct ORM reads on
+            # scope_assignments are blocked by FORCE RLS at this point
+            # in the request (we have not yet set app.admin_id — that
+            # GUC is what we're trying to discover). The function
+            # returns ONLY the tenant_id, scoped to one row by
+            # (user_id, role='owner', active, ended_at IS NULL). See
+            # alembic/versions/arc9_c20_resolve_tenant_secdef.py for
+            # the full doctrine.
+            #
+            # Pro/Enterprise users still match the Subscription path
+            # first so this branch is a strict superset, not a
+            # regression.
+            if sub is None:
+                tenant_id_row = db.execute(
+                    text(
+                        "SELECT public.arc9_c20_resolve_tenant_for_user(:uid)"
+                    ),
+                    {"uid": str(user.id)},
+                ).scalar()
+                if not tenant_id_row:
+                    # No Subscription AND no owner ScopeAssignment —
+                    # this user genuinely has nothing to administer.
+                    # Could be a teammate invite that was revoked, or
+                    # a webhook race for a paid signup where Stripe is
+                    # still in flight. Preserve the original 401 so
+                    # the marketing site behaviour is unchanged.
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "No active subscription for this user."},
+                    )
+                tenant_id = tenant_id_row
+                logger.info(
+                    "cookie auth: free-tier fallback owner-scope user=%s tenant=%s",
+                    user.id, tenant_id,
+                )
+            else:
+                tenant_id = sub.tenant_id
 
             # ----------------------------------------------------------
             # Step 30a.7 -- belt-and-suspenders tenant-active gate.
