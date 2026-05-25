@@ -114,6 +114,11 @@ on:
       - app/core/config.py
       - app/services/scope_prompt_preflight.py
       - app/integrations/llm/**
+      - app/models/admin.py
+      - app/models/instance.py
+      - app/models/api_key.py
+      - alembic/versions/**
+      - scripts/bootstrap_platform_admin_ci.py
       - ci/e2e/**
       - .github/workflows/widget-e2e.yml
       - tests/api/test_widget_e2e_harness_shape.py

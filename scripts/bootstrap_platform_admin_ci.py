@@ -120,6 +120,67 @@ def _guard_database_url() -> None:
             sys.exit(2)
 
 
+# Sentinel Admin / Instance the CI platform-admin key is FK'd to.
+# Arc 9.1 Phase A added a NOT NULL constraint on api_keys.luciel_instance_id,
+# so the CI mint must point at a real (Admin, Instance) row. Platform-admin
+# permission still bypasses scope enforcement at chat time; the FK is purely
+# a referential-integrity satisfier here.
+_CI_SENTINEL_ADMIN_ID = "ci-bootstrap-admin"
+_CI_SENTINEL_ADMIN_NAME = "CI Bootstrap Sentinel Admin"
+_CI_SENTINEL_INSTANCE_SLUG = "ci-bootstrap-sentinel"
+_CI_SENTINEL_INSTANCE_NAME = "CI Bootstrap Sentinel Instance"
+
+
+def _ensure_sentinel_admin_and_instance(db) -> tuple[str, int]:
+    """Idempotently create (or fetch) the sentinel Admin + Instance the
+    CI platform-admin key needs as its FK targets.
+
+    Returns (admin_id, instance_pk).
+
+    Idempotency matters because alembic upgrade + a re-run of this script
+    in the same DB should not crash on duplicate keys. The contract is:
+    if the rows already exist with the sentinel slugs, reuse them.
+    """
+    from app.models.admin import Admin
+    from app.models.instance import Instance
+
+    # ---- Sentinel Admin ----
+    admin = db.query(Admin).filter(Admin.id == _CI_SENTINEL_ADMIN_ID).one_or_none()
+    if admin is None:
+        admin = Admin(
+            id=_CI_SENTINEL_ADMIN_ID,
+            name=_CI_SENTINEL_ADMIN_NAME,
+            tier="free",
+            tier_source="manual",  # CI provenance per ck_admins_tier_source_valid
+            active=True,
+        )
+        db.add(admin)
+        db.flush()
+
+    # ---- Sentinel Instance ----
+    instance = (
+        db.query(Instance)
+        .filter(
+            Instance.admin_id == _CI_SENTINEL_ADMIN_ID,
+            Instance.instance_slug == _CI_SENTINEL_INSTANCE_SLUG,
+        )
+        .one_or_none()
+    )
+    if instance is None:
+        instance = Instance(
+            admin_id=_CI_SENTINEL_ADMIN_ID,
+            instance_slug=_CI_SENTINEL_INSTANCE_SLUG,
+            display_name=_CI_SENTINEL_INSTANCE_NAME,
+            description="FK target for the CI platform-admin key. "
+                        "Created by scripts/bootstrap_platform_admin_ci.py.",
+            active=True,
+        )
+        db.add(instance)
+        db.flush()
+
+    return admin.id, instance.id
+
+
 def main() -> int:
     _guard_env()
     _guard_database_url()
@@ -133,16 +194,21 @@ def main() -> int:
 
     db = SessionLocal()
     try:
+        sentinel_admin_id, sentinel_instance_pk = (
+            _ensure_sentinel_admin_and_instance(db)
+        )
+        db.commit()
+
         svc = ApiKeyService(db)
         api_key, raw_key = svc.create_key(
-            tenant_id=None,
+            tenant_id=sentinel_admin_id,
             domain_id=None,
             agent_id=None,
-            luciel_instance_id=None,
-            display_name="CI E2E platform-admin (Step 30d-C)",
+            luciel_instance_id=sentinel_instance_pk,
+            display_name="CI E2E platform-admin (Arc 9.2 PR #99)",
             permissions=["chat", "sessions", "admin", "platform_admin"],
             rate_limit=10000,
-            created_by="ci-bootstrap@step-30d-c",
+            created_by="ci-bootstrap@arc9_2-pr99",
             auto_commit=True,
             ssm_write=False,
         )

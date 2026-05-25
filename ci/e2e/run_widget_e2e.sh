@@ -2,17 +2,19 @@
 #
 # Widget-surface end-to-end harness orchestrator.
 #
-# Step 30d, Deliverable C.
+# Originally: Step 30d, Deliverable C.
+# Rebuilt at: Arc 9.2 PR #99 — Option 2 harness rebuild against the
+#             Admin -> Instance V2 hierarchy (Arc 5 Path A landed).
 #
 # What this script does
 # =====================
 #
 # Given a running uvicorn app on $BASE_URL and a platform-admin key in
-# $ADMIN_KEY, this script provisions exactly enough tenant/domain/embed-
-# key state to make two public widget-chat calls -- one benign, one
-# blocked by the keyword moderation provider -- and asserts the SSE
-# frame contracts that ARCHITECTURE.md section 3.3 (steps 1-7) and the
-# Step 30d Deliverable B refusal envelope require.
+# $ADMIN_KEY, this script provisions exactly enough Admin / Instance /
+# embed-key state to make two public widget-chat calls -- one benign,
+# one blocked by the keyword moderation provider -- and asserts the
+# SSE frame contracts that ARCHITECTURE.md section 3.3 (steps 1-7)
+# and the Step 30d Deliverable B refusal envelope require.
 #
 # What this script deliberately is NOT
 # ====================================
@@ -22,29 +24,29 @@
 #     this harness is to catch widget-surface regressions that are
 #     too fast-moving for the pillar suite to be the gate of record.
 #
-#   * Not a load test. We make two HTTP calls. Anything more belongs
-#     in a different harness.
+#   * Not a load test. We make a handful of HTTP calls; anything more
+#     belongs in a different harness.
 #
 #   * Not a substitute for the JS widget bundle build/size gate (which
 #     already lives in .github/workflows/ci.yml). We hit the HTTP
 #     surface directly; the bundle is the widget's other half and
 #     has its own gate.
 #
-# Provisioning chain
-# ==================
+# Provisioning chain (V2 — Admin -> Instance)
+# ===========================================
 #
 # A widget chat call requires (per ARCHITECTURE section 3.2 + 3.2.2):
 #
-#   1. A tenant_configs row whose system_prompt_additions is set
-#      (otherwise the tenant-wide path lacks scope; we also set the
-#       domain-level scope below).
-#   2. A domain_configs row whose system_prompt_additions is set --
-#      this is exactly what the Step 30d Deliverable A preflight
-#      checks at embed-key issuance time. Setting it gives us a
-#      green light from the preflight and a real scope prompt for
-#      the chat call to render against.
-#   3. An embed key minted via POST /api/v1/admin/embed-keys with
-#      allowed_origins set to $TEST_ORIGIN. The endpoint sets
+#   1. An admins row (created via POST /api/v1/admin/tenants which
+#      remains the public surface for Admin creation — the route name
+#      is preserved for API back-compat; the underlying entity is the
+#      Admin in V2 vocab).
+#   2. An instances row tied to that Admin (POST /api/v1/admin/instances).
+#      system_prompt_additions is set here so the four-layer prompt has
+#      a populated instance layer at chat time.
+#   3. An embed key minted via POST /api/v1/admin/embed-keys, pinned to
+#      (tenant_id=Admin.id, luciel_instance_id=Instance.id) and with
+#      allowed_origins=[$TEST_ORIGIN]. The endpoint sets
 #      permissions=["chat"] server-side, which require_embed_key
 #      then enforces.
 #
@@ -59,17 +61,6 @@
 #   BASE_URL     -- defaults to http://127.0.0.1:8000
 #   TEST_ORIGIN  -- defaults to https://e2e.luciel.test
 #                   Must match exactly one entry in allowed_origins.
-#
-# These environment variables MUST line up with the moderation config
-# the running app was booted with (see widget-e2e.yml):
-#
-#   moderation_provider=keyword
-#   moderation_keyword_block_terms='["E2E_REFUSE_SENTINEL"]'
-#
-# If they don't, the refusal-path assertion will fail. That is by
-# design -- a mismatch between the workflow's app boot and this
-# harness's sentinel is exactly the misconfig the harness should
-# catch.
 #
 # Exit code
 # =========
@@ -92,12 +83,12 @@ fi
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000}"
 TEST_ORIGIN="${TEST_ORIGIN:-https://e2e.luciel.test}"
 
-# Unique tenant_id per run so re-runs in the same DB don't collide.
+# Unique Admin / Instance per run so re-runs in the same DB don't collide.
 # In CI the DB is ephemeral so this is belt-and-suspenders; locally
 # it lets you re-run without resetting Postgres.
 TS="$(date +%s)"
 TENANT_ID="e2e-tenant-${TS}"
-DOMAIN_ID="e2e-domain-${TS}"
+INSTANCE_SLUG="e2e-instance-${TS}"
 
 # This sentinel MUST match moderation_keyword_block_terms in the
 # workflow env. See the file-header comment block above.
@@ -117,13 +108,13 @@ CURL_BASE=(
 )
 
 echo "==> widget-e2e starting"
-echo "    BASE_URL    = ${BASE_URL}"
-echo "    TEST_ORIGIN = ${TEST_ORIGIN}"
-echo "    TENANT_ID   = ${TENANT_ID}"
-echo "    DOMAIN_ID   = ${DOMAIN_ID}"
+echo "    BASE_URL       = ${BASE_URL}"
+echo "    TEST_ORIGIN    = ${TEST_ORIGIN}"
+echo "    TENANT_ID      = ${TENANT_ID}"
+echo "    INSTANCE_SLUG  = ${INSTANCE_SLUG}"
 
 # ---------------------------------------------------------------------------
-# Step 1: create the tenant
+# Step 1: create the Admin (POST /admin/tenants — V2-aliased route)
 # ---------------------------------------------------------------------------
 
 echo "==> [1/5] POST /api/v1/admin/tenants"
@@ -135,35 +126,58 @@ echo "==> [1/5] POST /api/v1/admin/tenants"
   "tenant_id": "${TENANT_ID}",
   "display_name": "E2E tenant ${TS}",
   "system_prompt_additions": "You are an E2E test assistant. Reply tersely.",
-  "created_by": "widget-e2e@step-30d-c"
+  "created_by": "widget-e2e@arc9_2-pr99"
 }
 JSON
 )" \
     >/dev/null
 
 # ---------------------------------------------------------------------------
-# Step 2: create the domain WITH system_prompt_additions
-# (Deliverable A preflight green-light)
+# Step 2: create the Instance under that Admin (V2: replaces Step 30d
+# Deliverable A domain-preflight; the per-Instance system_prompt_additions
+# carries the same role that domain_configs.system_prompt_additions used
+# to play in the legacy four-layer prompt).
 # ---------------------------------------------------------------------------
 
-echo "==> [2/5] POST /api/v1/admin/domains"
-"${CURL_BASE[@]}" \
-    -X POST \
-    "${BASE_URL}/api/v1/admin/domains" \
-    -d "$(cat <<JSON
+echo "==> [2/5] POST /api/v1/admin/instances"
+INSTANCE_RESPONSE="$(
+    "${CURL_BASE[@]}" \
+        -X POST \
+        "${BASE_URL}/api/v1/admin/instances" \
+        -d "$(cat <<JSON
 {
-  "tenant_id": "${TENANT_ID}",
-  "domain_id": "${DOMAIN_ID}",
-  "display_name": "E2E domain ${TS}",
-  "system_prompt_additions": "Domain-level scope for E2E tests.",
-  "created_by": "widget-e2e@step-30d-c"
+  "admin_id": "${TENANT_ID}",
+  "instance_slug": "${INSTANCE_SLUG}",
+  "display_name": "E2E instance ${TS}",
+  "description": "Provisioned by widget-e2e arc9_2-pr99 harness.",
+  "active": true,
+  "created_by": "widget-e2e@arc9_2-pr99",
+  "system_prompt_additions": "Instance-level scope for E2E tests."
 }
 JSON
-)" \
-    >/dev/null
+)"
+)"
+
+INSTANCE_ID="$(
+    python -c '
+import json, sys
+data = json.loads(sys.stdin.read())
+pk = data.get("id")
+if pk is None:
+    sys.stderr.write("FATAL: instance response missing id field\n")
+    sys.exit(1)
+print(pk)
+' <<<"${INSTANCE_RESPONSE}"
+)"
+
+echo "    instance pk = ${INSTANCE_ID}"
 
 # ---------------------------------------------------------------------------
 # Step 3: mint the embed key. response includes the raw key once.
+# Key is pinned to (tenant_id, luciel_instance_id). domain_id is omitted
+# (the Domain layer no longer exists in V2; the issuance preflight that
+# used to validate domain_configs.system_prompt_additions is now satisfied
+# by the Instance row created in Step 2).
 # ---------------------------------------------------------------------------
 
 echo "==> [3/5] POST /api/v1/admin/embed-keys"
@@ -174,12 +188,12 @@ EMBED_RESPONSE="$(
         -d "$(cat <<JSON
 {
   "tenant_id": "${TENANT_ID}",
-  "domain_id": "${DOMAIN_ID}",
+  "luciel_instance_id": ${INSTANCE_ID},
   "display_name": "E2E embed key ${TS}",
   "allowed_origins": ["${TEST_ORIGIN}"],
   "rate_limit_per_minute": 1000,
   "widget_config": {},
-  "created_by": "widget-e2e@step-30d-c"
+  "created_by": "widget-e2e@arc9_2-pr99"
 }
 JSON
 )"
