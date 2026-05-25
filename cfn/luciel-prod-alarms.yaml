@@ -205,8 +205,11 @@ Resources:
         ECS worker service running task count drops below 1 for two
         consecutive 1-minute periods. Catches the case where the
         service is down even before the heartbeat alarm sees missed
-        windows.
-      Namespace: AWS/ECS
+        windows. RunningTaskCount is emitted by Container Insights
+        (ECS/ContainerInsights namespace), NOT by the default AWS/ECS
+        namespace -- using AWS/ECS here was a silent miswire that
+        produced INSUFFICIENT_DATA -> Breaching alarm storms.
+      Namespace: ECS/ContainerInsights
       MetricName: RunningTaskCount
       Dimensions:
         - Name: ClusterName
