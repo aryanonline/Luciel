@@ -169,19 +169,27 @@ class ChatService:
         ctx = LucielContext(assistant_name="Luciel")
 
         # --- Legacy tenant config ---
+        # Arc 9 C17: system_prompt_additions migrated off the Admin row
+        # (the V2 alias of the legacy tenant_configs table) onto the
+        # Instance row. The Admin row no longer carries a prompt, so the
+        # tenant layer always degrades to None here; the prompt content
+        # is now exclusively contributed by the Instance layer below.
         tenant_config = self.config_repository.get_tenant_config(tenant_id)
         if tenant_config:
-            ctx.tenant_prompt = tenant_config.system_prompt_additions
+            ctx.tenant_prompt = getattr(
+                tenant_config, "system_prompt_additions", None
+            )
             ctx.tenant_config_id = tenant_config.id
 
         # --- Legacy domain config ---
+        # Arc 5 Path A eliminated the Domain layer; ConfigRepository no
+        # longer exposes get_domain_config(). The domain_id arg here is
+        # now either a legacy slug (pre-Arc-5 callers) or a synthetic
+        # `instance-<pk>` sentinel from chat_widget for V2 embed keys.
+        # In both cases there is no Domain row to read, so the entire
+        # branch degrades to None and the Instance layer below carries
+        # the prompt content.
         domain_config = None
-        if domain_id:
-            domain_config = self.config_repository.get_domain_config(tenant_id, domain_id)
-            if domain_config:
-                ctx.domain_prompt = domain_config.system_prompt_additions
-                ctx.domain_config_id = domain_config.id
-                ctx.preferred_provider = domain_config.preferred_provider
 
         # --- Legacy agent config ---
         if agent_id:
