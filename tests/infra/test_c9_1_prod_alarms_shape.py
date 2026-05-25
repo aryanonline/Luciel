@@ -136,6 +136,12 @@ def test_critical_alarms_present():
         "luciel-worker-unhealthy-task-count",
         "luciel-rds-cpu",
         "luciel-rds-connection-count",
+        # Arc 9.1 Phase B2 (G7): per-Admin observability.
+        # Removing any of these without a doctrine update means a
+        # tenant outage could be invisible to the on-call rotation.
+        "luciel-per-admin-http-5xx",
+        "luciel-per-admin-http-p99-latency",
+        "luciel-per-admin-zero-row",
     }
     found = {
         props.get("AlarmName")
