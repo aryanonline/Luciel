@@ -612,6 +612,165 @@ Resources:
       OKActions:
         - !Ref AlertTopic
 
+  # ==================================================================
+  # Arc 9.1 Phase B2 -- G7 per-Admin observability
+  # ==================================================================
+  #
+  # The three alarms below close G7 from the 2026-05-25 prod-alignment
+  # verification: pre-B2, every alarm in this stack was infra-level
+  # (CPU, storage, audit-chain integrity). None of them would fire if
+  # one tenant's traffic was broken while the rest of prod stayed
+  # healthy -- a Customer A 500-rate spike was invisible.
+  #
+  # All three filters key off the JSON payload emitted by
+  # app/middleware/request_logging.py (line ~205):
+  #   {"evt":"http_request","tenant_id":"<admin_uuid>",
+  #    "status":<int>,"duration_ms":<int>,...}
+  # The JSON-format FilterPattern syntax lets CloudWatch parse the
+  # field and use it as a metric Dimension. That is the per-Admin
+  # pivot that was missing.
+
+  PerAdminHttp5xxMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BackendLogGroupName
+      FilterName: luciel-backend-per-admin-http-5xx
+      # JSON metric filter: match http_request events with status>=500.
+      # The tenant_id field gets surfaced as a CloudWatch Dimension.
+      FilterPattern: '{ ($.evt = "http_request") && ($.status >= 500) && ($.tenant_id = "*") }'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Backend
+          MetricName: PerAdminHttp5xxCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+          Dimensions:
+            - Key: AdminId
+              Value: $.tenant_id
+
+  PerAdminHttpLatencyMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BackendLogGroupName
+      FilterName: luciel-backend-per-admin-http-latency
+      # Same payload, but emit duration_ms as the metric VALUE so
+      # CloudWatch can compute percentiles per Admin.
+      FilterPattern: '{ ($.evt = "http_request") && ($.duration_ms = "*") && ($.tenant_id = "*") }'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Backend
+          MetricName: PerAdminHttpLatencyMs
+          MetricValue: $.duration_ms
+          DefaultValue: 0
+          Unit: Milliseconds
+          Dimensions:
+            - Key: AdminId
+              Value: $.tenant_id
+
+  PerAdminZeroRowMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BackendLogGroupName
+      FilterName: luciel-backend-per-admin-zero-row
+      # 2xx responses on GET routes (the listing endpoints) where
+      # row_count is 0. This is the "RLS deny silently" signature:
+      # a healthy 200 with zero rows where the tenant should have
+      # had data. Requires backend logger to emit row_count -- if
+      # the field is absent the filter never matches, which is
+      # safe (zero datapoints = no alarm rather than false alarm).
+      # Backend code stub to add this field is tracked in the
+      # ARC9_1_ALIGNMENT_CLOSE writeup under "Phase B2 follow-up".
+      FilterPattern: '{ ($.evt = "http_request") && ($.method = "GET") && ($.status = 200) && ($.row_count = 0) && ($.tenant_id = "*") }'
+      MetricTransformations:
+        - MetricNamespace: Luciel/Backend
+          MetricName: PerAdminZeroRowCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+          Dimensions:
+            - Key: AdminId
+              Value: $.tenant_id
+
+  PerAdminHttp5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: PerAdminHttp5xxMetricFilter
+    Properties:
+      AlarmName: luciel-per-admin-http-5xx
+      AlarmDescription: >
+        MEDIUM SEVERITY (G7). Any single Admin's 5xx-error rate
+        exceeded 5 errors in a 5-minute window. Closes the
+        previously-invisible "tenant-of-one outage" case. Uses a
+        metric-math Anomaly equivalent only if the steady-state
+        is >0 -- on a quiet account this is a flat threshold.
+      Metrics:
+        - Id: e1
+          Expression: "SELECT MAX(PerAdminHttp5xxCount) FROM \"Luciel/Backend\" GROUP BY AdminId"
+          Period: 300
+          ReturnData: true
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  PerAdminHttpP99LatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: PerAdminHttpLatencyMetricFilter
+    Properties:
+      AlarmName: luciel-per-admin-http-p99-latency
+      AlarmDescription: >
+        MEDIUM SEVERITY (G7). Any single Admin's p99 HTTP latency
+        exceeded 5000ms across a 5-minute window. Catches per-Admin
+        slow-query regressions, runaway joins, and the "poisoned
+        cache" case where one tenant's data shape blows up.
+      Metrics:
+        - Id: e1
+          Expression: "SELECT MAX(p99(PerAdminHttpLatencyMs)) FROM \"Luciel/Backend\" GROUP BY AdminId"
+          Period: 300
+          ReturnData: true
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 5000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  PerAdminZeroRowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: PerAdminZeroRowMetricFilter
+    Properties:
+      AlarmName: luciel-per-admin-zero-row
+      AlarmDescription: >
+        MEDIUM SEVERITY (G7). Any single Admin saw >10 zero-row
+        200-OK responses in a 5-minute window. This is the
+        signature of an RLS deny-silently regression -- the API
+        returns a healthy 200 but the GUC mismatch hides the
+        tenant's own data. Requires backend logger to emit
+        row_count on GET responses (Phase B2 follow-up). Until
+        then the filter matches nothing and the alarm stays
+        in INSUFFICIENT_DATA, which TreatMissingData=notBreaching
+        translates to a calm dashboard tile.
+      Metrics:
+        - Id: e1
+          Expression: "SELECT MAX(PerAdminZeroRowCount) FROM \"Luciel/Backend\" GROUP BY AdminId"
+          Period: 300
+          ReturnData: true
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
 Outputs:
   AlertTopicArn:
     Description: ARN of the SNS topic for alarm notifications.
@@ -623,7 +782,7 @@ Outputs:
     Value: Luciel/Worker
   AlarmsCreated:
     Description: Number of CloudWatch alarms in this stack.
-    Value: "11"
+    Value: "14"
   PagerDutyTopicArn:
     Description: ARN of the PagerDuty High-severity SNS topic (Arc 9 C7).
     Value: !Ref PagerDutyTopic
