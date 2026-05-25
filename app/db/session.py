@@ -1,7 +1,9 @@
 import json
 from collections.abc import Generator
+from contextlib import contextmanager
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
@@ -176,6 +178,117 @@ def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+# Arc 9 C6.3 -- BYPASSRLS ops session (Wall 1 escape hatch).
+#
+# The luciel_ops Postgres role (Arc 9 C6.1) carries BYPASSRLS and a
+# narrow grant matrix:
+#   - SELECT-only on admin_audit_logs (forward-only immutability;
+#     UPDATE/DELETE blocked by the C6.2 RESTRICTIVE policies anyway)
+#   - SELECT + DELETE on the eight retention tables listed in
+#     admin_service.delete_admin_cascade (sessions, conversations,
+#     identity_claims, memory_items, api_keys, luciel_instances,
+#     agents, agent_configs)
+#   - No INSERT, no UPDATE, no sequence USAGE, no grants on the
+#     auth perimeter (admins, tenant_configs, users, user_invites,
+#     user_consents)
+#
+# This session exists so forensic queries and the admin-delete
+# cascade can cross the tenant fence WITHOUT temporarily disabling
+# RLS, running as superuser, or relying on a connection that
+# carries application-managed tenant GUCs.
+#
+# DESIGN: ops_engine + OpsSessionLocal are constructed as a
+# SEPARATE SQLAlchemy sessionmaker from SessionLocal. The Arc 9 C2
+# tenant-context listener (_set_tenant_context_on_begin above) is
+# attached to SessionLocal specifically, so OpsSessionLocal is
+# naturally GUC-free. This is the structural guarantee that an ops
+# session can NEVER emit app.admin_id or app.instance_id even if a
+# caller forgets to clear the ContextVar before opening it.
+#
+# We still install_audit_chain_event() above (idempotent across
+# every sessionmaker bound to any engine), so if an ops session
+# ever did emit an audit row (it cannot today -- no INSERT grant)
+# the chain handler would still run.
+#
+# Fail-closed: ops_engine is constructed lazily only when
+# ``settings.luciel_ops_db_url`` is set. ``get_ops_db_session()``
+# raises RuntimeError if the URL is unset, so local dev / CI never
+# accidentally acquire a BYPASSRLS connection.
+ops_engine: Engine | None = None
+OpsSessionLocal: sessionmaker[Session] | None = None
+
+if settings.luciel_ops_db_url is not None:
+    ops_engine = create_engine(
+        settings.luciel_ops_db_url,
+        pool_pre_ping=True,
+        json_serializer=lambda obj: json.dumps(obj, default=str),
+    )
+    OpsSessionLocal = sessionmaker(
+        bind=ops_engine,
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=Session,
+    )
+    # install_audit_chain_event() is idempotent and already invoked
+    # at module import (line 80) -- re-invoking is a no-op but kept
+    # here as defense-in-depth so the intent is documented at the
+    # ops sessionmaker construction site.
+    install_audit_chain_event()
+
+
+@contextmanager
+def get_ops_db_session() -> Generator[Session, None, None]:
+    """Yield a BYPASSRLS ops session bound to the luciel_ops role.
+
+    Fail-closed: raises RuntimeError when ``settings.luciel_ops_db_url``
+    is None (the default outside production). Callers MUST NOT catch
+    this and fall back to SessionLocal -- the absence of the URL is
+    the signal that ops capability is not available in this
+    environment.
+
+    Usage::
+
+        from app.db.session import get_ops_db_session
+
+        with get_ops_db_session() as ops_db:
+            rows = ops_db.execute(
+                select(AdminAuditLog).where(...)
+            ).scalars().all()
+
+    The session uses the luciel_ops Postgres role, which:
+      - BYPASSRLS -- sees all rows across all tenants
+      - Can SELECT admin_audit_logs but NOT UPDATE/DELETE it
+        (enforced by Arc 9 C6.2 RESTRICTIVE policies)
+      - Can SELECT + DELETE the eight retention tables
+      - Cannot touch the auth perimeter (admins, tenant_configs,
+        users, user_invites, user_consents) -- those grants are
+        deliberately omitted
+
+    The yielded session does NOT emit ``app.admin_id`` or
+    ``app.instance_id`` GUCs (the tenant-context after_begin
+    listener is attached to SessionLocal only, not OpsSessionLocal).
+    """
+    if OpsSessionLocal is None:
+        raise RuntimeError(
+            "get_ops_db_session() called but settings.luciel_ops_db_url "
+            "is not set. The luciel_ops BYPASSRLS connection is "
+            "production-only -- set the LUCIEL_OPS_DB_URL env var "
+            "(minted by scripts/mint_ops_db_password_ssm.py and "
+            "injected via SSM /luciel/production/ops_database_url) "
+            "to enable it."
+        )
+    db = OpsSessionLocal()
+    try:
+        yield db
+        db.commit()
     except Exception:
         db.rollback()
         raise
