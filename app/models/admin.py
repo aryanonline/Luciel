@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, String
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, String, func
 from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -86,11 +86,24 @@ class Admin(Base):
     last_signup_ip: Mapped[str | None] = mapped_column(
         INET(), nullable=True
     )
+    # Arc 9 C12 hotfix (demo-day-2026-05-25): server_default + onupdate added.
+    # Prior to this fix, the model lacked any default for the timestamp
+    # columns, so SQLAlchemy emitted ``INSERT ... (created_at, updated_at)
+    # VALUES (NULL, NULL)`` and Postgres rejected with NotNullViolation
+    # before the DB-side ``DEFAULT now()`` could fire (explicit NULL beats
+    # column default). The contract in onboarding_service.py:137 already
+    # assumed these were server-defaulted; the model just hadn't caught up.
+    # See ARC9_C12_HOTFIX section of ARC9_ENVELOPE_CORRIGENDUM (follow-up).
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
