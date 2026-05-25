@@ -35,18 +35,19 @@
 #       tests/e2e/step_31_validation_gate.py missing)
 #     * test_step24_5c_live_e2e_shape.py (AST target
 #       tests/e2e/step_24_5c_live_e2e.py missing)
-#     * test_step24_5c_models_shape.py partial (2 of 16 tests assert
-#       tenant_id FKs tenant_configs, but the current model FKs to
-#       admins -- this is the stale-FK issue Arc 9 C8 will fix; the
-#       remaining 14 tests in the file still pass and stay in the
-#       gate via the keyword filter below)
 #
 #   These all referenced files that were renamed or deleted in earlier
-#   sub-arcs (or assert against the pre-C8 schema) and the workflow
-#   was never updated, which forced 6 consecutive admin-merges into
-#   main between PR #72 and PR #77. Removing them re-arms the gate;
-#   when C8 lands the tenant_configs natural-key FK fix, drop the
-#   `-k` filter on the test_step24_5c_models_shape.py line below.
+#   sub-arcs and the workflow was never updated, which forced 6
+#   consecutive admin-merges into main between PR #72 and PR #77.
+#   Removing them re-arms the gate.
+#
+#   Arc 9 C8.1 closed the 2-test gap that was previously deselected via
+#   a -k filter on test_step24_5c_models_shape.py. The 2 tests were
+#   asserting a FK target (tenant_configs.tenant_id) that no longer
+#   exists -- tenant_configs was dropped in Arc 5 Revision C and admins.id
+#   replaces it 1:1. C8.1 rewrote those 2 tests to assert FK -> admins.id
+#   RESTRICT (the actual current contract) and folded the full file back
+#   into the main pytest line above. No -k filter remains.
 
 name: ci
 
@@ -136,24 +137,20 @@ jobs:
         # The test set below is the union of "backend-free shape guards
         # that exist on main AND whose AST targets still exist on main
         # AND that pass against the current schema". Seven references
-        # previously listed here were stale or asserted against a
-        # pre-C8 schema -- see the file-header comment block for the
-        # full enumeration and rationale.
+        # previously listed here were stale -- see the file-header
+        # comment block for the full enumeration and rationale.
         run: python -m pytest tests/api/test_health.py tests/api/test_content_safety_gate.py tests/api/test_widget_e2e_harness_shape.py tests/api/test_step24_5c_cross_session_retriever_shape.py tests/api/test_step24_5c_identity_resolver_shape.py tests/api/test_step24_5c_adapter_claims_shape.py tests/api/test_step31_dashboard_http_shape.py -v
 
-      - name: run Step 24.5c models-shape guards (excluding pre-C8 FK assertions)
-        # Two of the 16 tests in test_step24_5c_models_shape.py assert
-        # tenant_id FKs `tenant_configs` (the natural-key model from
-        # Step 24.5c §3.2.11), but the current model FKs to `admins`.
-        # This is the stale-FK issue Arc 9 C8 will fix. The remaining
-        # 14 tests in the file are valid invariants on the current
-        # schema and stay in the gate. When C8 lands, replace this
-        # whole step with an un-filtered re-add of the file to the
-        # step above.
+      - name: run Step 24.5c models-shape guards
+        # Arc 9 C8.1 (this PR's predecessor) rewrote the 2 tests that
+        # used to be deselected here -- they now assert FK -> admins.id
+        # RESTRICT (the current correct contract) instead of the dropped
+        # tenant_configs natural key. Full file is in the gate without
+        # any -k filter.
         env:
           DATABASE_URL: "sqlite:///:memory:"
           OPENAI_API_KEY: "ci-not-a-real-key-backend-free-tests-only"
-        run: python -m pytest tests/api/test_step24_5c_models_shape.py -v -k "not tenant_id_has_fk_to_tenant_configs and not tenant_id_fk_to_tenant_configs_natural_key"
+        run: python -m pytest tests/api/test_step24_5c_models_shape.py -v
 
       - name: run Arc 9 C7.1 ops-connect log-format contract
         # Arc 9 doctrine D7.1 -- "Every grant the ops role exercises

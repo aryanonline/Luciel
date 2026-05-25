@@ -158,18 +158,30 @@ class TestConversationTableShape:
             f"Conversation.id type is {type(id_col.type).__name__}, expected PG_UUID"
         )
 
-    def test_tenant_id_has_fk_to_tenant_configs(self) -> None:
-        """tenant_id FKs tenant_configs.tenant_id RESTRICT (matches §3.2.11
-        and the existing 24.5b scope_assignments convention)."""
+    def test_tenant_id_has_fk_to_admins(self) -> None:
+        """tenant_id FKs admins.id RESTRICT.
+
+        Arc 5 Revision C dropped the legacy ``tenant_configs`` table and
+        re-pointed every tenant_id FK at ``admins.id`` (String(100), 1:1
+        replacement of the old ``tenant_configs.tenant_id`` natural key).
+        The column name ``tenant_id`` is kept across the codebase for
+        call-site compatibility, but the FK target is now ``admins.id``.
+
+        RESTRICT is non-negotiable: identity history must survive a
+        tenant row removal attempt. Arc 9 C8.1 locks this contract.
+        """
         m = _import_models()
         col = m["Conversation"].__table__.columns["tenant_id"]
         fks = list(col.foreign_keys)
         assert len(fks) == 1, f"Conversation.tenant_id should have exactly one FK, has {len(fks)}"
         fk = fks[0]
-        # Reference target check: tenant_configs.tenant_id (the NATURAL
-        # key string, not the integer surrogate id).
-        assert fk.column.table.name == "tenant_configs"
-        assert fk.column.name == "tenant_id"
+        # Reference target check: admins.id (post Arc 5 Revision C).
+        assert fk.column.table.name == "admins", (
+            f"Conversation.tenant_id FK target is {fk.column.table.name}, "
+            f"expected 'admins'. tenant_configs was dropped in Arc 5 Revision C; "
+            f"a FK pointing anywhere else is drift."
+        )
+        assert fk.column.name == "id"
         assert fk.ondelete == "RESTRICT", (
             f"Conversation.tenant_id FK ondelete must be RESTRICT (identity "
             f"history protection), is {fk.ondelete}"
@@ -296,14 +308,24 @@ class TestIdentityClaimTableShape:
         assert fk.column.name == "id"
         assert fk.ondelete == "RESTRICT"
 
-    def test_tenant_id_fk_to_tenant_configs_natural_key(self) -> None:
+    def test_tenant_id_fk_to_admins_id(self) -> None:
+        """IdentityClaim.tenant_id FKs admins.id RESTRICT.
+
+        See TestConversationColumns.test_tenant_id_has_fk_to_admins for
+        the Arc 5 Revision C rationale -- tenant_configs was dropped and
+        admins.id is the 1:1 replacement. RESTRICT protects identity
+        history from cascade-delete on tenant removal.
+        """
         m = _import_models()
         col = m["IdentityClaim"].__table__.columns["tenant_id"]
         fks = list(col.foreign_keys)
         assert len(fks) == 1
         fk = fks[0]
-        assert fk.column.table.name == "tenant_configs"
-        assert fk.column.name == "tenant_id"  # natural key, not surrogate `id`
+        assert fk.column.table.name == "admins", (
+            f"IdentityClaim.tenant_id FK target is {fk.column.table.name}, "
+            f"expected 'admins'. tenant_configs was dropped in Arc 5 Revision C."
+        )
+        assert fk.column.name == "id"
         assert fk.ondelete == "RESTRICT"
 
     def test_domain_id_has_no_fk(self) -> None:
