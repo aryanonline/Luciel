@@ -57,20 +57,40 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from typing import Optional
-from uuid import UUID
+
+
+# IMPORTANT TYPE NOTE (Arc 9 C2 hot-fix 2026-05-24):
+#
+# admin_id is a STRING SLUG, not a UUID. The original C2 commit typed
+# this as Optional[UUID] under the mistaken belief that admins.id was
+# a uuid.UUID. Inspection of app/models/admin.py shows:
+#
+#     id: Mapped[str] = mapped_column(String(100), primary_key=True)
+#
+# Every customer-data table's ``tenant_id`` column is correspondingly
+# String(100), and the literal string ``'platform'`` is used as the
+# system-actions sentinel in admin_audit_logs.tenant_id. The middleware
+# at app/middleware/auth.py:227 writes ``request.state.tenant_id =
+# apikey.tenant_id`` where the source is also String(100).
+#
+# A UUID type annotation here would have crashed every request whose
+# admin slug is not a valid UUID (which is most of them). The hot-fix
+# changes the type to ``Optional[str]`` and preserves the rest of the
+# C2 contract unchanged. The engine listener already calls
+# ``str(admin_id)`` defensively so its behaviour is unchanged.
 
 
 # Module-level ContextVar. The leading underscore is convention to
 # signal "do not poke this directly -- use the get/set helpers".
 # Default is None: an unset context means "no tenant scope, deny
 # customer-data reads at the RLS layer".
-_current_admin_id: ContextVar[Optional[UUID]] = ContextVar(
+_current_admin_id: ContextVar[Optional[str]] = ContextVar(
     "luciel_current_admin_id",
     default=None,
 )
 
 
-def set_current_admin_id(admin_id: Optional[UUID]) -> object:
+def set_current_admin_id(admin_id: Optional[str]) -> object:
     """Set the current admin_id for this async context.
 
     Returns the ContextVar token so the caller can pass it to
@@ -86,7 +106,7 @@ def set_current_admin_id(admin_id: Optional[UUID]) -> object:
     return _current_admin_id.set(admin_id)
 
 
-def get_current_admin_id() -> Optional[UUID]:
+def get_current_admin_id() -> Optional[str]:
     """Return the admin_id bound to the current async context, or None.
 
     Repository and service layers SHOULD NOT use this for filtering
