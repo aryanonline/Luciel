@@ -15,7 +15,8 @@ Schema anchors
   Admins, never hard-delete).
 * ``instance_slug`` is unique within an Admin.
 * Back-pointers ``legacy_luciel_instance_id`` and ``legacy_agent_id``
-  are dropped at Revision C alongside the legacy tables.
+  were dropped at Revision C alongside the legacy tables (Arc 9 C15:
+  ORM declarations removed to match production schema).
 """
 
 from __future__ import annotations
@@ -53,12 +54,6 @@ class Instance(Base):
     description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
-    )
-    legacy_luciel_instance_id: Mapped[int | None] = mapped_column(
-        Integer, nullable=True
-    )
-    legacy_agent_id: Mapped[int | None] = mapped_column(
-        Integer, nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
