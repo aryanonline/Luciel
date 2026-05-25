@@ -687,20 +687,42 @@ Resources:
             - Key: AdminId
               Value: $.tenant_id
 
+  # Per-Admin alarm design note (Arc 9.1 Phase B2):
+  #   CloudWatch Standard Alarms do not natively support GROUP BY across
+  #   a metric Dimension -- the closest mechanism is a Metrics Insights
+  #   query inside the alarm's Metrics block, but it must return a SINGLE
+  #   time series (i.e. no multi-series GROUP BY without ORDER BY+LIMIT 1
+  #   inside a downstream aggregation). The pattern below uses Metrics
+  #   Insights to compute the MAX (across all AdminId dimensions) of each
+  #   per-Admin time series, then alarms on that MAX. When ANY Admin's
+  #   counter crosses threshold, the MAX crosses too and the alarm fires.
+  #   The per-Admin pivot is preserved in the underlying metric, so the
+  #   on-call rotation can drill down via the CloudWatch console to
+  #   identify WHICH Admin is the offender once the alarm fires.
+  #
+  # Metrics Insights syntax constraints encountered:
+  #   - p99() is NOT a valid Insights function; use percentile-statistic
+  #     on a single metric instead, which requires a non-Insights metric.
+  #     For latency we therefore use the simpler SELECT MAX(MAX(...)) form
+  #     -- catches the slowest Admin's slowest request in the window.
+  #     A per-Admin true-p99 alarm requires Contributor Insights (which
+  #     is a separate stack and a follow-up).
+  #   - GROUP BY in an alarm context must have ORDER BY + LIMIT to
+  #     collapse to a single series.
+
   PerAdminHttp5xxAlarm:
     Type: AWS::CloudWatch::Alarm
     DependsOn: PerAdminHttp5xxMetricFilter
     Properties:
       AlarmName: luciel-per-admin-http-5xx
       AlarmDescription: >
-        MEDIUM SEVERITY (G7). Any single Admin's 5xx-error rate
-        exceeded 5 errors in a 5-minute window. Closes the
-        previously-invisible "tenant-of-one outage" case. Uses a
-        metric-math Anomaly equivalent only if the steady-state
-        is >0 -- on a quiet account this is a flat threshold.
+        MEDIUM SEVERITY (G7). The maximum-across-all-Admins 5xx-error
+        count in a 5-minute window crossed 5. The CloudWatch console
+        will show which AdminId is the offender (drill into the
+        Luciel/Backend/PerAdminHttp5xxCount metric).
       Metrics:
         - Id: e1
-          Expression: "SELECT MAX(PerAdminHttp5xxCount) FROM \"Luciel/Backend\" GROUP BY AdminId"
+          Expression: "SELECT MAX(PerAdminHttp5xxCount) FROM SCHEMA(\"Luciel/Backend\", AdminId) GROUP BY AdminId ORDER BY MAX() DESC LIMIT 1"
           Period: 300
           ReturnData: true
       EvaluationPeriods: 1
@@ -719,13 +741,15 @@ Resources:
     Properties:
       AlarmName: luciel-per-admin-http-p99-latency
       AlarmDescription: >
-        MEDIUM SEVERITY (G7). Any single Admin's p99 HTTP latency
-        exceeded 5000ms across a 5-minute window. Catches per-Admin
-        slow-query regressions, runaway joins, and the "poisoned
-        cache" case where one tenant's data shape blows up.
+        MEDIUM SEVERITY (G7). The maximum-across-all-Admins peak
+        latency in a 5-minute window crossed 5000ms over 2 consecutive
+        windows. This is the slowest-Admin / slowest-request signal;
+        a true per-Admin p99 (rather than peak) requires Contributor
+        Insights -- tracked as a follow-up. Drilling in: open the
+        Luciel/Backend/PerAdminHttpLatencyMs metric and group by AdminId.
       Metrics:
         - Id: e1
-          Expression: "SELECT MAX(p99(PerAdminHttpLatencyMs)) FROM \"Luciel/Backend\" GROUP BY AdminId"
+          Expression: "SELECT MAX(PerAdminHttpLatencyMs) FROM SCHEMA(\"Luciel/Backend\", AdminId) GROUP BY AdminId ORDER BY MAX() DESC LIMIT 1"
           Period: 300
           ReturnData: true
       EvaluationPeriods: 2
@@ -744,18 +768,17 @@ Resources:
     Properties:
       AlarmName: luciel-per-admin-zero-row
       AlarmDescription: >
-        MEDIUM SEVERITY (G7). Any single Admin saw >10 zero-row
-        200-OK responses in a 5-minute window. This is the
-        signature of an RLS deny-silently regression -- the API
-        returns a healthy 200 but the GUC mismatch hides the
-        tenant's own data. Requires backend logger to emit
-        row_count on GET responses (Phase B2 follow-up). Until
-        then the filter matches nothing and the alarm stays
-        in INSUFFICIENT_DATA, which TreatMissingData=notBreaching
-        translates to a calm dashboard tile.
+        MEDIUM SEVERITY (G7). The maximum-across-all-Admins zero-row
+        200-OK count in a 5-minute window crossed 10. Signature of
+        an RLS deny-silently regression -- API returns 200 but the
+        GUC mismatch hides the tenant's own data. Requires backend
+        logger to emit row_count on GET responses (Phase B2 follow-up).
+        Until then the filter matches nothing and the alarm sits in
+        INSUFFICIENT_DATA -- TreatMissingData=notBreaching keeps the
+        dashboard tile calm.
       Metrics:
         - Id: e1
-          Expression: "SELECT MAX(PerAdminZeroRowCount) FROM \"Luciel/Backend\" GROUP BY AdminId"
+          Expression: "SELECT MAX(PerAdminZeroRowCount) FROM SCHEMA(\"Luciel/Backend\", AdminId) GROUP BY AdminId ORDER BY MAX() DESC LIMIT 1"
           Period: 300
           ReturnData: true
       EvaluationPeriods: 1
