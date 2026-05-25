@@ -15,7 +15,13 @@ Schema anchors
   tightens to ``('free', 'pro', 'enterprise')``.
 * ``admins.stripe_customer_id`` is NULL on Free tier per Gap 1 lock
   (lazy-created on upgrade); UNIQUE among non-NULL values.
-* Back-pointer ``legacy_tenant_id`` is dropped at Revision C.
+* Back-pointer ``legacy_tenant_id`` was dropped at Revision C
+  (arc5_c_admin_instance_subtractive); the column attribute on this
+  model was removed at this hotfix (demo-day-2026-05-25) to align the
+  model with the post-arc5_c schema. Prior to the hotfix, the model
+  still declared ``legacy_tenant_id`` which caused every SELECT on
+  admins to crash with UndefinedColumn against any DB at arc5_c or
+  later, including production. See Phase A of the C10 demo-day plan.
 """
 
 from __future__ import annotations
@@ -65,9 +71,12 @@ class Admin(Base):
     stripe_customer_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )
-    legacy_tenant_id: Mapped[str | None] = mapped_column(
-        String(100), nullable=True
-    )
+    # ``legacy_tenant_id`` Mapped column removed at hotfix
+    # demo-day-2026-05-25 (Phase A). The DB column was dropped at
+    # arc5_c; this model attribute had survived the cleanup and was
+    # the cause of the UndefinedColumn 500s observed on /signup-free
+    # on 2026-05-25. See git blame for the previous declaration.
+
     # Arc 7 Commit 6 (2026-05-24) -- Free-signup soft gate. Postgres
     # INET column captured at signup_free mint time. NULL for paid
     # Stripe Checkout flows (Pro / Enterprise) and for every
