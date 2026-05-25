@@ -36,6 +36,7 @@ from app.middleware.rate_limit import (
     rate_limit_exceeded_handler,
     create_rate_limit_middleware,
 )
+from app.middleware.request_logging import RequestLoggingMiddleware
 from app.repositories.audit_chain import install_audit_chain_event
 
 # Arc 8 Commit 1 (WU-1 Reliability): dedicated logger for the /ready probe so
@@ -94,6 +95,15 @@ app.add_middleware(SessionCookieAuthMiddleware)
 # Add the fallback middleware — catches Redis outages and fails open
 RateLimitFallbackMiddleware = create_rate_limit_middleware()
 app.add_middleware(RateLimitFallbackMiddleware)
+
+# Arc 9 WS4c — Structured request logging. Mounted AFTER rate-limit
+# (so it observes 429 denials) and BEFORE CORS (so CORS preflight
+# short-circuits without us logging every browser OPTIONS as a real
+# request). Emits one JSON-shaped INFO/WARN/ERROR line per request
+# with stable fields (request_id, method, route, status, duration_ms,
+# user_id, tenant_id, auth_method, client_ip, detail) -- see
+# app/middleware/request_logging.py header for the full contract.
+app.add_middleware(RequestLoggingMiddleware)
 
 # Step 30a.2-pilot Commit 3d — CORSMiddleware mounted LAST so it ends up
 # OUTERMOST in the dispatch chain. The browser's CORS preflight
