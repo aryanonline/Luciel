@@ -259,6 +259,19 @@ jobs:
           export TEST_ORIGIN="https://e2e.luciel.test"
           bash ci/e2e/run_widget_e2e.sh
 
+      - name: dump uvicorn log on failure
+        # Arc 9.2 PR #99 follow-up 3: tee the tail of /tmp/uvicorn.log
+        # into the run log so triagers without artifact-download access
+        # (which is currently 401 for our `gh run download` flow) can
+        # still see the backend traceback that produced the failing
+        # 5xx. Bounded to the last ~1200 lines so the run log doesn't
+        # explode if uvicorn went chatty.
+        if: failure()
+        run: |
+          echo "===== /tmp/uvicorn.log (tail 1200) ====="
+          tail -n 1200 /tmp/uvicorn.log || echo "(no /tmp/uvicorn.log)"
+          echo "===== end of uvicorn log ====="
+
       - name: capture uvicorn log on failure
         # If anything above failed we want the app log archived so
         # the operator can triage without re-running. on:failure-only.
