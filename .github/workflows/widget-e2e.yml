@@ -117,6 +117,7 @@ on:
       - ci/e2e/**
       - .github/workflows/widget-e2e.yml
       - tests/api/test_widget_e2e_harness_shape.py
+      - scripts/bootstrap_platform_admin_ci.py
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
