@@ -136,10 +136,14 @@ def _seed_ci_sentinel(db) -> tuple[str, int]:
     # Use an upsert-style insert so re-running against a partially-
     # populated DB doesn't blow up. RLS is bypassed because alembic+
     # bootstrap run as the migration role.
+    # tier_source must match ck_admins_tier_source_valid:
+    #   ('stripe_webhook','sales_ops_provisioned','free_signup',
+    #    'revision_b_backfill','manual'). 'manual' is the right fit
+    #   for a CI-seeded sentinel row.
     db.execute(text(
         "INSERT INTO admins (id, name, tier, tier_source, active, "
         "created_at, updated_at) VALUES (:id, :name, 'enterprise', "
-        "'ci-bootstrap', true, NOW(), NOW()) ON CONFLICT DO NOTHING"
+        "'manual', true, NOW(), NOW()) ON CONFLICT DO NOTHING"
     ), {"id": sentinel_tenant, "name": "CI sentinel Admin (Step 30d-C)"})
     row = db.execute(text(
         "INSERT INTO instances (admin_id, instance_slug, display_name, "
