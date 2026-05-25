@@ -293,6 +293,7 @@ def widget_chat_stream(
             claim_type=ClaimType(payload.client_claim.claim_type.upper()),
             claim_value=payload.client_claim.claim_value,
             issuing_adapter=WIDGET_ISSUING_ADAPTER,
+            luciel_instance_id=luciel_instance_id,
         )
         # SessionModel's primary key column is `id` (see
         # app/models/session.py:17), not `session_id`. Same read site
@@ -313,6 +314,7 @@ def widget_chat_stream(
             agent_id=agent_id,
             user_id=None,  # widget visitors are anonymous at v1
             channel="widget",
+            luciel_instance_id=luciel_instance_id,
         )
         # SessionModel's primary key column is `id` (see
         # app/models/session.py:17), not `session_id`. The session_id

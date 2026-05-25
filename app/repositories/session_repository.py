@@ -37,6 +37,7 @@ class SessionRepository:
         channel: str = "web",
         status: str = "active",
         conversation_id: uuid.UUID | None = None,
+        luciel_instance_id: int | None = None,
     ) -> SessionModel:
         # Step 24.5c sub-branch 4: conversation_id is the FK to
         # conversations.id that groups sibling sessions across
@@ -47,6 +48,11 @@ class SessionRepository:
         # that don't pass conversation_id continue to mint NULL
         # sessions -- behavioural compatibility per the §3.2.11
         # nullable-by-design contract.
+        # Arc 9.1 Phase A / Arc 9.2 PR #99: sessions.luciel_instance_id
+        # is NOT NULL. Every caller MUST supply it; legacy callers that
+        # still pass None will hit a NotNullViolation at flush — that is
+        # the desired behaviour until the call sites are converted in
+        # Arc 9.2 PR #97.
         session = SessionModel(
             id=session_id,
             tenant_id=tenant_id,
@@ -56,6 +62,7 @@ class SessionRepository:
             channel=channel,
             status=status,
             conversation_id=conversation_id,
+            luciel_instance_id=luciel_instance_id,
         )
         self.db.add(session)
         self.db.commit()

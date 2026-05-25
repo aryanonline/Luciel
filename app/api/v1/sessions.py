@@ -205,12 +205,35 @@ def create_session(
             autocommit=False,
         )
 
+    # Arc 9.1 Phase A: sessions.luciel_instance_id is NOT NULL. The
+    # auth middleware surfaces it from the API key. Tenant-scoped
+    # callers always carry one (every embed key has it; admin keys
+    # post-Arc-5 do too). Platform-admin override paths that target a
+    # cross-tenant Instance fall back to the request body field; if
+    # neither is present we 400 explicitly so the violation reads as
+    # a contract error rather than a 500.
+    key_luciel_instance_id = getattr(request.state, "luciel_instance_id", None)
+    luciel_instance_id = key_luciel_instance_id or getattr(
+        payload, "luciel_instance_id", None
+    )
+    if luciel_instance_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "luciel_instance_id_required",
+                "message": (
+                    "luciel_instance_id is required (from API key or "
+                    "request body) after Arc 9.1 Phase A."
+                ),
+            },
+        )
     session = service.create_session(
         tenant_id=effective_tenant_id,
         domain_id=domain_id,
         agent_id=agent_id,
         user_id=payload.user_id,
         channel=payload.channel,
+        luciel_instance_id=luciel_instance_id,
     )
     if db.in_transaction():
         db.commit()
