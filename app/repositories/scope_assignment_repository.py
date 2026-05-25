@@ -39,7 +39,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import and_
+from sqlalchemy import and_, text as _sa_text
 from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import (
@@ -179,7 +179,51 @@ class ScopeAssignmentRepository:
         active_only=False returns full role history -- used by PIPEDA
         access-request flows and tenant-admin role-history dashboards.
         Sorted by started_at ascending so history reads chronologically.
+
+        Arc 9 C21 -- RLS-aware discovery path
+        --------------------------------------
+        ``scope_assignments`` has FORCE ROW LEVEL SECURITY with
+        policies gating visibility on ``app.admin_id``. Several
+        callers invoke list_for_user BEFORE app.admin_id has been
+        set -- the cookied /billing/me handler, the upgrade /
+        downgrade endpoints, the invite-acceptance path, and the
+        audit_role_change helper -- because the whole point of those
+        reads is to *discover* which tenant the user belongs to.
+
+        Under FORCE RLS the direct ORM query returns [] silently in
+        that window, which surfaces to the frontend as ``tenant_id=""``
+        in /billing/me and cascades into 405 / 422 errors on the
+        downstream admin endpoints.
+
+        The fix mirrors the C20 single-row resolver: when
+        ``app.admin_id`` is empty we route the read through
+        ``public.arc9_c21_list_scopes_for_user(uuid, boolean)`` -- a
+        SECURITY DEFINER function owned by luciel_ops -- and hydrate
+        the rows into ScopeAssignment ORM instances. When the GUC is
+        already set, the existing ORM path runs and RLS evaluates
+        normally.
+
+        The SECDEF escape hatch is read-only and returns ONLY one
+        user's rows (no cross-user enumeration); see
+        alembic/versions/arc9_c21_list_scopes_secdef.py for the full
+        doctrine.
         """
+        # Step 1: probe the tenant GUC. If unset/empty we're in the
+        # discovery window and must use the SECDEF function to avoid
+        # the silent-empty-list RLS trap.
+        try:
+            admin_id_guc = self.db.execute(
+                _sa_text("SELECT current_setting('app.admin_id', true)")
+            ).scalar()
+        except Exception:  # pragma: no cover - extremely defensive
+            admin_id_guc = None
+
+        if not admin_id_guc:
+            return self._list_for_user_secdef(
+                user_id, active_only=active_only
+            )
+
+        # Step 2: GUC is set -- the normal ORM path with RLS in effect.
         query = self.db.query(ScopeAssignment).filter(
             ScopeAssignment.user_id == user_id
         )
@@ -189,6 +233,55 @@ class ScopeAssignmentRepository:
                 ScopeAssignment.active.is_(True),
             )
         return query.order_by(ScopeAssignment.started_at.asc()).all()
+
+    def _list_for_user_secdef(
+        self,
+        user_id: uuid.UUID,
+        *,
+        active_only: bool,
+    ) -> list[ScopeAssignment]:
+        """Read scope rows via the C21 SECURITY DEFINER function.
+
+        Hydrates the returned columns into transient (detached)
+        ScopeAssignment instances so callers receive the same shape
+        they expect from the ORM path. The instances are NOT added to
+        the session -- they represent a read-only view and should not
+        be mutated.
+        """
+        rows = self.db.execute(
+            _sa_text(
+                "SELECT id, user_id, tenant_id, domain_id, role, "
+                "started_at, ended_at, ended_reason, ended_note, "
+                "ended_by_api_key_id, active "
+                "FROM public.arc9_c21_list_scopes_for_user(:uid, :ao)"
+            ),
+            {"uid": str(user_id), "ao": active_only},
+        ).all()
+
+        out: list[ScopeAssignment] = []
+        for r in rows:
+            sa = ScopeAssignment(
+                id=r.id,
+                user_id=r.user_id,
+                tenant_id=r.tenant_id,
+                domain_id=r.domain_id,
+                role=r.role,
+                started_at=r.started_at,
+                ended_at=r.ended_at,
+                ended_reason=(
+                    EndReason(r.ended_reason)
+                    if r.ended_reason is not None
+                    else None
+                ),
+                ended_note=r.ended_note,
+                ended_by_api_key_id=r.ended_by_api_key_id,
+                active=r.active,
+            )
+            # No db.add() above -- instances stay transient by default,
+            # which is exactly what we want: they represent a
+            # SECDEF-sourced read view that must never be flushed back.
+            out.append(sa)
+        return out
 
     def list_for_tenant(
         self,
