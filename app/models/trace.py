@@ -66,10 +66,12 @@ class Trace(Base, TimestampMixin):
     # Pre-Arc 9.1 doctrine: NULL = legacy/unbound. That doctrine created
     # the P2 RLS bypass (luciel_instance_id IS NULL clause in policy).
     # All NULL rows were wiped in arc9_1_a_tenant_isolation_seal.
+    # Arc 5 Revision C / Arc 9.2 PR #99 — FK target is `instances.id`
+    # (the `luciel_instances` table was dropped in Arc 5 Revision C).
     luciel_instance_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey(
-            "luciel_instances.id",
+            "instances.id",
             ondelete="SET NULL",
             name="fk_traces_luciel_instance_id",
         ),
