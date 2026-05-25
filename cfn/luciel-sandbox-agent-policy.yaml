@@ -56,13 +56,9 @@ Resources:
           - Sid: AllowCfnList
             Effect: Allow
             Action:
-              - cloudformation:ListStacks
-              - cloudformation:DescribeStacks
-              - cloudformation:DescribeStackEvents
-              - cloudformation:DescribeStackResources
-              - cloudformation:DescribeStackResource
-              - cloudformation:GetTemplate
-              - cloudformation:GetTemplateSummary
+              - cloudformation:List*
+              - cloudformation:Describe*
+              - cloudformation:Get*
               - cloudformation:ValidateTemplate
             Resource: "*"
 
@@ -147,15 +143,11 @@ Resources:
           - Sid: AllowLogsList
             Effect: Allow
             Action:
-              - logs:DescribeLogGroups
-              - logs:DescribeLogStreams
-              - logs:DescribeMetricFilters
+              - logs:Describe*
+              - logs:Get*
               - logs:FilterLogEvents
-              - logs:GetLogEvents
               - logs:StartQuery
               - logs:StopQuery
-              - logs:GetQueryResults
-              - logs:DescribeQueries
             Resource: "*"
 
           - Sid: AllowLogsWriteOnLucielGroups
@@ -206,11 +198,8 @@ Resources:
           - Sid: AllowSnsReads
             Effect: Allow
             Action:
-              - sns:ListTopics
-              - sns:ListSubscriptions
-              - sns:ListSubscriptionsByTopic
-              - sns:GetTopicAttributes
-              - sns:GetSubscriptionAttributes
+              - sns:List*
+              - sns:Get*
             Resource: "*"
 
           - Sid: AllowSnsWriteOnLucielProd
