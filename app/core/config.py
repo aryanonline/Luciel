@@ -518,6 +518,33 @@ class Settings(BaseSettings):
     # a degraded one (the gate then no-ops with a logged warning).
     email_deliverability_check_timeout_seconds: float = 2.0
 
+    # --- Arc 9 C2: In-app RLS connection-pool wrapper ---
+    # Master feature flag for the Layer-3 tenant-context wiring that
+    # issues ``SET LOCAL app.admin_id = '<uuid>'`` on every DB
+    # connection at request entry. When False (v1 default), the
+    # ContextVar still tracks the current admin_id (cheap, in-process
+    # only) but the engine checkout listener does NOT push it to
+    # PostgreSQL. This means RLS policies (Arc 9 C3) cannot enforce
+    # tenant isolation -- so this flag MUST be flipped to True in
+    # lockstep with the matching per-table RLS policy deploy.
+    #
+    # Rollout order (see ARC9_RUNBOOK):
+    #   1. C2 lands flag=False everywhere -- code path exists but
+    #      no behaviour change. Tests verify ContextVar plumbing.
+    #   2. C3 lands the first per-table RLS policy (admin_audit_logs)
+    #      AND flips this flag True in the same deploy. Now SET LOCAL
+    #      fires and the one table actually enforces.
+    #   3. C3 lands remaining 11 tables incrementally. Each deploy
+    #      adds one ENABLE ROW LEVEL SECURITY -- the flag stays True.
+    #   4. C9 lands FORCE ROW LEVEL SECURITY on the final table and
+    #      tags arc-9-tenant-isolation-complete.
+    #
+    # Closes the structural gap C1 surfaced: 18/19 customer-data
+    # tables already filter at L1, but a single forgotten WHERE
+    # clause in a future repository method would leak cross-admin
+    # rows. L3 + L2 together make that impossible.
+    rls_tenant_context_enabled: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
