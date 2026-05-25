@@ -80,6 +80,69 @@ from app.repositories.audit_chain import install_audit_chain_event  # noqa: E402
 install_audit_chain_event()
 
 
+# Arc 9 C2 — In-app RLS connection-pool wrapper (Layer 3 of Wall 1).
+#
+# Every request-scoped DB session, on BEGIN, sets the PostgreSQL GUC
+# ``app.admin_id`` from the in-process ContextVar populated by the
+# FastAPI dependency ``get_tenant_scoped_db`` (or by background-task
+# wiring in worker tasks). The matching RLS policies (Arc 9 C3) read
+# this GUC via ``current_setting('app.admin_id', true)`` and reject
+# rows whose tenant_id does not match.
+#
+# We use SQLAlchemy's ``after_begin`` event rather than a raw DBAPI
+# ``checkout`` listener because:
+#   - ``SET LOCAL`` is transaction-scoped; it requires an active
+#     transaction to bind to. ``checkout`` fires before BEGIN, so a
+#     ``SET LOCAL`` issued there would silently no-op (or worse, leak
+#     across requests if the driver auto-promotes to SET).
+#   - ``after_begin`` fires exactly once per transaction, after BEGIN
+#     but before the first query of the unit-of-work, which is the
+#     structurally correct moment.
+#   - On rollback/commit, ``SET LOCAL`` automatically clears -- no
+#     ``RESET`` call is required at session close.
+#
+# Behaviour matrix:
+#   flag=False (v1 default):
+#       Listener installed but exits immediately. Zero PostgreSQL
+#       traffic added. No behaviour change vs pre-C2.
+#   flag=True, admin_id set in ContextVar:
+#       Issues ``SELECT set_config('app.admin_id', '<uuid>', true)``
+#       on every BEGIN. (Equivalent to SET LOCAL but parameterisable.)
+#   flag=True, admin_id NOT set in ContextVar (background job /
+#   health check / unauthenticated path):
+#       Issues ``SELECT set_config('app.admin_id', '', true)``. RLS
+#       policies treat empty string as "no tenant context" and apply
+#       their default-deny rule. This means background tasks MUST
+#       explicitly set the admin_id before touching customer-data
+#       tables -- which is the correct security posture.
+from app.core.config import settings  # noqa: E402
+from sqlalchemy import event  # noqa: E402
+from app.db.tenant_context import get_current_admin_id  # noqa: E402
+
+
+@event.listens_for(SessionLocal, "after_begin")
+def _set_tenant_context_on_begin(session, transaction, connection):
+    """Push the in-process admin_id into PostgreSQL on every BEGIN.
+
+    No-op when the master feature flag is False. Idempotent within a
+    transaction (SQLAlchemy guarantees one after_begin per BEGIN).
+    """
+    if not settings.rls_tenant_context_enabled:
+        return
+    admin_id = get_current_admin_id()
+    # set_config(name, value, is_local) is the parameterisable
+    # equivalent of ``SET LOCAL``. is_local=true scopes the change to
+    # the current transaction so the connection returns to the pool
+    # clean. Passing empty string for no-context is intentional --
+    # RLS policies SHOULD compare to current_setting('app.admin_id',
+    # true) and treat empty/missing as deny.
+    value = str(admin_id) if admin_id is not None else ""
+    connection.exec_driver_sql(
+        "SELECT set_config('app.admin_id', %s, true)",
+        (value,),
+    )
+
+
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:

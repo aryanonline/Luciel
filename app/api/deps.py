@@ -5,12 +5,18 @@ FastAPI dependency injection wiring.
 # Add import at top
 from app.repositories.consent_repository import ConsentRepository
 from app.policy.consent import ConsentPolicy
+from collections.abc import Generator
 from typing import Annotated
 
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
+from app.db.tenant_context import (
+    clear_current_admin_id,
+    reset_current_admin_id,
+    set_current_admin_id,
+)
 from app.integrations.llm.router import ModelRouter
 from app.knowledge.ingestion import IngestionService
 from app.knowledge.retriever import KnowledgeRetriever
@@ -44,6 +50,65 @@ from app.services.admin_service import AdminService  # noqa: E402
 from app.services.instance_service import InstanceService  # noqa: E402
 
 DbSession = Annotated[Session, Depends(get_db)]
+
+
+# Arc 9 C2 — In-app RLS connection-pool wrapper (Layer 3 of Wall 1).
+#
+# ``get_tenant_scoped_db`` is the parallel dependency to ``get_db``
+# that, on entry, reads the authenticated admin's UUID off
+# ``request.state.tenant_id`` (populated by ApiKeyAuthMiddleware /
+# SessionCookieAuthMiddleware -- both write tenant_id which IS the
+# admin_id under the Arc 5 Revision C aliasing convention) and pushes
+# it into the in-process ContextVar. The engine-level ``after_begin``
+# listener in ``app.db.session`` then issues
+# ``SELECT set_config('app.admin_id', '<uuid>', true)`` on each BEGIN.
+#
+# C2 lands this as a PARALLEL dep, not a replacement. Existing routes
+# keep using ``DbSession`` -> ``get_db``. C3 opts each route group in
+# by switching its annotation to ``TenantScopedDbSession``. This
+# staged migration limits blast radius and lets us roll back any
+# single route group without affecting the rest.
+def get_tenant_scoped_db(request: Request) -> Generator[Session, None, None]:
+    """Yield a DB session bound to the requesting admin's tenant scope.
+
+    Reads ``request.state.tenant_id`` (the admin_id under Arc 5
+    Revision C aliasing) and binds it to the async-context-local
+    admin_id. The session-level ``after_begin`` listener in
+    ``app.db.session`` translates that ContextVar into a PostgreSQL
+    ``SET LOCAL app.admin_id`` on every transaction begin, which the
+    Arc 9 C3 RLS policies then enforce against ``tenant_id`` columns.
+
+    When ``request.state.tenant_id`` is missing or None (unauth path,
+    health checks, public widget bootstrap), we still set the
+    ContextVar to None -- the after_begin listener will issue an
+    empty-string SET, and RLS policies will deny customer-data reads.
+    This is the correct fail-closed posture.
+
+    The ``finally`` clear via ``reset_current_admin_id(token)`` is
+    critical: ContextVar is per-async-task but the FastAPI worker
+    coroutine outlives any single request. Without the reset, an
+    authenticated request followed by an unauthenticated one on the
+    same coroutine could leave the previous admin_id lingering in
+    context between this dep yielding and the next request entering
+    the dep -- a window we don't want to leave open.
+    """
+    tenant_id = getattr(request.state, "tenant_id", None)
+    token = set_current_admin_id(tenant_id)
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+        try:
+            reset_current_admin_id(token)
+        except Exception:
+            clear_current_admin_id()
+
+
+TenantScopedDbSession = Annotated[Session, Depends(get_tenant_scoped_db)]
 
 _model_router = ModelRouter()
 _tool_registry = ToolRegistry()
