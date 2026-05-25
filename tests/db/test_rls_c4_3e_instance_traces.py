@@ -115,16 +115,28 @@ class TestC43EMigrationShape(unittest.TestCase):
             r"DROP\s+POLICY\s+IF\s+EXISTS\s+traces_instance_isolation",
         )
 
-    def test_downgrade_disables_rls(self):
+    def test_downgrade_drops_policy_but_does_not_disable_rls(self):
+        # Arc 9 C5.4 fix: downgrade MUST NOT disable RLS, because the
+        # sibling Wall-1 policy traces_tenant_isolation (C3.2a) is
+        # still in force. Drop only this Wall-3 policy.
         disable_pattern = (
             r"ALTER\s+TABLE\s+traces\s+DISABLE\s+ROW\s+LEVEL\s+SECURITY"
+        )
+        drop_pattern = (
+            r"DROP\s+POLICY\s+IF\s+EXISTS\s+traces_instance_isolation"
         )
         downgrade_block_match = re.search(
             r"def\s+downgrade.*", self.src, re.S
         )
         self.assertIsNotNone(downgrade_block_match)
         downgrade_block = downgrade_block_match.group(0)
-        self.assertRegex(downgrade_block, disable_pattern)
+        self.assertRegex(downgrade_block, drop_pattern)
+        self.assertNotRegex(
+            downgrade_block,
+            disable_pattern,
+            "C4.3e downgrade DISABLES RLS -- would neuter the Wall-1 "
+            "sibling policy on traces.",
+        )
 
 
 class TestC43EMigrationImports(unittest.TestCase):
