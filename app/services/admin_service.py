@@ -39,11 +39,36 @@ class AdminService:
     def create_tenant_config(self, **kwargs) -> Admin:
         """Create an Admin row. Legacy name kept for caller compatibility.
 
-        V2 note: callers passing ``tenant_id=`` should pass ``id=`` instead;
-        for the transition we map ``tenant_id`` → ``id`` if present.
+        V2 translation table (Arc 9.2 PR #99 cleanup):
+          * ``tenant_id`` -> ``id``           (PK rename Arc 5 Rev C)
+          * ``display_name`` -> ``name``      (column rename Arc 5 Rev C)
+          * ``description`` -> dropped        (no home on admins; V2 lives on instances)
+          * ``escalation_contact`` -> dropped (legacy contact column removed Arc 5)
+          * ``allowed_domains`` -> dropped    (Domain layer removed Arc 5 Path A)
+          * ``system_prompt_additions`` -> dropped (now Instance-level, Arc 9 C17)
+          * ``created_by`` -> dropped         (audit lives in admin_audit_logs)
+          * ``updated_by`` -> dropped         (idem)
+
+        Keeping the public ``TenantConfigCreate`` shape stable lets the
+        widget-E2E harness, Stripe webhooks, and external smoke scripts
+        keep their existing payloads. The translation below absorbs the
+        Arc-5-Rev-C drift; full schema simplification lands in the
+        Arc 9.2 Option A migration (PR #100/#101).
         """
         if "tenant_id" in kwargs and "id" not in kwargs:
             kwargs["id"] = kwargs.pop("tenant_id")
+        if "display_name" in kwargs and "name" not in kwargs:
+            kwargs["name"] = kwargs.pop("display_name")
+        # Drop legacy kwargs the V2 admins table no longer accepts.
+        for legacy in (
+            "description",
+            "escalation_contact",
+            "allowed_domains",
+            "system_prompt_additions",
+            "created_by",
+            "updated_by",
+        ):
+            kwargs.pop(legacy, None)
         config = Admin(**kwargs)
         self.db.add(config)
         self.db.commit()

@@ -211,20 +211,32 @@ def widget_chat_stream(
             },
         )
 
-    # Embed keys MUST be domain-scoped so create_session has a
-    # non-NULL domain_id. If a key was issued without one we fail
-    # closed here rather than silently use a placeholder.
-    if domain_id is None:
+    # Arc 9.2 PR #99 — V2 vocab: embed keys MUST be Instance-scoped
+    # (the Domain layer was eliminated in Arc 5 Path A). If the key
+    # carries no luciel_instance_id we fail closed; if it does, but
+    # carries no legacy domain_id, we synthesise a sentinel value so
+    # sessions.domain_id (still NOT NULL — collapses in Arc 9.2 PR
+    # #101) gets a stable, traceable bind. This is a transitional
+    # bridge: when PR #101 makes sessions.domain_id nullable / drops
+    # it, the synthesis goes away with the column.
+    if luciel_instance_id is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
-                "code": "embed_key_not_domain_scoped",
+                "code": "embed_key_not_instance_scoped",
                 "message": (
-                    "Embed keys must be bound to a domain. Re-issue "
-                    "the key with a domain_id."
+                    "Embed keys must be bound to a luciel_instance_id. "
+                    "Re-issue the key with an instance binding."
                 ),
             },
         )
+    if domain_id is None:
+        # Derived sentinel so sessions.domain_id (still NOT NULL until
+        # Arc 9.2 PR #101) is satisfied. Encodes the Instance pk so
+        # legacy queries that ever filtered on this column remain
+        # uniquely groupable per Instance — i.e. no cross-Instance
+        # bleed via sessions.domain_id.
+        domain_id = f"instance-{luciel_instance_id}"
 
     # Step 31 sub-branch 1: emission 1 of 3 -- request entry.
     #
@@ -281,6 +293,7 @@ def widget_chat_stream(
             claim_type=ClaimType(payload.client_claim.claim_type.upper()),
             claim_value=payload.client_claim.claim_value,
             issuing_adapter=WIDGET_ISSUING_ADAPTER,
+            luciel_instance_id=luciel_instance_id,
         )
         # SessionModel's primary key column is `id` (see
         # app/models/session.py:17), not `session_id`. Same read site
@@ -301,6 +314,7 @@ def widget_chat_stream(
             agent_id=agent_id,
             user_id=None,  # widget visitors are anonymous at v1
             channel="widget",
+            luciel_instance_id=luciel_instance_id,
         )
         # SessionModel's primary key column is `id` (see
         # app/models/session.py:17), not `session_id`. The session_id

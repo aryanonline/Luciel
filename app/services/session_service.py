@@ -56,6 +56,7 @@ class SessionService:
         user_id: str | None = None,
         channel: str = "web",
         conversation_id: uuid.UUID | None = None,
+        luciel_instance_id: int | None = None,
     ):
         session_id = str(uuid.uuid4())
         return self.repository.create_session(
@@ -66,6 +67,7 @@ class SessionService:
             user_id=user_id,
             channel=channel,
             conversation_id=conversation_id,
+            luciel_instance_id=luciel_instance_id,
         )
 
     def create_session_with_identity(
@@ -78,6 +80,7 @@ class SessionService:
         claim_type,  # ClaimType -- imported lazily inside body
         claim_value: str,
         issuing_adapter: str,
+        luciel_instance_id: int | None = None,
     ) -> SessionWithIdentity:
         """Resolve identity, then create a session bound to it.
 
@@ -136,6 +139,7 @@ class SessionService:
             user_id=str(resolution.user_id),
             channel=channel,
             conversation_id=resolution.conversation_id,
+            luciel_instance_id=luciel_instance_id,
         )
 
         return SessionWithIdentity(
