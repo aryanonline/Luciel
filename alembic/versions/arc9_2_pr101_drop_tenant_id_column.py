@@ -9,9 +9,11 @@ This migration finishes the collapse:
      recreated as `arc9_c20_resolve_admin_for_user` reading admin_id).
   2. For each of the 15 tables:
      a. Drop every FK whose source column is `tenant_id`
-     b. Drop every index on `tenant_id` (single-column and composite)
-     c. Drop every UNIQUE / CHECK constraint that includes `tenant_id`
-     d. DROP COLUMN tenant_id
+     b. Drop every UNIQUE / CHECK constraint that includes `tenant_id`
+        (must happen before index drops -- a UNIQUE constraint owns
+        its backing index, and DROP INDEX errors out otherwise).
+     c. Drop every remaining (non-constraint-owned) index on `tenant_id`
+     d. DROP COLUMN tenant_id CASCADE
   3. Recreate the SECDEF helper pointed at admin_id.
 
 Idempotent: every drop guards with IF EXISTS / pg_constraint lookup.
@@ -133,38 +135,10 @@ def _drop_tenant_id_on_table(table: str) -> None:
         )
     )
 
-    # 2b. Drop indexes that include tenant_id (single or composite).
-    bind.execute(
-        sa.text(
-            f"""
-            DO $$
-            DECLARE r record;
-            BEGIN
-                FOR r IN
-                    SELECT i.relname AS index_name
-                    FROM pg_class t
-                    JOIN pg_namespace n ON n.oid = t.relnamespace
-                    JOIN pg_index ix ON ix.indrelid = t.oid
-                    JOIN pg_class i ON i.oid = ix.indexrelid
-                    WHERE t.relname = '{table}'
-                      AND n.nspname = 'public'
-                      AND EXISTS (
-                          SELECT 1
-                          FROM pg_attribute a
-                          WHERE a.attrelid = t.oid
-                            AND a.attnum = ANY(ix.indkey)
-                            AND a.attname = 'tenant_id'
-                      )
-                      AND NOT ix.indisprimary
-                LOOP
-                    EXECUTE format('DROP INDEX IF EXISTS public.%I', r.index_name);
-                END LOOP;
-            END $$;
-            """
-        )
-    )
-
-    # 2c. Drop UNIQUE / CHECK constraints that reference tenant_id.
+    # 2b. Drop UNIQUE / CHECK constraints that reference tenant_id FIRST
+    #     (must precede index drops -- a UNIQUE constraint owns its backing
+    #     index, and Postgres refuses DROP INDEX on a constraint-owned
+    #     index with DependentObjectsStillExist).
     bind.execute(
         sa.text(
             f"""
@@ -194,7 +168,47 @@ def _drop_tenant_id_on_table(table: str) -> None:
         )
     )
 
-    # 2d. Finally drop the column.
+    # 2c. Drop remaining indexes that include tenant_id (single or
+    #     composite).  Any UNIQUE-backing indexes were removed in 2b
+    #     by their owning constraint; this catches the plain indexes.
+    bind.execute(
+        sa.text(
+            f"""
+            DO $$
+            DECLARE r record;
+            BEGIN
+                FOR r IN
+                    SELECT i.relname AS index_name
+                    FROM pg_class t
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    JOIN pg_index ix ON ix.indrelid = t.oid
+                    JOIN pg_class i ON i.oid = ix.indexrelid
+                    WHERE t.relname = '{table}'
+                      AND n.nspname = 'public'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM pg_attribute a
+                          WHERE a.attrelid = t.oid
+                            AND a.attnum = ANY(ix.indkey)
+                            AND a.attname = 'tenant_id'
+                      )
+                      AND NOT ix.indisprimary
+                      AND NOT EXISTS (
+                          -- Skip any index still owned by a constraint;
+                          -- shouldn't happen after 2b but defensive.
+                          SELECT 1 FROM pg_constraint c
+                          WHERE c.conindid = ix.indexrelid
+                      )
+                LOOP
+                    EXECUTE format('DROP INDEX IF EXISTS public.%I', r.index_name);
+                END LOOP;
+            END $$;
+            """
+        )
+    )
+
+    # 2d. Finally drop the column.  CASCADE catches any view, default,
+    #     or trigger that still pins tenant_id.
     bind.execute(
         sa.text(
             f"""
@@ -207,7 +221,7 @@ def _drop_tenant_id_on_table(table: str) -> None:
                       AND table_name = '{table}'
                       AND column_name = 'tenant_id'
                 ) THEN
-                    EXECUTE 'ALTER TABLE public.{table} DROP COLUMN tenant_id';
+                    EXECUTE 'ALTER TABLE public.{table} DROP COLUMN tenant_id CASCADE';
                 END IF;
             END $$;
             """
