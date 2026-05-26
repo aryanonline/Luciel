@@ -58,45 +58,127 @@ TABLES: tuple[str, ...] = (
 def upgrade() -> None:
     bind = op.get_bind()
 
-    # ---- 1. Drop the legacy SECDEF function ----------------------
+    # ---- 1. Drop legacy SECDEF functions that read tenant_id ------
+    #
+    # Both arc9_c20_resolve_tenant_for_user(uuid) and
+    # arc9_c22_bootstrap_identity(uuid) SELECT from
+    # scope_assignments.tenant_id.  They must be dropped BEFORE the
+    # column drop so the column drop does not cascade-explode.
     bind.execute(
         sa.text(
-            "DROP FUNCTION IF EXISTS public.arc9_c20_resolve_tenant_for_user(text) CASCADE"
+            "DROP FUNCTION IF EXISTS public.arc9_c20_resolve_tenant_for_user(uuid) CASCADE"
         )
     )
     bind.execute(
         sa.text(
-            "DROP FUNCTION IF EXISTS public.arc9_c20_resolve_tenant_for_user CASCADE"
+            "DROP FUNCTION IF EXISTS public.arc9_c22_bootstrap_identity(uuid) CASCADE"
         )
     )
 
-    # ---- 2. Per-table: drop FK + indexes + UQs + column -----------
+    # ---- 2. Per-table: drop FK + UQs + indexes + column -----------
     for table in TABLES:
         _drop_tenant_id_on_table(table)
 
-    # ---- 3. Recreate SECDEF helper pointed at admin_id ------------
+    # ---- 3. Recreate the C22 bootstrap function on admin_id -------
+    #
+    # Python caller (app/identity/bootstrap.py) now selects an
+    # ``admin_id`` column.  The function signature is unchanged
+    # (same uuid input, same number of columns, same order); only
+    # the third-from-last column name changes from tenant_id to
+    # admin_id, and the internal CTE filters on admin_id.
     bind.execute(
         sa.text(
             """
-            CREATE OR REPLACE FUNCTION public.arc9_c20_resolve_admin_for_user(p_user_id text)
-            RETURNS text
+            CREATE OR REPLACE FUNCTION public.arc9_c22_bootstrap_identity(
+                p_user_id uuid
+            )
+            RETURNS TABLE (
+                canonical_tenant_id varchar,
+                canonical_tier      varchar,
+                scope_assignment_id uuid,
+                admin_id            varchar,
+                domain_id           varchar,
+                role                varchar,
+                started_at          timestamptz,
+                ended_at            timestamptz,
+                ended_reason        varchar,
+                ended_note          text,
+                ended_by_api_key_id integer,
+                active              boolean
+            )
             LANGUAGE sql
-            SECURITY DEFINER
             STABLE
+            SECURITY DEFINER
+            SET search_path = public, pg_temp
             AS $$
-                SELECT admin_id
-                FROM public.scope_assignments
-                WHERE user_id = p_user_id
-                  AND active = TRUE
-                ORDER BY created_at ASC
-                LIMIT 1;
+                WITH active_scopes AS (
+                    SELECT
+                        sa.id,
+                        sa.user_id,
+                        sa.admin_id,
+                        sa.domain_id,
+                        sa.role,
+                        sa.started_at,
+                        sa.ended_at,
+                        sa.ended_reason,
+                        sa.ended_note,
+                        sa.ended_by_api_key_id,
+                        sa.active
+                    FROM public.scope_assignments AS sa
+                    WHERE sa.user_id = p_user_id
+                      AND sa.active = true
+                      AND sa.ended_at IS NULL
+                ),
+                canonical AS (
+                    SELECT admin_id
+                    FROM active_scopes
+                    ORDER BY (role = 'owner') DESC, started_at DESC
+                    LIMIT 1
+                ),
+                canonical_with_tier AS (
+                    SELECT
+                        c.admin_id AS aid,
+                        COALESCE(a.tier, '')::varchar AS tier
+                    FROM canonical c
+                    LEFT JOIN public.admins a ON a.id = c.admin_id
+                )
+                SELECT
+                    COALESCE((SELECT aid  FROM canonical_with_tier), '')::varchar,
+                    COALESCE((SELECT tier FROM canonical_with_tier), '')::varchar,
+                    s.id,
+                    s.admin_id,
+                    s.domain_id,
+                    s.role,
+                    s.started_at,
+                    s.ended_at,
+                    s.ended_reason,
+                    s.ended_note,
+                    s.ended_by_api_key_id,
+                    s.active
+                FROM active_scopes s
+                ORDER BY s.started_at ASC
             $$;
             """
         )
     )
+    # Preserve the original grant matrix (owner luciel_ops; EXECUTE
+    # granted to luciel_app; REVOKE from PUBLIC).
     bind.execute(
         sa.text(
-            "REVOKE ALL ON FUNCTION public.arc9_c20_resolve_admin_for_user(text) FROM PUBLIC"
+            "ALTER FUNCTION public.arc9_c22_bootstrap_identity(uuid) "
+            "OWNER TO luciel_ops"
+        )
+    )
+    bind.execute(
+        sa.text(
+            "REVOKE EXECUTE ON FUNCTION "
+            "public.arc9_c22_bootstrap_identity(uuid) FROM PUBLIC"
+        )
+    )
+    bind.execute(
+        sa.text(
+            "GRANT EXECUTE ON FUNCTION "
+            "public.arc9_c22_bootstrap_identity(uuid) TO luciel_app"
         )
     )
 
