@@ -9,7 +9,7 @@ using, or disclosing personal information.
 """
 from __future__ import annotations
 
-from sqlalchemy import Boolean, String, Text
+from sqlalchemy import Boolean, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -23,6 +23,14 @@ class UserConsent(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     tenant_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
 
+    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
+    # tenant_id remains during alias window; admin_id is source of truth.
+    admin_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
     # What the user consented to
     consent_type: Mapped[str] = mapped_column(
         String(50), nullable=False, default="memory_persistence",

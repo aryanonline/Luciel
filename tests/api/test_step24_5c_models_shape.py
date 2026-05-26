@@ -138,6 +138,10 @@ class TestConversationTableShape:
             # §3.2.11 row was updated in the same commit that added the
             # alembic migration dfea1a04e037; this row is intentional.
             "deactivated_at",
+            # Arc 9.2 PR #96: additive admin_id column (Option A --
+            # collapses tenant_id -> admin_id).  Both columns coexist
+            # during the alias window; tenant_id is dropped in PR #101.
+            "admin_id",
         }
         unexpected = cols - expected
         assert not unexpected, (
@@ -281,6 +285,8 @@ class TestIdentityClaimTableShape:
             # in lockstep when AdminService.deactivate_tenant_with_cascade
             # tears a tenant down.
             "deactivated_at",
+            # Arc 9.2 PR #96: additive admin_id (Option A).
+            "admin_id",
         }
         unexpected = cols - expected
         assert not unexpected, (

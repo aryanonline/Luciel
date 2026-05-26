@@ -11,7 +11,7 @@ persona additions, and scoped data access.
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -25,7 +25,16 @@ class AgentConfig(Base, TimestampMixin):
     tenant_id: Mapped[str] = mapped_column(
         String(100), index=True, nullable=False
     )
-    """Which tenant this agent belongs to."""
+    """Which tenant this agent belongs to.
+
+    NOTE: AgentConfig and the underlying ``agent_configs`` table are dead
+    code: the table was dropped by Arc 5 Revision C
+    (``arc5_c_admin_instance_subtractive``) when the Admin->Instance
+    hierarchy replaced the legacy Agent layer.  This model is kept only
+    to satisfy a handful of legacy stub methods in ``admin_service.py``
+    and will be deleted in a follow-up sweep PR.  No admin_id column is
+    added here because there is no live table to mirror.
+    """
 
     agent_id: Mapped[str] = mapped_column(
         String(100), index=True, nullable=False

@@ -144,6 +144,15 @@ class UserInvite(Base, TimestampMixin):
         index=True,
     )
 
+
+    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
+    # tenant_id remains during alias window; admin_id is source of truth.
+    admin_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("admins.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
     # Service-layer validated against domain_configs(tenant_id, domain_id).
     # Mirrors Agent.domain_id and ScopeAssignment.domain_id -- no direct FK
     # because domain_configs uses a composite natural key. NOT NULL because
