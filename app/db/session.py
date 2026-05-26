@@ -84,6 +84,13 @@ from app.repositories.audit_chain import install_audit_chain_event  # noqa: E402
 
 install_audit_chain_event()
 
+# Arc 9.2 PR #96 -- dual-write tenant_id -> admin_id on every INSERT until the
+# backend (PR #98) writes admin_id natively.  The hook is idempotent and is
+# removed wholesale in PR #101 when tenant_id is finally dropped.
+from app.db.admin_id_dual_write import install_admin_id_dual_write  # noqa: E402
+
+install_admin_id_dual_write()
+
 
 # Arc 9 C2 — In-app RLS connection-pool wrapper (Layer 3 of Wall 1).
 #
