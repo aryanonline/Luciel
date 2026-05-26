@@ -76,7 +76,18 @@ DUAL_WRITE_MODELS: tuple[type, ...] = (
 
 
 def _copy_tenant_to_admin(mapper: Mapper, connection, target) -> None:
-    """Populate ``target.admin_id`` from ``target.tenant_id`` if unset."""
+    """Populate ``target.admin_id`` from ``target.tenant_id`` if unset.
+
+    Runs on both ``before_insert`` (PR #96) and ``before_update`` (PR #98).
+    Updates are necessary because a small number of service-layer paths
+    re-assign ``tenant_id`` on existing rows (e.g. the cascade-deactivation
+    path on Conversation/IdentityClaim).  Without the reverse sync, an
+    UPDATE that touches only ``tenant_id`` would leave ``admin_id`` stale
+    and break Wall-1 RLS reads under PR #97 admin_id policies.
+
+    The hook only writes ``admin_id`` when it would otherwise be NULL,
+    so explicit service-layer ``admin_id`` writes always win.
+    """
     if getattr(target, "admin_id", None) is None:
         tenant_id = getattr(target, "tenant_id", None)
         if tenant_id is not None:
@@ -97,4 +108,5 @@ def install_admin_id_dual_write(models: Iterable[type] = DUAL_WRITE_MODELS) -> N
         return
     for model in models:
         event.listen(model, "before_insert", _copy_tenant_to_admin)
+        event.listen(model, "before_update", _copy_tenant_to_admin)
     _INSTALLED = True
