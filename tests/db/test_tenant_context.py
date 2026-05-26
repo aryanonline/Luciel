@@ -15,7 +15,7 @@ CONTRACT GUARDED:
           flag is True but no ContextVar value is set (no-context
           path, expected to deny customer-data reads at RLS).
     4. The FastAPI dep ``get_tenant_scoped_db`` reads
-       ``request.state.tenant_id`` and binds it to the admin_id
+       ``request.state.admin_id`` and binds it to the admin_id
        ContextVar, AND reads ``request.state.luciel_instance_id``
        and binds it to the instance_id ContextVar (C4.2). Both are
        cleared on exit, and the resets are independent so a failure
@@ -251,7 +251,7 @@ class TestAfterBeginListener(unittest.TestCase):
         self.assertEqual(params, (_SLUG_A,))
 
     def test_flag_on_with_platform_sentinel_passes_through(self):
-        """admin_audit_logs writes tenant_id='platform' for system
+        """admin_audit_logs writes admin_id='platform' for system
         actions. The listener MUST pass the literal through unchanged
         so platform-tier RLS policies can match it."""
         calls = self._invoke_listener("platform", flag_enabled=True)
@@ -283,10 +283,10 @@ class TestFastAPIDependency(unittest.TestCase):
 
         admin_id = _SLUG_A
         instance_id = 42
-        # Synthetic request whose state has BOTH tenant_id and
+        # Synthetic request whose state has BOTH admin_id and
         # luciel_instance_id (the normal authenticated path).
         mock_request = MagicMock()
-        mock_request.state.tenant_id = admin_id
+        mock_request.state.admin_id = admin_id
         mock_request.state.luciel_instance_id = instance_id
 
         # Stub SessionLocal so we don't actually open a DB connection.
@@ -313,7 +313,7 @@ class TestFastAPIDependency(unittest.TestCase):
 
     def test_dep_missing_tenant_id_binds_none(self):
         """Health check / unauth path -- request.state has no
-        tenant_id NOR luciel_instance_id. The dep MUST bind both to
+        admin_id NOR luciel_instance_id. The dep MUST bind both to
         None, not raise."""
         from app.db.tenant_context import get_current_admin_id
         from app.db.instance_context import get_current_instance_id
@@ -321,9 +321,9 @@ class TestFastAPIDependency(unittest.TestCase):
         mock_request = MagicMock()
         # spec=set([]) trick: any attribute access on .state that
         # ISN'T deleted would auto-create a MagicMock; we want both
-        # tenant_id and luciel_instance_id missing entirely so
+        # admin_id and luciel_instance_id missing entirely so
         # getattr returns None for both.
-        del mock_request.state.tenant_id
+        del mock_request.state.admin_id
         del mock_request.state.luciel_instance_id
 
         with patch("app.api.deps.SessionLocal") as mock_session_local:
@@ -352,7 +352,7 @@ class TestFastAPIDependency(unittest.TestCase):
         from app.db.instance_context import get_current_instance_id
 
         mock_request = MagicMock()
-        mock_request.state.tenant_id = _SLUG_A
+        mock_request.state.admin_id = _SLUG_A
         mock_request.state.luciel_instance_id = 0
 
         with patch("app.api.deps.SessionLocal") as mock_session_local:
@@ -375,7 +375,7 @@ class TestFastAPIDependency(unittest.TestCase):
         self.assertIsNone(get_current_instance_id())
 
     def test_dep_admin_level_key_binds_admin_only(self):
-        """Admin-level API key path: tenant_id is set but no instance
+        """Admin-level API key path: admin_id is set but no instance
         is bound. The dep MUST bind admin_id and leave instance_id as
         None. RLS Wall 3 policies are NULL-permissive (per C4.3
         doctrine) so an admin-level key can still read rows where
@@ -386,7 +386,7 @@ class TestFastAPIDependency(unittest.TestCase):
         from app.db.instance_context import get_current_instance_id
 
         mock_request = MagicMock()
-        mock_request.state.tenant_id = _SLUG_A
+        mock_request.state.admin_id = _SLUG_A
         del mock_request.state.luciel_instance_id
 
         with patch("app.api.deps.SessionLocal") as mock_session_local:
@@ -418,7 +418,7 @@ class TestFastAPIDependency(unittest.TestCase):
         from app.db.instance_context import get_current_instance_id
 
         mock_request = MagicMock()
-        mock_request.state.tenant_id = _SLUG_A
+        mock_request.state.admin_id = _SLUG_A
         mock_request.state.luciel_instance_id = 7
 
         with patch("app.api.deps.SessionLocal") as mock_session_local, \

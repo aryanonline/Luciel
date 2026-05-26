@@ -50,7 +50,7 @@ class TestRouteShape:
             "charge_id",
             "refunded_amount_cents",
             "currency",
-            "tenant_id",
+            "admin_id",
             "deactivated_at",
         }
         assert expected.issubset(fields), (
@@ -66,7 +66,7 @@ class TestRouteShape:
             charge_id="ch_test_xyz",
             refunded_amount_cents=10000,
             currency="cad",
-            tenant_id="t_pilot",
+            admin_id="t_pilot",
             deactivated_at=datetime.now(timezone.utc),
         )
         assert resp.refunded_amount_cents == 10000
@@ -257,7 +257,7 @@ class TestMePilotSignal:
         from app.schemas.billing import SubscriptionStatusResponse
         from datetime import datetime, timezone
         resp = SubscriptionStatusResponse(
-            tenant_id="t_x", tier="individual", status="active",
+            admin_id="t_x", tier="individual", status="active",
             active=True, is_entitled=True,
             current_period_start=datetime.now(timezone.utc),
             current_period_end=None, trial_end=None,
@@ -278,7 +278,7 @@ class TestMePilotSignal:
 
         future = datetime.now(timezone.utc) + timedelta(days=45)
         fake_sub = MagicMock()
-        fake_sub.tenant_id = "t_pilot"
+        fake_sub.admin_id = "t_pilot"
         fake_sub.tier = "individual"
         fake_sub.status = "trialing"
         fake_sub.active = True
@@ -311,10 +311,10 @@ class TestMePilotSignal:
             sar_module, "ScopeAssignmentRepository", lambda db: fake_sar
         )
         # Also stub validate_session_token so the second-decode in me()
-        # returns a benign tenant_id without needing a real JWT.
+        # returns a benign admin_id without needing a real JWT.
         monkeypatch.setattr(
             billing_api, "validate_session_token",
-            lambda token: {"sub": "42", "tenant_id": "t_pilot"},
+            lambda token: {"sub": "42", "admin_id": "t_pilot"},
         )
 
         client = TestClient(app)
@@ -337,7 +337,7 @@ class TestMePilotSignal:
 
         future = datetime.now(timezone.utc) + timedelta(days=10)
         fake_sub = MagicMock()
-        fake_sub.tenant_id = "t_normal"
+        fake_sub.admin_id = "t_normal"
         fake_sub.tier = "individual"
         fake_sub.status = "trialing"
         fake_sub.active = True
@@ -372,7 +372,7 @@ class TestMePilotSignal:
         )
         monkeypatch.setattr(
             billing_api, "validate_session_token",
-            lambda token: {"sub": "7", "tenant_id": "t_normal"},
+            lambda token: {"sub": "7", "admin_id": "t_normal"},
         )
 
         client = TestClient(app)

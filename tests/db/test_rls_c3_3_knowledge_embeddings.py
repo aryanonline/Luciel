@@ -7,16 +7,16 @@ CONTRACT GUARDED:
     USING / WITH CHECK pair to preserve the documented scope shape:
 
     READ-SIDE (USING):
-      tenant_id IS NULL OR tenant_id = current_setting(...)
+      admin_id IS NULL OR admin_id = current_setting(...)
 
       Reads cross-tenant domain_knowledge rows AND own-tenant rows.
 
     WRITE-SIDE (WITH CHECK):
-      (tenant_id IS NULL AND current_setting() = 'platform')
-      OR tenant_id = current_setting(...)
+      (admin_id IS NULL AND current_setting() = 'platform')
+      OR admin_id = current_setting(...)
 
       Regular admins can only write own-tenant rows. Domain-knowledge
-      writes (tenant_id NULL) require the 'platform' GUC sentinel.
+      writes (admin_id NULL) require the 'platform' GUC sentinel.
 
 THE BUG THIS GUARDS AGAINST:
     A future author copies the simple C3.1 policy template and
@@ -81,7 +81,7 @@ class TestC33MigrationShape(unittest.TestCase):
         )
 
     def test_using_has_null_permissive_carveout(self):
-        """Read-side MUST permit tenant_id IS NULL (domain_knowledge
+        """Read-side MUST permit admin_id IS NULL (domain_knowledge
         rows). Without this, the retriever loses ~50% of its surface."""
         # Find the USING block.
         m = re.search(
@@ -92,19 +92,19 @@ class TestC33MigrationShape(unittest.TestCase):
         self.assertIsNotNone(m, "USING ... WITH CHECK block not found")
         using_body = m.group(1)
         self.assertIn(
-            "tenant_id is null",
+            "admin_id is null",
             using_body,
-            "USING MUST include `tenant_id IS NULL` so cross-tenant "
+            "USING MUST include `admin_id IS NULL` so cross-tenant "
             "domain_knowledge rows remain visible.",
         )
         self.assertIn(
-            "tenant_id = current_setting",
+            "admin_id = current_setting",
             using_body,
             "USING MUST also include the own-tenant match.",
         )
 
     def test_with_check_gates_null_writes_to_platform(self):
-        """Write-side: domain_knowledge insert (tenant_id NULL) MUST
+        """Write-side: domain_knowledge insert (admin_id NULL) MUST
         require the 'platform' GUC sentinel. Otherwise an ordinary
         admin could upload content as if it were platform-curated."""
         # Capture the WITH CHECK block to end of policy.
@@ -116,18 +116,18 @@ class TestC33MigrationShape(unittest.TestCase):
         self.assertIsNotNone(m, "WITH CHECK block not found")
         check_body = m.group(1)
         # The NULL branch MUST be gated by = 'platform'.
-        # We look for both 'tenant_id is null' and a 'platform' token
+        # We look for both 'admin_id is null' and a 'platform' token
         # appearing together in the same body.
-        self.assertIn("tenant_id is null", check_body)
+        self.assertIn("admin_id is null", check_body)
         self.assertIn(
             "'platform'",
             check_body,
-            "WITH CHECK MUST gate tenant_id IS NULL writes by "
+            "WITH CHECK MUST gate admin_id IS NULL writes by "
             "current_setting() = 'platform'. Otherwise ordinary "
             "admins can write cross-tenant rows.",
         )
         # The own-tenant branch is also present.
-        self.assertIn("tenant_id = current_setting", check_body)
+        self.assertIn("admin_id = current_setting", check_body)
 
     def test_using_and_with_check_are_asymmetric(self):
         """The whole point of this policy is that USING is more

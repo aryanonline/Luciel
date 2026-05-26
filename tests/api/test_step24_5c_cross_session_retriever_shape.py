@@ -186,17 +186,17 @@ class TestRetrieverClassSurface:
 
     def test_retrieve_signature_kwonly(self):
         # retrieve() takes keyword-only args. Positional args invite
-        # subtle bugs where a caller swaps tenant_id and domain_id —
+        # subtle bugs where a caller swaps admin_id and domain_id —
         # the kw-only signature makes that a compile-time error.
         from app.memory.cross_session_retriever import (
             CrossSessionRetriever,
         )
         sig = inspect.signature(CrossSessionRetriever.retrieve)
         params = sig.parameters
-        # Expect: self + kw-only required (conversation_id, tenant_id,
+        # Expect: self + kw-only required (conversation_id, admin_id,
         # domain_id) + kw-only optional (limit, exclude_session_id).
         assert "conversation_id" in params
-        assert "tenant_id" in params
+        assert "admin_id" in params
         assert "domain_id" in params
         assert "limit" in params
         assert "exclude_session_id" in params
@@ -266,7 +266,7 @@ class TestInputValidation:
         with pytest.raises(TypeError):
             r.retrieve(
                 conversation_id="not-a-uuid",  # type: ignore[arg-type]
-                tenant_id="t-1",
+                admin_id="t-1",
                 domain_id="d-1",
             )
 
@@ -278,7 +278,7 @@ class TestInputValidation:
         with pytest.raises(ValueError):
             r.retrieve(
                 conversation_id=uuid.uuid4(),
-                tenant_id="",
+                admin_id="",
                 domain_id="d-1",
             )
 
@@ -290,7 +290,7 @@ class TestInputValidation:
         with pytest.raises(ValueError):
             r.retrieve(
                 conversation_id=uuid.uuid4(),
-                tenant_id="   ",
+                admin_id="   ",
                 domain_id="d-1",
             )
 
@@ -302,7 +302,7 @@ class TestInputValidation:
         with pytest.raises(ValueError):
             r.retrieve(
                 conversation_id=uuid.uuid4(),
-                tenant_id="t-1",
+                admin_id="t-1",
                 domain_id="",
             )
 
@@ -314,7 +314,7 @@ class TestInputValidation:
         with pytest.raises(ValueError):
             r.retrieve(
                 conversation_id=uuid.uuid4(),
-                tenant_id="t-1",
+                admin_id="t-1",
                 domain_id="\t\n",
             )
 
@@ -404,7 +404,7 @@ class TestLimitClamping:
         r = CrossSessionRetriever(db=db)  # type: ignore[arg-type]
         r.retrieve(
             conversation_id=uuid.uuid4(),
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             limit=0,
         )
@@ -418,7 +418,7 @@ class TestLimitClamping:
         r = CrossSessionRetriever(db=db)  # type: ignore[arg-type]
         r.retrieve(
             conversation_id=uuid.uuid4(),
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             limit=-7,
         )
@@ -433,7 +433,7 @@ class TestLimitClamping:
         r = CrossSessionRetriever(db=db)  # type: ignore[arg-type]
         r.retrieve(
             conversation_id=uuid.uuid4(),
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             limit=MAX_LIMIT * 10,
         )
@@ -447,7 +447,7 @@ class TestLimitClamping:
         r = CrossSessionRetriever(db=db)  # type: ignore[arg-type]
         r.retrieve(
             conversation_id=uuid.uuid4(),
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             limit=17,
         )
@@ -474,7 +474,7 @@ class TestSqlScopePredicates:
         # The three required scope predicates as they appear in the
         # source. Token-based check is robust against whitespace.
         assert "SessionModel.conversation_id == conversation_id" in src
-        assert "SessionModel.tenant_id == tenant_id" in src
+        assert "SessionModel.admin_id == admin_id" in src
         assert "SessionModel.domain_id == domain_id" in src
 
     def test_retrieve_orders_by_message_created_at_desc(self):
@@ -527,7 +527,7 @@ class TestDefenseInDepthScopeCheck:
         # Look for the explicit per-row scope assertion. We check
         # for the three predicates as they appear in the post-loop
         # `if (...)` guard.
-        assert "session.tenant_id != tenant_id" in src
+        assert "session.admin_id != admin_id" in src
         assert "session.domain_id != domain_id" in src
         assert "session.conversation_id != conversation_id" in src
 

@@ -13,9 +13,9 @@ Step 27a additions:
   /luciel/bootstrap/admin_key_<id> and returns (api_key, None) instead
   of exposing the raw value. Closes the CloudWatch-exposure surface
   identified in 26b Phase 7.5 bootstrap.
-- tenant_id type corrected to `str | None` — aligns with 26b.1 DB
+- admin_id type corrected to `str | None` — aligns with 26b.1 DB
   migration 3447ac8b45b4 (nullable) and ApiKeyCreate schema. Required
-  for platform-admin keys with tenant_id=NULL per Invariant 5.
+  for platform-admin keys with admin_id=NULL per Invariant 5.
 - boto3 is lazy-imported inside the ssm_write branch; dev/test paths
   that don't set ssm_write=True do not require boto3 installation.
 """
@@ -154,7 +154,7 @@ class ApiKeyService:
     def create_key(
         self,
         *,
-        tenant_id: str | None,                      # Step 27a: was `str`
+        admin_id: str | None,                      # Step 27a: was `str`
         domain_id: str | None = None,
         agent_id: str | None = None,
         luciel_instance_id: int | None = None,      # Step 24.5
@@ -262,7 +262,7 @@ class ApiKeyService:
         api_key = ApiKey(
             key_hash=hashed,
             key_prefix=raw_key[:12],
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
             luciel_instance_id=luciel_instance_id,   # Step 24.5
@@ -339,7 +339,7 @@ class ApiKeyService:
             ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
                 label="create_key"
             ),
-            tenant_id=tenant_id or SYSTEM_ACTOR_TENANT,
+            admin_id=admin_id or SYSTEM_ACTOR_TENANT,
             action=ACTION_CREATE,
             resource_type=RESOURCE_API_KEY,
             resource_pk=key_id,
@@ -358,7 +358,7 @@ class ApiKeyService:
 
         logger.info(
             "Created API key id=%d tenant=%s prefix=%s ssm=%s",
-            key_id, tenant_id, api_key.key_prefix, ssm_write,
+            key_id, admin_id, api_key.key_prefix, ssm_write,
         )
 
         # Never return the raw key when it was persisted to SSM —
@@ -377,11 +377,11 @@ class ApiKeyService:
         )
         return self.db.scalars(stmt).first()
 
-    def list_keys(self, tenant_id: str | None = None) -> list[ApiKey]:
+    def list_keys(self, admin_id: str | None = None) -> list[ApiKey]:
         """List API keys, optionally filtered by tenant."""
         stmt = select(ApiKey).order_by(ApiKey.created_at.desc())
-        if tenant_id:
-            stmt = stmt.where(ApiKey.tenant_id == tenant_id)
+        if admin_id:
+            stmt = stmt.where(ApiKey.admin_id == admin_id)
         return list(self.db.scalars(stmt).all())
 
     def deactivate_key(
@@ -418,7 +418,7 @@ class ApiKeyService:
             ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
                 label="deactivate_key"
             ),
-            tenant_id=api_key.tenant_id or SYSTEM_ACTOR_TENANT,
+            admin_id=api_key.admin_id or SYSTEM_ACTOR_TENANT,
             action=ACTION_DEACTIVATE,
             resource_type=RESOURCE_API_KEY,
             resource_pk=api_key.id,
@@ -471,7 +471,7 @@ class ApiKeyService:
     def deactivate_all_for_tenant(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         audit_ctx: AuditContext | None = None,
         autocommit: bool = True,
     ) -> int:
@@ -489,7 +489,7 @@ class ApiKeyService:
         affected = (
             self.db.query(ApiKey.id, ApiKey.key_prefix)
             .filter(
-                ApiKey.tenant_id == tenant_id,
+                ApiKey.admin_id == admin_id,
                 ApiKey.active.is_(True),
             )
             .all()
@@ -500,7 +500,7 @@ class ApiKeyService:
         updated = (
             self.db.query(ApiKey)
             .filter(
-                ApiKey.tenant_id == tenant_id,
+                ApiKey.admin_id == admin_id,
                 ApiKey.active.is_(True),
             )
             .update(
@@ -512,7 +512,7 @@ class ApiKeyService:
         if audit_ctx is not None and updated:
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 action=ACTION_CASCADE_DEACTIVATE,
                 resource_type=RESOURCE_API_KEY,
                 resource_pk=None,
@@ -523,7 +523,7 @@ class ApiKeyService:
                     "affected_key_prefixes": affected_prefixes,
                     "trigger": "tenant_deactivate",
                 },
-                note=f"Cascade from tenant {tenant_id} deactivation",
+                note=f"Cascade from tenant {admin_id} deactivation",
                 autocommit=False,
             )
 
@@ -532,6 +532,6 @@ class ApiKeyService:
         logger.info(
             "ApiKey cascade-deactivated count=%d tenant=%s",
             updated,
-            tenant_id,
+            admin_id,
         )
         return int(updated)

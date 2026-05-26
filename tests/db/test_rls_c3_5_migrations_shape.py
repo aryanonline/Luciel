@@ -4,14 +4,14 @@ batch of strict (NOT NULL wall-column) customer-data tables.
 
 C3.5 covers the 5 strict NOT-NULL tables that were NOT in C3.2:
 
-  - user_invites          (tenant_id NOT NULL, FK->admins.id)
-  - user_consents         (tenant_id NOT NULL)
-  - identity_claims       (tenant_id NOT NULL, FK->admins.id)
+  - user_invites          (admin_id NOT NULL, FK->admins.id)
+  - user_consents         (admin_id NOT NULL)
+  - identity_claims       (admin_id NOT NULL, FK->admins.id)
   - instances             (admin_id  NOT NULL, FK->admins.id)
   - admin_widget_domains  (admin_id  NOT NULL, FK->admins.id)
 
 Note the wall-column NAME differs for instances and admin_widget_domains
-(`admin_id` rather than `tenant_id`) -- both are equivalent slug
+(`admin_id` rather than `admin_id`) -- both are equivalent slug
 references to admins.id but the column name follows the V2 model
 nomenclature on those two tables. The RLS predicate adapts accordingly;
 the GUC name itself (`app.admin_id`) stays constant across all 16
@@ -54,19 +54,19 @@ VERSIONS_DIR = (
 C35_MIGRATIONS = [
     (
         "user_invites",
-        "tenant_id",
+        "admin_id",
         "arc9_c3_5a_rls_user_invites",
         "arc9_c3_4_rls_api_keys",
     ),
     (
         "user_consents",
-        "tenant_id",
+        "admin_id",
         "arc9_c3_5b_rls_user_consents",
         "arc9_c3_5a_rls_user_invites",
     ),
     (
         "identity_claims",
-        "tenant_id",
+        "admin_id",
         "arc9_c3_5c_rls_identity_claims",
         "arc9_c3_5b_rls_user_consents",
     ),
@@ -115,10 +115,10 @@ class TestC35MigrationsShape(unittest.TestCase):
         """Common per-table shape assertions.
 
         wall_col matters for the strict-RLS predicate: most C3 tables
-        use `tenant_id` but instances + admin_widget_domains use
+        use `admin_id` but instances + admin_widget_domains use
         `admin_id` (same FK target, different column name). This
         helper asserts the predicate references THE column actually
-        on the table, not a hardcoded `tenant_id`.
+        on the table, not a hardcoded `admin_id`.
         """
         path = _migration_path(rev_id)
         self.assertTrue(path.exists(), f"Missing migration: {path}")
@@ -160,7 +160,7 @@ class TestC35MigrationsShape(unittest.TestCase):
         )
 
         # USING clause references the wall column (NOT a hardcoded
-        # tenant_id when the table actually uses admin_id).
+        # admin_id when the table actually uses admin_id).
         self.assertRegex(
             text_lower,
             rf"using\s*\(\s*{wall_col}\s*=",
@@ -207,7 +207,7 @@ class TestC35MigrationsShape(unittest.TestCase):
     def test_c35a_user_invites(self):
         self._assert_migration_shape(
             "user_invites",
-            "tenant_id",
+            "admin_id",
             "arc9_c3_5a_rls_user_invites",
             "arc9_c3_4_rls_api_keys",
         )
@@ -215,7 +215,7 @@ class TestC35MigrationsShape(unittest.TestCase):
     def test_c35b_user_consents(self):
         self._assert_migration_shape(
             "user_consents",
-            "tenant_id",
+            "admin_id",
             "arc9_c3_5b_rls_user_consents",
             "arc9_c3_5a_rls_user_invites",
         )
@@ -223,7 +223,7 @@ class TestC35MigrationsShape(unittest.TestCase):
     def test_c35c_identity_claims(self):
         self._assert_migration_shape(
             "identity_claims",
-            "tenant_id",
+            "admin_id",
             "arc9_c3_5c_rls_identity_claims",
             "arc9_c3_5b_rls_user_consents",
         )

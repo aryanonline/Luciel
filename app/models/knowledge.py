@@ -40,9 +40,6 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
     # ---- Scope triple (legacy + new) ----
-    tenant_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str | None] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -139,13 +136,13 @@ class KnowledgeEmbedding(Base, TimestampMixin):
 
     # ---- Indexes ----
     __table_args__ = (
-        Index("ix_knowledge_scope", "tenant_id", "domain_id", "knowledge_type"),
+        Index("ix_knowledge_scope", "admin_id", "domain_id", "knowledge_type"),
         # Step 25b: composite for fast "find chunks for source" lookups.
         # Declared in the File 2 Alembic migration with the same name; we
         # mirror it here so SQLAlchemy's metadata matches the DB.
         Index(
             "ix_knowledge_embeddings_scope_source",
-            "tenant_id", "domain_id", "luciel_instance_id", "source_id",
+            "admin_id", "domain_id", "luciel_instance_id", "source_id",
         ),
     )
     # NOTE: `embedding` column is pgvector vector(1536), added manually via

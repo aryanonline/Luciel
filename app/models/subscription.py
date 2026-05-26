@@ -166,19 +166,7 @@ class Subscription(Base, TimestampMixin):
     # -----------------------------------------------------------------
     # Scope binding — the tenant this subscription pays for.
     # -----------------------------------------------------------------
-    # Stored as a string FK to tenant_configs.tenant_id rather than the
-    # numeric PK because the rest of the platform addresses tenants
-    # by their slug (ARCHITECTURE §4.1).
-    tenant_id: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-        index=True,
-        comment="FK to tenant_configs.tenant_id. Scope-as-billing-boundary.",
-    )
 
-
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -330,7 +318,7 @@ class Subscription(Base, TimestampMixin):
     __table_args__ = (
         # The two queries we care about most:
         # 1. "Is this tenant currently entitled?" — look up active+entitled by tenant_id.
-        Index("ix_subscriptions_tenant_active", "tenant_id", "active"),
+        Index("ix_subscriptions_tenant_active", "admin_id", "active"),
         # 2. "Which subscription did this Stripe customer last buy?" — for the portal flow.
         Index("ix_subscriptions_stripe_customer", "stripe_customer_id"),
         # 3. Step 30a.1: tier-cohort queries ("how many active Team subs?").
@@ -340,7 +328,7 @@ class Subscription(Base, TimestampMixin):
 
     def __repr__(self) -> str:  # pragma: no cover
         return (
-            f"<Subscription id={self.id} tenant={self.tenant_id} "
+            f"<Subscription id={self.id} tenant={self.admin_id} "
             f"tier={self.tier} status={self.status} active={self.active}>"
         )
 

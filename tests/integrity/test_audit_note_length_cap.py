@@ -89,7 +89,7 @@ def _record(note):
     ctx = AuditContext(actor_permissions=("admin",))
     row = repo.record(
         ctx=ctx,
-        tenant_id="t1",
+        admin_id="t1",
         action=ACTION_CREATE,
         resource_type=RESOURCE_TENANT,
         resource_pk=1,

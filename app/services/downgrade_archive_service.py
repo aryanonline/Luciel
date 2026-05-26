@@ -342,12 +342,12 @@ class DowngradeArchiveService:
             return list(self.db.scalars(stmt).all())
 
         if axis == AXIS_EMBED_KEYS:
-            # tenant_id on api_keys is the legacy column name for admin
+            # admin_id on api_keys is the legacy column name for admin
             # binding — see D-arc5-tenant-id-column-physical-retention-2026-05-23.
             stmt = (
                 select(ApiKey)
                 .where(
-                    ApiKey.tenant_id == admin_id,
+                    ApiKey.admin_id == admin_id,
                     ApiKey.key_kind == "embed",
                     ApiKey.active.is_(True),
                     ApiKey.pending_downgrade_archived_at.is_(None),
@@ -369,12 +369,12 @@ class DowngradeArchiveService:
 
         if axis == AXIS_SEATS:
             # Active dashboard-seat assignments under this Admin.
-            # tenant_id on scope_assignments is the admin binding
+            # admin_id on scope_assignments is the admin binding
             # (same physical-retention story as api_keys).
             stmt = (
                 select(ScopeAssignment)
                 .where(
-                    ScopeAssignment.tenant_id == admin_id,
+                    ScopeAssignment.admin_id == admin_id,
                     ScopeAssignment.active.is_(True),
                     ScopeAssignment.ended_at.is_(None),
                 )

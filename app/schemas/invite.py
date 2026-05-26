@@ -32,7 +32,7 @@ _SLUG_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 class UserInviteCreate(BaseModel):
     """Payload for POST /api/v1/admin/invites.
 
-    tenant_id and domain_id are derived server-side from the cookied
+    admin_id and domain_id are derived server-side from the cookied
     User's active ScopeAssignment when omitted; passing them explicitly
     is the platform_admin path (Step 30a.5's Company-admin-invites-lead
     leg). Most Team-tier callers will only pass invited_email.
@@ -42,7 +42,7 @@ class UserInviteCreate(BaseModel):
         ...,
         description="Email address of the teammate to invite.",
     )
-    tenant_id: str | None = Field(
+    admin_id: str | None = Field(
         default=None,
         min_length=2,
         max_length=100,
@@ -91,7 +91,7 @@ class UserInviteRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    tenant_id: str
+    admin_id: str
     domain_id: str
     invited_email: str
     role: str

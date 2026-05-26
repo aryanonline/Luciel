@@ -15,7 +15,7 @@ Security:
 - Idempotent: repeated calls return the same observations.
 
 PIPEDA posture:
-- No PII returned (only tenant_id and aggregate counts).
+- No PII returned (only admin_id and aggregate counts).
 - No raw user data, no message contents, no memory items.
 - Audit: intentionally NOT logged to admin_audit_log — this endpoint is
   diagnostic, not a mutation, and logging every poll would noise the audit
@@ -54,38 +54,38 @@ router = APIRouter(prefix="/admin/verification", tags=["verification"])
 # scope the count. If none match, table is flagged "no_tenant_scope" and
 # skipped for enforcement (still observed).
 _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
-    ("tenant_configs",       "active", "tenant_inactive_exactly_one", ["tenant_id"]),
-    ("domain_configs",       "active", 0,                              ["tenant_id"]),
-    ("agents",               "active", 0,                              ["tenant_id"]),
+    ("tenant_configs",       "active", "tenant_inactive_exactly_one", ["admin_id"]),
+    ("domain_configs",       "active", 0,                              ["admin_id"]),
+    ("agents",               "active", 0,                              ["admin_id"]),
     # Arc 5 Path A — V2: luciel_instances is being collapsed to ``instances`` (admin_id). The legacy column ``scope_owner_tenant_id`` is dropped at Revision C; until then this probe accepts both columns as a transitional fallback.
-    ("luciel_instances",     "active", 0,                              ["tenant_id"]),
-    ("api_keys",             "active", 0,                              ["tenant_id"]),
-    ("sessions",             None,     "*",                            ["tenant_id"]),
-    ("messages",             None,     "*",                            ["tenant_id"]),
-    ("traces",               None,     "*",                            ["tenant_id"]),
-    ("memory_items",         "active", 0,                              ["tenant_id"]),
-    ("user_consents",        None,     "*",                            ["tenant_id"]),
-    ("knowledge_embeddings", None,     "*",                            ["tenant_id"]),
-    ("retention_policies",   None,     "*",                            ["tenant_id"]),
-    ("deletion_logs",        None,     "*",                            ["tenant_id"]),
-    ("admin_audit_logs",     None,     "*",                            ["tenant_id"]),
+    ("luciel_instances",     "active", 0,                              ["admin_id"]),
+    ("api_keys",             "active", 0,                              ["admin_id"]),
+    ("sessions",             None,     "*",                            ["admin_id"]),
+    ("messages",             None,     "*",                            ["admin_id"]),
+    ("traces",               None,     "*",                            ["admin_id"]),
+    ("memory_items",         "active", 0,                              ["admin_id"]),
+    ("user_consents",        None,     "*",                            ["admin_id"]),
+    ("knowledge_embeddings", None,     "*",                            ["admin_id"]),
+    ("retention_policies",   None,     "*",                            ["admin_id"]),
+    ("deletion_logs",        None,     "*",                            ["admin_id"]),
+    ("admin_audit_logs",     None,     "*",                            ["admin_id"]),
     ("agent_configs",        None,     "*",                            ["tenant_id"]),
 
     # Step 24.5b additions:
-    # - users: tenant-agnostic identity rows. No tenant_id column on the
+    # - users: tenant-agnostic identity rows. No admin_id column on the
     #   table, so the probe will resolve "no_tenant_scope" -- intentional.
     #   Real-User cleanup is verified by per-pillar self-teardown via
     #   UserService.deactivate_user, not via per-tenant residue probe.
     #   Listed here so the observations dict shows "users: no_tenant_scope"
     #   for traceability rather than silently omitting the table.
-    ("users",                None,     "*",                            ["tenant_id"]),
+    ("users",                None,     "*",                            ["admin_id"]),
     # - scope_assignments: tenant-scoped active assignments. Per-tenant
     #   teardown should leave 0 active rows for the audited tenant.
     #   Q6 doctrine: end-and-recreate, never UPDATE in place; teardown
     #   cascades end every active SA via end_assignment with reason=
     #   DEACTIVATED. Probe enforces live=0 to catch a stuck-assignment
     #   scenario after Pillar 14 / UserService.deactivate_user runs.
-    ("scope_assignments",    "active", 0,                              ["tenant_id"]),
+    ("scope_assignments",    "active", 0,                              ["admin_id"]),
 ]
 
 
@@ -99,7 +99,7 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
 def teardown_integrity(
     request: Request,
     db: DbSession,
-    tenant_id: str = Query(
+    admin_id: str = Query(
         ...,
         min_length=2,
         max_length=100,
@@ -152,7 +152,7 @@ def teardown_integrity(
 
         total = db.execute(
             text(f"SELECT COUNT(*) FROM {table} WHERE {tenant_col} = :tid"),
-            {"tid": tenant_id},
+            {"tid": admin_id},
         ).scalar_one()
 
         if active_col and _has_column(table, active_col):
@@ -161,7 +161,7 @@ def teardown_integrity(
                     f"SELECT COUNT(*) FROM {table} "
                     f"WHERE {tenant_col} = :tid AND {active_col} = TRUE"
                 ),
-                {"tid": tenant_id},
+                {"tid": admin_id},
             ).scalar_one()
         else:
             live = None
@@ -188,7 +188,7 @@ def teardown_integrity(
         # "*" expectations: observe, do not enforce
 
     return {
-        "target_tenant": tenant_id,
+        "target_tenant": admin_id,
         "violations": violations,
         "observations": observations,
         "passed": len(violations) == 0,

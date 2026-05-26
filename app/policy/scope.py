@@ -8,7 +8,7 @@ to:
 
 * :func:`ScopePolicy.is_platform_admin` — unchanged.
 * :func:`ScopePolicy.enforce_tenant_scope` — verifies the caller's
-  Admin matches the target Admin (``request.state.tenant_id`` is the
+  Admin matches the target Admin (``request.state.admin_id`` is the
   Admin slug post-Revision-B backfill). Cross-Admin access requires
   platform_admin.
 * :func:`ScopePolicy.enforce_admin_owns_instance` — verifies the
@@ -46,15 +46,15 @@ class ScopePolicy:
     def _caller(request: Request) -> tuple[str | None, str | None, str | None, list[str]]:
         """Return the caller's (admin_id, domain_id, agent_id, permissions) tuple.
 
-        V2 surfaces only ``admin_id`` via ``request.state.tenant_id``
-        (the field name carries the legacy ``tenant_id`` for one
+        V2 surfaces only ``admin_id`` via ``request.state.admin_id``
+        (the field name carries the legacy ``admin_id`` for one
         release window — Revision B backfilled the values to be equal
         to the V2 Admin slug). ``domain_id`` and ``agent_id`` are
         always None in V2 callers post-B1; they remain in the return
         tuple as ``None`` literals so legacy call-sites that destructure
         the tuple still parse.
         """
-        admin_id = getattr(request.state, "tenant_id", None)
+        admin_id = getattr(request.state, "admin_id", None)
         permissions = getattr(request.state, "permissions", []) or []
         return admin_id, None, None, permissions
 

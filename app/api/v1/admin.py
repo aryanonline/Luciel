@@ -132,7 +132,7 @@ def _load_active_instance(
 
 # --- Add this endpoint BEFORE the individual /tenants POST route ---
 # (FastAPI matches routes top-down, so /tenants/onboard must come
-#  before /tenants/{tenant_id} to avoid treating "onboard" as a tenant_id)
+#  before /tenants/{admin_id} to avoid treating "onboard" as a admin_id)
 
 @router.post(
     "/tenants/onboard",
@@ -172,7 +172,7 @@ def onboard_tenant(
 
     try:
         result = service.onboard_tenant(
-            tenant_id=payload.tenant_id,
+            admin_id=payload.admin_id,
             display_name=payload.display_name,
             # Arc 6 Commit 8 -- V2 tier vocabulary threaded through.
             tier=payload.tier,
@@ -212,12 +212,12 @@ def onboard_tenant(
     return TenantOnboardResponse(
         # Arc 6 Commit 8 -- explicit V2 -> legacy-wire mapping. The V2
         # Admin model has ``id`` (slug) and ``name``; we surface both
-        # under the legacy ``tenant_id`` / ``display_name`` field names
+        # under the legacy ``admin_id`` / ``display_name`` field names
         # so existing API consumers (the platform-admin onboarding UI,
         # downstream test fixtures) keep working unchanged.
         tenant=OnboardedTenantSummary(
             id=tenant.id,
-            tenant_id=tenant.id,
+            admin_id=tenant.id,
             display_name=tenant.name,
             tier=tenant.tier,
             tier_source=tenant.tier_source,
@@ -245,7 +245,7 @@ def onboard_tenant(
             for p in result["retention_policies"]
         ],
         message=(
-            f"Tenant {payload.tenant_id} onboarded. Use the admin key to "
+            f"Tenant {payload.admin_id} onboarded. Use the admin key to "
             f"create your first LucielInstance and its chat key."
         ),
     )
@@ -262,11 +262,11 @@ def create_tenant(
         raise HTTPException(status_code=403, detail="Only platform_admin may create tenants")
 
     service = AdminService(db)
-    existing = service.get_tenant_config(payload.tenant_id)
+    existing = service.get_tenant_config(payload.admin_id)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Tenant {payload.tenant_id} already exists",
+            detail=f"Tenant {payload.admin_id} already exists",
         )
 
     config = service.create_tenant_config(**payload.model_dump())
@@ -283,22 +283,22 @@ def list_tenants(
     if ScopePolicy.is_platform_admin(request):
         configs = service.list_tenant_configs()
     else:
-        caller_tenant = getattr(request.state, "tenant_id", None)
+        caller_tenant = getattr(request.state, "admin_id", None)
         cfg = service.get_tenant_config(caller_tenant) if caller_tenant else None
         configs = [cfg] if cfg else []
     return [TenantConfigRead.model_validate(c) for c in configs]
 
 
-@router.get("/tenants/{tenant_id}", response_model=TenantConfigRead)
+@router.get("/tenants/{admin_id}", response_model=TenantConfigRead)
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_tenant(
     request: Request,
-    tenant_id: str,
+    admin_id: str,
     db: DbSession,
 ) -> TenantConfigRead:
-    ScopePolicy.enforce_tenant_scope(request, tenant_id)
+    ScopePolicy.enforce_tenant_scope(request, admin_id)
     service = AdminService(db)
-    config = service.get_tenant_config(tenant_id)
+    config = service.get_tenant_config(admin_id)
     if not config:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -307,11 +307,11 @@ def get_tenant(
     return TenantConfigRead.model_validate(config)
 
 
-@router.patch("/tenants/{tenant_id}", response_model=TenantConfigRead)
+@router.patch("/tenants/{admin_id}", response_model=TenantConfigRead)
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def update_tenant(
     request: Request,
-    tenant_id: str,
+    admin_id: str,
     payload: TenantConfigUpdate,
     db: DbSession,
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
@@ -321,7 +321,7 @@ def update_tenant(
     # for backward compat; we pass None so the cascade-spine V2 rewrite at
     # B2 can drop it cleanly.
 ) -> TenantConfigRead:
-    ScopePolicy.enforce_tenant_scope(request, tenant_id)
+    ScopePolicy.enforce_tenant_scope(request, admin_id)
     service = AdminService(db)
     payload_data = payload.model_dump(exclude_unset=True)
 
@@ -329,7 +329,7 @@ def update_tenant(
     # All other updates use the generic update_tenant_config path.
     if payload_data.get("active") is False:
         deactivated = service.deactivate_tenant_with_cascade(
-            tenant_id,
+            admin_id,
             audit_ctx=audit_ctx,
             luciel_instance_service=luciel_service,
             agent_repo=None,
@@ -340,9 +340,9 @@ def update_tenant(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Tenant not found",
             )
-        config = service.get_tenant_config(tenant_id)
+        config = service.get_tenant_config(admin_id)
     else:
-        config = service.update_tenant_config(tenant_id, **payload_data)
+        config = service.update_tenant_config(admin_id, **payload_data)
         if not config:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -369,7 +369,7 @@ def ingest_knowledge(
     # and agent (if scoped) of the target knowledge record.
     ScopePolicy.enforce_agent_scope(
         request,
-        payload.tenant_id,
+        payload.admin_id,
         payload.domain_id,
         payload.agent_id,
     )
@@ -398,7 +398,7 @@ def ingest_knowledge(
         chunks_stored = ingestion.ingest(
             content=payload.content,
             knowledge_type=payload.knowledge_type,
-            tenant_id=payload.tenant_id,
+            admin_id=payload.admin_id,
             domain_id=payload.domain_id,
             agent_id=payload.agent_id,
             title=payload.title,
@@ -416,7 +416,7 @@ def ingest_knowledge(
     return KnowledgeIngestResponse(
         chunks_stored=chunks_stored,
         knowledge_type=payload.knowledge_type,
-        tenant_id=payload.tenant_id,
+        admin_id=payload.admin_id,
         domain_id=payload.domain_id,
         agent_id=payload.agent_id,
         source=payload.source,
@@ -436,7 +436,7 @@ def create_api_key(
     # Scope: a caller can only mint keys at or below their own scope.
     ScopePolicy.enforce_agent_scope(
         request,
-        payload.tenant_id,
+        payload.admin_id,
         payload.domain_id,
         payload.agent_id,
     )
@@ -476,7 +476,7 @@ def create_api_key(
                 ),
             )
         ScopePolicy.enforce_luciel_instance_scope(request, instance)
-        if instance.admin_id != payload.tenant_id:
+        if instance.admin_id != payload.admin_id:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -492,7 +492,7 @@ def create_api_key(
     # post-mint audit emission needed.
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
-        tenant_id=payload.tenant_id,
+        admin_id=payload.admin_id,
         domain_id=payload.domain_id,
         agent_id=payload.agent_id,
         luciel_instance_id=payload.luciel_instance_id,   # Step 24.5
@@ -514,15 +514,15 @@ def create_api_key(
 def list_api_keys(
     request: Request,
     db: DbSession,
-    tenant_id: str | None = Query(default=None),
+    admin_id: str | None = Query(default=None),
 ) -> list[ApiKeyRead]:
     service = ApiKeyService(db)
 
     if not ScopePolicy.is_platform_admin(request):
         # Force tenant filter to caller's own tenant.
-        tenant_id = getattr(request.state, "tenant_id", None)
+        admin_id = getattr(request.state, "admin_id", None)
 
-    keys = service.list_keys(tenant_id=tenant_id)
+    keys = service.list_keys(admin_id=admin_id)
 
     caller_domain = getattr(request.state, "domain_id", None)
     caller_agent = getattr(request.state, "agent_id", None)
@@ -557,7 +557,7 @@ def list_api_keys(
 # an embed key only at or below their own scope. A tenant-scoped
 # admin key minted for tenant X cannot mint an embed key for tenant Y;
 # a domain-scoped admin key cannot mint a tenant-wide embed key. We
-# additionally refuse minting embed keys with NULL tenant_id (those
+# additionally refuse minting embed keys with NULL admin_id (those
 # would be cross-tenant by definition, which the EmbedKeyCreate schema
 # already rejects, but we restate the rule here so the endpoint is
 # self-contained and a future schema relaxation cannot accidentally
@@ -606,7 +606,7 @@ def create_embed_key(
     # is correct: the embed key is tenant- or domain-scoped only.
     ScopePolicy.enforce_agent_scope(
         request,
-        payload.tenant_id,
+        payload.admin_id,
         payload.domain_id,
         target_agent_id=None,
     )
@@ -662,7 +662,7 @@ def create_embed_key(
                     "not found."
                 ),
             )
-        if instance.admin_id != payload.tenant_id:
+        if instance.admin_id != payload.admin_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -721,7 +721,7 @@ def create_embed_key(
         try:
             ScopePromptPreflight.check(
                 db,
-                tenant_id=payload.tenant_id,
+                admin_id=payload.admin_id,
                 domain_id=payload.domain_id,
             )
         except ScopePromptMissingError as exc:
@@ -730,7 +730,7 @@ def create_embed_key(
                 detail={
                     "error": "scope_prompt_missing",
                     "reason": exc.reason,
-                    "tenant_id": exc.tenant_id,
+                    "admin_id": exc.admin_id,
                     "domain_id": exc.domain_id,
                     "message": str(exc),
                 },
@@ -746,7 +746,7 @@ def create_embed_key(
     # facing branding text into the audit log.
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
-        tenant_id=payload.tenant_id,
+        admin_id=payload.admin_id,
         domain_id=payload.domain_id,
         agent_id=None,
         luciel_instance_id=payload.luciel_instance_id,
@@ -806,10 +806,10 @@ def deactivate_api_key(
         # belonging to other tenants; a domain-scoped caller cannot
         # touch keys outside their domain; same for agent.
         if not ScopePolicy.is_platform_admin(request):
-            caller_tenant = getattr(request.state, "tenant_id", None)
+            caller_tenant = getattr(request.state, "admin_id", None)
             caller_domain = getattr(request.state, "domain_id", None)
             caller_agent = getattr(request.state, "agent_id", None)
-            if caller_tenant and target.tenant_id != caller_tenant:
+            if caller_tenant and target.admin_id != caller_tenant:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Cannot deactivate API key outside your tenant",
@@ -852,7 +852,7 @@ def deactivate_api_key(
 def list_memory_items(
     request: Request,
     db: DbSession,
-    tenant_id: str = Query(
+    admin_id: str = Query(
         ...,
         min_length=2,
         max_length=100,
@@ -871,7 +871,7 @@ def list_memory_items(
         )
     service = MemoryAdminService(db)
     items = service.list_memories_for_tenant(
-        tenant_id=tenant_id,
+        admin_id=admin_id,
         active_only=active_only,
     )
     return [MemoryRead.model_validate(i) for i in items]
@@ -923,7 +923,7 @@ def create_luciel_instance(
     if not ScopePolicy.is_platform_admin(request):
         try:
             service.admin._enforce_tier_scope(
-                tenant_id=payload.admin_id,
+                admin_id=payload.admin_id,
             )
         except TierScopeViolationError as exc:
             raise HTTPException(
@@ -1001,10 +1001,10 @@ def _resolve_invite_actor(
     request: Request,
     db,
 ) -> tuple["User", str, str]:
-    """Resolve (cookied_user, tenant_id, default_domain_id) for invite routes.
+    """Resolve (cookied_user, admin_id, default_domain_id) for invite routes.
 
     Reads the session cookie off the Request directly (same pattern as
-    billing routes). Returns the cookied User, their active tenant_id
+    billing routes). Returns the cookied User, their active admin_id
     (from the session JWT), and the domain_id of their currently-active
     ScopeAssignment within that tenant.
 
@@ -1034,7 +1034,7 @@ def _resolve_invite_actor(
         ) from exc
 
     user_id = payload.get("sub")
-    session_tenant_id = payload.get("tenant_id")
+    session_tenant_id = payload.get("admin_id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Malformed session.")
 
@@ -1045,7 +1045,7 @@ def _resolve_invite_actor(
         )
 
     # Find the cookied user's active ScopeAssignment to source
-    # (tenant_id, domain_id) when the caller omits them on the payload.
+    # (admin_id, domain_id) when the caller omits them on the payload.
     sar = ScopeAssignmentRepository(db)
     active_assignments = sar.list_for_user(user.id, active_only=True)
     if not active_assignments:
@@ -1054,13 +1054,13 @@ def _resolve_invite_actor(
             detail="Cookied user has no active scope assignment.",
         )
 
-    # Prefer the assignment matching the session JWT's tenant_id; fall
+    # Prefer the assignment matching the session JWT's admin_id; fall
     # back to the first active assignment (single-tenant common case).
     chosen = next(
-        (a for a in active_assignments if a.tenant_id == session_tenant_id),
+        (a for a in active_assignments if a.admin_id == session_tenant_id),
         active_assignments[0],
     )
-    return user, chosen.tenant_id, chosen.domain_id
+    return user, chosen.admin_id, chosen.domain_id
 
 
 def _map_invite_error(exc: InviteError) -> HTTPException:
@@ -1102,14 +1102,14 @@ def create_invite_route(  # noqa: D401
     inviter, default_tenant_id, default_domain_id = _resolve_invite_actor(
         request=request, db=db
     )
-    tenant_id = payload.tenant_id or default_tenant_id
+    admin_id = payload.admin_id or default_tenant_id
     domain_id = payload.domain_id or default_domain_id
 
     # Cross-tenant safety: a cookied user can only invite into their own
     # tenant unless they hold platform_admin (which a cookied session
     # does not carry today). Tenant mismatch is 403 rather than 422 so
     # the audit chain reads as an authz event.
-    if tenant_id != default_tenant_id:
+    if admin_id != default_tenant_id:
         raise HTTPException(
             status_code=403,
             detail="Cookied user cannot invite into a tenant they do not belong to.",
@@ -1118,7 +1118,7 @@ def create_invite_route(  # noqa: D401
     try:
         invite, _token = invite_service.create_invite(
             db=db,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             inviter_user_id=inviter.id,
             inviter_email=inviter.email,
@@ -1163,7 +1163,7 @@ def list_invites_route(
     from app.models.user_invite import InviteStatus
     from app.repositories.user_invites import UserInviteRepository
 
-    _user, tenant_id, _domain_id = _resolve_invite_actor(
+    _user, admin_id, _domain_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1178,7 +1178,7 @@ def list_invites_route(
             ) from exc
 
     repo = UserInviteRepository(db)
-    invites = repo.list_for_tenant(tenant_id=tenant_id, statuses=statuses)
+    invites = repo.list_for_tenant(admin_id=admin_id, statuses=statuses)
     return [UserInviteRead.model_validate(i) for i in invites]
 
 
@@ -1194,7 +1194,7 @@ def resend_invite_route(
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> UserInviteResendResponse:
     """Rotate token_jti and re-mint the welcome email (Step 30a.4)."""
-    inviter, tenant_id, _domain_id = _resolve_invite_actor(
+    inviter, admin_id, _domain_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1212,7 +1212,7 @@ def resend_invite_route(
     # cookied user does not belong to is a 403. Done AFTER the lookup
     # so a 404 wins over a 403 for non-existent invite ids (no info
     # leakage about which ids exist).
-    if invite.tenant_id != tenant_id:
+    if invite.admin_id != admin_id:
         raise HTTPException(
             status_code=403,
             detail="Cookied user cannot resend invites under a foreign tenant.",
@@ -1235,7 +1235,7 @@ def revoke_invite_route(
     """Flip a still-pending invite to REVOKED (Step 30a.4)."""
     from app.repositories.user_invites import UserInviteRepository
 
-    _inviter, tenant_id, _domain_id = _resolve_invite_actor(
+    _inviter, admin_id, _domain_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1243,7 +1243,7 @@ def revoke_invite_route(
     pre = UserInviteRepository(db).get_by_pk(invite_id)
     if pre is None:
         raise HTTPException(status_code=404, detail="Invite not found.")
-    if pre.tenant_id != tenant_id:
+    if pre.admin_id != admin_id:
         raise HTTPException(
             status_code=403,
             detail="Cookied user cannot revoke invites under a foreign tenant.",
@@ -1269,11 +1269,11 @@ def revoke_invite_route(
 def list_luciel_instances(
     request: Request,
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
-    tenant_id: str | None = Query(default=None),
+    admin_id: str | None = Query(default=None),
     active_only: bool = Query(default=False),
 ) -> list[LucielInstanceRead]:
     # Arc 9 C22 -- Arc 5 Path A collapsed the tenant/domain/agent
-    # hierarchy into a single admin scope. "tenant_id" here is the
+    # hierarchy into a single admin scope. "admin_id" here is the
     # caller's admin_id and is the only scope axis the service
     # understands. Platform admins must pass it explicitly; tenant
     # admins inherit it from the cookie/session scope.
@@ -1281,13 +1281,13 @@ def list_luciel_instances(
         caller_tenant, _caller_domain, _caller_agent, _ = ScopePolicy._caller(request)
         if caller_tenant is None:
             raise HTTPException(status_code=403, detail="Admin key has no tenant scope.")
-        tenant_id = caller_tenant
+        admin_id = caller_tenant
     else:
-        if tenant_id is None:
-            raise HTTPException(status_code=400, detail="platform_admin must specify tenant_id.")
+        if admin_id is None:
+            raise HTTPException(status_code=400, detail="platform_admin must specify admin_id.")
 
     instances = service.list_for_admin(
-        admin_id=tenant_id,
+        admin_id=admin_id,
         active_only=active_only,
     )
     return [LucielInstanceRead.model_validate(i) for i in instances]
@@ -1366,7 +1366,7 @@ def deactivate_luciel_instance(
     # zero-residue still passed thanks to the tenant-level cascade
     # firing later in the verify teardown PATCH.
     AdminService(db).bulk_soft_deactivate_memory_items_for_luciel_instance(
-        tenant_id=instance.admin_id,
+        admin_id=instance.admin_id,
         luciel_instance_id=pk,
         audit_ctx=audit_ctx,
         updated_by=getattr(request.state, "actor_label", None),
@@ -1434,7 +1434,7 @@ def get_effective_chunking_config(
         request=request, instance_id=instance_id, instance_service=instance_service
     )
     cfg = ingestion_service._resolve_chunking_config(
-        tenant_id=instance.admin_id,
+        admin_id=instance.admin_id,
         domain_id=None,
         luciel_instance_id=instance.id,
     )
@@ -1499,7 +1499,7 @@ async def upload_knowledge_file(
         result: IngestResult = ingestion_service.ingest_file(
             file_bytes=file_bytes,
             filename=file.filename or "upload.bin",
-            tenant_id=instance.admin_id,
+            admin_id=instance.admin_id,
             domain_id=None,
             luciel_instance_id=instance.id,
             knowledge_type=meta.knowledge_type,
@@ -1519,7 +1519,7 @@ async def upload_knowledge_file(
     action = ACTION_KNOWLEDGE_REPLACE if replace_existing else ACTION_KNOWLEDGE_INGEST
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=instance.admin_id,
+        admin_id=instance.admin_id,
         action=action,              # or the specific ACTION_KNOWLEDGE_* constant
         resource_type=RESOURCE_KNOWLEDGE,
         resource_pk=instance.id,
@@ -1581,7 +1581,7 @@ def ingest_knowledge_text(
     try:
         result = ingestion_service.ingest_text(
             content=payload.content,
-            tenant_id=instance.admin_id,
+            admin_id=instance.admin_id,
             domain_id=None,
             luciel_instance_id=instance.id,
             knowledge_type=payload.knowledge_type,
@@ -1602,7 +1602,7 @@ def ingest_knowledge_text(
     action = ACTION_KNOWLEDGE_REPLACE if replace_existing else ACTION_KNOWLEDGE_INGEST
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=instance.admin_id,
+        admin_id=instance.admin_id,
         action=action,              # or the specific ACTION_KNOWLEDGE_* constant
         resource_type=RESOURCE_KNOWLEDGE,
         resource_pk=instance.id,
@@ -1746,7 +1746,7 @@ def delete_knowledge_source(
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=instance.admin_id,
+        admin_id=instance.admin_id,
         action=ACTION_KNOWLEDGE_DELETE,              # or the specific ACTION_KNOWLEDGE_* constant
         resource_type=RESOURCE_KNOWLEDGE,
         resource_pk=instance.id,
@@ -1792,7 +1792,7 @@ def replace_knowledge_source_text(
     try:
         result = ingestion_service.ingest_text(
             content=payload.content,
-            tenant_id=instance.admin_id,
+            admin_id=instance.admin_id,
             domain_id=None,
             luciel_instance_id=instance.id,
             knowledge_type="luciel_knowledge",
@@ -1812,7 +1812,7 @@ def replace_knowledge_source_text(
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=instance.admin_id,
+        admin_id=instance.admin_id,
         action=ACTION_KNOWLEDGE_REPLACE,
         resource_type=RESOURCE_KNOWLEDGE,
         resource_pk=instance.id,

@@ -136,7 +136,7 @@ class TestSubscriptionStatusFreeAdminShape:
 
         r = SubscriptionStatusResponse(
             has_subscription=False,
-            tenant_id="free-1a2b3c4d",
+            admin_id="free-1a2b3c4d",
             tier="free",
             status="free",
             active=True,
@@ -165,7 +165,7 @@ class TestSubscriptionStatusFreeAdminShape:
         now = datetime.now(timezone.utc)
         r = SubscriptionStatusResponse(
             has_subscription=True,
-            tenant_id="pro-9f8e7d6c",
+            admin_id="pro-9f8e7d6c",
             tier="pro",
             status="active",
             active=True,
@@ -334,7 +334,7 @@ class TestMeFreeAdminLive:
             active = True
 
         class _FakeAssignment:
-            tenant_id = "free-1a2b3c4d"
+            admin_id = "free-1a2b3c4d"
             role = "owner"
 
         class _FakeAdmin:
@@ -357,7 +357,7 @@ class TestMeFreeAdminLive:
         )
         monkeypatch.setattr(
             billing_module, "validate_session_token",
-            lambda _t: {"tenant_id": "free-1a2b3c4d"},
+            lambda _t: {"admin_id": "free-1a2b3c4d"},
         )
 
         # Patch the inline-imported ScopeAssignmentRepository so the

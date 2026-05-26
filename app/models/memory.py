@@ -51,9 +51,6 @@ class MemoryItem(Base, TimestampMixin):
     not a platform identity row. See actor_user_id below for the
     platform identity FK."""
 
-    tenant_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),

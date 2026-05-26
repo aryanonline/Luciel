@@ -13,7 +13,7 @@ C.4 (P14 reads) adds one new endpoint `users_step29c/{user_id}`
 for the User.active assertion (A6 — User persists across
 departure); the two ApiKey reads (A1/A2) reuse C.1's
 `api_keys_step29c?id=` and the two MemoryItem reads (A5/A7)
-reuse C.2's `memory_items_step29c?tenant_id=&actor_user_id=`.
+reuse C.2's `memory_items_step29c?admin_id=&actor_user_id=`.
 C.5 (P11 F10 ORM-write migration) adds the first and only
 mutation in the C-series: a platform_admin POST at
 `/luciel_instances_step29c/{instance_id}/toggle_active` that
@@ -34,7 +34,7 @@ Routes
     GET /api/v1/admin/forensics/api_keys_step29c
         ?id=<int>
     GET /api/v1/admin/forensics/memory_items_step29c
-        ?tenant_id=<str>
+        ?admin_id=<str>
         &user_id=<str>                  # chat-end-user string (P11)
         &actor_user_id=<uuid>           # platform User UUID (P12, C.2)
         &agent_id=<str>                 # agent slug (P12, C.2)
@@ -43,7 +43,7 @@ Routes
         &content_contains=<str>         # substring probe (P13, C.3)
         &limit=<int=100>
     GET /api/v1/admin/forensics/admin_audit_logs_step29c
-        ?tenant_id=<str>
+        ?admin_id=<str>
         &action=<str>
         &actor_label_like=<str>
         &actor_key_prefix=<str>         # exact 12-char handle (P13, C.3)
@@ -177,7 +177,7 @@ class ApiKeyForensic(BaseModel):
 
     id: int
     key_prefix: str
-    tenant_id: str | None
+    admin_id: str | None
     domain_id: str | None
     agent_id: str | None
     luciel_instance_id: int | None
@@ -203,7 +203,7 @@ class MemoryItemForensic(BaseModel):
     id: int
     user_id: str
     actor_user_id: uuid.UUID | None
-    tenant_id: str
+    admin_id: str
     agent_id: str | None
     category: str
     message_id: int | None
@@ -229,7 +229,7 @@ class AdminAuditLogForensic(BaseModel):
     id: int
     action: str
     resource_type: str
-    tenant_id: str
+    admin_id: str
     domain_id: str | None
     agent_id: str | None
     luciel_instance_id: int | None
@@ -296,7 +296,7 @@ class LucielInstanceForensic(BaseModel):
 
     id: int
     instance_id: str = Field(alias="instance_slug")
-    tenant_id: str = Field(alias="admin_id")
+    admin_id: str = Field(alias="admin_id")
     active: bool
     created_at: datetime
 
@@ -375,7 +375,7 @@ def get_api_key_forensic_step29c(
     return ApiKeyForensic(
         id=row.id,
         key_prefix=row.key_prefix,
-        tenant_id=row.tenant_id,
+        admin_id=row.admin_id,
         domain_id=row.domain_id,
         agent_id=row.agent_id,
         luciel_instance_id=row.luciel_instance_id,
@@ -392,7 +392,7 @@ def get_api_key_forensic_step29c(
 def list_memory_items_forensic_step29c(
     request: Request,
     db: DbSession,
-    tenant_id: str = Query(..., max_length=100),
+    admin_id: str = Query(..., max_length=100),
     user_id: str | None = Query(default=None, max_length=100),
     actor_user_id: uuid.UUID | None = Query(default=None),
     agent_id: str | None = Query(default=None, max_length=100),
@@ -420,7 +420,7 @@ def list_memory_items_forensic_step29c(
 
     Filter combination semantics (all AND-joined; omit a param to
     leave its dimension unconstrained):
-      - tenant_id is required (per-tenant isolation, no
+      - admin_id is required (per-tenant isolation, no
         cross-tenant scans even for platform_admin)
       - user_id is the chat-end-user string
         (memory_items.user_id, e.g. "pillar11-user")
@@ -441,7 +441,7 @@ def list_memory_items_forensic_step29c(
     """
     _require_platform_admin_step29c(request)
 
-    stmt = select(MemoryItem).where(MemoryItem.tenant_id == tenant_id)
+    stmt = select(MemoryItem).where(MemoryItem.admin_id == admin_id)
     if user_id is not None:
         stmt = stmt.where(MemoryItem.user_id == user_id)
     if actor_user_id is not None:
@@ -467,7 +467,7 @@ def list_memory_items_forensic_step29c(
                 id=r.id,
                 user_id=r.user_id,
                 actor_user_id=r.actor_user_id,
-                tenant_id=r.tenant_id,
+                admin_id=r.admin_id,
                 agent_id=r.agent_id,
                 category=r.category,
                 message_id=r.message_id,
@@ -488,7 +488,7 @@ def list_memory_items_forensic_step29c(
 def list_admin_audit_logs_forensic_step29c(
     request: Request,
     db: DbSession,
-    tenant_id: str = Query(..., max_length=100),
+    admin_id: str = Query(..., max_length=100),
     action: str | None = Query(default=None, max_length=100),
     actor_label_like: str | None = Query(default=None, max_length=100),
     actor_key_prefix: str | None = Query(default=None, max_length=32),
@@ -520,7 +520,7 @@ def list_admin_audit_logs_forensic_step29c(
     """
     _require_platform_admin_step29c(request)
 
-    stmt = select(AdminAuditLog).where(AdminAuditLog.tenant_id == tenant_id)
+    stmt = select(AdminAuditLog).where(AdminAuditLog.admin_id == admin_id)
     if action is not None:
         stmt = stmt.where(AdminAuditLog.action == action)
     if actor_label_like is not None:
@@ -539,7 +539,7 @@ def list_admin_audit_logs_forensic_step29c(
                 id=r.id,
                 action=r.action,
                 resource_type=r.resource_type,
-                tenant_id=r.tenant_id,
+                admin_id=r.admin_id,
                 domain_id=r.domain_id,
                 agent_id=r.agent_id,
                 luciel_instance_id=r.luciel_instance_id,
@@ -773,7 +773,7 @@ def toggle_luciel_instance_active_step29c(
     # validation, DB constraint), the mutation below never executes.
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=inst.admin_id,
+        admin_id=inst.admin_id,
         action=ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE,
         resource_type=RESOURCE_LUCIEL_INSTANCE,
         resource_pk=inst.id,
@@ -815,7 +815,7 @@ def toggle_luciel_instance_active_step29c(
     # this function. If any leg fails the whole batch rolls back.
     if requested_active is False and previous_active is True:
         AdminService(db).bulk_soft_deactivate_memory_items_for_luciel_instance(
-            tenant_id=inst.admin_id,
+            admin_id=inst.admin_id,
             luciel_instance_id=inst.id,
             audit_ctx=audit_ctx,
             updated_by=getattr(request.state, "actor_label", None),
@@ -918,14 +918,14 @@ def toggle_luciel_instance_active_step29c(
 class WorkerPipelineProbeRequest(BaseModel):
     """Body for the worker-pipeline-probe route.
 
-    All fields except `tenant_id` and `actor_key_prefix` are optional
+    All fields except `admin_id` and `actor_key_prefix` are optional
     in the malformed-mode default path; the malformed payload is
     constructed by the route. In full-mode the caller MUST supply a
     real `message_id` (int) and `user_id` (str) so the worker can
     actually extract memory from a turn.
     """
 
-    tenant_id: str = Field(..., min_length=1, max_length=128)
+    admin_id: str = Field(..., min_length=1, max_length=128)
     actor_key_prefix: str = Field(..., min_length=12, max_length=12)
     # full-mode only:
     user_id: str | None = Field(default=None, max_length=128)
@@ -1002,7 +1002,7 @@ def worker_pipeline_probe_step29y(
         kwargs = {
             "session_id": payload.session_id or f"worker-probe-{uuid.uuid4().hex[:12]}",
             "user_id": payload.user_id,
-            "tenant_id": payload.tenant_id,
+            "admin_id": payload.admin_id,
             "message_id": int(payload.message_id),
             "actor_key_prefix": payload.actor_key_prefix,
         }
@@ -1013,7 +1013,7 @@ def worker_pipeline_probe_step29y(
         kwargs = {
             "session_id": f"worker-probe-{uuid.uuid4().hex[:12]}",
             "user_id": "worker-probe-user",
-            "tenant_id": payload.tenant_id,
+            "admin_id": payload.admin_id,
             "message_id": "not-an-int",  # type violation -> Gate 1 rejection
             "actor_key_prefix": payload.actor_key_prefix,
         }
@@ -1025,7 +1025,7 @@ def worker_pipeline_probe_step29y(
     # is a valid high-water mark.
     high_water = db.execute(
         select(AdminAuditLog.id)
-        .where(AdminAuditLog.tenant_id == payload.tenant_id)
+        .where(AdminAuditLog.admin_id == payload.admin_id)
         .where(AdminAuditLog.action == polled_action)
         .order_by(AdminAuditLog.id.desc())
         .limit(1)
@@ -1044,7 +1044,7 @@ def worker_pipeline_probe_step29y(
         db.expire_all()
         row = db.execute(
             select(AdminAuditLog)
-            .where(AdminAuditLog.tenant_id == payload.tenant_id)
+            .where(AdminAuditLog.admin_id == payload.admin_id)
             .where(AdminAuditLog.action == polled_action)
             .where(AdminAuditLog.id > high_water)
             .order_by(AdminAuditLog.id.desc())
@@ -1068,8 +1068,8 @@ def worker_pipeline_probe_step29y(
                 "elapsed_ms": elapsed_ms,
                 "detail": (
                     f"worker_pipeline_probe_step29y did not observe a new "
-                    f"{polled_action!r} audit row for tenant_id="
-                    f"{payload.tenant_id!r} within "
+                    f"{polled_action!r} audit row for admin_id="
+                    f"{payload.admin_id!r} within "
                     f"{int(_PROBE_DEADLINE_SECONDS)}s of enqueue. The "
                     f"worker may be down, the broker may be unreachable, "
                     f"or the worker DSN may have lost INSERT privilege "

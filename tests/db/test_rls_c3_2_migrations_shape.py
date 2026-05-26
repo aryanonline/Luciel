@@ -1,6 +1,6 @@
 """
 Arc 9 C3.2 regression tests -- RLS migrations for the 7 NOT-NULL
-tenant_id customer-data tables.
+admin_id customer-data tables.
 
 CONTRACT GUARDED:
     Each of the 7 sibling migrations (arc9_c3_2a through arc9_c3_2g)
@@ -10,7 +10,7 @@ CONTRACT GUARDED:
          after arc9_c3_1_rls_admin_audit_logs)
       3. ENABLE ROW LEVEL SECURITY on its target table
       4. CREATE POLICY <table>_tenant_isolation with USING + WITH CHECK
-      5. Predicate compares tenant_id to current_setting('app.admin_id', true)
+      5. Predicate compares admin_id to current_setting('app.admin_id', true)
       6. Provide a working downgrade (DROP IF EXISTS, then DISABLE)
 
 WHY ONE TEST FILE FOR ALL 7:

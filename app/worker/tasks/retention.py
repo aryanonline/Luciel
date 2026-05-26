@@ -26,7 +26,7 @@ Retention window:
     overrides can land without touching the scan predicate.
 
 Scan predicate (single SELECT per nightly run):
-    SELECT tenant_id FROM tenant_configs
+    SELECT admin_id FROM tenant_configs
     WHERE active = false
       AND deactivated_at IS NOT NULL
       AND deactivated_at < (now() - INTERVAL '90 days')
@@ -37,7 +37,7 @@ The composite index ``ix_tenant_configs_active_deactivated_at``
 
 Per-tenant action:
     For each row returned by the scan, the task calls
-    ``AdminService.hard_delete_tenant_after_retention(tenant_id)``,
+    ``AdminService.hard_delete_tenant_after_retention(admin_id)``,
     which runs a 12-step DELETE chain inside a single transaction.
     Any error rolls back that tenant's purge and the worker logs +
     moves on to the next tenant -- one bad row should not block a
@@ -53,7 +53,7 @@ Idempotency:
 
 What this task does NOT do:
     - It does not delete AdminAuditLog rows. Those are the legal
-      record that the purge happened; they reference tenant_id as
+      record that the purge happened; they reference admin_id as
       a string, not via FK, so they survive the cascade.
     - It does not delete subscriptions rows. Those carry billing
       history (Stripe invoice numbers, period-end dates) needed for
@@ -161,7 +161,7 @@ def run_retention_purge(self):
     errored_count = 0
     errored_tenant_ids: list[str] = []
 
-    for tenant_id in eligible_tenant_ids:
+    for admin_id in eligible_tenant_ids:
         # Each tenant gets its own session + transaction so one
         # failing purge does not block the rest of the nightly batch.
         # AdminService.hard_delete_tenant_after_retention runs the
@@ -192,16 +192,16 @@ def run_retention_purge(self):
         from app.core.config import settings as _settings
         if getattr(_settings, "rls_tenant_context_enabled", False):
             errored_count += 1
-            errored_tenant_ids.append(tenant_id)
+            errored_tenant_ids.append(admin_id)
             _log.error(
-                "retention_purge BLOCKED tenant_id=%s reason=%s",
-                tenant_id,
+                "retention_purge BLOCKED admin_id=%s reason=%s",
+                admin_id,
                 "rls_tenant_context_enabled=True but C6 BYPASSRLS "
                 "role not yet wired; refusing to run for safety.",
             )
             continue
 
-        with bind_tenant_scope(admin_id=tenant_id, instance_id=None):
+        with bind_tenant_scope(admin_id=admin_id, instance_id=None):
             per_tenant_db: Session = SessionLocal()
             try:
                 # Import here (not at module top) to avoid a circular
@@ -212,23 +212,23 @@ def run_retention_purge(self):
 
                 admin_svc = AdminService(per_tenant_db)
                 row_counts = admin_svc.hard_delete_tenant_after_retention(
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     retention_window_days=RETENTION_WINDOW_DAYS,
                 )
                 per_tenant_db.commit()
                 purged_count += 1
                 _log.info(
-                    "retention_purge OK tenant_id=%s row_counts=%s",
-                    tenant_id,
+                    "retention_purge OK admin_id=%s row_counts=%s",
+                    admin_id,
                     row_counts,
                 )
             except Exception:
                 per_tenant_db.rollback()
                 errored_count += 1
-                errored_tenant_ids.append(tenant_id)
+                errored_tenant_ids.append(admin_id)
                 _log.error(
-                    "retention_purge FAILED tenant_id=%s traceback:\n%s",
-                    tenant_id,
+                    "retention_purge FAILED admin_id=%s traceback:\n%s",
+                    admin_id,
                     traceback.format_exc(),
                 )
             finally:
@@ -254,10 +254,10 @@ def _scan_eligible_tenants(db: "Session", cutoff: datetime) -> list[str]:
     """
     # Plain SQL keeps the scan close to the index shape; using the ORM
     # here would load TenantConfig objects (heavier) when all we need
-    # is the tenant_id string.
+    # is the admin_id string.
     sql = text(
         """
-        SELECT tenant_id
+        SELECT admin_id
           FROM tenant_configs
          WHERE active = false
            AND deactivated_at IS NOT NULL

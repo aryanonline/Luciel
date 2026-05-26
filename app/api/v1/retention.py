@@ -15,10 +15,10 @@ foreign tenant, manual purge of foreign data).
 Hardened contract:
 
   1. Every route is rate-limited (unchanged from pre-29.y).
-  2. Every route resolves an effective ``tenant_id`` and enforces that
+  2. Every route resolves an effective ``admin_id`` and enforces that
      the caller has scope over it. Non-platform callers cannot read or
      write another tenant's policies; the GET/list routes silently
-     downgrade to the caller's own tenant when a foreign tenant_id is
+     downgrade to the caller's own tenant when a foreign admin_id is
      supplied (matches the audit_log.py convention).
   3. POST / PATCH / DELETE / POST-enforce / POST-purge write an
      ``admin_audit_logs`` row BEFORE the mutation, using the same
@@ -81,20 +81,20 @@ def _get_retention_service(db: DbSession) -> RetentionService:
 def _resolve_target_tenant(
     request: Request, supplied_tenant_id: str | None
 ) -> str | None:
-    """Resolve effective tenant_id for a retention operation.
+    """Resolve effective admin_id for a retention operation.
 
-    Returns the caller's own tenant_id for non-platform callers,
+    Returns the caller's own admin_id for non-platform callers,
     silently ignoring any cross-tenant value supplied by the caller.
     For platform_admin callers, returns the supplied value (or None
     for "all tenants" operations like enforce_all_policies).
 
     Raises 403 only when the caller has NO tenant binding AND is not
     platform_admin -- a state that should be impossible per the F-7
-    NOT NULL constraint on api_keys.tenant_id, but defended against
+    NOT NULL constraint on api_keys.admin_id, but defended against
     here.
     """
     is_platform = ScopePolicy.is_platform_admin(request)
-    key_tenant_id = getattr(request.state, "tenant_id", None)
+    key_tenant_id = getattr(request.state, "admin_id", None)
 
     if is_platform:
         return supplied_tenant_id  # may be None (means "all")
@@ -132,7 +132,7 @@ def _enforce_policy_owned_by_caller(
     if is_platform:
         return policy
 
-    key_tenant_id = getattr(request.state, "tenant_id", None)
+    key_tenant_id = getattr(request.state, "admin_id", None)
     if key_tenant_id is None:
         # Defense in depth: a non-platform caller without tenant
         # binding should have been rejected upstream already.
@@ -140,7 +140,7 @@ def _enforce_policy_owned_by_caller(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Policy not found",
         )
-    if policy.tenant_id != key_tenant_id:
+    if policy.admin_id != key_tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Policy not found",
@@ -155,7 +155,7 @@ def _policy_snapshot(policy: RetentionPolicy) -> dict[str, Any]:
     regulator can see exactly which retention parameters changed.
     """
     return {
-        "tenant_id": policy.tenant_id,
+        "admin_id": policy.admin_id,
         "data_category": policy.data_category,
         "retention_days": policy.retention_days,
         "action": policy.action,
@@ -183,7 +183,7 @@ def create_policy(
 ) -> RetentionPolicyRead:
     repo = RetentionRepository(db)
 
-    effective_tenant_id = _resolve_target_tenant(request, payload.tenant_id)
+    effective_tenant_id = _resolve_target_tenant(request, payload.admin_id)
     if effective_tenant_id is None:
         # Platform-admin must explicitly target a tenant for policy
         # creation -- "all tenants" is not a legal target for create.
@@ -191,15 +191,15 @@ def create_policy(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": "tenant_id_required",
-                "message": "Retention policy creation requires tenant_id.",
+                "message": "Retention policy creation requires admin_id.",
             },
         )
 
     existing = repo.get_policy_for_category(
         data_category=payload.data_category,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
     )
-    if existing and existing.tenant_id == effective_tenant_id:
+    if existing and existing.admin_id == effective_tenant_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -210,7 +210,7 @@ def create_policy(
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         action=ACTION_CREATE,
         resource_type=RESOURCE_RETENTION_POLICY,
         resource_pk=None,
@@ -219,7 +219,7 @@ def create_policy(
         ),
         before=None,
         after={
-            "tenant_id": effective_tenant_id,
+            "admin_id": effective_tenant_id,
             "data_category": payload.data_category,
             "retention_days": payload.retention_days,
             "action": payload.action,
@@ -230,7 +230,7 @@ def create_policy(
     )
 
     policy = RetentionPolicy(
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         data_category=payload.data_category,
         retention_days=payload.retention_days,
         action=payload.action,
@@ -248,11 +248,11 @@ def create_policy(
 def list_policies(
     request: Request,
     db: DbSession,
-    tenant_id: str | None = Query(default=None),
+    admin_id: str | None = Query(default=None),
 ) -> list[RetentionPolicyRead]:
     repo = RetentionRepository(db)
-    effective_tenant_id = _resolve_target_tenant(request, tenant_id)
-    policies = repo.list_policies(tenant_id=effective_tenant_id)
+    effective_tenant_id = _resolve_target_tenant(request, admin_id)
+    policies = repo.list_policies(admin_id=effective_tenant_id)
     return [RetentionPolicyRead.model_validate(p) for p in policies]
 
 
@@ -289,12 +289,12 @@ def update_policy(
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=existing.tenant_id,
+        admin_id=existing.admin_id,
         action=ACTION_UPDATE,
         resource_type=RESOURCE_RETENTION_POLICY,
         resource_pk=existing.id,
         resource_natural_id=(
-            f"{existing.tenant_id}:{existing.data_category}"
+            f"{existing.admin_id}:{existing.data_category}"
         ),
         before=before,
         after=after,
@@ -335,12 +335,12 @@ def delete_policy(
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=existing.tenant_id,
+        admin_id=existing.admin_id,
         action=ACTION_DELETE_HARD,
         resource_type=RESOURCE_RETENTION_POLICY,
         resource_pk=existing.id,
         resource_natural_id=(
-            f"{existing.tenant_id}:{existing.data_category}"
+            f"{existing.admin_id}:{existing.data_category}"
         ),
         before=_policy_snapshot(existing),
         after=None,
@@ -366,14 +366,14 @@ def delete_policy(
 def list_logs(
     request: Request,
     db: DbSession,
-    tenant_id: str | None = Query(default=None),
+    admin_id: str | None = Query(default=None),
     data_category: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[DeletionLogRead]:
     repo = RetentionRepository(db)
-    effective_tenant_id = _resolve_target_tenant(request, tenant_id)
+    effective_tenant_id = _resolve_target_tenant(request, admin_id)
     logs = repo.list_deletion_logs(
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         data_category=data_category,
         limit=limit,
     )
@@ -392,7 +392,7 @@ def enforce_policies(
         AdminAuditRepository, Depends(get_admin_audit_repository)
     ],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-    tenant_id: str | None = Query(default=None),
+    admin_id: str | None = Query(default=None),
 ) -> list[EnforceResult]:
     """Run retention enforcement.
 
@@ -402,14 +402,14 @@ def enforce_policies(
     """
     is_platform = ScopePolicy.is_platform_admin(request)
     if is_platform:
-        target_tenant_id = tenant_id  # may be None for "all"
+        target_tenant_id = admin_id  # may be None for "all"
     else:
         # Non-platform: ignore cross-tenant requests, force own tenant.
-        target_tenant_id = _resolve_target_tenant(request, tenant_id)
+        target_tenant_id = _resolve_target_tenant(request, admin_id)
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=target_tenant_id,
+        admin_id=target_tenant_id,
         action=ACTION_RETENTION_ENFORCE,
         resource_type=RESOURCE_RETENTION_POLICY,
         resource_pk=None,
@@ -417,7 +417,7 @@ def enforce_policies(
         before=None,
         after={
             "scope": "tenant" if target_tenant_id else "all_tenants",
-            "tenant_id": target_tenant_id,
+            "admin_id": target_tenant_id,
         },
         note="step-29y-c1-retention-enforce",
         autocommit=False,
@@ -426,13 +426,13 @@ def enforce_policies(
     service = _get_retention_service(db)
     if target_tenant_id:
         results = service.enforce_for_tenant(
-            tenant_id=target_tenant_id,
+            admin_id=target_tenant_id,
             triggered_by="admin",
         )
     else:
         # Platform-admin "all tenants" path. Only reachable when
         # is_platform=True (non-platform callers were forced to a
-        # specific tenant_id by _resolve_target_tenant above).
+        # specific admin_id by _resolve_target_tenant above).
         results = service.enforce_all_policies(triggered_by="admin")
 
     if db.in_transaction():
@@ -457,19 +457,19 @@ def manual_purge(
     needs an explicit reason and target. Non-platform callers may only
     purge their own tenant's data.
     """
-    effective_tenant_id = _resolve_target_tenant(request, payload.tenant_id)
+    effective_tenant_id = _resolve_target_tenant(request, payload.admin_id)
     if effective_tenant_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": "tenant_id_required",
-                "message": "Manual purge requires tenant_id.",
+                "message": "Manual purge requires admin_id.",
             },
         )
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         action=ACTION_RETENTION_MANUAL_PURGE,
         resource_type=RESOURCE_RETENTION_POLICY,
         resource_pk=None,
@@ -478,7 +478,7 @@ def manual_purge(
         ),
         before=None,
         after={
-            "tenant_id": effective_tenant_id,
+            "admin_id": effective_tenant_id,
             "data_category": payload.data_category,
             "reason": payload.reason,
         },
@@ -490,7 +490,7 @@ def manual_purge(
     try:
         result = service.manual_purge(
             data_category=payload.data_category,
-            tenant_id=effective_tenant_id,
+            admin_id=effective_tenant_id,
             reason=payload.reason,
             triggered_by="admin",
         )

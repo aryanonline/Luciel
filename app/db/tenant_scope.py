@@ -50,8 +50,8 @@ Usage in a Celery task
 ======================
 
     @celery_app.task
-    def extract_memories(task_id, tenant_id, session_id, ..., luciel_instance_id):
-        with bind_tenant_scope(admin_id=tenant_id, instance_id=luciel_instance_id):
+    def extract_memories(task_id, admin_id, session_id, ..., luciel_instance_id):
+        with bind_tenant_scope(admin_id=admin_id, instance_id=luciel_instance_id):
             db = SessionLocal()
             try:
                 # ... do work; all SELECTs/INSERTs on this session

@@ -182,7 +182,7 @@ def test_agent_scoped_key_with_user_id_binds_actor_user_id() -> None:
 
     fake_apikey = SimpleNamespace(
         id=42,
-        tenant_id="t-test",
+        admin_id="t-test",
         domain_id="d-test",
         agent_id="a-test",
         permissions=["chat", "sessions"],
@@ -218,7 +218,7 @@ def test_agent_with_null_user_id_yields_none_actor_user_id() -> None:
     correctly produce actor_user_id=None -- NOT a bug, just deferred."""
     _require_behavioral()
     fake_apikey = SimpleNamespace(
-        id=43, tenant_id="t-test", domain_id="d-test", agent_id="a-test",
+        id=43, admin_id="t-test", domain_id="d-test", agent_id="a-test",
         permissions=["chat"], key_prefix="luc_sk_fakepfx",
         created_by="test-actor", luciel_instance_id=None,
     )
@@ -248,7 +248,7 @@ def test_tenant_admin_key_yields_none_actor_user_id() -> None:
     NOT trigger the agent lookup at all -- actor_user_id stays None."""
     _require_behavioral()
     fake_apikey = SimpleNamespace(
-        id=44, tenant_id="t-test", domain_id=None, agent_id=None,
+        id=44, admin_id="t-test", domain_id=None, agent_id=None,
         permissions=["admin"], key_prefix="luc_sk_adminpfx",
         created_by="test-actor", luciel_instance_id=None,
     )
@@ -266,7 +266,7 @@ def test_tenant_admin_key_yields_none_actor_user_id() -> None:
     assert state is not None
     assert state.actor_user_id is None
     # The repo must NOT have been instantiated -- this proves the
-    # tenant_id/domain_id/agent_id triple-non-null guard is working.
+    # admin_id/domain_id/agent_id triple-non-null guard is working.
     agent_repo_cls.assert_not_called()
 
 
@@ -276,7 +276,7 @@ def test_orphan_apikey_missing_agent_yields_none_actor_user_id() -> None:
     Must log a warning AND leave actor_user_id=None -- never crash."""
     _require_behavioral()
     fake_apikey = SimpleNamespace(
-        id=45, tenant_id="t-test", domain_id="d-test", agent_id="a-orphan",
+        id=45, admin_id="t-test", domain_id="d-test", agent_id="a-orphan",
         permissions=["chat"], key_prefix="luc_sk_orphpfx",
         created_by="test-actor", luciel_instance_id=None,
     )

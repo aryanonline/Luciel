@@ -1,11 +1,11 @@
 """Arc 9 C5.3 tests -- MessageModel + SessionRepository.add_message
-populate tenant_id and luciel_instance_id from parent session.
+populate admin_id and luciel_instance_id from parent session.
 
 GUARDS:
-    1. MessageModel has tenant_id (String 100, NOT NULL) column
+    1. MessageModel has admin_id (String 100, NOT NULL) column
     2. MessageModel has luciel_instance_id (Integer, nullable) column
     3. SessionRepository.add_message fetches parent session
-    4. add_message copies tenant_id from parent
+    4. add_message copies admin_id from parent
     5. add_message copies luciel_instance_id from parent
     6. add_message raises ValueError if session not found in scope
     7. The model imports cleanly (no SQLAlchemy mapper errors)
@@ -40,7 +40,7 @@ class TestMessageModelShape(unittest.TestCase):
 
     def test_tenant_id_column_declared(self):
         # Required for Wall-1 RLS (messages_tenant_isolation).
-        self.assertIn("tenant_id: Mapped[str]", self.text)
+        self.assertIn("admin_id: Mapped[str]", self.text)
         self.assertIn("String(100)", self.text)
         # NOT NULL -- this is the post-C5.0a Phase 3 contract.
         self.assertIn("nullable=False", self.text)
@@ -83,10 +83,10 @@ class TestSessionRepositoryAddMessage(unittest.TestCase):
         self.assertIn("Refusing to insert orphan message", self.text)
 
     def test_add_message_copies_tenant_id_from_parent(self):
-        # tenant_id MUST come from parent.tenant_id (NOT NULL, no
+        # admin_id MUST come from parent.admin_id (NOT NULL, no
         # alternative source allowed -- the only authority is the
         # session row).
-        self.assertIn("tenant_id=parent.tenant_id", self.text)
+        self.assertIn("admin_id=parent.admin_id", self.text)
 
     def test_add_message_copies_instance_id_from_parent(self):
         # luciel_instance_id MUST come from parent.luciel_instance_id
@@ -123,7 +123,7 @@ class TestMessageModelImportable(unittest.TestCase):
         # SQLAlchemy registers mapped columns on the class. Verify
         # the new ones are present in __table__.columns.
         col_names = {c.name for c in cls.__table__.columns}
-        self.assertIn("tenant_id", col_names)
+        self.assertIn("admin_id", col_names)
         self.assertIn("luciel_instance_id", col_names)
         self.assertIn("session_id", col_names)
         self.assertIn("role", col_names)
@@ -131,8 +131,8 @@ class TestMessageModelImportable(unittest.TestCase):
 
     def test_tenant_id_column_is_not_nullable(self):
         import app.models.message as msg_mod
-        col = msg_mod.MessageModel.__table__.columns["tenant_id"]
-        self.assertFalse(col.nullable, "tenant_id must be NOT NULL")
+        col = msg_mod.MessageModel.__table__.columns["admin_id"]
+        self.assertFalse(col.nullable, "admin_id must be NOT NULL")
 
     def test_luciel_instance_id_column_is_nullable(self):
         import app.models.message as msg_mod

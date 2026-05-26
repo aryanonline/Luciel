@@ -29,7 +29,7 @@ explicitly -- which forces the implementer to think about RLS coverage.
 DOCUMENTED VARIATIONS
 =====================
 Three Wall-1 tables deliberately deviate from the canonical
-``tenant_id = current_setting('app.admin_id', true)`` shape. The suite
+``admin_id = current_setting('app.admin_id', true)`` shape. The suite
 recognises each variation explicitly:
 
     1. api_keys (C3.4) -- auth-perimeter table. USING = true
@@ -39,7 +39,7 @@ recognises each variation explicitly:
        there is exactly one policy on the table and it predates the
        prefix convention.
     2. admin_widget_domains (C3.5e) -- Wall column is ``admin_id``
-       (FK -> admins.id), not ``tenant_id``. Strict shape; same GUC.
+       (FK -> admins.id), not ``admin_id``. Strict shape; same GUC.
     3. instances (C3.5d) -- DB table is ``instances`` (model class is
        ``LucielInstance``). Wall column is ``admin_id``.
 
@@ -82,12 +82,12 @@ VERSIONS_DIR = (
 @dataclass(frozen=True)
 class Wall1Entry:
     """One Wall-1 table entry. Most tables follow the canonical shape
-    (tenant_id column, table-prefixed policy name). The handful that
+    (admin_id column, table-prefixed policy name). The handful that
     deviate carry per-field overrides plus a docstring rationale.
     """
     db_table: str                  # the actual table name in PG
     revision: str                  # alembic revision id
-    wall_column: str = "tenant_id"  # which column carries the tenant
+    wall_column: str = "admin_id"  # which column carries the tenant
     policy_name: str | None = None  # default: f"{db_table}_tenant_isolation"
     auth_perimeter: bool = False   # api_keys-style permissive USING
     rationale: str = ""            # required for any non-default field
@@ -144,7 +144,7 @@ WALL_1_ENTRIES: list[Wall1Entry] = [
         rationale=(
             "DB table name is ``instances`` (the model class is "
             "LucielInstance). Wall column is ``admin_id`` (FK -> "
-            "admins.id), not ``tenant_id``. Strict shape; same "
+            "admins.id), not ``admin_id``. Strict shape; same "
             "app.admin_id GUC."
         ),
     ),
@@ -154,7 +154,7 @@ WALL_1_ENTRIES: list[Wall1Entry] = [
         wall_column="admin_id",
         rationale=(
             "Wall column is ``admin_id`` (FK -> admins.id), not "
-            "``tenant_id``. Strict shape; same app.admin_id GUC."
+            "``admin_id``. Strict shape; same app.admin_id GUC."
         ),
     ),
     Wall1Entry("retention_policies", "arc9_c3_6a_rls_retention_policies"),
@@ -224,7 +224,7 @@ class TestWall1CoverageInventory(unittest.TestCase):
         to read why before editing."""
         for e in WALL_1_ENTRIES:
             deviates = (
-                e.wall_column != "tenant_id"
+                e.wall_column != "admin_id"
                 or e.policy_name is not None
                 or e.auth_perimeter
             )
@@ -250,8 +250,8 @@ class TestWall1PolicyShape(unittest.TestCase):
         CREATE POLICY tenant_isolation
           USING (true)
           WITH CHECK (
-            (tenant_id IS NULL AND current_setting('app.admin_id', true) = 'platform')
-            OR tenant_id = current_setting('app.admin_id', true)
+            (admin_id IS NULL AND current_setting('app.admin_id', true) = 'platform')
+            OR admin_id = current_setting('app.admin_id', true)
           )
     """
 
@@ -313,13 +313,13 @@ class TestWall1PolicyShape(unittest.TestCase):
             f"{table}: auth-perimeter USING is not `using (true)`",
         )
 
-        # WITH CHECK references the 'platform' sentinel and tenant_id
+        # WITH CHECK references the 'platform' sentinel and admin_id
         # equality. Both branches required.
         self.assertIn(
-            "tenant_id is null",
+            "admin_id is null",
             body,
             f"{table}: auth-perimeter WITH CHECK is missing the "
-            "NULL-tenant_id branch (platform sentinel)",
+            "NULL-admin_id branch (platform sentinel)",
         )
         self.assertIn(
             "= 'platform'",
@@ -328,10 +328,10 @@ class TestWall1PolicyShape(unittest.TestCase):
             "'platform' sentinel value",
         )
         self.assertIn(
-            "tenant_id = current_setting('app.admin_id', true)",
+            "admin_id = current_setting('app.admin_id', true)",
             body,
             f"{table}: auth-perimeter WITH CHECK is missing the "
-            "non-null tenant_id equality branch",
+            "non-null admin_id equality branch",
         )
 
     def _dispatch(self, e: Wall1Entry) -> None:
@@ -604,22 +604,22 @@ class TestWall4MessagesPosture(unittest.TestCase):
 
     def test_message_model_has_tenant_id_not_null(self):
         body = self._read(self.MODEL_FILE)
-        self.assertIn("tenant_id", body, "MessageModel missing tenant_id")
+        self.assertIn("admin_id", body, "MessageModel missing admin_id")
         has_explicit_not_null = (
             re.search(
-                r"tenant_id[^\n]*nullable\s*=\s*false",
+                r"admin_id[^\n]*nullable\s*=\s*false",
                 body.lower(),
             ) is not None
         )
         has_typed_not_null = (
             re.search(
-                r"tenant_id\s*:\s*Mapped\[\s*str\s*\]",
+                r"admin_id\s*:\s*Mapped\[\s*str\s*\]",
                 body,
             ) is not None
         )
         self.assertTrue(
             has_explicit_not_null or has_typed_not_null,
-            "MessageModel.tenant_id must be NOT NULL.",
+            "MessageModel.admin_id must be NOT NULL.",
         )
 
     def test_message_model_luciel_instance_id_nullable(self):
@@ -649,8 +649,8 @@ class TestWall4MessagesPosture(unittest.TestCase):
     def test_add_message_inherits_parent_scope(self):
         body = self._read(self.REPO_FILE)
         self.assertRegex(
-            body, r"\.tenant_id",
-            "add_message must read tenant_id off the parent session.",
+            body, r"\.admin_id",
+            "add_message must read admin_id off the parent session.",
         )
         self.assertRegex(
             body, r"\.luciel_instance_id",
@@ -663,7 +663,7 @@ class TestWall4MessagesPosture(unittest.TestCase):
 # =====================================================================
 class TestGUCNamingDiscipline(unittest.TestCase):
     """Every Wall-1 policy MUST use app.admin_id. Every Wall-3 policy
-    MUST use app.instance_id. Drift onto e.g. 'app.tenant_id' would
+    MUST use app.instance_id. Drift onto e.g. 'app.admin_id' would
     silently disconnect the policy from the C2/C4.1 listener (which
     only sets app.admin_id + app.instance_id) -- the policy would
     always see empty GUC and behave wrongly."""

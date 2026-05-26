@@ -16,7 +16,7 @@ project-wide repository doctrine established by UserRepository and
 * All mutations run under `autocommit=False` by default so the service
   layer can compose them into a single txn that includes the audit row.
 * Case-insensitive email lookup goes through `func.lower()` to ride
-  the partial-unique index on (tenant_id, LOWER(invited_email))
+  the partial-unique index on (admin_id, LOWER(invited_email))
   WHERE status='pending'.
 
 Domain-agnostic: no imports from app/domain/, no vertical branching.
@@ -58,7 +58,7 @@ class UserInviteRepository:
     def create(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         inviter_user_id: uuid.UUID,
         invited_email: str,
@@ -69,7 +69,7 @@ class UserInviteRepository:
     ) -> UserInvite:
         """Insert a new pending UserInvite row.
 
-        The partial unique index on (tenant_id, LOWER(invited_email))
+        The partial unique index on (admin_id, LOWER(invited_email))
         WHERE status='pending' enforces the no-duplicate-pending invariant
         at the schema layer. Caller (InviteService) is expected to
         translate IntegrityError into a 409 at the route layer.
@@ -82,7 +82,7 @@ class UserInviteRepository:
             expires_at = datetime.now(timezone.utc) + INVITE_ROW_TTL
 
         invite = UserInvite(
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             inviter_user_id=inviter_user_id,
             invited_email=invited_email.strip(),
@@ -101,7 +101,7 @@ class UserInviteRepository:
         logger.info(
             "UserInvite created id=%s tenant=%s email=%s role=%s expires_at=%s",
             invite.id,
-            tenant_id,
+            admin_id,
             invited_email,
             role,
             expires_at.isoformat(),
@@ -134,12 +134,12 @@ class UserInviteRepository:
     def get_pending_for_email(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         invited_email: str,
     ) -> UserInvite | None:
         """Case-insensitive lookup of the pending invite for (tenant, email).
 
-        Rides the partial unique index on (tenant_id, LOWER(invited_email))
+        Rides the partial unique index on (admin_id, LOWER(invited_email))
         WHERE status='pending'. Returns at most one row by construction.
         Used by InviteService.create_invite as the pre-flight duplicate
         guard so we surface a clean 409 before the INSERT race.
@@ -149,7 +149,7 @@ class UserInviteRepository:
         return (
             self.db.query(UserInvite)
             .filter(
-                UserInvite.tenant_id == tenant_id,
+                UserInvite.admin_id == admin_id,
                 func.lower(UserInvite.invited_email)
                 == invited_email.strip().lower(),
                 UserInvite.status == InviteStatus.PENDING,
@@ -160,7 +160,7 @@ class UserInviteRepository:
     def list_for_tenant(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         statuses: tuple[InviteStatus, ...] | None = None,
     ) -> list[UserInvite]:
         """List invites under a tenant, optionally filtered by status.
@@ -173,13 +173,13 @@ class UserInviteRepository:
         invites appear first in the admin list (matches the
         ScopeAssignment + Agent list endpoints' conventions).
         """
-        query = select(UserInvite).where(UserInvite.tenant_id == tenant_id)
+        query = select(UserInvite).where(UserInvite.admin_id == admin_id)
         if statuses:
             query = query.where(UserInvite.status.in_(statuses))
         query = query.order_by(UserInvite.created_at.desc())
         return list(self.db.execute(query).scalars().all())
 
-    def count_pending_for_tenant(self, *, tenant_id: str) -> int:
+    def count_pending_for_tenant(self, *, admin_id: str) -> int:
         """Count still-pending invites under a tenant.
 
         Used by InviteService.create_invite to enforce the per-tier
@@ -189,7 +189,7 @@ class UserInviteRepository:
         return (
             self.db.query(func.count(UserInvite.id))
             .filter(
-                UserInvite.tenant_id == tenant_id,
+                UserInvite.admin_id == admin_id,
                 UserInvite.status == InviteStatus.PENDING,
             )
             .scalar()

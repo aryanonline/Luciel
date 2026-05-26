@@ -183,26 +183,7 @@ class IdentityClaim(Base):
     )
 
     # Scope this claim was issued under. Same shape as everywhere else:
-    # tenant_id String(100) with FK to tenant_configs.tenant_id RESTRICT;
-    # domain_id String(100) without FK (composite natural key in
-    # domain_configs validated at service layer). Mirrors
-    # scope_assignments File 1.2 convention.
-    # Arc 5 Revision C: FK re-pointed from tenant_configs.tenant_id to
-    # admins.id. Column name kept for call-site compatibility.
-    tenant_id: Mapped[str] = mapped_column(
-        String(100),
-        ForeignKey(
-            "admins.id",
-            ondelete="RESTRICT",
-            name="fk_identity_claims_tenant_id_admins",
-        ),
-        nullable=False,
-        index=True,
-    )
 
-
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -278,7 +259,7 @@ class IdentityClaim(Base):
         UniqueConstraint(
             "claim_type",
             "claim_value",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             name="uq_identity_claims_type_value_scope",
         ),
@@ -289,7 +270,7 @@ class IdentityClaim(Base):
         # never scans inactive claims.
         Index(
             "ix_identity_claims_active_resolver",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "claim_type",
             "claim_value",
@@ -302,7 +283,7 @@ class IdentityClaim(Base):
         Index(
             "ix_identity_claims_user_tenant_domain_active",
             "user_id",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             postgresql_where=text("active = true"),
         ),
@@ -320,7 +301,7 @@ class IdentityClaim(Base):
         return (
             f"<IdentityClaim id={self.id} user_id={self.user_id} "
             f"type={self.claim_type.value} "
-            f"scope=({self.tenant_id!r},{self.domain_id!r}) "
+            f"scope=({self.admin_id!r},{self.domain_id!r}) "
             f"adapter={self.issuing_adapter!r} "
             f"verified={self.verified_at is not None} "
             f"active={self.active}>"

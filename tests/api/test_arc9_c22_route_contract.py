@@ -190,11 +190,11 @@ class TestIdentitySnapshotZeroState:
         from app.identity.bootstrap import IdentitySnapshot
         from app.models.scope_assignment import ScopeAssignment
         # ScopeAssignment can be constructed without a session; we
-        # only need the role/tenant_id attributes for has_scope.
+        # only need the role/admin_id attributes for has_scope.
         sa = ScopeAssignment(
             id=uuid.uuid4(),
             user_id=uuid.uuid4(),
-            tenant_id="free-abc",
+            admin_id="free-abc",
             role="owner",
             active=True,
         )
@@ -211,11 +211,11 @@ class TestIdentitySnapshotZeroState:
         from app.models.scope_assignment import ScopeAssignment
         u = uuid.uuid4()
         owner = ScopeAssignment(
-            id=uuid.uuid4(), user_id=u, tenant_id="t1",
+            id=uuid.uuid4(), user_id=u, admin_id="t1",
             role="owner", active=True,
         )
         member = ScopeAssignment(
-            id=uuid.uuid4(), user_id=u, tenant_id="t1",
+            id=uuid.uuid4(), user_id=u, admin_id="t1",
             role="member", active=True,
         )
         snap = IdentitySnapshot(

@@ -612,17 +612,7 @@ class AdminAuditLog(Base, TimestampMixin):
     # WHERE — scope the action happened in
     # -----------------------------------------------------------------
 
-    # tenant_id is always set. System actions with no tenant (unusual)
-    # use the literal string 'platform' to preserve the NOT NULL
-    # invariant and make 'WHERE tenant_id = :x' queries cheap.
-    tenant_id: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-        index=True,
-    )
 
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -737,7 +727,7 @@ class AdminAuditLog(Base, TimestampMixin):
         # tenant X in time range Y" for a tenant audit dashboard.
         Index(
             "ix_admin_audit_logs_tenant_time",
-            "tenant_id",
+            "admin_id",
             "created_at",
         ),
         # "Show me everything this actor has done" — key prefix + time.
@@ -759,6 +749,6 @@ class AdminAuditLog(Base, TimestampMixin):
     def __repr__(self) -> str:  # pragma: no cover - debug aid only
         return (
             f"<AdminAuditLog id={self.id} actor={self.actor_key_prefix} "
-            f"tenant={self.tenant_id} {self.action}:{self.resource_type} "
+            f"tenant={self.admin_id} {self.action}:{self.resource_type} "
             f"pk={self.resource_pk}>"
         )

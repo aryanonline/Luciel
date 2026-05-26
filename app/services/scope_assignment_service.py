@@ -128,7 +128,7 @@ class ScopeAssignmentService:
         Pre-flight checks:
         - User exists and is active. Inactive Users cannot acquire
           new assignments -- raise AssignmentUserInactiveError.
-        - tenant_id and domain_id are caller-validated at the route
+        - admin_id and domain_id are caller-validated at the route
           layer via ScopePolicy (this service does not re-validate
           tenant/domain existence; that's the route handler's job).
 
@@ -154,7 +154,7 @@ class ScopeAssignmentService:
 
         return sa_repo.create(
             user_id=user_id,
-            tenant_id=payload.tenant_id,
+            admin_id=payload.admin_id,
             domain_id=payload.domain_id,
             role=payload.role,
             started_at=payload.started_at,
@@ -187,12 +187,12 @@ class ScopeAssignmentService:
 
     def list_for_tenant(
         self,
-        tenant_id: str,
+        admin_id: str,
         *,
         active_only: bool = False,
     ) -> list[ScopeAssignment]:
         return ScopeAssignmentRepository(self.db).list_for_tenant(
-            tenant_id,
+            admin_id,
             active_only=active_only,
         )
     # ---------------------------------------------------------------
@@ -304,7 +304,7 @@ class ScopeAssignmentService:
             "keys_rotated=%d",
             assignment_id,
             assignment.user_id,
-            assignment.tenant_id,
+            assignment.admin_id,
             reason.value,
             len(target_agents),
             total_rotated,
@@ -381,7 +381,7 @@ class ScopeAssignmentService:
 
         created = sa_repo.create(
             user_id=new_user_id,
-            tenant_id=new_payload.tenant_id,
+            admin_id=new_payload.admin_id,
             domain_id=new_payload.domain_id,
             role=new_payload.role,
             started_at=new_payload.started_at,

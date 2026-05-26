@@ -36,7 +36,7 @@ from app.models.scope_assignment import EndReason
 # for human-readable role labels.
 _ROLE_PATTERN = r"^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$"
 
-# tenant_id / domain_id reuse the existing slug pattern from elsewhere
+# admin_id / domain_id reuse the existing slug pattern from elsewhere
 # in the codebase. NOT normalized in the schema -- service layer asserts
 # existence against the live tables (so a typo produces a 404, not a
 # silent slug rewrite that masks the error).
@@ -50,14 +50,14 @@ _SLUG_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 class ScopeAssignmentCreate(BaseModel):
     """Payload for POST /api/v1/users/{user_id}/scope-assignments.
 
-    Caller's API key must have admin scope at-or-above (tenant_id, domain_id)
+    Caller's API key must have admin scope at-or-above (admin_id, domain_id)
     per Invariant 5 -- enforced at the service layer, not here.
 
     user_id is taken from the URL path, not the body. started_at defaults
     to server now() if omitted (matches the column server_default).
     """
 
-    tenant_id: str = Field(
+    admin_id: str = Field(
         ...,
         min_length=2,
         max_length=100,
@@ -70,7 +70,7 @@ class ScopeAssignmentCreate(BaseModel):
         max_length=100,
         pattern=_SLUG_PATTERN,
         description="Domain scope. Must exist and be active under the given "
-                    "tenant_id (validated at the service layer, no composite FK).",
+                    "admin_id (validated at the service layer, no composite FK).",
     )
     role: str = Field(
         ...,
@@ -158,7 +158,7 @@ class ScopeAssignmentRead(BaseModel):
 
     id: uuid.UUID
     user_id: uuid.UUID
-    tenant_id: str
+    admin_id: str
     domain_id: str
     role: str
     started_at: datetime
@@ -188,7 +188,7 @@ class ScopeAssignmentSummary(BaseModel):
 
     id: uuid.UUID
     user_id: uuid.UUID
-    tenant_id: str
+    admin_id: str
     domain_id: str
     role: str
     started_at: datetime

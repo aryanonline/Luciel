@@ -17,7 +17,7 @@ NON-superuser ``luciel_app`` role the prod backend connects as:
        still running).
     2. SELECT with a bogus / unknown ``app.admin_id`` (random uuid that
        owns nothing) also returns 0 rows -- proving the policy evaluator
-       actually compares tenant_id against the GUC, not just no-ops.
+       actually compares admin_id against the GUC, not just no-ops.
     3. Whichever path the request takes (success, exception, identity
        bootstrap zero-state), we never accidentally serve cross-tenant
        data.
@@ -248,7 +248,7 @@ class TestArc9WS4bRlsFuzz(unittest.TestCase):
         )
 
     def test_bogus_guc_also_returns_zero_rows(self):
-        """RLS must compare tenant_id against the GUC, not no-op.
+        """RLS must compare admin_id against the GUC, not no-op.
 
         With ``app.admin_id`` set to a random uuid that owns nothing,
         every FORCE-RLS table MUST return 0 rows. This rules out a
@@ -275,7 +275,7 @@ class TestArc9WS4bRlsFuzz(unittest.TestCase):
             leaks,
             f"RLS LEAK: tables returned rows for a bogus admin_id "
             f"({bogus!r}): {leaks}. Policy is not actually filtering "
-            f"on tenant_id.",
+            f"on admin_id.",
         )
 
     def test_admin_role_sanity_some_tables_have_data(self):

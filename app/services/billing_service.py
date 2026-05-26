@@ -650,7 +650,7 @@ class BillingService:
                 f"{{{TIER_FREE!r}, {TIER_PRO!r}}}."
             )
 
-        sub = self.get_active_subscription_for_tenant(tenant_id=admin_id)
+        sub = self.get_active_subscription_for_tenant(admin_id=admin_id)
         if sub is None:
             # Free admins have no Subscription row by design. A
             # downgrade request from a Free admin would be a route-
@@ -690,7 +690,7 @@ class BillingService:
         # and what date did the buyer see?" from the audit row alone.
         AdminAuditRepository(self.db).record(
             ctx=audit_ctx,
-            tenant_id=admin_id,
+            admin_id=admin_id,
             action=ACTION_SUBSCRIPTION_DOWNGRADE_SCHEDULED,
             resource_type=RESOURCE_SUBSCRIPTION,
             resource_natural_id=sub.stripe_subscription_id,
@@ -780,10 +780,10 @@ class BillingService:
         )
         return self.db.execute(stmt).scalars().first()
 
-    def get_active_subscription_for_tenant(self, *, tenant_id: str) -> Subscription | None:
+    def get_active_subscription_for_tenant(self, *, admin_id: str) -> Subscription | None:
         stmt = (
             select(Subscription)
-            .where(Subscription.tenant_id == tenant_id, Subscription.active.is_(True))
+            .where(Subscription.admin_id == admin_id, Subscription.active.is_(True))
             .order_by(Subscription.created_at.desc())
             .limit(1)
         )
@@ -974,7 +974,7 @@ class BillingService:
         audit_repo = AdminAuditRepository(self.db)
         audit_repo.record(
             ctx=ctx,
-            tenant_id=sub.tenant_id,
+            admin_id=sub.admin_id,
             action=ACTION_SUBSCRIPTION_PILOT_REFUNDED,
             resource_type=RESOURCE_SUBSCRIPTION,
             resource_pk=sub.id,
@@ -1003,7 +1003,7 @@ class BillingService:
             agent_repo = AgentRepository(self.db)
             luciel_service = InstanceService(self.db, admin_service=admin)
             admin.deactivate_tenant_with_cascade(
-                sub.tenant_id,
+                sub.admin_id,
                 audit_ctx=ctx,
                 luciel_instance_service=luciel_service,
                 agent_repo=agent_repo,
@@ -1014,7 +1014,7 @@ class BillingService:
             self.db.rollback()
             logger.exception(
                 "billing: pilot-refund cascade failed tenant=%s sub=%s",
-                sub.tenant_id, sub.stripe_subscription_id,
+                sub.admin_id, sub.stripe_subscription_id,
             )
             raise
 
@@ -1052,7 +1052,7 @@ class BillingService:
                 followup_repo = AdminAuditRepository(self.db)
                 followup_repo.record(
                     ctx=ctx,
-                    tenant_id=sub.tenant_id,
+                    admin_id=sub.admin_id,
                     action=ACTION_PILOT_REFUND_EMAIL_SEND_FAILED,
                     resource_type=RESOURCE_SUBSCRIPTION,
                     resource_pk=sub.id,
@@ -1095,7 +1095,7 @@ class BillingService:
         logger.info(
             "billing: pilot-refund completed user_id=%s sub=%s tenant=%s "
             "refund=%s charge=%s amount_cents=%s",
-            user.id, sub.id, sub.tenant_id, refund_id, charge_id,
+            user.id, sub.id, sub.admin_id, refund_id, charge_id,
             self._PILOT_REFUND_AMOUNT_CENTS,
         )
         return {
@@ -1103,6 +1103,6 @@ class BillingService:
             "charge_id": charge_id,
             "refunded_amount_cents": self._PILOT_REFUND_AMOUNT_CENTS,
             "currency": self._PILOT_REFUND_CURRENCY,
-            "tenant_id": sub.tenant_id,
+            "admin_id": sub.admin_id,
             "deactivated_at": now,
         }

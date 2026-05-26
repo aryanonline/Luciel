@@ -329,7 +329,7 @@ def test_memory_item_forensic_projection_excludes_content() -> None:
     fields = _annotated_field_names(cls)
     assert "content" not in fields, (
         "MemoryItemForensic must NOT expose memory content. The harness "
-        "only reads metadata (id, message_id, tenant_id) for idempotency "
+        "only reads metadata (id, message_id, admin_id) for idempotency "
         "and cross-tenant leak probes; surfacing content over the "
         "platform_admin HTTP boundary would defeat the strict-projection "
         "rationale of this module."

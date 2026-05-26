@@ -4,8 +4,8 @@ Step 29.y Cluster 1 (G-4 resolution)
 ====================================
 
 Pre-29.y, the four session routes had no rate limit and the POST route
-trusted ``payload.tenant_id`` whenever the API key had no tenant binding
-of its own. The auth middleware enforces ``tenant_id NOT NULL`` on every
+trusted ``payload.admin_id`` whenever the API key had no tenant binding
+of its own. The auth middleware enforces ``admin_id NOT NULL`` on every
 key in steady state, but findings_phase1f F-7 noted there is no FK
 backing that constraint, so a hand-edited orphaned key could land a
 session under an arbitrary tenant. There was also no audit row for
@@ -20,10 +20,10 @@ Hardened contract:
      the chat client polls, plus ``ADMIN_RATE_LIMIT`` for the list route.
   2. POST ``/sessions``:
        * If the API key has a tenant binding, it wins. Body-supplied
-         ``tenant_id`` is ignored unless the caller is platform_admin
+         ``admin_id`` is ignored unless the caller is platform_admin
          AND it differs (in which case audit is required).
        * If the API key has NO tenant binding, the caller MUST be
-         platform_admin AND MUST supply a tenant_id in the body. Any
+         platform_admin AND MUST supply a admin_id in the body. Any
          non-platform key without a tenant binding is rejected (it
          shouldn't be possible per F-7, but defense in depth).
        * Privileged cross-tenant creation (platform_admin acting on a
@@ -68,18 +68,18 @@ router = APIRouter(tags=["sessions"])
 def _resolve_session_tenant(
     request: Request, payload_tenant_id: str | None
 ) -> tuple[str, bool]:
-    """Resolve the session's effective tenant_id and report cross-tenant flag.
+    """Resolve the session's effective admin_id and report cross-tenant flag.
 
     Returns ``(effective_tenant_id, is_cross_tenant)``. The ``is_cross_tenant``
     flag is True only when a platform_admin caller is acting on a tenant
     other than their own key binding (or has no key binding at all). The
     POST route uses the flag to decide whether an audit row is required.
     """
-    key_tenant_id = getattr(request.state, "tenant_id", None)
+    key_tenant_id = getattr(request.state, "admin_id", None)
     is_platform = ScopePolicy.is_platform_admin(request)
 
     if key_tenant_id is not None:
-        # Key is tenant-scoped. Body tenant_id is advisory; reject any
+        # Key is tenant-scoped. Body admin_id is advisory; reject any
         # mismatch unless the caller is platform_admin acting cross-tenant.
         if (
             payload_tenant_id is not None
@@ -91,7 +91,7 @@ def _resolve_session_tenant(
                     detail={
                         "code": "cross_tenant_denied",
                         "message": (
-                            "tenant_id in payload does not match the "
+                            "admin_id in payload does not match the "
                             "calling API key's tenant scope."
                         ),
                     },
@@ -118,7 +118,7 @@ def _resolve_session_tenant(
                 "code": "tenant_id_required",
                 "message": (
                     "Platform-admin session creation requires "
-                    "tenant_id in the request body."
+                    "admin_id in the request body."
                 ),
             },
         )
@@ -143,9 +143,9 @@ def create_session(
 ) -> SessionRead:
     """Create a new session.
 
-    tenant_id, domain_id, and agent_id come from the API key for
+    admin_id, domain_id, and agent_id come from the API key for
     tenant-scoped callers. Platform-admin keys may target a different
-    tenant by passing tenant_id in the body, but every cross-tenant
+    tenant by passing admin_id in the body, but every cross-tenant
     creation writes an ACTION_SESSION_CREATE_CROSS_TENANT audit row
     first.
     """
@@ -153,7 +153,7 @@ def create_session(
     key_agent_id = getattr(request.state, "agent_id", None)
 
     effective_tenant_id, is_cross_tenant = _resolve_session_tenant(
-        request, payload.tenant_id
+        request, payload.admin_id
     )
 
     domain_id = key_domain_id or payload.domain_id
@@ -184,10 +184,10 @@ def create_session(
     # NOT audit -- only the platform_admin override does, because that
     # is the only operationally privileged path.
     if is_cross_tenant:
-        key_tenant_id = getattr(request.state, "tenant_id", None)
+        key_tenant_id = getattr(request.state, "admin_id", None)
         audit_repo.record(
             ctx=audit_ctx,
-            tenant_id=effective_tenant_id,
+            admin_id=effective_tenant_id,
             action=ACTION_SESSION_CREATE_CROSS_TENANT,
             resource_type=RESOURCE_SESSION,
             resource_pk=None,  # Not yet created.
@@ -228,7 +228,7 @@ def create_session(
             },
         )
     session = service.create_session(
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         domain_id=domain_id,
         agent_id=agent_id,
         user_id=payload.user_id,
@@ -245,7 +245,7 @@ def create_session(
 def list_sessions(
     request: Request,
     service: Annotated[SessionService, Depends(get_session_service)],
-    tenant_id: str | None = Query(default=None),
+    admin_id: str | None = Query(default=None),
     user_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[SessionRead]:
@@ -256,13 +256,13 @@ def list_sessions(
     are silently downgraded to the caller's own tenant (matches the
     same convention used in audit_log.py:list_audit_log).
     """
-    key_tenant_id = getattr(request.state, "tenant_id", None)
+    key_tenant_id = getattr(request.state, "admin_id", None)
     if ScopePolicy.is_platform_admin(request):
-        effective_tenant_id = tenant_id or key_tenant_id
+        effective_tenant_id = admin_id or key_tenant_id
     else:
         effective_tenant_id = key_tenant_id
     sessions = service.list_sessions(
-        tenant_id=effective_tenant_id, user_id=user_id, limit=limit,
+        admin_id=effective_tenant_id, user_id=user_id, limit=limit,
     )
     return [SessionRead.model_validate(item) for item in sessions]
 
@@ -279,7 +279,7 @@ def get_session(
     Returns 404 (not 403) on cross-tenant access so a tenant-A holder
     cannot probe for the existence of a tenant-B session_id.
     """
-    key_tenant_id = getattr(request.state, "tenant_id", None)
+    key_tenant_id = getattr(request.state, "admin_id", None)
     is_platform = ScopePolicy.is_platform_admin(request)
     session = service.get_session(session_id)
     if session is None:
@@ -290,7 +290,7 @@ def get_session(
     if (
         not is_platform
         and key_tenant_id is not None
-        and session.tenant_id != key_tenant_id
+        and session.admin_id != key_tenant_id
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -307,7 +307,7 @@ def list_messages(
     service: Annotated[SessionService, Depends(get_session_service)],
 ) -> list[MessageRead]:
     """Read messages for one session, scoped to the caller's tenant."""
-    key_tenant_id = getattr(request.state, "tenant_id", None)
+    key_tenant_id = getattr(request.state, "admin_id", None)
     is_platform = ScopePolicy.is_platform_admin(request)
     session = service.get_session(session_id)
     if session is None:
@@ -318,7 +318,7 @@ def list_messages(
     if (
         not is_platform
         and key_tenant_id is not None
-        and session.tenant_id != key_tenant_id
+        and session.admin_id != key_tenant_id
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

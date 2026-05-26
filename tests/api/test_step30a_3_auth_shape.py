@@ -181,7 +181,7 @@ class TestMagicLinkServiceTokenExtensions:
         from app.services.magic_link_service import mint_set_password_token
         sig = inspect.signature(mint_set_password_token)
         params = sig.parameters
-        for name in ("user_id", "email", "tenant_id", "purpose"):
+        for name in ("user_id", "email", "admin_id", "purpose"):
             assert name in params, f"mint_set_password_token missing kw {name}"
             assert params[name].kind == inspect.Parameter.KEYWORD_ONLY
         # purpose has a default ("signup")
@@ -191,7 +191,7 @@ class TestMagicLinkServiceTokenExtensions:
         from app.services.magic_link_service import mint_reset_password_token
         sig = inspect.signature(mint_reset_password_token)
         params = sig.parameters
-        for name in ("user_id", "email", "tenant_id"):
+        for name in ("user_id", "email", "admin_id"):
             assert name in params
             assert params[name].kind == inspect.Parameter.KEYWORD_ONLY
 

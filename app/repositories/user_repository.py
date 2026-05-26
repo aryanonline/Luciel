@@ -20,12 +20,12 @@ Scope of responsibility:
   All email comparisons here go through func.lower() for index alignment.
 
 Audit semantics for User mutations:
-- AdminAuditLog.tenant_id is NOT NULL but Users are tenant-agnostic.
+- AdminAuditLog.admin_id is NOT NULL but Users are tenant-agnostic.
 - Per the existing project convention (documented in admin_audit_log.py
   and AuditContext.SYSTEM_ACTOR_TENANT), system-level actions with no
   tenant scope use the literal string "platform". User mutations are
   platform-level events -- one User identity spans tenants -- so they
-  always log against tenant_id="platform". This keeps cross-tenant
+  always log against admin_id="platform". This keeps cross-tenant
   identity history queryable without a join.
 
 Domain-agnostic: no imports from app/domain/, no vertical branching.
@@ -123,7 +123,7 @@ class UserRepository:
         if audit_ctx is not None:
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=SYSTEM_ACTOR_TENANT,
+                admin_id=SYSTEM_ACTOR_TENANT,
                 action=ACTION_CREATE,
                 resource_type=RESOURCE_USER,
                 resource_pk=None,  # User PK is UUID, not int; use natural id
@@ -194,15 +194,15 @@ class UserRepository:
     def list_for_scope(
         self,
         *,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
         active_only: bool = False,
         include_synthetic: bool = True,
     ) -> list[User]:
         """List Users, optionally filtered by tenant scope.
 
-        - tenant_id=None       -> all Users (platform-admin view; route
+        - admin_id=None       -> all Users (platform-admin view; route
                                   handler / ScopePolicy gates this).
-        - tenant_id="t1"       -> Users that hold any Agent row under
+        - admin_id="t1"       -> Users that hold any Agent row under
                                   tenant t1 (active or inactive Agent).
                                   Useful for "who has ever worked at
                                   this brokerage".
@@ -214,12 +214,12 @@ class UserRepository:
         """
         query = self.db.query(User)
 
-        if tenant_id is not None:
-            # V2: "users under admin tenant_id" = users with any
-            # ScopeAssignment whose tenant_id matches.
+        if admin_id is not None:
+            # V2: "users under admin admin_id" = users with any
+            # ScopeAssignment whose admin_id matches.
             query = query.join(
                 ScopeAssignment, ScopeAssignment.user_id == User.id
-            ).filter(ScopeAssignment.tenant_id == tenant_id)
+            ).filter(ScopeAssignment.admin_id == admin_id)
 
         if active_only:
             query = query.filter(User.active.is_(True))
@@ -247,7 +247,7 @@ class UserRepository:
         if active_only:
             query = query.filter(ScopeAssignment.active.is_(True))
         return query.order_by(
-            ScopeAssignment.tenant_id.asc(), ScopeAssignment.id.asc()
+            ScopeAssignment.admin_id.asc(), ScopeAssignment.id.asc()
         ).all()
     # ---------------------------------------------------------------
     # Update
@@ -300,7 +300,7 @@ class UserRepository:
             if before_diff or after_diff:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=SYSTEM_ACTOR_TENANT,
+                    admin_id=SYSTEM_ACTOR_TENANT,
                     action=ACTION_UPDATE,
                     resource_type=RESOURCE_USER,
                     resource_pk=None,  # User PK is UUID
@@ -354,7 +354,7 @@ class UserRepository:
         if audit_ctx is not None and was_active:
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=SYSTEM_ACTOR_TENANT,
+                admin_id=SYSTEM_ACTOR_TENANT,
                 action=ACTION_DEACTIVATE,
                 resource_type=RESOURCE_USER,
                 resource_pk=None,  # User PK is UUID

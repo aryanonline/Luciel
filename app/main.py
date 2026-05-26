@@ -101,7 +101,7 @@ app.add_middleware(RateLimitFallbackMiddleware)
 # short-circuits without us logging every browser OPTIONS as a real
 # request). Emits one JSON-shaped INFO/WARN/ERROR line per request
 # with stable fields (request_id, method, route, status, duration_ms,
-# user_id, tenant_id, auth_method, client_ip, detail) -- see
+# user_id, admin_id, auth_method, client_ip, detail) -- see
 # app/middleware/request_logging.py header for the full contract.
 app.add_middleware(RequestLoggingMiddleware)
 

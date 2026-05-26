@@ -14,6 +14,11 @@ E-2 (rejection-audit idempotency)
       a CREATE UNIQUE INDEX statement on
       (action, tenant_id, resource_natural_id) WHERE action LIKE
       'worker_%'.
+
+      Arc 9.2 PR #101 note: this historical migration references the
+      original ``tenant_id`` column.  The column is dropped by
+      ``arc9_2_pr101_drop_tenant_id_column``; the historical file is
+      retained verbatim per Alembic forward-only doctrine.
   T2. AdminAuditRepository.record() accepts skip_on_conflict.
   T3. _reject_with_audit() in memory_extraction.py passes
       skip_on_conflict=True.
@@ -34,7 +39,7 @@ E-3 (autoretry tightening)
 E-5 (apply_async with headers)
   T8. memory_service.enqueue_extraction calls
       extract_memory_from_turn.apply_async(...) (NOT .delay) and
-      passes a ``headers={"trace_id": ..., "tenant_id": ...}``
+      passes a ``headers={"trace_id": ..., "admin_id": ...}``
       argument.
 """
 
@@ -275,7 +280,7 @@ def test_e5_enqueue_uses_apply_async_with_headers() -> None:
         ".apply_async(kwargs=..., headers=...)."
     )
 
-    # AST-level: confirm headers={trace_id, tenant_id} keys are present.
+    # AST-level: confirm headers={trace_id, admin_id} keys are present.
     tree = _parse("app/memory/service.py")
     fn = _find_function(tree, "enqueue_extraction")
     apply_async_call = None
@@ -295,7 +300,7 @@ def test_e5_enqueue_uses_apply_async_with_headers() -> None:
             break
     assert headers_kw is not None, (
         "E-5: apply_async must pass headers=... so trace_id "
-        "and tenant_id flow through SQS MessageAttributes."
+        "and admin_id flow through SQS MessageAttributes."
     )
     assert isinstance(headers_kw.value, ast.Dict)
     keys = [
@@ -303,7 +308,7 @@ def test_e5_enqueue_uses_apply_async_with_headers() -> None:
         for k in headers_kw.value.keys
         if isinstance(k, ast.Constant)
     ]
-    for required in ("trace_id", "tenant_id"):
+    for required in ("trace_id", "admin_id"):
         assert required in keys, (
             f"E-5: headers dict must contain {required!r} "
             f"(saw keys={keys})."

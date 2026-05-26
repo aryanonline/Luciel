@@ -8,7 +8,7 @@ CONTRACT GUARDED:
       3. CREATE POLICY with BOTH a USING and WITH CHECK clause
          (read-side and write-side enforcement -- one without the
          other is a tenant-leak half-fix)
-      4. Compare tenant_id to current_setting('app.admin_id', true)
+      4. Compare admin_id to current_setting('app.admin_id', true)
          -- the second arg ``true`` is CRITICAL: it makes the function
          return empty string instead of raising when the GUC is unset
          (matches Arc 9 C2 listener behaviour for background paths)
@@ -26,7 +26,7 @@ THE BUGS THIS GUARDS AGAINST:
 
 WHY UNIT (not DB-backed):
     The full DB-backed test of "admin A INSERTs a row with
-    tenant_id='globex', does it succeed or fail" requires a live
+    admin_id='globex', does it succeed or fail" requires a live
     Postgres and is the responsibility of the G3 staging migration
     dry-run + C7 tenant-leak regression suite. THIS test catches
     structural drift in the migration text itself -- which is
@@ -109,14 +109,14 @@ class TestC31MigrationShape(unittest.TestCase):
 
         This is the most common drift point: an author writes USING
         only and assumes that's sufficient. It is NOT -- an admin
-        could still INSERT a row with someone else's tenant_id.
+        could still INSERT a row with someone else's admin_id.
         """
         self.assertRegex(
             self.text_lower,
             r"with\s+check\s*\(",
             "Policy MUST have a WITH CHECK clause -- without it "
             "writes leak (admin A could INSERT a row with "
-            "tenant_id='admin B').",
+            "admin_id='admin B').",
         )
 
     def test_policy_predicate_uses_current_setting_with_missing_ok(self):
@@ -134,9 +134,9 @@ class TestC31MigrationShape(unittest.TestCase):
         )
 
     def test_policy_predicate_compares_tenant_id_column(self):
-        """The compared column MUST be tenant_id (not admin_id, not
+        """The compared column MUST be admin_id (not admin_id, not
         owner_id, not anything else)."""
-        self.assertIn("tenant_id = current_setting", self.text_lower)
+        self.assertIn("admin_id = current_setting", self.text_lower)
 
     def test_downgrade_drops_policy_then_disables_rls(self):
         """Order matters: dropping the policy first leaves the table

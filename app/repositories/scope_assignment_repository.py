@@ -24,7 +24,7 @@ Scope of responsibility:
   the service composes end_assignment() + create() in one transaction.
 
 Audit semantics for ScopeAssignment mutations:
-- AdminAuditLog.tenant_id is set to the assignment's own tenant_id.
+- AdminAuditLog.admin_id is set to the assignment's own admin_id.
   Per the C decision: assignment lifecycle events are tenant-level
   events (a promotion happens within a brokerage), not platform-level
   events (which is what User CRUD is). Tenant admins reading their
@@ -83,7 +83,7 @@ class ScopeAssignmentRepository:
         self,
         *,
         user_id: uuid.UUID,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         role: str,
         started_at: datetime | None = None,
@@ -94,9 +94,9 @@ class ScopeAssignmentRepository:
 
         Caller (ScopeAssignmentService) is expected to:
         1. Verify the User exists and is active.
-        2. Verify (tenant_id, domain_id) exist and are active.
+        2. Verify (admin_id, domain_id) exist and are active.
         3. Verify the calling key has admin scope at-or-above
-           (tenant_id, domain_id) per Invariant 5.
+           (admin_id, domain_id) per Invariant 5.
         4. Optionally end any conflicting active assignment for the
            same User in the same tenant before calling create() --
            this is the "promotion" composition pattern.
@@ -109,7 +109,7 @@ class ScopeAssignmentRepository:
         """
         assignment = ScopeAssignment(
             user_id=user_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             role=role,
             started_at=started_at,  # None -> DB server_default fires
@@ -121,7 +121,7 @@ class ScopeAssignmentRepository:
         if audit_ctx is not None:
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 action=ACTION_CREATE,
                 resource_type=RESOURCE_SCOPE_ASSIGNMENT,
                 resource_pk=None,  # ScopeAssignment PK is UUID
@@ -130,7 +130,7 @@ class ScopeAssignmentRepository:
                 after={
                     "id": str(assignment.id),
                     "user_id": str(user_id),
-                    "tenant_id": tenant_id,
+                    "admin_id": admin_id,
                     "domain_id": domain_id,
                     "role": role,
                     "active": True,
@@ -146,7 +146,7 @@ class ScopeAssignmentRepository:
             "ScopeAssignment created id=%s user=%s tenant=%s domain=%s role=%s",
             assignment.id,
             user_id,
-            tenant_id,
+            admin_id,
             domain_id,
             role,
         )
@@ -240,7 +240,7 @@ class ScopeAssignmentRepository:
 
     def list_for_tenant(
         self,
-        tenant_id: str,
+        admin_id: str,
         *,
         active_only: bool = False,
     ) -> list[ScopeAssignment]:
@@ -251,7 +251,7 @@ class ScopeAssignmentRepository:
         platform admins use the unfiltered version for full tenant history.
         """
         query = self.db.query(ScopeAssignment).filter(
-            ScopeAssignment.tenant_id == tenant_id
+            ScopeAssignment.admin_id == admin_id
         )
         if active_only:
             query = query.filter(
@@ -264,7 +264,7 @@ class ScopeAssignmentRepository:
         self,
         *,
         user_id: uuid.UUID,
-        tenant_id: str,
+        admin_id: str,
     ) -> ScopeAssignment | None:
         """Find the User's currently-active assignment within one tenant.
 
@@ -281,7 +281,7 @@ class ScopeAssignmentRepository:
             .filter(
                 and_(
                     ScopeAssignment.user_id == user_id,
-                    ScopeAssignment.tenant_id == tenant_id,
+                    ScopeAssignment.admin_id == admin_id,
                     ScopeAssignment.ended_at.is_(None),
                     ScopeAssignment.active.is_(True),
                 )
@@ -368,7 +368,7 @@ class ScopeAssignmentRepository:
         if audit_ctx is not None:
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=assignment.tenant_id,
+                admin_id=assignment.admin_id,
                 action=ACTION_DEACTIVATE,
                 resource_type=RESOURCE_SCOPE_ASSIGNMENT,
                 resource_pk=None,  # ScopeAssignment PK is UUID
@@ -392,7 +392,7 @@ class ScopeAssignmentRepository:
             "ScopeAssignment ended id=%s user=%s tenant=%s reason=%s",
             assignment.id,
             assignment.user_id,
-            assignment.tenant_id,
+            assignment.admin_id,
             reason.value,
         )
         return assignment

@@ -38,11 +38,6 @@ class ApiKey(Base, TimestampMixin):
     key_prefix: Mapped[str] = mapped_column(String(20), nullable=False)
     """First few characters of the raw key, safe to display."""
 
-    tenant_id: Mapped[str | None] = mapped_column(
-        String(100), index=True, nullable=True
-    )
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str | None] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),

@@ -330,13 +330,13 @@ def test_deliverability_never_raises_on_unexpected_exception() -> None:
 # Closes ``D-tier-provisioning-tenant-id-kwarg-mismatch-2026-05-24``
 # (discovered during C2 recon). Both production callers --
 # ``BillingWebhookService._on_checkout_completed`` and
-# ``api.v1.billing.signup_free`` -- pass ``tenant_id=`` instead of the
+# ``api.v1.billing.signup_free`` -- pass ``admin_id=`` instead of the
 # new ``admin_id=``. We accept both kwargs so neither caller breaks.
 # These tests pin the alias contract without needing a real DB.
 
 
 def test_premint_for_tier_accepts_tenant_id_alias() -> None:
-    """Calling ``premint_for_tier(tenant_id=...)`` must NOT raise
+    """Calling ``premint_for_tier(admin_id=...)`` must NOT raise
     ``TypeError`` on the kwarg shape -- the alias is the gate that
     keeps every paid/free signup from silently failing.
 
@@ -364,7 +364,7 @@ def test_premint_for_tier_accepts_tenant_id_alias() -> None:
     with patch("app.core.config.settings", fake_settings):
         with pytest.raises(ValueError, match="missing or inactive"):
             svc.premint_for_tier(
-                tenant_id="admin-abc123",  # old kwarg name
+                admin_id="admin-abc123",  # old kwarg name
                 tier="free",
                 primary_user=primary_user,
                 audit_ctx=MagicMock(),
@@ -413,7 +413,7 @@ def test_premint_for_tier_rejects_missing_admin_id_and_tenant_id() -> None:
 
     fake_settings = _FakeSettings(enabled=False)
     with patch("app.core.config.settings", fake_settings):
-        with pytest.raises(TypeError, match="admin_id= or tenant_id= must be supplied"):
+        with pytest.raises(TypeError, match="admin_id= or admin_id= must be supplied"):
             svc.premint_for_tier(
                 tier="free",
                 primary_user=primary_user,

@@ -15,21 +15,21 @@ The three endpoints:
 
   - GET /api/v1/dashboard/tenant
         Returns a TenantDashboard rollup for the caller's tenant.
-        Platform-admin callers MAY pass `?tenant_id=...` to read any
+        Platform-admin callers MAY pass `?admin_id=...` to read any
         tenant; non-platform-admin callers MUST omit the query param
-        (their key's tenant scope is used). Passing a tenant_id that
+        (their key's tenant scope is used). Passing a admin_id that
         does not match the caller's scope is rejected by
         `ScopePolicy.enforce_tenant_scope`.
 
   - GET /api/v1/dashboard/domain/{domain_id}
         Returns a DomainDashboard rollup. The tenant is derived from
-        the caller's scope (or `?tenant_id=...` for platform_admin).
+        the caller's scope (or `?admin_id=...` for platform_admin).
         Domain-scoped keys whose `caller_domain != domain_id` are
         rejected by `enforce_domain_scope`.
 
   - GET /api/v1/dashboard/agent/{agent_id}
         Returns an AgentDashboard rollup. Tenant + domain are derived
-        from caller scope (or `?tenant_id=` / `?domain_id=` for
+        from caller scope (or `?admin_id=` / `?domain_id=` for
         platform_admin). Agent-scoped keys whose `caller_agent !=
         agent_id` are rejected by `enforce_agent_scope`.
 
@@ -123,26 +123,26 @@ DashboardServiceDep = Annotated[DashboardService, Depends(get_dashboard_service)
 
 
 def _resolve_tenant_id(request: Request, query_tenant_id: str | None) -> str:
-    """Resolve the target tenant_id for a dashboard read.
+    """Resolve the target admin_id for a dashboard read.
 
     Non-platform-admin callers: their key's tenant scope is authoritative;
-    a `?tenant_id=` that contradicts the key is rejected by
+    a `?admin_id=` that contradicts the key is rejected by
     `enforce_tenant_scope` below. Omitting the query param is fine —
     we just use the caller's tenant.
 
-    Platform-admin callers: MUST supply `?tenant_id=` because their
+    Platform-admin callers: MUST supply `?admin_id=` because their
     key carries no tenant scope.
 
     Returns the resolved string; raises HTTP 400 if neither source
     yields one.
     """
-    caller_tenant = getattr(request.state, "tenant_id", None)
+    caller_tenant = getattr(request.state, "admin_id", None)
     target = query_tenant_id or caller_tenant
     if not target:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "tenant_id is required: platform-admin callers must "
+                "admin_id is required: platform-admin callers must "
                 "pass it as a query parameter; scope-bound callers "
                 "use their key's tenant by default"
             ),
@@ -186,7 +186,7 @@ def _to_envelope(result: Any) -> dict[str, Any]:
 def get_tenant_dashboard(
     request: Request,
     service: DashboardServiceDep,
-    tenant_id: str | None = Query(
+    admin_id: str | None = Query(
         default=None,
         description=(
             "Target tenant. Required for platform-admin callers; "
@@ -203,7 +203,7 @@ def get_tenant_dashboard(
     request (admin permission present), this still denies cross-tenant
     reads.
     """
-    target_tenant = _resolve_tenant_id(request, tenant_id)
+    target_tenant = _resolve_tenant_id(request, admin_id)
     ScopePolicy.enforce_tenant_scope(request, target_tenant)
     result = service.get_tenant_dashboard(
         target_tenant,
@@ -219,7 +219,7 @@ def get_domain_dashboard(
     request: Request,
     domain_id: str,
     service: DashboardServiceDep,
-    tenant_id: str | None = Query(
+    admin_id: str | None = Query(
         default=None,
         description=(
             "Target tenant. Required for platform-admin callers; "
@@ -230,7 +230,7 @@ def get_domain_dashboard(
     top_n: int = Query(default=5, ge=1, le=50),
 ) -> dict[str, Any]:
     """Return the domain-scope dashboard rollup."""
-    target_tenant = _resolve_tenant_id(request, tenant_id)
+    target_tenant = _resolve_tenant_id(request, admin_id)
     ScopePolicy.enforce_domain_scope(request, target_tenant, domain_id)
     result = service.get_domain_dashboard(
         target_tenant,
@@ -247,7 +247,7 @@ def get_agent_dashboard(
     request: Request,
     agent_id: str,
     service: DashboardServiceDep,
-    tenant_id: str | None = Query(
+    admin_id: str | None = Query(
         default=None,
         description=(
             "Target tenant. Required for platform-admin callers; "
@@ -265,7 +265,7 @@ def get_agent_dashboard(
     top_n: int = Query(default=5, ge=1, le=50),
 ) -> dict[str, Any]:
     """Return the agent-scope dashboard rollup."""
-    target_tenant = _resolve_tenant_id(request, tenant_id)
+    target_tenant = _resolve_tenant_id(request, admin_id)
     target_domain = _resolve_domain_id(request, domain_id)
     ScopePolicy.enforce_agent_scope(
         request, target_tenant, target_domain, agent_id

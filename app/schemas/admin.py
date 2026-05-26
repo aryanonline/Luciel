@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # --- Tenant Config ---
 
 class TenantConfigCreate(BaseModel):
-    tenant_id: str
+    admin_id: str
     display_name: str
     description: str | None = None
     escalation_contact: str | None = None
@@ -36,7 +36,7 @@ class TenantConfigUpdate(BaseModel):
 
 class TenantConfigRead(BaseModel):
     """V2 Admin read model. Field names below are the V2 truth
-    (`name` / `tier` / `tier_source`); the legacy aliases `tenant_id`
+    (`name` / `tier` / `tier_source`); the legacy aliases `admin_id`
     and `display_name` are populated from `id` and `name` via a
     model_validator for back-compat with the widget-E2E harness,
     Stripe webhooks, and external smoke scripts.
@@ -60,15 +60,15 @@ class TenantConfigRead(BaseModel):
     updated_at: datetime
 
     # Back-compat aliases. Populated by a model_validator so external
-    # callers that still read `tenant_id` / `display_name` keep working.
-    tenant_id: str = ""
+    # callers that still read `admin_id` / `display_name` keep working.
+    admin_id: str = ""
     display_name: str = ""
 
     @classmethod
     def model_validate(cls, obj, *args, **kwargs):  # type: ignore[override]
         instance = super().model_validate(obj, *args, **kwargs)
-        if not instance.tenant_id:
-            instance.tenant_id = instance.id
+        if not instance.admin_id:
+            instance.admin_id = instance.id
         if not instance.display_name:
             instance.display_name = instance.name
         return instance
@@ -89,7 +89,7 @@ class TenantConfigRead(BaseModel):
 # --- Agent Config ---
 
 class AgentConfigCreate(BaseModel):
-    tenant_id: str
+    admin_id: str
     agent_id: str
     display_name: str
     description: str | None = None
@@ -117,7 +117,7 @@ class AgentConfigRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    tenant_id: str
+    admin_id: str
     agent_id: str
     display_name: str
     description: str | None
@@ -138,7 +138,7 @@ class AgentConfigRead(BaseModel):
 class KnowledgeIngestRequest(BaseModel):
     content: str
     knowledge_type: str
-    tenant_id: str | None = None
+    admin_id: str | None = None
     domain_id: str | None = None
     agent_id: str | None = None
     title: str | None = None
@@ -151,7 +151,7 @@ class KnowledgeIngestRequest(BaseModel):
 class KnowledgeIngestResponse(BaseModel):
     chunks_stored: int
     knowledge_type: str
-    tenant_id: str | None
+    admin_id: str | None
     domain_id: str | None
     agent_id: str | None = None
     source: str | None

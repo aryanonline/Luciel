@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # without leaking any channel-asserted identifier into the email
 # column itself (the email is still the natural lookup key for the
 # legacy auth path, NOT the cross-channel identity claim path).
-_SYNTHETIC_EMAIL_TEMPLATE = "identity-{user_id}@{tenant_id}.luciel.local"
+_SYNTHETIC_EMAIL_TEMPLATE = "identity-{user_id}@{admin_id}.luciel.local"
 
 # RFC 5321 email length cap, matched to identity_claims.claim_value
 # String(320). Anything longer is invalid per the spec.
@@ -197,7 +197,7 @@ class IdentityResolver:
         *,
         claim_type: ClaimType,
         claim_value: str,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         issuing_adapter: str,
     ) -> IdentityResolution:
@@ -209,7 +209,7 @@ class IdentityResolver:
                               normalises internally; callers don't
                               need to pre-normalise (but may, since
                               normalise_claim_value() is idempotent).
-            tenant_id:        Natural-key tenant scope. Asserted on
+            admin_id:        Natural-key tenant scope. Asserted on
                               the claim lookup.
             domain_id:        Natural-key domain scope. Asserted on
                               the claim lookup.
@@ -226,11 +226,11 @@ class IdentityResolver:
         Raises:
             ValueError / TypeError via normalise_claim_value() on
             malformed input.
-            ValueError on blank tenant_id / domain_id / issuing_adapter.
+            ValueError on blank admin_id / domain_id / issuing_adapter.
         """
         # ---- input validation ---------------------------------------
-        if not tenant_id or not tenant_id.strip():
-            raise ValueError("tenant_id must be a non-empty string")
+        if not admin_id or not admin_id.strip():
+            raise ValueError("admin_id must be a non-empty string")
         if not domain_id or not domain_id.strip():
             raise ValueError("domain_id must be a non-empty string")
         if not issuing_adapter or not issuing_adapter.strip():
@@ -243,14 +243,14 @@ class IdentityResolver:
         # ---- step A: look up an existing claim ----------------------
         # ONE query, indexed by the unique constraint
         # uq_identity_claims_type_value_scope on
-        # (claim_type, claim_value, tenant_id, domain_id).
+        # (claim_type, claim_value, admin_id, domain_id).
         # active=True so soft-deleted claims do not resolve.
         existing_claim_stmt = (
             select(IdentityClaim)
             .where(
                 IdentityClaim.claim_type == claim_type,
                 IdentityClaim.claim_value == normalised_value,
-                IdentityClaim.tenant_id == tenant_id,
+                IdentityClaim.admin_id == admin_id,
                 IdentityClaim.domain_id == domain_id,
                 IdentityClaim.active.is_(True),
             )
@@ -262,7 +262,7 @@ class IdentityResolver:
             # HIT: bind to existing user, resolve conversation_id.
             return self._resolve_existing(
                 claim=existing_claim,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 domain_id=domain_id,
             )
 
@@ -270,7 +270,7 @@ class IdentityResolver:
         return self._mint_fresh(
             claim_type=claim_type,
             normalised_value=normalised_value,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             issuing_adapter=issuing_adapter,
         )
@@ -283,7 +283,7 @@ class IdentityResolver:
         self,
         *,
         claim: IdentityClaim,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
     ) -> IdentityResolution:
         """Bind to claim.user_id; find or mint conversation_id.
@@ -302,7 +302,7 @@ class IdentityResolver:
             select(SessionModel)
             .where(
                 SessionModel.user_id == str(claim.user_id),
-                SessionModel.tenant_id == tenant_id,
+                SessionModel.admin_id == admin_id,
                 SessionModel.domain_id == domain_id,
                 SessionModel.conversation_id.is_not(None),
                 SessionModel.status == "active",
@@ -329,7 +329,7 @@ class IdentityResolver:
         # archived), but we need a fresh conversation to host this
         # session's sibling thread. Mint just the conversation.
         new_conv = self._mint_conversation(
-            tenant_id=tenant_id, domain_id=domain_id
+            admin_id=admin_id, domain_id=domain_id
         )
         return IdentityResolution(
             user_id=claim.user_id,
@@ -348,7 +348,7 @@ class IdentityResolver:
         *,
         claim_type: ClaimType,
         normalised_value: str,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         issuing_adapter: str,
     ) -> IdentityResolution:
@@ -366,7 +366,7 @@ class IdentityResolver:
         # flag keeps PIPEDA filters honest.
         new_user_id = uuid.uuid4()
         synth_email = _SYNTHETIC_EMAIL_TEMPLATE.format(
-            user_id=str(new_user_id), tenant_id=tenant_id,
+            user_id=str(new_user_id), admin_id=admin_id,
         )
         new_user = User(
             id=new_user_id,
@@ -385,7 +385,7 @@ class IdentityResolver:
 
         # Mint Conversation.
         new_conv = self._mint_conversation(
-            tenant_id=tenant_id, domain_id=domain_id
+            admin_id=admin_id, domain_id=domain_id
         )
 
         # Mint IdentityClaim, binding the new User. verified_at=NULL
@@ -397,7 +397,7 @@ class IdentityResolver:
             user_id=new_user_id,
             claim_type=claim_type,
             claim_value=normalised_value,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             issuing_adapter=issuing_adapter,
             verified_at=None,
@@ -416,7 +416,7 @@ class IdentityResolver:
             "identity_resolver minted fresh user=%s conversation=%s "
             "claim_type=%s tenant=%s domain=%s adapter=%s",
             str(new_user_id), str(new_conv.id), claim_type.value,
-            tenant_id, domain_id, issuing_adapter,
+            admin_id, domain_id, issuing_adapter,
         )
 
         return IdentityResolution(
@@ -430,13 +430,13 @@ class IdentityResolver:
     def _mint_conversation(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
     ) -> Conversation:
         """Helper: mint a new Conversation row, flush, return."""
         new_conv = Conversation(
             id=uuid.uuid4(),
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             last_activity_at=datetime.now(timezone.utc),
             active=True,

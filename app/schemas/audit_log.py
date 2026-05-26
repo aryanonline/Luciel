@@ -60,7 +60,7 @@ class AdminAuditLogRead(BaseModel):
         )
 
     # WHERE
-    tenant_id: str
+    admin_id: str
     domain_id: str | None
     agent_id: str | None
     luciel_instance_id: int | None

@@ -11,7 +11,7 @@ Coverage (AST + import only -- no Postgres, no FastAPI runtime, no SES
 network):
 
   * UserInvite model surface -- table name, columns, native enum,
-    partial unique index on (tenant_id, LOWER(invited_email)).
+    partial unique index on (admin_id, LOWER(invited_email)).
   * Alembic migration -- the Step 30a.4 revision is present with the
     documented revision id and down_revision.
   * Audit constants -- the four ACTION_* + RESOURCE_USER_INVITE
@@ -57,7 +57,7 @@ class TestUserInviteModel:
         # 15 columns total: PK + 11 invite-specific + created_at/updated_at + ...
         required = {
             "id",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "inviter_user_id",
             "invited_email",
@@ -235,7 +235,7 @@ class TestUserInviteRepository:
         params = sig.parameters
         # `self` plus all-keyword args
         for name in (
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "inviter_user_id",
             "invited_email",
@@ -292,7 +292,7 @@ class TestInviteService:
         sig = inspect.signature(create_invite)
         for name in (
             "db",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "inviter_user_id",
             "inviter_email",
@@ -403,7 +403,7 @@ class TestInviteSchemas:
         fields = UserInviteCreate.model_fields
         assert "invited_email" in fields
         assert fields["invited_email"].is_required() is True
-        assert "tenant_id" in fields
+        assert "admin_id" in fields
         assert "domain_id" in fields
         assert "role" in fields
 
@@ -412,7 +412,7 @@ class TestInviteSchemas:
         fields = UserInviteRead.model_fields
         required = {
             "id",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "invited_email",
             "role",

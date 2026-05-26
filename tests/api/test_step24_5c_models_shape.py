@@ -21,10 +21,10 @@ plus the surgical edits the sub-branch makes to two existing files:
 
 A break in any of these contracts would silently weaken the spec
 committed in ARCHITECTURE §3.2.11 -- e.g. a future refactor that
-changed conversations.tenant_id to use the tenant_configs.id integer
-FK instead of the tenant_configs.tenant_id string, or that made
+changed conversations.admin_id to use the tenant_configs.id integer
+FK instead of the tenant_configs.admin_id string, or that made
 sessions.conversation_id NOT NULL, or that dropped the load-bearing
-uniqueness on (claim_type, claim_value, tenant_id, domain_id), would
+uniqueness on (claim_type, claim_value, admin_id, domain_id), would
 not necessarily fail any other unit test but would silently invalidate
 the design contract the impl arc rests on.
 
@@ -115,7 +115,7 @@ class TestConversationTableShape:
         cols = {c.name for c in m["Conversation"].__table__.columns}
         expected = {
             "id",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "last_activity_at",
             "active",
@@ -129,7 +129,7 @@ class TestConversationTableShape:
         cols = {c.name for c in m["Conversation"].__table__.columns}
         expected = {
             "id",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "last_activity_at",
             "active",
@@ -139,8 +139,8 @@ class TestConversationTableShape:
             # alembic migration dfea1a04e037; this row is intentional.
             "deactivated_at",
             # Arc 9.2 PR #96: additive admin_id column (Option A --
-            # collapses tenant_id -> admin_id).  Both columns coexist
-            # during the alias window; tenant_id is dropped in PR #101.
+            # collapses admin_id -> admin_id).  Both columns coexist
+            # during the alias window; admin_id is dropped in PR #101.
             "admin_id",
         }
         unexpected = cols - expected
@@ -163,31 +163,31 @@ class TestConversationTableShape:
         )
 
     def test_tenant_id_has_fk_to_admins(self) -> None:
-        """tenant_id FKs admins.id RESTRICT.
+        """admin_id FKs admins.id RESTRICT.
 
         Arc 5 Revision C dropped the legacy ``tenant_configs`` table and
-        re-pointed every tenant_id FK at ``admins.id`` (String(100), 1:1
-        replacement of the old ``tenant_configs.tenant_id`` natural key).
-        The column name ``tenant_id`` is kept across the codebase for
+        re-pointed every admin_id FK at ``admins.id`` (String(100), 1:1
+        replacement of the old ``tenant_configs.admin_id`` natural key).
+        The column name ``admin_id`` is kept across the codebase for
         call-site compatibility, but the FK target is now ``admins.id``.
 
         RESTRICT is non-negotiable: identity history must survive a
         tenant row removal attempt. Arc 9 C8.1 locks this contract.
         """
         m = _import_models()
-        col = m["Conversation"].__table__.columns["tenant_id"]
+        col = m["Conversation"].__table__.columns["admin_id"]
         fks = list(col.foreign_keys)
-        assert len(fks) == 1, f"Conversation.tenant_id should have exactly one FK, has {len(fks)}"
+        assert len(fks) == 1, f"Conversation.admin_id should have exactly one FK, has {len(fks)}"
         fk = fks[0]
         # Reference target check: admins.id (post Arc 5 Revision C).
         assert fk.column.table.name == "admins", (
-            f"Conversation.tenant_id FK target is {fk.column.table.name}, "
+            f"Conversation.admin_id FK target is {fk.column.table.name}, "
             f"expected 'admins'. tenant_configs was dropped in Arc 5 Revision C; "
             f"a FK pointing anywhere else is drift."
         )
         assert fk.column.name == "id"
         assert fk.ondelete == "RESTRICT", (
-            f"Conversation.tenant_id FK ondelete must be RESTRICT (identity "
+            f"Conversation.admin_id FK ondelete must be RESTRICT (identity "
             f"history protection), is {fk.ondelete}"
         )
 
@@ -199,7 +199,7 @@ class TestConversationTableShape:
         col = m["Conversation"].__table__.columns["domain_id"]
         assert not list(col.foreign_keys), (
             "Conversation.domain_id must have NO foreign key. "
-            "domain_configs uses (tenant_id, domain_id) as a composite natural "
+            "domain_configs uses (admin_id, domain_id) as a composite natural "
             "key; a single-column FK would be a half-truth. See §3.2.11 + "
             "scope_assignments precedent in 24.5b File 1.2."
         )
@@ -257,7 +257,7 @@ class TestIdentityClaimTableShape:
             "user_id",
             "claim_type",
             "claim_value",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "issuing_adapter",
             "verified_at",
@@ -274,7 +274,7 @@ class TestIdentityClaimTableShape:
             "user_id",
             "claim_type",
             "claim_value",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "issuing_adapter",
             "verified_at",
@@ -315,7 +315,7 @@ class TestIdentityClaimTableShape:
         assert fk.ondelete == "RESTRICT"
 
     def test_tenant_id_fk_to_admins_id(self) -> None:
-        """IdentityClaim.tenant_id FKs admins.id RESTRICT.
+        """IdentityClaim.admin_id FKs admins.id RESTRICT.
 
         See TestConversationColumns.test_tenant_id_has_fk_to_admins for
         the Arc 5 Revision C rationale -- tenant_configs was dropped and
@@ -323,12 +323,12 @@ class TestIdentityClaimTableShape:
         history from cascade-delete on tenant removal.
         """
         m = _import_models()
-        col = m["IdentityClaim"].__table__.columns["tenant_id"]
+        col = m["IdentityClaim"].__table__.columns["admin_id"]
         fks = list(col.foreign_keys)
         assert len(fks) == 1
         fk = fks[0]
         assert fk.column.table.name == "admins", (
-            f"IdentityClaim.tenant_id FK target is {fk.column.table.name}, "
+            f"IdentityClaim.admin_id FK target is {fk.column.table.name}, "
             f"expected 'admins'. tenant_configs was dropped in Arc 5 Revision C."
         )
         assert fk.column.name == "id"
@@ -381,7 +381,7 @@ class TestIdentityClaimUniqueness:
         # Order doesn't matter for uniqueness, but the *set* is what's
         # load-bearing. We assert the set so a future re-ordering of the
         # constraint definition doesn't trip the test for the wrong reason.
-        assert set(cols) == {"claim_type", "claim_value", "tenant_id", "domain_id"}
+        assert set(cols) == {"claim_type", "claim_value", "admin_id", "domain_id"}
 
 
 # ======================================================================
@@ -577,7 +577,7 @@ class TestMigrationShape:
     def test_downgrade_drops_in_reverse_phase_order(self, migration_text: str) -> None:
         """Downgrade must reverse C -> B -> A: sessions.conversation_id
         first (depends on conversations.id), then identity_claims
-        + enum (depends on users.id + tenant_configs.tenant_id), then
+        + enum (depends on users.id + tenant_configs.admin_id), then
         conversations. If the order inverts, the downgrade hits an FK
         constraint violation."""
         # Find the downgrade() function body by string slicing rather

@@ -34,7 +34,7 @@ logger = logging.getLogger("luciel.ratelimit")
 # The wiring works because ApiKeyAuthMiddleware runs ahead of the
 # route's ``@limiter.limit(...)`` decorator (the decorator fires
 # inside the route, after auth has populated request.state). So the
-# key-func + limit-provider pair can both read request.state.tenant_id
+# key-func + limit-provider pair can both read request.state.admin_id
 # (== admin_id) and request.state.luciel_instance_id to form a
 # per-(admin, instance) Redis bucket -- tenant cross-talk is
 # impossible and one Instance going hot doesn't starve sibling
@@ -231,7 +231,7 @@ def get_tier_aware_key(request: Request) -> str:
     """Compose the tier-aware Redis bucket key for one request.
 
     Shape: ``tier:{tier}:admin:{admin_id}:inst:{instance_id|none}``
-    when ``request.state.tenant_id`` is populated by
+    when ``request.state.admin_id`` is populated by
     ``ApiKeyAuthMiddleware`` (or ``SessionCookieAuthMiddleware``).
 
     Shape: ``ip:{ip}`` when the request is unauthenticated -- this is
@@ -256,14 +256,14 @@ def get_tier_aware_key(request: Request) -> str:
     starve siblings under the same Admin.
     """
     state = getattr(request, "state", None)
-    tenant_id = getattr(state, "tenant_id", None) if state is not None else None
-    if not tenant_id:
+    admin_id = getattr(state, "admin_id", None) if state is not None else None
+    if not admin_id:
         return f"ip:{_client_ip(request)}"
 
     instance_id = getattr(state, "luciel_instance_id", None) if state is not None else None
-    tier = _lookup_admin_tier(str(tenant_id))
+    tier = _lookup_admin_tier(str(admin_id))
     inst_part = str(instance_id) if instance_id is not None else "none"
-    return f"tier:{tier}:admin:{tenant_id}:inst:{inst_part}"
+    return f"tier:{tier}:admin:{admin_id}:inst:{inst_part}"
 
 
 def get_embed_key_aware_key(request: Request) -> str:
@@ -298,7 +298,7 @@ def get_embed_key_aware_key(request: Request) -> str:
     tier-aware admin bucket on admin-surface routes.
     """
     state = getattr(request, "state", None)
-    tenant_id = getattr(state, "tenant_id", None) if state is not None else None
+    admin_id = getattr(state, "admin_id", None) if state is not None else None
     key_kind = getattr(state, "key_kind", None) if state is not None else None
     api_key_id = getattr(state, "api_key_id", None) if state is not None else None
 
@@ -306,11 +306,11 @@ def get_embed_key_aware_key(request: Request) -> str:
     # this code path (shouldn't happen -- require_embed_key gates them
     # off) fall through to the IP bucket so they cannot inherit the
     # per-embed-key generous derivation.
-    if not tenant_id or key_kind != "embed" or not api_key_id:
+    if not admin_id or key_kind != "embed" or not api_key_id:
         return f"ip:{_client_ip(request)}"
 
-    tier = _lookup_admin_tier(str(tenant_id))
-    return f"embed:tier:{tier}:admin:{tenant_id}:key:{api_key_id}"
+    tier = _lookup_admin_tier(str(admin_id))
+    return f"embed:tier:{tier}:admin:{admin_id}:key:{api_key_id}"
 
 
 def get_embed_key_rate_limit_for_key(key: str) -> str:

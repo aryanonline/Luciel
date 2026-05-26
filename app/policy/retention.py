@@ -15,9 +15,9 @@ Article 4.5 (Limiting Retention) violation surface.
 
 Fix: each category declares an explicit tenant_scope strategy:
   - ("direct", "l>")
-        WHERE l> = :tenant_id
+        WHERE l> = :admin_id
   - ("via_fk", "<fk_col>", "<ref_table>", "<ref_tenant_col>")
-        WHERE <fk_col> IN (SELECT id FROM <ref_table> WHERE <ref_tenant_col> = :tenant_id)
+        WHERE <fk_col> IN (SELECT id FROM <ref_table> WHERE <ref_tenant_col> = :admin_id)
 
 Strategy is enforced for every effective_tenant; no silent fallthrough.
 """
@@ -50,20 +50,20 @@ DATA_CATEGORY_MAP: dict[str, dict] = {
         "table": "sessions",
         "date_col": "created_at",
         "anon_cols": {"user_id": "anon"},
-        "tenant_scope": ("direct", "tenant_id"),
+        "tenant_scope": ("direct", "admin_id"),
     },
     "messages": {
         "table": "messages",
         "date_col": "created_at",
         "anon_cols": {"content": "[redacted]"},
-        # messages has no tenant_id column; scope via its session FK.
-        "tenant_scope": ("via_fk", "session_id", "sessions", "tenant_id"),
+        # messages has no admin_id column; scope via its session FK.
+        "tenant_scope": ("via_fk", "session_id", "sessions", "admin_id"),
     },
     "memory_items": {
         "table": "memory_items",
         "date_col": "created_at",
         "anon_cols": {"user_id": "anon", "content": "[redacted]"},
-        "tenant_scope": ("direct", "tenant_id"),
+        "tenant_scope": ("direct", "admin_id"),
     },
     "traces": {
         "table": "traces",
@@ -73,13 +73,13 @@ DATA_CATEGORY_MAP: dict[str, dict] = {
             "user_message": "[redacted]",
             "assistant_reply": "[redacted]",
         },
-        "tenant_scope": ("direct", "tenant_id"),
+        "tenant_scope": ("direct", "admin_id"),
     },
     "knowledge_embeddings": {
         "table": "knowledge_embeddings",
         "date_col": "created_at",
         "anon_cols": {},
-        "tenant_scope": ("direct", "tenant_id"),
+        "tenant_scope": ("direct", "admin_id"),
     },
 }
 
@@ -97,13 +97,13 @@ def _build_tenant_predicate(
     kind = strategy[0]
     if kind == "direct":
         col = strategy[1]
-        return f"{col} = :tenant_id", {"tenant_id": effective_tenant}
+        return f"{col} = :admin_id", {"admin_id": effective_tenant}
     if kind == "via_fk":
         _, fk_col, ref_table, ref_tenant_col = strategy
         return (
             f"{fk_col} IN (SELECT id FROM {ref_table} "
-            f"WHERE {ref_tenant_col} = :tenant_id)",
-            {"tenant_id": effective_tenant},
+            f"WHERE {ref_tenant_col} = :admin_id)",
+            {"admin_id": effective_tenant},
         )
     raise ValueError(f"Unknown tenant_scope strategy kind: {kind!r}")
 
@@ -147,25 +147,25 @@ class RetentionService:
         return results
 
     def enforce_for_tenant(
-        self, *, tenant_id: str, triggered_by: str = "scheduler",
+        self, *, admin_id: str, triggered_by: str = "scheduler",
     ) -> list[dict]:
         results = []
         for category in VALID_CATEGORIES:
             policy = self.repository.get_policy_for_category(
-                data_category=category, tenant_id=tenant_id,
+                data_category=category, admin_id=admin_id,
             )
             if policy and policy.retention_days > 0:
                 try:
                     result = self._enforce_single(
                         policy=policy,
                         triggered_by=triggered_by,
-                        scope_tenant_id=tenant_id,
+                        scope_tenant_id=admin_id,
                     )
                     results.append(result)
                 except Exception as exc:
                     logger.error(
                         "Tenant %s category %s failed: %s",
-                        tenant_id, category, exc,
+                        admin_id, category, exc,
                     )
         return results
 
@@ -173,7 +173,7 @@ class RetentionService:
         self,
         *,
         data_category: str,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
         reason: str,
         triggered_by: str,
     ) -> dict:
@@ -181,7 +181,7 @@ class RetentionService:
             raise ValueError(f"Invalid category: {data_category}")
 
         policy = self.repository.get_policy_for_category(
-            data_category=data_category, tenant_id=tenant_id,
+            data_category=data_category, admin_id=admin_id,
         )
         if not policy:
             raise ValueError(f"No active policy for {data_category}")
@@ -189,7 +189,7 @@ class RetentionService:
         return self._enforce_single(
             policy=policy,
             triggered_by=triggered_by,
-            scope_tenant_id=tenant_id,
+            scope_tenant_id=admin_id,
             reason=reason,
         )
 
@@ -211,7 +211,7 @@ class RetentionService:
 
         Public return shape is preserved — callers get the same
         {policy_id, data_category, action, rows_affected,
-         cutoff_date, tenant_id} dict as before. rows_affected is now
+         cutoff_date, admin_id} dict as before. rows_affected is now
         the SUM across all batches.
 
         Failure semantics: if a batch raises, batches that already
@@ -253,7 +253,7 @@ class RetentionService:
         # exists. If a category has no declared strategy, we raise rather than
         # silently fall through — Invariant 5 (scope arithmetic only) forbids
         # a tenant-scoped purge that ignores the tenant.
-        effective_tenant = scope_tenant_id or policy.tenant_id
+        effective_tenant = scope_tenant_id or policy.admin_id
         if effective_tenant:
             strategy = config.get("tenant_scope")
             if strategy is None:
@@ -305,7 +305,7 @@ class RetentionService:
         # the partial-failure exception path.
         try:
             log = DeletionLog(
-                tenant_id=effective_tenant,
+                admin_id=effective_tenant,
                 data_category=category,
                 action_taken=action + "d",
                 rows_affected=rows,
@@ -344,7 +344,7 @@ class RetentionService:
             "action": action,
             "rows_affected": rows,
             "cutoff_date": cutoff_str,
-            "tenant_id": effective_tenant,
+            "admin_id": effective_tenant,
         }
 
     # ------------------------------------------------------------------
@@ -376,7 +376,7 @@ class RetentionService:
         sleep_s = settings.retention_batch_sleep_seconds
 
         total = 0
-        # Each batch needs the static params (cutoff, tenant_id, …)
+        # Each batch needs the static params (cutoff, admin_id, …)
         # plus the dynamic :batch_size. Build a fresh dict per batch
         # to avoid mutation surprises if the caller's params escape.
         sql = (

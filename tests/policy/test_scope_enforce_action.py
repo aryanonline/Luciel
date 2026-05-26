@@ -35,8 +35,8 @@ from app.policy.scope import ScopePolicy, PLATFORM_ADMIN
 
 
 class _State:
-    def __init__(self, tenant_id=None, domain_id=None, agent_id=None, permissions=None):
-        self.tenant_id = tenant_id
+    def __init__(self, admin_id=None, domain_id=None, agent_id=None, permissions=None):
+        self.admin_id = admin_id
         self.domain_id = domain_id
         self.agent_id = agent_id
         self.permissions = permissions or []
@@ -48,7 +48,7 @@ class _Req:
 
 
 def _req(perms):
-    return _Req(_State(tenant_id="t1", permissions=list(perms)))
+    return _Req(_State(admin_id="t1", permissions=list(perms)))
 
 
 # 1. Method existence and shape

@@ -39,7 +39,7 @@ def _build_app(*, populate_state: bool = False) -> FastAPI:
     def _ok(request: Request):
         if populate_state:
             request.state.user_id = "u-123"
-            request.state.tenant_id = "t-abc"
+            request.state.admin_id = "t-abc"
             request.state.auth_method = "cookie"
         return {"ok": True}
 
@@ -59,7 +59,7 @@ def _build_app(*, populate_state: bool = False) -> FastAPI:
         @app.get("/api/v1/ok_state")
         def _ok_state(request: Request):
             request.state.user_id = "u-123"
-            request.state.tenant_id = "t-abc"
+            request.state.admin_id = "t-abc"
             request.state.auth_method = "cookie"
             return {"ok": True}
 
@@ -145,7 +145,7 @@ class TestArc9WS4cMiddlewareContract(unittest.TestCase):
         self.assertIsInstance(payload["duration_ms"], int)
         self.assertGreaterEqual(payload["duration_ms"], 0)
         self.assertIsNone(payload["user_id"])
-        self.assertIsNone(payload["tenant_id"])
+        self.assertIsNone(payload["admin_id"])
         self.assertIsNone(payload["auth_method"])
         self.assertIsNone(payload["detail"])
 
@@ -186,7 +186,7 @@ class TestArc9WS4cMiddlewareContract(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         payload = json.loads(self.capture.records[0].getMessage())
         self.assertEqual(payload["user_id"], "u-123")
-        self.assertEqual(payload["tenant_id"], "t-abc")
+        self.assertEqual(payload["admin_id"], "t-abc")
         self.assertEqual(payload["auth_method"], "cookie")
 
     # ------------------------------------------------------------------

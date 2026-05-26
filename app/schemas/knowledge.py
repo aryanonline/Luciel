@@ -110,7 +110,7 @@ class KnowledgeRead(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="ignore")
 
     id: int
-    tenant_id: str | None
+    admin_id: str | None
     domain_id: str | None
     agent_id: str | None
     luciel_instance_id: int | None

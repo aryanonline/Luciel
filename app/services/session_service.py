@@ -50,7 +50,7 @@ class SessionService:
     def create_session(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         agent_id: str | None = None,
         user_id: str | None = None,
@@ -61,7 +61,7 @@ class SessionService:
         session_id = str(uuid.uuid4())
         return self.repository.create_session(
             session_id=session_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
             user_id=user_id,
@@ -73,7 +73,7 @@ class SessionService:
     def create_session_with_identity(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         agent_id: str | None = None,
         channel: str = "web",
@@ -99,7 +99,7 @@ class SessionService:
         method does not pay any extra import cost on cold start.
 
         Args:
-            tenant_id, domain_id, agent_id, channel: same as
+            admin_id, domain_id, agent_id, channel: same as
                 create_session().
             claim_type:      ClaimType -- EMAIL / PHONE / SSO_SUBJECT.
             claim_value:     The raw asserted value (resolver normalises).
@@ -119,7 +119,7 @@ class SessionService:
         resolution = resolver.resolve(
             claim_type=claim_type,
             claim_value=claim_value,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             issuing_adapter=issuing_adapter,
         )
@@ -133,7 +133,7 @@ class SessionService:
         session_id = str(uuid.uuid4())
         new_session = self.repository.create_session(
             session_id=session_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
             user_id=str(resolution.user_id),
@@ -157,12 +157,12 @@ class SessionService:
     def list_sessions(
         self,
         *,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
         user_id: str | None = None,
         limit: int = 50,
     ):
         return self.repository.list_sessions(
-            tenant_id=tenant_id, user_id=user_id, limit=limit,
+            admin_id=admin_id, user_id=user_id, limit=limit,
         )
 
     def add_message(

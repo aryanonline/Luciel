@@ -77,7 +77,7 @@ class LoginResponse(BaseModel):
     ok: bool = True
     redirect: str = "/app"
     email: str
-    tenant_id: str
+    admin_id: str
 
 
 class SetPasswordRequest(BaseModel):
@@ -105,16 +105,16 @@ class ForgotPasswordResponse(BaseModel):
 
 
 def _resolve_tenant_for_user(db, user_id) -> str:
-    """Return the tenant_id the cookied user belongs to, else "".
+    """Return the admin_id the cookied user belongs to, else "".
 
     Tenant binding is owned by ScopeAssignment, NOT by Stripe billing.
     Owners satisfy both (a Stripe subscription on file *and* an
     owner-role ScopeAssignment created by tier_provisioning_service),
     so the pre-30a.5 billing-only resolver coincidentally returned the
-    right tenant_id for the paying user. The moment a non-paying role
+    right admin_id for the paying user. The moment a non-paying role
     (teammate / department_lead / tenant_admin) logged in after
     redeeming an invite, the billing lookup returned ``None`` and the
-    cookie carried ``tenant_id=""``. The frontend then surfaced the
+    cookie carried ``admin_id=""``. The frontend then surfaced the
     "No subscription on file" empty state to a fully-provisioned
     teammate. Caught in the Step 30a.5 $1,000 live smoke walk.
     Drift id: D-invite-redeemed-user-sees-no-subscription-on-file-2026-05-18.
@@ -126,7 +126,7 @@ def _resolve_tenant_for_user(db, user_id) -> str:
          ``ScopeAssignmentRepository.list_for_user``. Prefer
          ``role='owner'`` (canonical primary scope), else fall back to
          the most-recently-started active assignment among the rest.
-         Returns its ``tenant_id``. This is the path every
+         Returns its ``admin_id``. This is the path every
          redeemed-invite login takes.
       2. Fallback: ``BillingService.get_active_subscription_for_user``.
          Preserves the narrow race window where a Stripe subscription
@@ -170,7 +170,7 @@ def _resolve_tenant_for_user(db, user_id) -> str:
     #    "no tenant yet" sentinel.
     svc = BillingService(db=db, stripe_client=None)  # type: ignore[arg-type]
     sub = svc.get_active_subscription_for_user(user_id=user_id)
-    return sub.tenant_id if sub is not None else ""
+    return sub.admin_id if sub is not None else ""
 
 
 def _mint_and_set_session(
@@ -182,12 +182,12 @@ def _mint_and_set_session(
 ) -> str:
     """Mint a session JWT for ``user_id`` and stamp it as a cookie.
 
-    Returns the resolved tenant_id (for the response body).
+    Returns the resolved admin_id (for the response body).
     """
-    tenant_id = _resolve_tenant_for_user(db, user_id)
-    token = mint_session_token(user_id=user_id, email=email, tenant_id=tenant_id)
+    admin_id = _resolve_tenant_for_user(db, user_id)
+    token = mint_session_token(user_id=user_id, email=email, admin_id=admin_id)
     _set_session_cookie(response, token)
-    return tenant_id
+    return admin_id
 
 
 # ---------------------------------------------------------------------
@@ -226,14 +226,14 @@ def login(
             detail="Invalid email or password.",
         )
 
-    tenant_id = _mint_and_set_session(
+    admin_id = _mint_and_set_session(
         response=response, db=db, user_id=user.id, email=user.email,
     )
     logger.info(
-        "auth: login ok user_id=%s email=%s tenant_id=%s",
-        user.id, user.email, tenant_id or "<none>",
+        "auth: login ok user_id=%s email=%s admin_id=%s",
+        user.id, user.email, admin_id or "<none>",
     )
-    return LoginResponse(email=user.email, tenant_id=tenant_id)
+    return LoginResponse(email=user.email, admin_id=admin_id)
 
 
 # ---------------------------------------------------------------------

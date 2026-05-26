@@ -24,7 +24,7 @@ class TenantOnboardRequest(BaseModel):
     """
 
     # --- Admin fields (required) ---
-    tenant_id: str = Field(
+    admin_id: str = Field(
         ..., min_length=2, max_length=100,
         pattern=r"^[a-z0-9][a-z0-9\-]*[a-z0-9]$",
         description="URL-safe Admin slug, e.g. 'remax-crossroads'",
@@ -91,7 +91,7 @@ class OnboardedTenantSummary(BaseModel):
 
     Arc 6 Commit 8 (2026-05-23): rewired to V2 Admin columns. The V2
     Admin model uses ``id`` (string slug PK) and ``name``; the legacy
-    ``tenant_id`` / ``display_name`` shape is preserved on the wire by
+    ``admin_id`` / ``display_name`` shape is preserved on the wire by
     explicit field construction in the route (see admin.py), so
     pre-Arc-6 API consumers do not see a breaking change.
     """
@@ -100,7 +100,7 @@ class OnboardedTenantSummary(BaseModel):
 
     # Legacy wire shape -- preserved verbatim for API source-compat.
     id: str
-    tenant_id: str = Field(..., description="V2 Admin slug (== id)")
+    admin_id: str = Field(..., description="V2 Admin slug (== id)")
     display_name: str = Field(..., description="V2 Admin name")
     tier: str
     tier_source: str
@@ -112,7 +112,7 @@ class OnboardedDomainSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    tenant_id: str
+    admin_id: str
     domain_id: str
     display_name: str
     active: bool

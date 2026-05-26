@@ -192,17 +192,17 @@ def widget_chat_stream(
     # sync the way time.time() can.
     _turn_start_monotonic = time.monotonic()
 
-    tenant_id = getattr(request.state, "tenant_id", None)
+    admin_id = getattr(request.state, "admin_id", None)
     domain_id = getattr(request.state, "domain_id", None)
     agent_id = getattr(request.state, "agent_id", None)
     luciel_instance_id = getattr(request.state, "luciel_instance_id", None)
     embed_key_prefix = getattr(request.state, "key_prefix", None)
 
-    # Embed keys MUST be tenant-scoped. NULL tenant_id means
+    # Embed keys MUST be tenant-scoped. NULL admin_id means
     # platform-admin in our model -- it has no place on a public
     # widget surface. Defense-in-depth alongside the issuance-time
     # check (future commit).
-    if tenant_id is None:
+    if admin_id is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -252,7 +252,7 @@ def widget_chat_stream(
         "widget_chat_turn_received",
         extra={
             "event": "widget_chat_turn_received",
-            "tenant_id": tenant_id,
+            "admin_id": admin_id,
             "domain_id": domain_id,
             "agent_id": agent_id,
             "luciel_instance_id": luciel_instance_id,
@@ -286,7 +286,7 @@ def widget_chat_stream(
         # while the schema accepts lowercase; convert here.
         from app.models.identity_claim import ClaimType
         result = session_service.create_session_with_identity(
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
             channel="widget",
@@ -309,7 +309,7 @@ def widget_chat_stream(
         # commit. is_new_user / is_new_conversation stay False because
         # nothing was resolved; the session is anonymous.
         session = session_service.create_session(
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
             user_id=None,  # widget visitors are anonymous at v1
@@ -336,7 +336,7 @@ def widget_chat_stream(
         "widget_chat_session_resolved",
         extra={
             "event": "widget_chat_session_resolved",
-            "tenant_id": tenant_id,
+            "admin_id": admin_id,
             "domain_id": domain_id,
             "session_id": session_id,
             "user_id": user_id_for_audit,
@@ -370,7 +370,7 @@ def widget_chat_stream(
         logger.warning(
             "widget_chat_stream: turn blocked by moderation gate",
             extra={
-                "tenant_id": tenant_id,
+                "admin_id": admin_id,
                 "domain_id": domain_id,
                 "session_id": session_id,
                 "categories": moderation.categories,
@@ -388,7 +388,7 @@ def widget_chat_stream(
             "widget_chat_turn_completed",
             extra={
                 "event": "widget_chat_turn_completed",
-                "tenant_id": tenant_id,
+                "admin_id": admin_id,
                 "domain_id": domain_id,
                 "session_id": session_id,
                 "latency_ms": int(
@@ -442,7 +442,7 @@ def widget_chat_stream(
             session_id=session_id,
             message=payload.message,
             provider=None,  # widget cannot override provider
-            caller_tenant_id=tenant_id,
+            caller_tenant_id=admin_id,
             luciel_instance_id=getattr(request.state, "luciel_instance_id", None),
             actor_key_prefix=getattr(request.state, "key_prefix", None),
             actor_user_id=getattr(request.state, "actor_user_id", None),
@@ -478,7 +478,7 @@ def widget_chat_stream(
                 "widget_chat_turn_completed",
                 extra={
                     "event": "widget_chat_turn_completed",
-                    "tenant_id": tenant_id,
+                    "admin_id": admin_id,
                     "domain_id": domain_id,
                     "session_id": session_id,
                     "latency_ms": int(
@@ -510,7 +510,7 @@ def widget_chat_stream(
                     "widget_chat_turn_completed",
                     extra={
                         "event": "widget_chat_turn_completed",
-                        "tenant_id": tenant_id,
+                        "admin_id": admin_id,
                         "domain_id": domain_id,
                         "session_id": session_id,
                         "latency_ms": int(

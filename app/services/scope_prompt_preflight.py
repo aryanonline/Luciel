@@ -37,13 +37,13 @@ class ScopePromptMissingError(Exception):
     ----------
     reason : str
         One of {"missing_domain_config", "empty_system_prompt"}.
-    tenant_id : str
+    admin_id : str
     domain_id : str
     """
 
-    def __init__(self, reason: str, tenant_id: str, domain_id: str, message: str):
+    def __init__(self, reason: str, admin_id: str, domain_id: str, message: str):
         self.reason = reason
-        self.tenant_id = tenant_id
+        self.admin_id = admin_id
         self.domain_id = domain_id
         super().__init__(message)
 
@@ -56,7 +56,7 @@ class ScopePromptPreflight:
     @staticmethod
     def check(
         db: Session,
-        tenant_id: str,
+        admin_id: str,
         domain_id: Optional[str],
     ) -> None:
         """V2: always succeeds. Domain layer no longer exists.

@@ -92,7 +92,7 @@ class AuditContext:
             actor_key_prefix=getattr(state, "key_prefix", None),
             actor_permissions=perms,
             actor_label=getattr(state, "actor_label", None),
-            actor_tenant_id=getattr(state, "tenant_id", None),
+            actor_tenant_id=getattr(state, "admin_id", None),
         )
 
     @classmethod
@@ -152,7 +152,7 @@ class AdminAuditRepository:
         self,
         *,
         ctx: AuditContext,
-        tenant_id: str,
+        admin_id: str,
         action: str,
         resource_type: str,
         resource_pk: int | None = None,
@@ -204,7 +204,7 @@ class AdminAuditRepository:
             logger.warning(
                 "AUDIT note truncated tenant=%s action=%s "
                 "original_len=%d cap=%d",
-                tenant_id, action, len(note), MAX_NOTE_LENGTH,
+                admin_id, action, len(note), MAX_NOTE_LENGTH,
             )
             note = note[:keep] + _TRUNC_MARKER
 
@@ -212,7 +212,7 @@ class AdminAuditRepository:
             actor_key_prefix=ctx.actor_key_prefix,
             actor_permissions=ctx.permissions_str,
             actor_label=ctx.actor_label,
-            tenant_id=tenant_id or SYSTEM_ACTOR_TENANT,
+            admin_id=admin_id or SYSTEM_ACTOR_TENANT,
             domain_id=domain_id,
             agent_id=agent_id,
             luciel_instance_id=luciel_instance_id,
@@ -236,7 +236,7 @@ class AdminAuditRepository:
             # the caller is writing a worker-rejection-class row
             # protected by the
             # ux_admin_audit_logs_worker_reject_idem partial unique
-            # index on (action, tenant_id, resource_natural_id). A
+            # index on (action, admin_id, resource_natural_id). A
             # concurrent worker that already wrote the same triple
             # makes our INSERT raise IntegrityError -- which is the
             # exact idempotency outcome we want. Swallow it, roll
@@ -248,7 +248,7 @@ class AdminAuditRepository:
                 logger.info(
                     "AUDIT idempotent-skip tenant=%s action=%s nat=%s "
                     "(rejection already recorded)",
-                    tenant_id, action, resource_natural_id,
+                    admin_id, action, resource_natural_id,
                 )
                 return None
             raise
@@ -256,7 +256,7 @@ class AdminAuditRepository:
         logger.info(
             "AUDIT tenant=%s action=%s resource=%s pk=%s nat=%s "
             "actor=%s perms=%s",
-            row.tenant_id,
+            row.admin_id,
             row.action,
             row.resource_type,
             row.resource_pk,
@@ -273,7 +273,7 @@ class AdminAuditRepository:
     def list_for_tenant(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         limit: int = 200,
         offset: int = 0,
         actions: Iterable[str] | None = None,
@@ -283,7 +283,7 @@ class AdminAuditRepository:
         (ScopePolicy in Files 9/10) enforces that only the owning
         tenant or platform_admin can hit this."""
         query = self.db.query(AdminAuditLog).filter(
-            AdminAuditLog.tenant_id == tenant_id
+            AdminAuditLog.admin_id == admin_id
         )
         if actions:
             query = query.filter(AdminAuditLog.action.in_(tuple(actions)))
