@@ -25,7 +25,7 @@ def seed() -> None:
         for default in PLATFORM_DEFAULTS:
             existing = repo.get_policy_for_category(
                 data_category=default["data_category"],
-                tenant_id=None,
+                admin_id=None,
             )
             if existing:
                 print(
@@ -35,7 +35,7 @@ def seed() -> None:
                 continue
 
             policy = RetentionPolicy(
-                tenant_id=None,
+                admin_id=None,
                 data_category=default["data_category"],
                 retention_days=default["retention_days"],
                 action=default["action"],
