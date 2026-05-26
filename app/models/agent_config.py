@@ -25,16 +25,16 @@ class AgentConfig(Base, TimestampMixin):
     tenant_id: Mapped[str] = mapped_column(
         String(100), index=True, nullable=False
     )
+    """Which tenant this agent belongs to.
 
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
-    admin_id: Mapped[str] = mapped_column(
-        String(100),
-        ForeignKey("admins.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
-    """Which tenant this agent belongs to."""
+    NOTE: AgentConfig and the underlying ``agent_configs`` table are dead
+    code: the table was dropped by Arc 5 Revision C
+    (``arc5_c_admin_instance_subtractive``) when the Admin->Instance
+    hierarchy replaced the legacy Agent layer.  This model is kept only
+    to satisfy a handful of legacy stub methods in ``admin_service.py``
+    and will be deleted in a follow-up sweep PR.  No admin_id column is
+    added here because there is no live table to mirror.
+    """
 
     agent_id: Mapped[str] = mapped_column(
         String(100), index=True, nullable=False

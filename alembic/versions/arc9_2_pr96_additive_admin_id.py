@@ -36,9 +36,12 @@ depends_on = None
 # allow NULL tenant_id for legitimate platform-wide / cross-tenant rows
 # (platform-admin API keys, shared domain knowledge, default retention
 # policies, system deletion events).  admin_id mirrors that nullability.
+# Note: `agent_configs` is intentionally absent.  The table was dropped by
+# Arc 5 Revision C (`arc5_c_admin_instance_subtractive`) when the Admin->
+# Instance hierarchy replaced the legacy Agent layer.  The AgentConfig
+# model file still exists as dead code; a later cleanup PR will delete it.
 TABLES_NOT_NULL: tuple[str, ...] = (
     "admin_audit_logs",
-    "agent_configs",
     "conversations",
     "identity_claims",
     "memory_items",
