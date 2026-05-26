@@ -361,7 +361,7 @@ def test_validation_gate_pillar_2_pins_widget_audit_log_event_names():
 
 def test_validation_gate_pillar_3_exercises_cross_tenant_denial():
     """Pillar 3 (MEMORY QUALITY) exercises
-    CrossSessionRetriever.retrieve() with a mismatched tenant_id and
+    CrossSessionRetriever.retrieve() with a mismatched admin_id and
     asserts the result set is empty — the §4.7 three-layer scope
     filter + defense-in-depth post-query loop denying cross-tenant
     access on real rows. The harness MUST exercise both tenants on
@@ -377,9 +377,9 @@ def test_validation_gate_pillar_3_exercises_cross_tenant_denial():
         "CrossSessionRetriever.retrieve() — the runtime memory "
         "surface the §3.2.12 pillar 3 claim is built on."
     )
-    assert "tenant_id=TENANT_B" in source, (
+    assert "admin_id=TENANT_B" in source, (
         "Pillar 3 (memory quality) must call retriever.retrieve() "
-        "with tenant_id=TENANT_B (mismatched) — the cross-tenant "
+        "with admin_id=TENANT_B (mismatched) — the cross-tenant "
         "denial claim from §4.7 made concrete on real rows."
     )
     # The provenance fields the retriever returns are load-bearing for

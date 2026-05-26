@@ -48,7 +48,7 @@ class CheckoutSessionRequest(BaseModel):
     same schema. Flipped to V2 vocab as a Path-A side-fix; tracked as
     drift ``D-arc6-checkout-schema-tier-v1-vocab-2026-05-23``.
 
-    Why tenant_id is OPTIONAL here:
+    Why admin_id is OPTIONAL here:
       v1 self-serve mints a fresh tenant for every checkout. A buyer
       who is already a Team / Company member upgrading to a paid
       Individual seat (Sarah → department, CANONICAL_RECAP Q5) is a
@@ -81,7 +81,7 @@ class CheckoutSessionRequest(BaseModel):
             "incentive). Default 'monthly' preserves Step 30a behaviour."
         ),
     )
-    tenant_id: str | None = Field(
+    admin_id: str | None = Field(
         default=None,
         description="Reserved for Step 38 upgrade flows; ignored at v1.",
     )
@@ -111,7 +111,7 @@ class UpgradeRequest(BaseModel):
         Subscription row attached.
 
     The cookied user's existing Admin id is derived from the session
-    cookie's tenant_id claim server-side; the buyer cannot pass it.
+    cookie's admin_id claim server-side; the buyer cannot pass it.
     This eliminates a class of cross-admin-upgrade attacks where a
     Free user could try to upgrade someone else's admin by posting a
     foreign admin_id.
@@ -165,7 +165,7 @@ class DowngradeRequest(BaseModel):
     emails a transactional ``/signup?tier=pro`` magic link.
 
     The cookied user's existing Admin id is derived from the session
-    cookie's tenant_id claim server-side; the buyer cannot pass it.
+    cookie's admin_id claim server-side; the buyer cannot pass it.
     This mirrors the cross-admin-attack mitigation in UpgradeRequest.
 
     Three-layer Enterprise rejection (CANONICAL_RECAP \u00a717 lock):
@@ -400,7 +400,7 @@ class SubscriptionStatusResponse(BaseModel):
                     "cookied user. False for Free admins (Free has no "
                     "Subscription by V2 design).",
     )
-    tenant_id: str
+    admin_id: str
     tier: str
     # Subscription-derived fields are nullable for Free admins (no
     # Subscription row). When has_subscription=True every field below
@@ -481,7 +481,7 @@ class PilotRefundResponse(BaseModel):
       currency             -- Lowercased ISO-4217. Always 'cad' today;
                               field exists so a future currency expansion
                               doesn't change the response shape.
-      tenant_id            -- The tenant that just cascaded to inactive.
+      admin_id            -- The tenant that just cascaded to inactive.
                               Surfaced so the marketing site can purge
                               the cookied session state correctly.
       deactivated_at       -- Server-side timestamp the cascade ran.
@@ -496,7 +496,7 @@ class PilotRefundResponse(BaseModel):
         ..., description="Amount refunded in the smallest currency unit (cents for CAD).",
     )
     currency: str = Field(..., description="ISO-4217 currency, lowercased (e.g. 'cad').")
-    tenant_id: str = Field(..., description="Tenant that was cascade-deactivated.")
+    admin_id: str = Field(..., description="Tenant that was cascade-deactivated.")
     deactivated_at: datetime = Field(..., description="UTC time the cascade ran.")
 
 

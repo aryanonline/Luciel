@@ -89,7 +89,7 @@ GENESIS_PREV_HASH = "0" * 64
 # backfill. Drift here = chain breakage on the first new insert
 # after deploy. Pillar 23 catches drift by recomputing every row.
 _CHAIN_FIELDS = (
-    "tenant_id",
+    "admin_id",
     "domain_id",
     "agent_id",
     "luciel_instance_id",

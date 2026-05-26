@@ -199,7 +199,7 @@ _FREE_ALLOWED_INVITE_ROLES: frozenset[str] = frozenset()  # seats=1
 # additions don't require this constant to grow.
 
 
-def _resolve_max_pending_invites(*, tenant_id: str, db: Session) -> int:
+def _resolve_max_pending_invites(*, admin_id: str, db: Session) -> int:
     """Resolve the pending-invite cap for a tenant from its active sub.
 
     Returns 2x the subscription's instance_count_cap when there is an
@@ -211,7 +211,7 @@ def _resolve_max_pending_invites(*, tenant_id: str, db: Session) -> int:
     sub = (
         db.query(Subscription)
         .filter(
-            Subscription.tenant_id == tenant_id,
+            Subscription.admin_id == admin_id,
             Subscription.status.in_((STATUS_ACTIVE, STATUS_TRIALING)),
             Subscription.active.is_(True),
         )
@@ -224,7 +224,7 @@ def _resolve_max_pending_invites(*, tenant_id: str, db: Session) -> int:
 
 
 def _check_role_allowed_for_tier(
-    *, tenant_id: str, role: str, db: Session
+    *, admin_id: str, role: str, db: Session
 ) -> None:
     """Raise ``InviteRoleNotAllowedForTierError`` if role is not allowed.
 
@@ -246,7 +246,7 @@ def _check_role_allowed_for_tier(
     sub = (
         db.query(Subscription)
         .filter(
-            Subscription.tenant_id == tenant_id,
+            Subscription.admin_id == admin_id,
             Subscription.status.in_((STATUS_ACTIVE, STATUS_TRIALING)),
             Subscription.active.is_(True),
         )
@@ -320,7 +320,7 @@ def _extract_jti(token: str) -> str:
 def create_invite(
     *,
     db: Session,
-    tenant_id: str,
+    admin_id: str,
     domain_id: str,
     inviter_user_id: uuid.UUID,
     inviter_email: str,
@@ -354,25 +354,25 @@ def create_invite(
     #    `department_lead` / `domain_lead` invite. Individual tier has
     #    no invite path at all (seats=1). Company tier is permissive
     #    so v1 + future role labels both flow through.
-    _check_role_allowed_for_tier(tenant_id=tenant_id, role=role, db=db)
+    _check_role_allowed_for_tier(admin_id=admin_id, role=role, db=db)
 
     # 1. Duplicate-pending pre-flight. The partial unique index would
     #    raise IntegrityError on race, but a clean 409 is friendlier.
     existing = repo.get_pending_for_email(
-        tenant_id=tenant_id, invited_email=email_norm
+        admin_id=admin_id, invited_email=email_norm
     )
     if existing is not None:
         raise DuplicatePendingInviteError(
             f"A pending invite for {email_lc} already exists under "
-            f"tenant {tenant_id}; use resend instead of create."
+            f"tenant {admin_id}; use resend instead of create."
         )
 
     # 2. Pending-invite cap.
-    pending_count = repo.count_pending_for_tenant(tenant_id=tenant_id)
-    cap = _resolve_max_pending_invites(tenant_id=tenant_id, db=db)
+    pending_count = repo.count_pending_for_tenant(admin_id=admin_id)
+    cap = _resolve_max_pending_invites(admin_id=admin_id, db=db)
     if pending_count >= cap:
         raise InvitePendingCapExceededError(
-            f"Tenant {tenant_id} already has {pending_count} pending "
+            f"Tenant {admin_id} already has {pending_count} pending "
             f"invites (cap={cap}). Resolve some before issuing more."
         )
 
@@ -384,14 +384,14 @@ def create_invite(
     token = mint_set_password_token(
         user_id=inviter_user_id,
         email=email_norm,
-        tenant_id=tenant_id,
+        admin_id=admin_id,
         purpose="invite",
     )
     token_jti = _extract_jti(token)
 
     try:
         invite = repo.create(
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             inviter_user_id=inviter_user_id,
             invited_email=email_norm,
@@ -402,7 +402,7 @@ def create_invite(
 
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             action=ACTION_USER_INVITED,
             resource_type=RESOURCE_USER_INVITE,
@@ -410,7 +410,7 @@ def create_invite(
             resource_natural_id=email_lc,
             after={
                 "invite_id": str(invite.id),
-                "tenant_id": tenant_id,
+                "admin_id": admin_id,
                 "domain_id": domain_id,
                 "invited_email": email_norm,
                 "role": role,
@@ -442,7 +442,7 @@ def create_invite(
         logger.exception(
             "create_invite: invite email send failed tenant=%s invite=%s "
             "email=%s -- row committed, admin can resend",
-            tenant_id,
+            admin_id,
             invite.id,
             email_lc,
         )
@@ -450,7 +450,7 @@ def create_invite(
     logger.info(
         "Invite created tenant=%s invite_id=%s email=%s role=%s "
         "inviter=%s expires_at=%s",
-        tenant_id,
+        admin_id,
         invite.id,
         email_lc,
         role,
@@ -524,7 +524,7 @@ def redeem_invite(
             repo.mark_expired(invite, autocommit=False)
             AdminAuditRepository(db).record(
                 ctx=audit_ctx,
-                tenant_id=invite.tenant_id,
+                admin_id=invite.admin_id,
                 domain_id=invite.domain_id,
                 action=ACTION_INVITE_REVOKED,  # closest existing verb for system-initiated expiry
                 resource_type=RESOURCE_USER_INVITE,
@@ -547,7 +547,7 @@ def redeem_invite(
             f"{invite.expires_at.isoformat()}; ask the admin to resend"
         )
 
-    tenant_id = invite.tenant_id
+    admin_id = invite.admin_id
     domain_id = invite.domain_id
     email_norm = invite.invited_email.strip()
     email_lc = email_norm.lower()
@@ -576,7 +576,7 @@ def redeem_invite(
         existing_assignment = db.execute(
             select(ScopeAssignment).where(
                 ScopeAssignment.user_id == user.id,
-                ScopeAssignment.tenant_id == tenant_id,
+                ScopeAssignment.admin_id == admin_id,
                 ScopeAssignment.domain_id.is_(None),
                 ScopeAssignment.ended_at.is_(None),
                 ScopeAssignment.active.is_(True),
@@ -585,7 +585,7 @@ def redeem_invite(
         if existing_assignment is None:
             assignment = ScopeAssignment(
                 user_id=user.id,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 domain_id=None,  # V2: no Domain layer
                 role=invite.role,
                 active=True,
@@ -605,7 +605,7 @@ def redeem_invite(
 
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_slug,
             action=ACTION_INVITE_REDEEMED,
@@ -618,7 +618,7 @@ def redeem_invite(
                 "invite_id": str(invite.id),
                 "accepted_user_id": str(user.id),
                 "agent_id": agent_slug,
-                "tenant_id": tenant_id,
+                "admin_id": admin_id,
                 "domain_id": domain_id,
                 "role": invite.role,
             },
@@ -638,7 +638,7 @@ def redeem_invite(
 
     logger.info(
         "Invite redeemed tenant=%s invite_id=%s user_id=%s agent=%s email=%s",
-        tenant_id,
+        admin_id,
         invite.id,
         user.id,
         agent_slug,
@@ -702,7 +702,7 @@ def resend_invite(
     new_token = mint_set_password_token(
         user_id=inviter_user_id,
         email=invite.invited_email,
-        tenant_id=invite.tenant_id,
+        admin_id=invite.admin_id,
         purpose="invite",
     )
     new_jti = _extract_jti(new_token)
@@ -719,7 +719,7 @@ def resend_invite(
         )
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
-            tenant_id=invite.tenant_id,
+            admin_id=invite.admin_id,
             domain_id=invite.domain_id,
             action=ACTION_INVITE_RESENT,
             resource_type=RESOURCE_USER_INVITE,
@@ -753,14 +753,14 @@ def resend_invite(
         logger.exception(
             "resend_invite: email send failed tenant=%s invite=%s email=%s "
             "-- row committed, admin can resend again",
-            invite.tenant_id,
+            invite.admin_id,
             invite.id,
             invite.invited_email,
         )
 
     logger.info(
         "Invite resent tenant=%s invite_id=%s email=%s old_jti=%s new_jti=%s",
-        invite.tenant_id,
+        invite.admin_id,
         invite.id,
         invite.invited_email,
         old_jti,
@@ -807,7 +807,7 @@ def revoke_invite(
         )
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
-            tenant_id=invite.tenant_id,
+            admin_id=invite.admin_id,
             domain_id=invite.domain_id,
             action=ACTION_INVITE_REVOKED,
             resource_type=RESOURCE_USER_INVITE,
@@ -833,7 +833,7 @@ def revoke_invite(
 
     logger.info(
         "Invite revoked tenant=%s invite_id=%s email=%s",
-        invite.tenant_id,
+        invite.admin_id,
         invite.id,
         invite.invited_email,
     )

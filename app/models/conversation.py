@@ -106,30 +106,7 @@ class Conversation(Base):
         server_default=text("gen_random_uuid()"),
     )
 
-    # Scope: (tenant_id, domain_id). String(100), same shape as everywhere
-    # else in this codebase. tenant_id has FK to tenant_configs.tenant_id
-    # with RESTRICT to protect identity history from cascade-delete on
-    # tenant removal. domain_id deliberately has no FK; service layer
-    # validates the composite (tenant_id, domain_id) against domain_configs
-    # at write time. Same convention scope_assignments uses (File 1.2 of
-    # Step 24.5b).
-    # Arc 5 Revision C: FK re-pointed from tenant_configs.tenant_id to
-    # admins.id (tenant_configs was dropped; admins.id replaces it 1:1).
-    # Column name 'tenant_id' kept for call-site compatibility.
-    tenant_id: Mapped[str] = mapped_column(
-        String(100),
-        ForeignKey(
-            "admins.id",
-            ondelete="RESTRICT",
-            name="fk_conversations_tenant_id_admins",
-        ),
-        nullable=False,
-        index=True,
-    )
 
-
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -200,7 +177,7 @@ class Conversation(Base):
         # lands in sub-branch 2.
         Index(
             "ix_conversations_tenant_domain_last_activity",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "last_activity_at",
         ),
@@ -215,6 +192,6 @@ class Conversation(Base):
     def __repr__(self) -> str:  # pragma: no cover -- debug only
         return (
             f"<Conversation id={self.id} "
-            f"tenant_id={self.tenant_id!r} domain_id={self.domain_id!r} "
+            f"tenant_id={self.admin_id!r} domain_id={self.domain_id!r} "
             f"active={self.active}>"
         )

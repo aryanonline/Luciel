@@ -20,14 +20,14 @@ class ConsentRepository:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         consent_type: str = "memory_persistence",
     ) -> UserConsent | None:
         return (
             self.db.query(UserConsent)
             .filter(
                 UserConsent.user_id == user_id,
-                UserConsent.tenant_id == tenant_id,
+                UserConsent.admin_id == admin_id,
                 UserConsent.consent_type == consent_type,
             )
             .first()
@@ -37,7 +37,7 @@ class ConsentRepository:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         consent_type: str = "memory_persistence",
         collection_method: str = "api",
         consent_text: str | None = None,
@@ -45,7 +45,7 @@ class ConsentRepository:
     ) -> UserConsent:
         existing = self.get_consent(
             user_id=user_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             consent_type=consent_type,
         )
         if existing:
@@ -59,7 +59,7 @@ class ConsentRepository:
 
         record = UserConsent(
             user_id=user_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             consent_type=consent_type,
             granted=True,
             collection_method=collection_method,
@@ -75,12 +75,12 @@ class ConsentRepository:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         consent_type: str = "memory_persistence",
     ) -> UserConsent | None:
         existing = self.get_consent(
             user_id=user_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             consent_type=consent_type,
         )
         if existing:
@@ -93,12 +93,12 @@ class ConsentRepository:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         consent_type: str = "memory_persistence",
     ) -> bool:
         record = self.get_consent(
             user_id=user_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             consent_type=consent_type,
         )
         return record is not None and record.granted

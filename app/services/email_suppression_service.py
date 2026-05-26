@@ -106,7 +106,7 @@ from app.models.email_suppression import (
 logger = logging.getLogger(__name__)
 
 
-# The tenant_id slot on AdminAuditLog is NOT NULL. System-actor writes
+# The admin_id slot on AdminAuditLog is NOT NULL. System-actor writes
 # use the literal "platform" string per the convention established by
 # AdminAuditRepository.SYSTEM_ACTOR_TENANT. We avoid importing that
 # constant here so this service has no dependency on the repository
@@ -302,7 +302,7 @@ def record_suppression(
         actor_key_prefix=None,  # system actor (SNS-driven)
         actor_permissions=None,
         actor_label=actor_label,
-        tenant_id=_SYSTEM_ACTOR_TENANT,
+        admin_id=_SYSTEM_ACTOR_TENANT,
         domain_id=None,
         agent_id=None,
         luciel_instance_id=None,
@@ -379,7 +379,7 @@ def clear_suppression(
         actor_key_prefix=None,
         actor_permissions=None,
         actor_label=actor_label,
-        tenant_id=_SYSTEM_ACTOR_TENANT,
+        admin_id=_SYSTEM_ACTOR_TENANT,
         domain_id=None,
         agent_id=None,
         luciel_instance_id=None,

@@ -23,7 +23,7 @@ emitting an ACTION_DEACTIVATE audit row in the same transaction
 
 The walker (scripts/cleanup_residue_tenant.ps1) calls this service via
 two new admin endpoints in app/api/v1/admin.py:
-  - GET    /api/v1/admin/memory-items?tenant_id=X
+  - GET    /api/v1/admin/memory-items?admin_id=X
   - DELETE /api/v1/admin/memory-items/{id}
 
 Both endpoints are platform_admin gated. Tenant-scoped admin keys cannot
@@ -60,7 +60,7 @@ class MemoryAdminService:
     def list_memories_for_tenant(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         active_only: bool = False,
     ) -> list[MemoryItem]:
         """List memory items for a tenant.
@@ -71,7 +71,7 @@ class MemoryAdminService:
         """
         stmt = (
             select(MemoryItem)
-            .where(MemoryItem.tenant_id == tenant_id)
+            .where(MemoryItem.admin_id == admin_id)
             .order_by(MemoryItem.created_at.desc())
         )
         if active_only:
@@ -108,7 +108,7 @@ class MemoryAdminService:
             ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
                 label="deactivate_memory"
             ),
-            tenant_id=item.tenant_id or SYSTEM_ACTOR_TENANT,
+            admin_id=item.admin_id or SYSTEM_ACTOR_TENANT,
             action=ACTION_DEACTIVATE,
             resource_type=RESOURCE_MEMORY,
             resource_pk=item.id,
@@ -123,5 +123,5 @@ class MemoryAdminService:
         )
 
         self.db.commit()
-        logger.info("Deactivated memory id=%d tenant=%s", memory_id, item.tenant_id)
+        logger.info("Deactivated memory id=%d tenant=%s", memory_id, item.admin_id)
         return True

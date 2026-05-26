@@ -98,7 +98,7 @@ class TestServiceLegacyShape:
         from app.services.session_service import SessionService
         sig = inspect.signature(SessionService.create_session)
         for name, default in [
-            ("tenant_id", inspect.Parameter.empty),
+            ("admin_id", inspect.Parameter.empty),
             ("domain_id", inspect.Parameter.empty),
             ("agent_id", None),
             ("user_id", None),
@@ -123,7 +123,7 @@ class TestServiceIdentityShape:
             SessionService.create_session_with_identity
         )
         required = {
-            "tenant_id", "domain_id", "claim_type",
+            "admin_id", "domain_id", "claim_type",
             "claim_value", "issuing_adapter",
         }
         optional = {"agent_id", "channel"}
@@ -245,7 +245,7 @@ class _CountingRepo:
         self.created_sessions: list[dict] = []
 
     def create_session(
-        self, *, session_id, tenant_id, domain_id, agent_id, user_id,
+        self, *, session_id, admin_id, domain_id, agent_id, user_id,
         channel, status="active", conversation_id=None,
         luciel_instance_id=None,
     ):
@@ -255,7 +255,7 @@ class _CountingRepo:
         # type-error before reaching the contract assertions.
         captured = {
             "session_id": session_id,
-            "tenant_id": tenant_id,
+            "admin_id": admin_id,
             "domain_id": domain_id,
             "agent_id": agent_id,
             "user_id": user_id,
@@ -318,7 +318,7 @@ class TestEndToEndWiring:
         repo = _CountingRepo(scripted_resolver_results=[None])
         svc = SessionService(repository=repo)  # type: ignore[arg-type]
         result = svc.create_session_with_identity(
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             agent_id=None,
             channel="web",
@@ -337,7 +337,7 @@ class TestEndToEndWiring:
         sess = repo.created_sessions[0]
         assert isinstance(sess["conversation_id"], uuid.UUID)
         assert sess["user_id"] == str(result.user_id)
-        assert sess["tenant_id"] == "t-1"
+        assert sess["admin_id"] == "t-1"
         assert sess["domain_id"] == "d-1"
         assert sess["channel"] == "web"
         # 3) Returned SessionWithIdentity flags both mints true.
@@ -373,7 +373,7 @@ class TestEndToEndWiring:
         ])
         svc = SessionService(repository=repo)  # type: ignore[arg-type]
         result = svc.create_session_with_identity(
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             channel="programmatic_api",
             claim_type=ClaimType.EMAIL,
@@ -424,7 +424,7 @@ class TestLegacyBehaviourUnchanged:
         repo = _LegacyRepo()
         svc = SessionService(repository=repo)  # type: ignore[arg-type]
         svc.create_session(
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             agent_id="agent-1",
             user_id="legacy-user",

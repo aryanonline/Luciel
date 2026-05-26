@@ -68,7 +68,7 @@ class TestQuarantineGate(unittest.TestCase):
             with self.assertRaises(RuntimeError) as cm:
                 r.retrieve(
                     conversation_id=CONV_ID,
-                    tenant_id="t1",
+                    admin_id="t1",
                     domain_id="d1",
                 )
             self.assertIn("quarantined", str(cm.exception).lower())
@@ -84,7 +84,7 @@ class TestQuarantineGate(unittest.TestCase):
             with self.assertRaises(RuntimeError) as cm:
                 r.retrieve(
                     conversation_id=CONV_ID,
-                    tenant_id="t1",
+                    admin_id="t1",
                     domain_id="d1",
                 )
             self.assertIn("app.admin_id", str(cm.exception).lower())
@@ -100,7 +100,7 @@ class TestQuarantineGate(unittest.TestCase):
             with self.assertRaises(RuntimeError) as cm:
                 r.retrieve(
                     conversation_id=CONV_ID,
-                    tenant_id="t1",
+                    admin_id="t1",
                     domain_id="d1",
                 )
             self.assertIn("guc", str(cm.exception).lower())
@@ -117,7 +117,7 @@ class TestQuarantineGate(unittest.TestCase):
             r = CrossSessionRetriever(db=_GucStubDb(admin_guc="admin-A"))
             out = r.retrieve(
                 conversation_id=CONV_ID,
-                tenant_id="t1",
+                admin_id="t1",
                 domain_id="d1",
             )
             self.assertEqual(out, [])
@@ -137,7 +137,7 @@ class TestGateDoesNotBlockInputValidation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 r.retrieve(
                     conversation_id=CONV_ID,
-                    tenant_id="   ",
+                    admin_id="   ",
                     domain_id="d1",
                 )
 
@@ -152,7 +152,7 @@ class TestGateDoesNotBlockInputValidation(unittest.TestCase):
             with self.assertRaises(TypeError):
                 r.retrieve(
                     conversation_id="not-a-uuid",  # type: ignore[arg-type]
-                    tenant_id="t1",
+                    admin_id="t1",
                     domain_id="d1",
                 )
 

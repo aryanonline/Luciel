@@ -105,20 +105,7 @@ class ScopeAssignment(Base, TimestampMixin):
 
     # Tenant + domain + role triple. Mirrors the scope-arithmetic columns
     # used elsewhere (api_keys, agents, luciel_instances). String FKs match
-    # existing project convention (tenant_configs.tenant_id is VARCHAR(100)).
-    # Arc 5 Revision C: FK re-pointed from tenant_configs.tenant_id to
-    # admins.id (admins.id is 1:1 with the dropped tenant_configs.tenant_id).
-    # Column name kept for call-site compatibility.
-    tenant_id: Mapped[str] = mapped_column(
-        String(100),
-        ForeignKey("admins.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
 
-
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -215,8 +202,8 @@ class ScopeAssignment(Base, TimestampMixin):
         ),
         # Hot-path query: "who currently holds assignments under this tenant?"
         Index(
-            "ix_scope_assignments_tenant_id_active",
-            "tenant_id",
+            "ix_scope_assignments_admin_id_active",
+            "admin_id",
             "active",
             postgresql_where=text("ended_at IS NULL"),
         ),
@@ -224,7 +211,7 @@ class ScopeAssignment(Base, TimestampMixin):
         Index(
             "ix_scope_assignments_user_tenant_domain_role_active",
             "user_id",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "role",
             postgresql_where=text("ended_at IS NULL"),
@@ -243,6 +230,6 @@ class ScopeAssignment(Base, TimestampMixin):
         state = "active" if self.ended_at is None else f"ended={self.ended_reason}"
         return (
             f"<ScopeAssignment id={self.id} user={self.user_id} "
-            f"tenant={self.tenant_id} domain={self.domain_id} "
+            f"tenant={self.admin_id} domain={self.domain_id} "
             f"role={self.role!r} {state}>"
         )

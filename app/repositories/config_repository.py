@@ -32,16 +32,16 @@ class ConfigRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def get_tenant_config(self, tenant_id: str) -> Admin | None:
+    def get_tenant_config(self, admin_id: str) -> Admin | None:
         """Look up the Admin row (legacy name preserved)."""
         stmt = select(Admin).where(
-            Admin.id == tenant_id,
+            Admin.id == admin_id,
             Admin.active.is_(True),
         )
         return self.db.scalars(stmt).first()
 
     def get_agent_config(
-        self, tenant_id: str, agent_id: str
+        self, admin_id: str, agent_id: str
     ) -> AgentConfig | None:
         """Look up the legacy agent_configs row.
 

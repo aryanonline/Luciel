@@ -29,7 +29,7 @@ class MemoryRepository:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         category: str,
         content: str,
         agent_id: str | None = None,
@@ -47,7 +47,7 @@ class MemoryRepository:
         """
         item = MemoryItem(
             user_id=user_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             agent_id=agent_id,
             category=category,
             content=content,
@@ -64,7 +64,7 @@ class MemoryRepository:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         agent_id: str | None = None,
         category: str | None = None,
         limit: int = 50,
@@ -73,7 +73,7 @@ class MemoryRepository:
         Retrieve active memories for a user.
 
         Scoping rules:
-          - Always filters by user_id + tenant_id.
+          - Always filters by user_id + admin_id.
           - If agent_id is provided, returns only that agent's memories
             PLUS tenant-level memories (agent_id IS NULL).
           - If agent_id is None, returns only tenant-level memories.
@@ -84,7 +84,7 @@ class MemoryRepository:
             select(MemoryItem)
             .where(
                 MemoryItem.user_id == user_id,
-                MemoryItem.tenant_id == tenant_id,
+                MemoryItem.admin_id == admin_id,
                 MemoryItem.active.is_(True),
             )
             .order_by(MemoryItem.created_at.desc())
@@ -119,7 +119,7 @@ class MemoryRepository:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         category: str,
         content: str,
         message_id: int,
@@ -128,15 +128,15 @@ class MemoryRepository:
         luciel_instance_id: int | None = None,
         actor_user_id: "uuid.UUID | None" = None,  # Step 24.5b File 2.6b
     ) -> bool:
-        """Insert a memory row keyed by (tenant_id, message_id).
+        """Insert a memory row keyed by (admin_id, message_id).
 
-        Idempotent: if a row already exists for the same (tenant_id, message_id),
+        Idempotent: if a row already exists for the same (admin_id, message_id),
         this is a no-op and returns False. Relies on the composite partial
         unique index added in migration <step-27b add_memory_items_message_id>.
 
         Returns True if a new row was inserted, False if the row already existed.
 
-        Invariant 13: tenant_id is in the conflict key, not just message_id,
+        Invariant 13: admin_id is in the conflict key, not just message_id,
         so two tenants cannot collision-block each other's message ids.
 
         Invariant 4: caller commits (worker owns the transaction so the
@@ -151,7 +151,7 @@ class MemoryRepository:
         existing = self.db.scalars(
             select(MemoryItem.id)
             .where(
-                MemoryItem.tenant_id == tenant_id,
+                MemoryItem.admin_id == admin_id,
                 MemoryItem.message_id == message_id,
             )
             .limit(1)
@@ -161,7 +161,7 @@ class MemoryRepository:
 
         item = MemoryItem(
             user_id=user_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             agent_id=agent_id,
             category=category,
             content=content,

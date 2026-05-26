@@ -135,18 +135,7 @@ class UserInvite(Base, TimestampMixin):
     # convention -- a tenant cannot be hard-deleted while invites reference
     # it; soft-deactivation goes through the AdminService cascade which
     # is responsible for revoking any pending invites in the same txn.
-    # Arc 5 Revision C: FK re-pointed from tenant_configs.tenant_id to
-    # admins.id. Column name kept for call-site compatibility.
-    tenant_id: Mapped[str] = mapped_column(
-        String(100),
-        ForeignKey("admins.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
 
-
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -284,7 +273,7 @@ class UserInvite(Base, TimestampMixin):
         # browsed via the broader (tenant_id, status) composite).
         Index(
             "ix_user_invites_tenant_status_pending",
-            "tenant_id",
+            "admin_id",
             "status",
             postgresql_where=text("status = 'pending'"),
         ),
@@ -302,7 +291,7 @@ class UserInvite(Base, TimestampMixin):
         # service-layer 409 the route surfaces on the same condition.
         Index(
             "uq_user_invites_tenant_email_pending",
-            "tenant_id",
+            "admin_id",
             text("LOWER(invited_email)"),
             unique=True,
             postgresql_where=text("status = 'pending'"),
@@ -320,7 +309,7 @@ class UserInvite(Base, TimestampMixin):
 
     def __repr__(self) -> str:  # pragma: no cover -- debug only
         return (
-            f"<UserInvite id={self.id} tenant={self.tenant_id} "
+            f"<UserInvite id={self.id} tenant={self.admin_id} "
             f"email={self.invited_email!r} role={self.role!r} "
             f"status={self.status.value}>"
         )

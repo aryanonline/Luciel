@@ -4,7 +4,7 @@ Knowledge repository (Step 25b, File 8).
 Scope-aware CRUD over knowledge_embeddings.
 
 Write discipline:
-    - Writes always carry the full scope (tenant_id, domain_id,
+    - Writes always carry the full scope (admin_id, domain_id,
       luciel_instance_id) so retrieval inheritance works.
     - source_id + source_version are atomic units of replace.
     - Soft supersede: never UPDATE-in-place, never DELETE rows. Set
@@ -48,7 +48,7 @@ class KnowledgeRepository:
         *,
         chunks: Sequence[str],
         embeddings: Sequence[Sequence[float]],
-        tenant_id: str | None,
+        admin_id: str | None,
         domain_id: str | None,
         agent_id: str | None,
         luciel_instance_id: int | None,
@@ -80,7 +80,7 @@ class KnowledgeRepository:
         rows: list[KnowledgeEmbedding] = []
         for text, emb in zip(chunks, embeddings):
             row = KnowledgeEmbedding(
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 domain_id=domain_id,
                 agent_id=agent_id,
                 luciel_instance_id=luciel_instance_id,
@@ -216,7 +216,7 @@ class KnowledgeRepository:
     def list_active_chunks_for_scope(
         self,
         *,
-        tenant_id: str | None,
+        admin_id: str | None,
         domain_id: str | None,
         luciel_instance_id: int | None,
         knowledge_type: str | None = None,
@@ -226,11 +226,11 @@ class KnowledgeRepository:
 
         Returns active chunks visible to this scope:
             - chunks bound to this luciel_instance_id  (instance-private)
-            - chunks at this (tenant_id, domain_id) with luciel_instance_id IS NULL
+            - chunks at this (admin_id, domain_id) with luciel_instance_id IS NULL
               (domain-shared)
-            - chunks at this tenant_id with domain_id IS NULL and
+            - chunks at this admin_id with domain_id IS NULL and
               luciel_instance_id IS NULL  (tenant-shared)
-            - chunks with all of (tenant_id, domain_id, luciel_instance_id) NULL
+            - chunks with all of (admin_id, domain_id, luciel_instance_id) NULL
               (global / domain_knowledge across all tenants for a domain)
 
         Legacy rows (agent_id set, luciel_instance_id NULL) are read-
@@ -244,17 +244,17 @@ class KnowledgeRepository:
         )
         domain_clause = and_(
             KnowledgeEmbedding.luciel_instance_id.is_(None),
-            KnowledgeEmbedding.tenant_id == tenant_id,
+            KnowledgeEmbedding.admin_id == admin_id,
             KnowledgeEmbedding.domain_id == domain_id,
         ) if domain_id is not None else None
         tenant_clause = and_(
             KnowledgeEmbedding.luciel_instance_id.is_(None),
             KnowledgeEmbedding.domain_id.is_(None),
-            KnowledgeEmbedding.tenant_id == tenant_id,
-        ) if tenant_id is not None else None
+            KnowledgeEmbedding.admin_id == admin_id,
+        ) if admin_id is not None else None
         global_clause = and_(
             KnowledgeEmbedding.luciel_instance_id.is_(None),
-            KnowledgeEmbedding.tenant_id.is_(None),
+            KnowledgeEmbedding.admin_id.is_(None),
             KnowledgeEmbedding.domain_id.is_(None),
         )
 
@@ -339,7 +339,7 @@ class KnowledgeRepository:
         self,
         *,
         query_embedding: Sequence[float],
-        tenant_id: str | None,
+        admin_id: str | None,
         domain_id: str | None,
         luciel_instance_id: int | None = None,
         agent_id: str | None = None,  # legacy read-compat
@@ -350,16 +350,16 @@ class KnowledgeRepository:
 
         Visibility (union of):
           - luciel_instance_id == given  (instance-private)
-          - luciel_instance_id IS NULL AND tenant_id+domain_id match  (domain-shared)
-          - luciel_instance_id IS NULL AND domain_id IS NULL AND tenant_id match (tenant-shared)
-          - tenant_id IS NULL AND domain_id IS NULL  (global)
+          - luciel_instance_id IS NULL AND admin_id+domain_id match  (domain-shared)
+          - luciel_instance_id IS NULL AND domain_id IS NULL AND admin_id match (tenant-shared)
+          - admin_id IS NULL AND domain_id IS NULL  (global)
           - Legacy compat: agent_id match (pre-Step-24.5 rows)
 
         Active-only (superseded_at IS NULL).
         Orders by cosine distance ascending (<=>).
 
         Returns a list of dicts: {id, content, title, knowledge_type,
-        luciel_instance_id, tenant_id, domain_id, distance}.
+        luciel_instance_id, admin_id, domain_id, distance}.
         """
         # Build visibility clauses — all require superseded_at IS NULL.
         clauses: list = []
@@ -367,27 +367,27 @@ class KnowledgeRepository:
             clauses.append(
                 KnowledgeEmbedding.luciel_instance_id == luciel_instance_id
             )
-        if domain_id is not None and tenant_id is not None:
+        if domain_id is not None and admin_id is not None:
             clauses.append(
                 and_(
                     KnowledgeEmbedding.luciel_instance_id.is_(None),
-                    KnowledgeEmbedding.tenant_id == tenant_id,
+                    KnowledgeEmbedding.admin_id == admin_id,
                     KnowledgeEmbedding.domain_id == domain_id,
                 )
             )
-        if tenant_id is not None:
+        if admin_id is not None:
             clauses.append(
                 and_(
                     KnowledgeEmbedding.luciel_instance_id.is_(None),
                     KnowledgeEmbedding.domain_id.is_(None),
-                    KnowledgeEmbedding.tenant_id == tenant_id,
+                    KnowledgeEmbedding.admin_id == admin_id,
                 )
             )
         # Global rows (no tenant).
         clauses.append(
             and_(
                 KnowledgeEmbedding.luciel_instance_id.is_(None),
-                KnowledgeEmbedding.tenant_id.is_(None),
+                KnowledgeEmbedding.admin_id.is_(None),
                 KnowledgeEmbedding.domain_id.is_(None),
             )
         )
@@ -396,7 +396,7 @@ class KnowledgeRepository:
             clauses.append(
                 and_(
                     KnowledgeEmbedding.luciel_instance_id.is_(None),
-                    KnowledgeEmbedding.tenant_id == tenant_id,
+                    KnowledgeEmbedding.admin_id == admin_id,
                     KnowledgeEmbedding.agent_id == agent_id,
                 )
             )
@@ -416,7 +416,7 @@ class KnowledgeRepository:
                 KnowledgeEmbedding.title,
                 KnowledgeEmbedding.knowledge_type,
                 KnowledgeEmbedding.luciel_instance_id,
-                KnowledgeEmbedding.tenant_id,
+                KnowledgeEmbedding.admin_id,
                 KnowledgeEmbedding.domain_id,
                 distance_expr.label("distance"),
             )
@@ -438,7 +438,7 @@ class KnowledgeRepository:
                 "title": r.title,
                 "knowledge_type": r.knowledge_type,
                 "luciel_instance_id": r.luciel_instance_id,
-                "tenant_id": r.tenant_id,
+                "admin_id": r.admin_id,
                 "domain_id": r.domain_id,
                 "distance": float(r.distance) if r.distance is not None else None,
             }

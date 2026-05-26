@@ -5,7 +5,7 @@ class RuntimeRequest:
     message: str
     session_id: str
     user_id: str | None
-    tenant_id: str
+    admin_id: str
     domain_id: str
     channel: str
 

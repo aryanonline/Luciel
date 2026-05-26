@@ -3,9 +3,9 @@
 Three read-only methods that produce the aggregates the operator-facing
 dashboard renders (and that a future Step 32 frontend reads):
 
-  * get_tenant_dashboard(tenant_id)  -> TenantDashboard
-  * get_domain_dashboard(tenant_id, domain_id) -> DomainDashboard
-  * get_agent_dashboard(tenant_id, domain_id, agent_id) -> AgentDashboard
+  * get_tenant_dashboard(admin_id)  -> TenantDashboard
+  * get_domain_dashboard(admin_id, domain_id) -> DomainDashboard
+  * get_agent_dashboard(admin_id, domain_id, agent_id) -> AgentDashboard
 
 Architectural pins
 ==================
@@ -150,7 +150,7 @@ class TenantDashboard:
     into a domain first.
     """
 
-    tenant_id: str
+    admin_id: str
     window_days: int
     aggregates: ScopeAggregates
     trend: list[TrendBucket]
@@ -160,7 +160,7 @@ class TenantDashboard:
 
 @dataclass(frozen=True)
 class DomainDashboard:
-    tenant_id: str
+    admin_id: str
     domain_id: str
     window_days: int
     aggregates: ScopeAggregates
@@ -170,7 +170,7 @@ class DomainDashboard:
 
 @dataclass(frozen=True)
 class AgentDashboard:
-    tenant_id: str
+    admin_id: str
     domain_id: str
     agent_id: str
     window_days: int
@@ -203,42 +203,42 @@ class DashboardService:
 
     def get_tenant_dashboard(
         self,
-        tenant_id: str,
+        admin_id: str,
         *,
         window_days: int = DEFAULT_TREND_DAYS,
         top_n: int = DEFAULT_TOP_N,
         since: datetime | None = None,
     ) -> TenantDashboard:
-        if not tenant_id:
-            raise ValueError("tenant_id is required")
+        if not admin_id:
+            raise ValueError("admin_id is required")
         window_start = self._window_start(window_days, since)
 
         base_filter = [
-            Trace.tenant_id == tenant_id,
+            Trace.admin_id == admin_id,
             Trace.created_at >= window_start,
         ]
-        aggregates = self._aggregates(base_filter, scope_tag=("tenant", tenant_id))
+        aggregates = self._aggregates(base_filter, scope_tag=("tenant", admin_id))
         trend = self._trend(base_filter, window_days, window_start)
         top_domains = self._top_children(
             base_filter=base_filter + [Trace.domain_id.is_not(None)],
             group_col=Trace.domain_id,
-            display_lookup=self._domain_display_lookup(tenant_id),
+            display_lookup=self._domain_display_lookup(admin_id),
             top_n=top_n,
-            scope_tag=("tenant.top_domains", tenant_id),
+            scope_tag=("tenant.top_domains", admin_id),
             scope_check=lambda row_id: row_id is not None,
         )
         top_instances = self._top_children(
             base_filter=base_filter + [Trace.luciel_instance_id.is_not(None)],
             group_col=Trace.luciel_instance_id,
-            display_lookup=self._instance_display_lookup_for_tenant(tenant_id),
+            display_lookup=self._instance_display_lookup_for_tenant(admin_id),
             top_n=top_n,
-            scope_tag=("tenant.top_instances", tenant_id),
+            scope_tag=("tenant.top_instances", admin_id),
             scope_check=lambda row_id: row_id is not None,
             id_cast=str,
         )
 
         return TenantDashboard(
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             window_days=window_days,
             aggregates=aggregates,
             trend=trend,
@@ -248,39 +248,39 @@ class DashboardService:
 
     def get_domain_dashboard(
         self,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         *,
         window_days: int = DEFAULT_TREND_DAYS,
         top_n: int = DEFAULT_TOP_N,
         since: datetime | None = None,
     ) -> DomainDashboard:
-        if not tenant_id:
-            raise ValueError("tenant_id is required")
+        if not admin_id:
+            raise ValueError("admin_id is required")
         if not domain_id:
             raise ValueError("domain_id is required")
         window_start = self._window_start(window_days, since)
 
         base_filter = [
-            Trace.tenant_id == tenant_id,
+            Trace.admin_id == admin_id,
             Trace.domain_id == domain_id,
             Trace.created_at >= window_start,
         ]
         aggregates = self._aggregates(
-            base_filter, scope_tag=("domain", f"{tenant_id}/{domain_id}")
+            base_filter, scope_tag=("domain", f"{admin_id}/{domain_id}")
         )
         trend = self._trend(base_filter, window_days, window_start)
         top_agents = self._top_children(
             base_filter=base_filter + [Trace.agent_id.is_not(None)],
             group_col=Trace.agent_id,
-            display_lookup=self._agent_display_lookup(tenant_id, domain_id),
+            display_lookup=self._agent_display_lookup(admin_id, domain_id),
             top_n=top_n,
-            scope_tag=("domain.top_agents", f"{tenant_id}/{domain_id}"),
+            scope_tag=("domain.top_agents", f"{admin_id}/{domain_id}"),
             scope_check=lambda row_id: row_id is not None,
         )
 
         return DomainDashboard(
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             window_days=window_days,
             aggregates=aggregates,
@@ -290,7 +290,7 @@ class DashboardService:
 
     def get_agent_dashboard(
         self,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         agent_id: str,
         *,
@@ -298,8 +298,8 @@ class DashboardService:
         top_n: int = DEFAULT_TOP_N,
         since: datetime | None = None,
     ) -> AgentDashboard:
-        if not tenant_id:
-            raise ValueError("tenant_id is required")
+        if not admin_id:
+            raise ValueError("admin_id is required")
         if not domain_id:
             raise ValueError("domain_id is required")
         if not agent_id:
@@ -307,33 +307,33 @@ class DashboardService:
         window_start = self._window_start(window_days, since)
 
         base_filter = [
-            Trace.tenant_id == tenant_id,
+            Trace.admin_id == admin_id,
             Trace.domain_id == domain_id,
             Trace.agent_id == agent_id,
             Trace.created_at >= window_start,
         ]
         aggregates = self._aggregates(
             base_filter,
-            scope_tag=("agent", f"{tenant_id}/{domain_id}/{agent_id}"),
+            scope_tag=("agent", f"{admin_id}/{domain_id}/{agent_id}"),
         )
         trend = self._trend(base_filter, window_days, window_start)
         top_instances = self._top_children(
             base_filter=base_filter + [Trace.luciel_instance_id.is_not(None)],
             group_col=Trace.luciel_instance_id,
             display_lookup=self._instance_display_lookup_for_agent(
-                tenant_id, domain_id, agent_id
+                admin_id, domain_id, agent_id
             ),
             top_n=top_n,
             scope_tag=(
                 "agent.top_instances",
-                f"{tenant_id}/{domain_id}/{agent_id}",
+                f"{admin_id}/{domain_id}/{agent_id}",
             ),
             scope_check=lambda row_id: row_id is not None,
             id_cast=str,
         )
 
         return AgentDashboard(
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
             window_days=window_days,
@@ -515,29 +515,29 @@ class DashboardService:
 
     # --- display-name lookups (cheap because they're small lists) --- #
 
-    def _domain_display_lookup(self, tenant_id: str) -> dict[str, str]:
+    def _domain_display_lookup(self, admin_id: str) -> dict[str, str]:
         """Arc 5 Path A V2 stub. Domain layer is gone; returns {}."""
         return {}
 
     def _agent_display_lookup(
-        self, tenant_id: str, domain_id: str
+        self, admin_id: str, domain_id: str
     ) -> dict[str, str]:
         """Arc 5 Path A V2 stub. Agent layer is gone; returns {}."""
         return {}
 
     def _instance_display_lookup_for_tenant(
-        self, tenant_id: str
+        self, admin_id: str
     ) -> dict[str, str]:
         # Arc 5 Path A — V2 Instance carries admin_id only; the legacy
         # scope_owner_tenant_id column is gone. tenant_id arg name kept
         # for caller compatibility; semantically it is the Admin slug.
         stmt = select(LucielInstance.id, LucielInstance.display_name).where(
-            LucielInstance.admin_id == tenant_id
+            LucielInstance.admin_id == admin_id
         )
         return {str(row.id): row.display_name for row in self.db.execute(stmt).all()}
 
     def _instance_display_lookup_for_agent(
-        self, tenant_id: str, domain_id: str, agent_id: str
+        self, admin_id: str, domain_id: str, agent_id: str
     ) -> dict[str, str]:
         # Arc 5 Path A — Agent layer eliminated. The dashboard's
         # per-agent instance lookup has no V2 equivalent (V2 dashboards

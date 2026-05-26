@@ -337,32 +337,13 @@ class TierProvisioningService:
     def premint_for_tier(
         self,
         *,
-        admin_id: str | None = None,
+        admin_id: str,
         tier: str,
         primary_user: "User",
         audit_ctx: AuditContext,
-        # Arc 8 Commit 2 (2026-05-24) -- backward-compat kwarg alias.
-        #
-        # Both production callers (``BillingWebhookService._on_checkout_completed``
-        # and ``api.v1.billing.signup_free``) still pass ``tenant_id=...`` --
-        # the original V1 column name -- because the rename to
-        # ``admin_id`` in this signature was made in the Arc-5 doctrine
-        # pass but the two callsites were not updated. The mismatch
-        # silently raised ``TypeError`` at every paid + free signup,
-        # was swallowed by both callers' ``except Exception:`` traps,
-        # and the customer ended up with an Admin row but no
-        # ScopeAssignment / no primary Instance -- exactly the failure
-        # mode the C9 ops runbook flags as "broken account requires
-        # manual rebuild".
-        #
-        # We accept BOTH kwargs here and prefer ``admin_id`` when both
-        # are supplied. The callers will be updated to the new name in
-        # a follow-up Arc-8 commit; this alias is purely the "don't
-        # leave prod broken while the file is open" fix.
-        #
-        # Closes drift D-tier-provisioning-tenant-id-kwarg-mismatch-2026-05-24
-        # (discovered during Arc 8 C2 recon).
-        tenant_id: str | None = None,
+        # Arc 9.2 PR #101: ``tenant_id`` collapsed into ``admin_id``
+        # (Option A complete). The Arc 8 C2 dual-kwarg alias is now
+        # removed; ``admin_id`` is the sole, required identifier.
     ) -> dict:
         """Pre-mint the V2 primary Instance for ``admin_id``.
 
@@ -398,17 +379,13 @@ class TierProvisioningService:
                 f"unsupported tier {tier!r}"
             )
 
-        # Arc 8 C2 backward-compat kwarg resolution. Exactly one of
-        # ``admin_id`` and ``tenant_id`` must be set; both-or-neither is
-        # programmer error. ``admin_id`` wins if both are passed (matches
-        # the post-Arc-5 doctrine).
-        if admin_id is None and tenant_id is None:
+        # Arc 9.2 PR #101: admin_id is the sole identifier (Option A
+        # complete).  ``admin_id`` is required (no default); FastAPI/
+        # Pydantic and direct callers must supply it explicitly.
+        if not admin_id:
             raise TypeError(
-                "TierProvisioningService.premint_for_tier: one of "
-                "admin_id= or tenant_id= must be supplied"
+                "TierProvisioningService.premint_for_tier: admin_id= is required"
             )
-        if admin_id is None:
-            admin_id = tenant_id
 
         normalised_email = _validate_email_shape(
             getattr(primary_user, "email", None) if primary_user is not None else None
@@ -596,7 +573,7 @@ class TierProvisioningService:
         admin.tier_source = new_tier_source
         self.audit.record(
             ctx=audit_ctx,
-            tenant_id=admin_id,
+            admin_id=admin_id,
             action=ACTION_UPDATE,
             resource_type=RESOURCE_ADMIN,
             resource_natural_id=admin_id,
@@ -718,7 +695,7 @@ class TierProvisioningService:
         admin.tier_source = new_tier_source
         self.audit.record(
             ctx=audit_ctx,
-            tenant_id=admin_id,
+            admin_id=admin_id,
             action=ACTION_UPDATE,
             resource_type=RESOURCE_ADMIN,
             resource_natural_id=admin_id,
@@ -769,13 +746,13 @@ class TierProvisioningService:
         sar = ScopeAssignmentRepository(self.db)
 
         # ScopeAssignmentRepository.get_active_for_user_in_tenant() still
-        # carries the legacy kwarg name ``tenant_id`` during the migration
-        # window; the new Admin.id replaces tenant_configs.tenant_id 1:1
+        # carries the legacy kwarg name ``admin_id`` during the migration
+        # window; the new Admin.id replaces tenant_configs.admin_id 1:1
         # (same String(100) semantic slug per Q1 lock). The kwarg renames
         # to ``admin_id`` in a follow-up after Revision C lands.
         existing = sar.get_active_for_user_in_tenant(
             user_id=primary_user.id,
-            tenant_id=admin.id,
+            admin_id=admin.id,
         )
         if existing is not None:
             logger.info(
@@ -790,7 +767,7 @@ class TierProvisioningService:
 
         sar.create(
             user_id=primary_user.id,
-            tenant_id=admin.id,
+            admin_id=admin.id,
             # Arc 6 Commit 8 -- write the Domain-collapse sentinel rather
             # than None. The column is nullable=False at the DB layer
             # (V1 inheritance), and the V2 model has not yet had the

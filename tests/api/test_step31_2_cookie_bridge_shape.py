@@ -18,7 +18,7 @@ network):
     permission set ("admin","chat","sessions"), so cookied callers can
     do anything the tenant's admin key can do.
   * `request.state` fields set -- every field downstream code reads off
-    state (tenant_id, permissions, key_prefix, actor_label,
+    state (admin_id, permissions, key_prefix, actor_label,
     actor_user_id, auth_method, plus the widget-related fields the
     middleware sets to None) is populated by the cookie path.
   * Audit attribution -- `actor_label` is set to "cookie:<email>" so
@@ -137,7 +137,7 @@ def test_cookie_permissions_is_tuple() -> None:
 
 REQUIRED_STATE_FIELDS = {
     # Auth-vector fields ApiKeyAuthMiddleware sets:
-    "tenant_id",
+    "admin_id",
     "domain_id",
     "agent_id",
     "api_key_id",

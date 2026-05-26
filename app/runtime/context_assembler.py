@@ -15,7 +15,7 @@ class ContextAssembler:
         identity = build_system_prompt()
         return (
             f"{identity}\n\n"
-            f"Tenant: {req.tenant_id}\nDomain: {req.domain_id}\nChannel: {req.channel}\n"
+            f"Tenant: {req.admin_id}\nDomain: {req.domain_id}\nChannel: {req.channel}\n"
             f"User message: {req.message}\n"
             "Respond as Luciel with clarity and restraint."
         )

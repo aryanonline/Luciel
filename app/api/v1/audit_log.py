@@ -9,8 +9,8 @@ for all /api/v1/admin/* paths.
 Surface (read-only):
   GET /api/v1/admin/audit-log
        Tenant-scoped paginated listing. Platform-admin may filter by
-       any tenant_id; non-platform-admin callers are forced to their
-       own tenant_id.
+       any admin_id; non-platform-admin callers are forced to their
+       own admin_id.
 
   GET /api/v1/admin/audit-log/resource/{resource_type}/{resource_pk}
        History of a specific resource over time (per-resource history
@@ -112,7 +112,7 @@ _COMMON_SAFE_KEYS = frozenset({"active", "id"})
 
 _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
     RESOURCE_TENANT: _COMMON_SAFE_KEYS | {
-        "tenant_id",
+        "admin_id",
         "display_name",
         "description",
         "allowed_domains",
@@ -121,18 +121,18 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
         # email (PII), system_prompt_additions can be anything.
     },
     RESOURCE_DOMAIN: _COMMON_SAFE_KEYS | {
-        "tenant_id",
+        "admin_id",
         "domain_id",
         "display_name",
     },
     RESOURCE_AGENT: _COMMON_SAFE_KEYS | {
-        "tenant_id",
+        "admin_id",
         "domain_id",
         "agent_id",
         "user_id",  # platform User UUID (not email)
     },
     RESOURCE_LUCIEL_INSTANCE: _COMMON_SAFE_KEYS | {
-        "tenant_id",
+        "admin_id",
         "domain_id",
         "agent_id",
         "instance_id",
@@ -140,7 +140,7 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
         # NOTE: persona / system_prompt content NOT included.
     },
     RESOURCE_API_KEY: _COMMON_SAFE_KEYS | {
-        "tenant_id",
+        "admin_id",
         "domain_id",
         "agent_id",
         "luciel_instance_id",
@@ -151,7 +151,7 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
         # the redaction filter masks them.
     },
     RESOURCE_KNOWLEDGE: _COMMON_SAFE_KEYS | {
-        "tenant_id",
+        "admin_id",
         "domain_id",
         "source_id",
         "version",
@@ -159,13 +159,13 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
         # NOTE: chunk content / embedding vectors NOT included.
     },
     RESOURCE_RETENTION_POLICY: _COMMON_SAFE_KEYS | {
-        "tenant_id",
+        "admin_id",
         "category",
         "cutoff_days",
         "cutoff_date",
     },
     RESOURCE_MEMORY: _COMMON_SAFE_KEYS | {
-        "tenant_id",
+        "admin_id",
         "agent_id",
         "luciel_instance_id",
         "category",
@@ -189,7 +189,7 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
     },
     RESOURCE_SCOPE_ASSIGNMENT: _COMMON_SAFE_KEYS | {
         "user_id",
-        "tenant_id",
+        "admin_id",
         "domain_id",
         "agent_id",
         "role",
@@ -232,7 +232,7 @@ def _to_read(row: AdminAuditLog) -> AdminAuditLogRead:
         actor_key_prefix=row.actor_key_prefix,
         actor_permissions=row.actor_permissions,
         actor_label=row.actor_label,
-        tenant_id=row.tenant_id,
+        admin_id=row.admin_id,
         domain_id=row.domain_id,
         agent_id=row.agent_id,
         luciel_instance_id=row.luciel_instance_id,
@@ -279,7 +279,7 @@ def _validate_resource_types(resource_types: Iterable[str] | None) -> tuple[str,
 def list_audit_log(
     request: Request,
     repo: Annotated[AdminAuditRepository, Depends(get_admin_audit_repository)],
-    tenant_id: str | None = Query(
+    admin_id: str | None = Query(
         default=None,
         min_length=2,
         max_length=100,
@@ -292,23 +292,23 @@ def list_audit_log(
     """List audit rows for a tenant, most-recent-first.
 
     Authorization:
-      - Platform-admin: may query any tenant. If `tenant_id` is
+      - Platform-admin: may query any tenant. If `admin_id` is
         omitted, defaults to the platform sentinel so platform-level
         system actions are surfaced.
-      - Tenant-admin (or any non-platform-admin admin): tenant_id is
-        forced to the caller's own tenant_id. Any value passed in the
+      - Tenant-admin (or any non-platform-admin admin): admin_id is
+        forced to the caller's own admin_id. Any value passed in the
         query string is ignored; the override attempt is logged at
         WARNING level for forensic review.
     """
     # Defense-in-depth: tenant scoping at the API layer in addition
     # to the middleware's admin-perm check.
     if not ScopePolicy.is_platform_admin(request):
-        caller_tenant = getattr(request.state, "tenant_id", None)
+        caller_tenant = getattr(request.state, "admin_id", None)
         if caller_tenant is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
-                    "Caller has no tenant_id on the API key; cannot "
+                    "Caller has no admin_id on the API key; cannot "
                     "infer which tenant's audit log to return."
                 ),
             )
@@ -316,26 +316,26 @@ def list_audit_log(
         # read another tenant's audit log leaves a forensic trail.
         # The actual response still comes back (filtered to their
         # own tenant), but the attempt is captured in CloudWatch.
-        if tenant_id is not None and tenant_id != caller_tenant:
+        if admin_id is not None and admin_id != caller_tenant:
             logger.warning(
                 "audit-log: tenant scope override — caller_tenant=%s "
                 "requested_tenant_id=%s key_prefix=%s",
                 caller_tenant,
-                tenant_id,
+                admin_id,
                 getattr(request.state, "key_prefix", "<unknown>"),
             )
-        tenant_id = caller_tenant
+        admin_id = caller_tenant
     else:
         # Platform-admin: default to platform-sentinel tenant when
         # no filter supplied, to surface system actions.
-        if tenant_id is None:
-            tenant_id = SYSTEM_ACTOR_TENANT
+        if admin_id is None:
+            admin_id = SYSTEM_ACTOR_TENANT
 
     actions_tuple = _validate_actions(action)
     resource_types_tuple = _validate_resource_types(resource_type)
 
     rows: list[AdminAuditLog] = repo.list_for_tenant(
-        tenant_id=tenant_id,
+        admin_id=admin_id,
         limit=limit,
         offset=offset,
         actions=actions_tuple,
@@ -372,7 +372,7 @@ def list_audit_log_for_resource(
     Authorization:
       - Platform-admin: full access.
       - Non-platform-admin: results are post-filtered to the caller's
-        tenant_id. Cross-tenant rows are dropped silently from the
+        admin_id. Cross-tenant rows are dropped silently from the
         response (they shouldn't appear, but defense in depth).
     """
     if resource_type not in ALLOWED_RESOURCE_TYPES:
@@ -388,12 +388,12 @@ def list_audit_log_for_resource(
     )
 
     if not ScopePolicy.is_platform_admin(request):
-        caller_tenant = getattr(request.state, "tenant_id", None)
+        caller_tenant = getattr(request.state, "admin_id", None)
         if caller_tenant is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
-                    "Caller has no tenant_id on the API key; cannot "
+                    "Caller has no admin_id on the API key; cannot "
                     "filter resource audit history."
                 ),
             )
@@ -402,14 +402,14 @@ def list_audit_log_for_resource(
         # this filter shouldn't change the count, but if it ever does
         # it indicates a model bug worth catching here, not at the
         # caller's screen.
-        leaked = [r for r in rows if r.tenant_id != caller_tenant]
+        leaked = [r for r in rows if r.admin_id != caller_tenant]
         if leaked:
             logger.error(
                 "audit-log: resource-scope leak guard tripped — "
                 "caller_tenant=%s resource=%s/%s leaked_count=%d",
                 caller_tenant, resource_type, resource_pk, len(leaked),
             )
-        rows = [r for r in rows if r.tenant_id == caller_tenant]
+        rows = [r for r in rows if r.admin_id == caller_tenant]
 
     return [_to_read(r) for r in rows]
 

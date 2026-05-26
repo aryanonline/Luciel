@@ -2,7 +2,7 @@
 Session repository.
 
 PATCHED:
-  S1 — get_session() now accepts optional tenant_id for ownership check.
+  S1 — get_session() now accepts optional admin_id for ownership check.
   S2 — list_sessions() now accepts agent_id filter.
   S3 — Step 24.5c sub-branch 4: create_session() now accepts an optional
        conversation_id (UUID) that the identity resolver supplies. NULL
@@ -30,7 +30,7 @@ class SessionRepository:
         self,
         *,
         session_id: str,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         agent_id: str | None = None,
         user_id: str | None = None,
@@ -55,7 +55,7 @@ class SessionRepository:
         # Arc 9.2 PR #97.
         session = SessionModel(
             id=session_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
             user_id=user_id,
@@ -73,26 +73,26 @@ class SessionRepository:
         self,
         session_id: str,
         *,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
     ) -> SessionModel | None:
         """
         Get a session by ID.
 
-        If tenant_id is provided, also verifies the session belongs
+        If admin_id is provided, also verifies the session belongs
         to that tenant. Returns None if the session exists but belongs
         to a different tenant — preventing cross-tenant reads.
         """
         session = self.db.get(SessionModel, session_id)
         if session is None:
             return None
-        if tenant_id and session.tenant_id != tenant_id:
+        if admin_id and session.admin_id != admin_id:
             return None
         return session
 
     def list_sessions(
         self,
         *,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
         limit: int = 50,
@@ -102,8 +102,8 @@ class SessionRepository:
             .order_by(SessionModel.created_at.desc())
             .limit(limit)
         )
-        if tenant_id:
-            stmt = stmt.where(SessionModel.tenant_id == tenant_id)
+        if admin_id:
+            stmt = stmt.where(SessionModel.admin_id == admin_id)
         if user_id:
             stmt = stmt.where(SessionModel.user_id == user_id)
         if agent_id:
@@ -118,15 +118,15 @@ class SessionRepository:
         content: str,
         trace_id: str | None = None,
     ) -> MessageModel:
-        # Arc 9 C5.3 -- copy parent session's tenant_id and
+        # Arc 9 C5.3 -- copy parent session's admin_id and
         # luciel_instance_id into the new message row. These fields
         # are required by:
-        #   * messages.tenant_id NOT NULL (post C5.0a Phase 3)
+        #   * messages.admin_id NOT NULL (post C5.0a Phase 3)
         #   * messages_tenant_isolation RLS policy (Wall-1, C5.1)
         #   * messages_instance_isolation RLS policy (Wall-3, C5.2)
         #
         # Without this denormalisation:
-        #   - NOT NULL violation on insert if tenant_id is missing.
+        #   - NOT NULL violation on insert if admin_id is missing.
         #   - Even if NULL were allowed, the Wall-1 RLS policy uses
         #     strict equality (no NULL carveout), so a NULL row would
         #     be invisible to its own tenant.
@@ -154,7 +154,7 @@ class SessionRepository:
 
         message = MessageModel(
             session_id=session_id,
-            tenant_id=parent.tenant_id,
+            admin_id=parent.admin_id,
             luciel_instance_id=parent.luciel_instance_id,
             role=role,
             content=content,

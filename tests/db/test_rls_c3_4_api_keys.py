@@ -103,7 +103,7 @@ class TestC34MigrationShape:
         )
 
     def test_using_does_not_check_tenant(self) -> None:
-        """USING clause must NOT reference current_setting or tenant_id.
+        """USING clause must NOT reference current_setting or admin_id.
 
         Defence-in-depth on top of test_using_is_permissive_true: we
         assert the USING line specifically does not contain a tenant-
@@ -111,7 +111,7 @@ class TestC34MigrationShape:
         """
         text = _read_migration_text()
         # Find the USING(...) block specifically (before WITH CHECK)
-        # and assert it contains neither current_setting nor tenant_id.
+        # and assert it contains neither current_setting nor admin_id.
         match = re.search(
             r"USING\s*\((?P<using>[^)]*)\)", text, re.IGNORECASE
         )
@@ -121,8 +121,8 @@ class TestC34MigrationShape:
             "USING clause must not reference current_setting — that "
             "would break the auth-perimeter lookup."
         )
-        assert "tenant_id" not in using_body.lower(), (
-            "USING clause must not reference tenant_id — see C3.4 "
+        assert "admin_id" not in using_body.lower(), (
+            "USING clause must not reference admin_id — see C3.4 "
             "docstring for the auth chicken-and-egg rationale."
         )
 
@@ -139,18 +139,18 @@ class TestC34MigrationShape:
         # The WITH CHECK clause must reference both the platform
         # sentinel branch and the tenant-equality branch.
         assert "WITH CHECK" in text, "WITH CHECK clause missing"
-        # Platform sentinel: NULL tenant_id is only writable when GUC
+        # Platform sentinel: NULL admin_id is only writable when GUC
         # is the literal 'platform'.
         assert re.search(
-            r"tenant_id\s+IS\s+NULL", text, re.IGNORECASE
-        ), "WITH CHECK must handle NULL tenant_id branch"
+            r"admin_id\s+IS\s+NULL", text, re.IGNORECASE
+        ), "WITH CHECK must handle NULL admin_id branch"
         assert "'platform'" in text, (
             "WITH CHECK must reference the 'platform' sentinel literal"
         )
         # Tenant-equality branch.
         assert re.search(
-            r"tenant_id\s*=\s*current_setting", text, re.IGNORECASE
-        ), "WITH CHECK must include tenant_id = current_setting() branch"
+            r"admin_id\s*=\s*current_setting", text, re.IGNORECASE
+        ), "WITH CHECK must include admin_id = current_setting() branch"
 
     def test_current_setting_uses_missing_ok_arg(self) -> None:
         """current_setting must use the two-arg form returning '' on miss.

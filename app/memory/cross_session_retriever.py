@@ -6,7 +6,7 @@ the message-history thread on SessionModel.messages). Where the per-session
 retriever answers "what did THIS session say recently?", the cross-session
 retriever answers:
 
-    Given the active session's (conversation_id, tenant_id, domain_id),
+    Given the active session's (conversation_id, admin_id, domain_id),
     what are the N most recent messages from SIBLING sessions under the
     same conversation, ordered by recency, capped by a per-call budget?
 
@@ -15,7 +15,7 @@ source_channel, timestamp) that the runtime layer threads into the
 foundation-model context as the cross-session leg of memory retrieval.
 
 Scope filtering happens INSIDE the retriever, not at the caller. The
-retriever refuses to return a row whose tenant_id / domain_id does not
+retriever refuses to return a row whose admin_id / domain_id does not
 match the calling scope, even if the same conversation_id is shared
 across scopes — which it cannot be, by the conversations-table FK, but
 the retriever asserts it anyway. Defense in depth, same discipline as
@@ -122,7 +122,7 @@ class CrossSessionRetriever:
         self,
         *,
         conversation_id: uuid.UUID,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         limit: int = 20,
         exclude_session_id: str | None = None,
@@ -134,8 +134,8 @@ class CrossSessionRetriever:
                 we want to read. Must be a uuid.UUID (NOT a string —
                 callers MUST parse before invoking, mirroring the
                 MemoryRepository discipline of typed inputs).
-            tenant_id:       The natural-key tenant scope. Asserted on
-                EVERY returned row's session.tenant_id; mismatched
+            admin_id:       The natural-key tenant scope. Asserted on
+                EVERY returned row's session.admin_id; mismatched
                 rows are dropped (defense-in-depth, §4.7).
             domain_id:       The natural-key domain scope. Asserted on
                 EVERY returned row's session.domain_id; mismatched
@@ -161,9 +161,9 @@ class CrossSessionRetriever:
                 Defense against string-typing creeping in from older
                 routes — fail loudly at the boundary, not silently
                 via SQL-side coercion.
-            ValueError: if tenant_id or domain_id is empty / whitespace.
+            ValueError: if admin_id or domain_id is empty / whitespace.
                 A blank scope assertion is never legitimate; refusing it
-                here prevents a "match anything in tenant_id" bug class.
+                here prevents a "match anything in admin_id" bug class.
         """
         # ---- input validation (fail-loud at the boundary) -----------
         if not isinstance(conversation_id, uuid.UUID):
@@ -171,8 +171,8 @@ class CrossSessionRetriever:
                 "conversation_id must be uuid.UUID, "
                 f"got {type(conversation_id).__name__}"
             )
-        if not tenant_id or not tenant_id.strip():
-            raise ValueError("tenant_id must be a non-empty string")
+        if not admin_id or not admin_id.strip():
+            raise ValueError("admin_id must be a non-empty string")
         if not domain_id or not domain_id.strip():
             raise ValueError("domain_id must be a non-empty string")
 
@@ -231,7 +231,7 @@ class CrossSessionRetriever:
         # ---- SQL --------------------------------------------------
         # JOIN: messages → sessions ON sessions.id = messages.session_id.
         # Scope: sessions.conversation_id = X
-        #        AND sessions.tenant_id = X
+        #        AND sessions.admin_id = X
         #        AND sessions.domain_id = X
         # Optional exclusion: sessions.id != exclude_session_id.
         # Order: messages.created_at DESC (newest first; recency-ranking
@@ -242,7 +242,7 @@ class CrossSessionRetriever:
             .join(SessionModel, SessionModel.id == MessageModel.session_id)
             .where(
                 SessionModel.conversation_id == conversation_id,
-                SessionModel.tenant_id == tenant_id,
+                SessionModel.admin_id == admin_id,
                 SessionModel.domain_id == domain_id,
             )
             .order_by(MessageModel.created_at.desc())
@@ -259,10 +259,10 @@ class CrossSessionRetriever:
         # The SQL filter above is the primary scope check. This loop
         # re-asserts on the materialised row, which guards against:
         #   1. Schema drift: a future migration adds a different
-        #      tenant_id source to sessions and someone forgets to
+        #      admin_id source to sessions and someone forgets to
         #      update the retriever filter.
         #   2. ORM hydration bugs: a join that accidentally surfaces
-        #      a row whose sessions.tenant_id is NULL or mismatched.
+        #      a row whose sessions.admin_id is NULL or mismatched.
         #   3. SQL injection in upstream caller code: defense-in-depth
         #      assumes the caller could be compromised, not just the
         #      DB layer.
@@ -272,7 +272,7 @@ class CrossSessionRetriever:
         dropped = 0
         for message, session in rows:
             if (
-                session.tenant_id != tenant_id
+                session.admin_id != admin_id
                 or session.domain_id != domain_id
                 or session.conversation_id != conversation_id
             ):
@@ -284,8 +284,8 @@ class CrossSessionRetriever:
                     "cross_session_retriever scope mismatch (defense-in-depth "
                     "drop): asked tenant=%s domain=%s conv=%s, got "
                     "session=%s tenant=%s domain=%s conv=%s",
-                    tenant_id, domain_id, str(conversation_id),
-                    session.id, session.tenant_id, session.domain_id,
+                    admin_id, domain_id, str(conversation_id),
+                    session.id, session.admin_id, session.domain_id,
                     str(session.conversation_id)
                     if session.conversation_id else None,
                 )
@@ -308,7 +308,7 @@ class CrossSessionRetriever:
             logger.error(
                 "cross_session_retriever dropped %d row(s) on post-query "
                 "scope check for conversation=%s tenant=%s domain=%s",
-                dropped, str(conversation_id), tenant_id, domain_id,
+                dropped, str(conversation_id), admin_id, domain_id,
             )
 
         return passages

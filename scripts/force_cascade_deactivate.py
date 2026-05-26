@@ -1,4 +1,4 @@
-"""One-shot admin-path cascade for a given tenant_id.
+"""One-shot admin-path cascade for a given admin_id.
 
 Designed for ECS-exec execution from inside the backend container.
 Calls AdminService.deactivate_tenant_with_cascade directly. Idempotent
@@ -36,7 +36,7 @@ from app.services.instance_service import InstanceService
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("tenant_id")
+    parser.add_argument("admin_id")
     parser.add_argument("--reason", required=True, help="audit-row note for the manual cascade")
     parser.add_argument("--actor-label", default="ops:force_cascade_deactivate")
     args = parser.parse_args()
@@ -60,7 +60,7 @@ def main() -> int:
 
         try:
             result = admin.deactivate_tenant_with_cascade(
-                args.tenant_id,
+                args.admin_id,
                 audit_ctx=ctx,
                 luciel_instance_service=luciel_service,
                 agent_repo=None,
@@ -73,10 +73,10 @@ def main() -> int:
             return 2
 
         if result is True:
-            print(f"verdict=CASCADE_APPLIED tenant_id={args.tenant_id}")
+            print(f"verdict=CASCADE_APPLIED admin_id={args.admin_id}")
             return 0
         elif result is False:
-            print(f"verdict=TENANT_NOT_FOUND tenant_id={args.tenant_id}")
+            print(f"verdict=TENANT_NOT_FOUND admin_id={args.admin_id}")
             return 1
         else:
             print(f"verdict=UNEXPECTED_RETURN result={result!r}")

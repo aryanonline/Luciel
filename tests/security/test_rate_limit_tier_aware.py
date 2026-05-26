@@ -5,7 +5,7 @@ Arc 7 Commit 4:
 
   1. ``get_tier_aware_key(request)`` returns
      ``tier:{tier}:admin:{admin_id}:inst:{instance_id|none}`` when
-     ``request.state.tenant_id`` is populated by ApiKeyAuthMiddleware,
+     ``request.state.admin_id`` is populated by ApiKeyAuthMiddleware,
      and ``ip:{client_ip}`` otherwise.
 
   2. ``get_tier_rate_limit_for_key(key)`` parses the tier from the
@@ -170,8 +170,8 @@ def test_limit_provider_returns_correct_cap(key: str, expected: str) -> None:
 
 
 class _StubState:
-    def __init__(self, tenant_id: Any = None, luciel_instance_id: Any = None) -> None:
-        self.tenant_id = tenant_id
+    def __init__(self, admin_id: Any = None, luciel_instance_id: Any = None) -> None:
+        self.admin_id = admin_id
         self.luciel_instance_id = luciel_instance_id
 
 
@@ -185,7 +185,7 @@ class _StubRequest:
 
     The real Request would require an ASGI scope round-trip per
     request, which makes these tests slow and brittle. The key-func
-    only reads ``request.state.tenant_id`` /
+    only reads ``request.state.admin_id`` /
     ``request.state.luciel_instance_id`` / ``request.headers`` /
     ``request.client``, so a stub with those attributes is
     behaviourally equivalent.
@@ -193,43 +193,43 @@ class _StubRequest:
 
     def __init__(
         self,
-        tenant_id: Any = None,
+        admin_id: Any = None,
         instance_id: Any = None,
         ip: str = "1.2.3.4",
         headers: dict | None = None,
     ) -> None:
-        self.state = _StubState(tenant_id=tenant_id, luciel_instance_id=instance_id)
+        self.state = _StubState(admin_id=admin_id, luciel_instance_id=instance_id)
         self.client = _StubClient(host=ip)
         self.headers = headers or {}
 
 
 def test_key_func_returns_ip_bucket_when_unauthenticated() -> None:
-    """No tenant_id on request.state -> ip:{ip} bucket. Free cap applies."""
-    req = _StubRequest(tenant_id=None, ip="9.9.9.9")
+    """No admin_id on request.state -> ip:{ip} bucket. Free cap applies."""
+    req = _StubRequest(admin_id=None, ip="9.9.9.9")
     key = get_tier_aware_key(req)
     assert key == "ip:9.9.9.9"
     assert get_tier_rate_limit_for_key(key) == "30/minute"
 
 
 def test_key_func_returns_tier_bucket_with_instance() -> None:
-    """tenant_id + instance_id populated -> full composite key."""
+    """admin_id + instance_id populated -> full composite key."""
     _reset_admin_tier_cache()
     with patch(
         "app.middleware.rate_limit._lookup_admin_tier", return_value="pro"
     ):
-        req = _StubRequest(tenant_id="acme", instance_id=42)
+        req = _StubRequest(admin_id="acme", instance_id=42)
         key = get_tier_aware_key(req)
     assert key == "tier:pro:admin:acme:inst:42"
     assert get_tier_rate_limit_for_key(key) == "300/minute"
 
 
 def test_key_func_returns_tier_bucket_no_instance() -> None:
-    """tenant_id set, instance_id NULL -> inst:none."""
+    """admin_id set, instance_id NULL -> inst:none."""
     _reset_admin_tier_cache()
     with patch(
         "app.middleware.rate_limit._lookup_admin_tier", return_value="enterprise"
     ):
-        req = _StubRequest(tenant_id="big-co", instance_id=None)
+        req = _StubRequest(admin_id="big-co", instance_id=None)
         key = get_tier_aware_key(req)
     assert key == "tier:enterprise:admin:big-co:inst:none"
     assert get_tier_rate_limit_for_key(key) == "3000/minute"
@@ -245,7 +245,7 @@ def test_key_func_fails_safe_to_free_on_lookup_error() -> None:
     with patch(
         "app.middleware.rate_limit._lookup_admin_tier", return_value="free"
     ):
-        req = _StubRequest(tenant_id="ghost-admin", instance_id=1)
+        req = _StubRequest(admin_id="ghost-admin", instance_id=1)
         key = get_tier_aware_key(req)
     assert key == "tier:free:admin:ghost-admin:inst:1"
     assert get_tier_rate_limit_for_key(key) == "30/minute"
@@ -261,7 +261,7 @@ def _build_test_app(monkeypatch_lookup: dict[str, str]) -> Starlette:
     the tier-aware limiter.
 
     ``monkeypatch_lookup`` maps admin_id -> tier so the test bypasses
-    the DB; the test injects ``request.state.tenant_id`` /
+    the DB; the test injects ``request.state.admin_id`` /
     ``request.state.luciel_instance_id`` via a one-line middleware
     that reads the ``X-Admin``/``X-Instance`` request headers.
     """
@@ -282,7 +282,7 @@ def _build_test_app(monkeypatch_lookup: dict[str, str]) -> Starlette:
         async def dispatch(self, request, call_next):
             admin = request.headers.get("x-admin")
             inst = request.headers.get("x-instance")
-            request.state.tenant_id = admin or None
+            request.state.admin_id = admin or None
             request.state.luciel_instance_id = int(inst) if inst else None
             return await call_next(request)
 

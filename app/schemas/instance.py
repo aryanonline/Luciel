@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # ---------------------------------------------------------------------
 
 # Admin.id is a VARCHAR(100) semantic slug per Q1 lock — mirrors the
-# legacy tenant_configs.tenant_id at Revision B backfill. Constrain
+# legacy tenant_configs.admin_id at Revision B backfill. Constrain
 # at the schema boundary so callers get a 422 rather than an FK error.
 _ADMIN_ID_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 _SLUG_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"

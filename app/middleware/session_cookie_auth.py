@@ -56,7 +56,7 @@ Scope shape
 -----------
 A cookied customer is treated as a *tenant-admin* caller -- they see
 their own tenant, all domains within it, all agents and instances
-within those domains. They MAY NOT pass `?tenant_id=other-tenant`; the
+within those domains. They MAY NOT pass `?admin_id=other-tenant`; the
 `ScopePolicy.enforce_tenant_scope` call in each route rejects that with
 the same 403 it returns for cross-tenant API-key calls. Platform-admin
 operations stay API-key-only at v1 (no platform admin can log in via
@@ -148,7 +148,7 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
             logger.warning("cookie auth: cookie payload missing 'sub' on %s", path)
             return await call_next(request)
 
-        # Resolve the User row + their active tenant_id. We open a short
+        # Resolve the User row + their active admin_id. We open a short
         # DB session here (same shape as ApiKeyAuthMiddleware) and
         # release it before invoking the route. The route gets its own
         # request-scoped session via the existing `DbSession` dependency.
@@ -219,14 +219,14 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
                         status_code=401,
                         content={"detail": "No active subscription for this user."},
                     )
-                tenant_id = snapshot.canonical_tenant_id
+                admin_id = snapshot.canonical_tenant_id
                 logger.info(
                     "cookie auth: free-tier fallback via C22 bootstrap "
                     "user=%s tenant=%s tier=%s",
-                    user.id, tenant_id, snapshot.canonical_tier,
+                    user.id, admin_id, snapshot.canonical_tier,
                 )
             else:
-                tenant_id = sub.tenant_id
+                admin_id = sub.admin_id
 
             # ----------------------------------------------------------
             # Step 30a.7 -- belt-and-suspenders tenant-active gate.
@@ -249,13 +249,13 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
             # "tenant cascaded" in the field.
             # Arc 5 B4 — Admin replaces TenantConfig (V2 noun set); Admin.id
             # is the semantic VARCHAR(100) key mirrored from the legacy
-            # tenant_configs.tenant_id at Revision B backfill (active rows
+            # tenant_configs.admin_id at Revision B backfill (active rows
             # only). Inactive/soft-deleted tenants are not minted into
             # admins so the active-check below is necessary but redundant
             # for the post-Revision-B world.
             admin_row = (
                 db.query(Admin)
-                .filter(Admin.id == tenant_id)
+                .filter(Admin.id == admin_id)
                 .first()
             )
             if admin_row is None or not admin_row.active:
@@ -292,7 +292,7 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
             # defaults. key_kind="cookie" is novel; downstream code
             # checks key_kind only on the widget path which we do not
             # reach via cookie.
-            request.state.tenant_id = tenant_id
+            request.state.admin_id = admin_id
             request.state.domain_id = domain_id
             request.state.agent_id = agent_id
             request.state.api_key_id = None

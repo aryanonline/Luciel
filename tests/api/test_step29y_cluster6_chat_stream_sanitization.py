@@ -190,7 +190,7 @@ class _BoomGenerator:
     message. Used to exercise the except branch of event_stream
     without bringing up FastAPI / DB / LLM."""
 
-    SENSITIVE = "tenant_id 'attacker-probe' not found in cache"
+    SENSITIVE = "admin_id 'attacker-probe' not found in cache"
 
     def __init__(self) -> None:
         self._yielded = False

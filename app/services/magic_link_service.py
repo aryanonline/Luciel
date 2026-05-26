@@ -201,7 +201,7 @@ def _secret_or_fail() -> str:
     return _resolve_keys()[_active_kid()]
 
 
-def mint_magic_link_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> str:
+def mint_magic_link_token(*, user_id: uuid.UUID, email: str, admin_id: str) -> str:
     """Return a signed, short-TTL JWT that authorizes one login.
 
     The token carries the user_id + email + tenant so the consuming
@@ -219,7 +219,7 @@ def mint_magic_link_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> 
         "iss": JWT_ISSUER,
         "sub": str(user_id),
         "email": email,
-        "tenant_id": tenant_id,
+        "admin_id": admin_id,
         "typ": TOKEN_TYPE_MAGIC_LINK,
         "iat": int(now.timestamp()),
         "exp": int(exp.timestamp()),
@@ -228,7 +228,7 @@ def mint_magic_link_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> 
     return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM, headers={"kid": kid})
 
 
-def mint_session_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> str:
+def mint_session_token(*, user_id: uuid.UUID, email: str, admin_id: str) -> str:
     """Return a signed, long-TTL JWT for the cookie session.
 
     Same shape as the magic-link token but with ``typ='session'`` and
@@ -244,7 +244,7 @@ def mint_session_token(*, user_id: uuid.UUID, email: str, tenant_id: str) -> str
         "iss": JWT_ISSUER,
         "sub": str(user_id),
         "email": email,
-        "tenant_id": tenant_id,
+        "admin_id": admin_id,
         "typ": TOKEN_TYPE_SESSION,
         "iat": int(now.timestamp()),
         "exp": int(exp.timestamp()),
@@ -344,7 +344,7 @@ def mint_set_password_token(
     *,
     user_id: uuid.UUID,
     email: str,
-    tenant_id: str,
+    admin_id: str,
     purpose: Literal["signup", "invite"] = "signup",
 ) -> str:
     """Mint a short-TTL ``set_password``-class JWT.
@@ -376,7 +376,7 @@ def mint_set_password_token(
         "iss": JWT_ISSUER,
         "sub": str(user_id),
         "email": email,
-        "tenant_id": tenant_id,
+        "admin_id": admin_id,
         "typ": TOKEN_TYPE_SET_PASSWORD,
         "purpose": purpose,
         "iat": int(now.timestamp()),
@@ -390,7 +390,7 @@ def mint_reset_password_token(
     *,
     user_id: uuid.UUID,
     email: str,
-    tenant_id: str,
+    admin_id: str,
 ) -> str:
     """Mint a short-TTL ``reset_password``-class JWT.
 
@@ -409,7 +409,7 @@ def mint_reset_password_token(
         "iss": JWT_ISSUER,
         "sub": str(user_id),
         "email": email,
-        "tenant_id": tenant_id,
+        "admin_id": admin_id,
         "typ": TOKEN_TYPE_RESET_PASSWORD,
         "iat": int(now.timestamp()),
         "exp": int(exp.timestamp()),

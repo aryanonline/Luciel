@@ -23,11 +23,6 @@ class RetentionPolicy(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
-    tenant_id: Mapped[str | None] = mapped_column(
-        String(100), nullable=True, index=True,
-    )
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str | None] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -68,7 +63,7 @@ class RetentionPolicy(Base, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint(
-            "tenant_id", "data_category",
+            "admin_id", "data_category",
             name="uq_retention_tenant_category",
         ),
     )
@@ -79,12 +74,7 @@ class DeletionLog(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
-    tenant_id: Mapped[str | None] = mapped_column(
-        String(100), nullable=True, index=True,
-    )
 
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str | None] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),

@@ -99,7 +99,7 @@ class InstanceRepository:
             # confusing 409 DuplicateInstanceError at the HTTP layer.
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=admin_id,
+                admin_id=admin_id,
                 action=ACTION_CREATE,
                 resource_type=RESOURCE_INSTANCE,
                 resource_pk=instance.id,
@@ -238,7 +238,7 @@ class InstanceRepository:
             if before_diff or after_diff:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=instance.admin_id,
+                    admin_id=instance.admin_id,
                     action=ACTION_UPDATE,
                     resource_type=RESOURCE_INSTANCE,
                     resource_pk=instance.id,
@@ -280,7 +280,7 @@ class InstanceRepository:
         if audit_ctx is not None and was_active:
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=instance.admin_id,
+                admin_id=instance.admin_id,
                 action=ACTION_DEACTIVATE,
                 resource_type=RESOURCE_INSTANCE,
                 resource_pk=instance.id,
@@ -348,7 +348,7 @@ class InstanceRepository:
         if audit_ctx is not None and updated:
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=admin_id,
+                admin_id=admin_id,
                 action=ACTION_CASCADE_DEACTIVATE,
                 resource_type=RESOURCE_INSTANCE,
                 resource_pk=None,

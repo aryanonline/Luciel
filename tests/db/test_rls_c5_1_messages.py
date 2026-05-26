@@ -1,14 +1,14 @@
 """Arc 9 C5.1 shape tests -- RLS policy on messages (Wall 1 strict).
 
 Guards the C3.2-shape Wall-1 RLS migration for the messages table.
-Strict (no NULL carveout) because messages.tenant_id is NOT NULL
+Strict (no NULL carveout) because messages.admin_id is NOT NULL
 after C5.0a's Phase 3 flip.
 
 CONTRACT GUARDED:
     1. Chain integrity: down_revision = C5.0b
     2. ENABLE ROW LEVEL SECURITY on messages
     3. CREATE POLICY messages_tenant_isolation with USING + WITH CHECK
-    4. Predicate compares tenant_id = current_setting('app.admin_id', true)
+    4. Predicate compares admin_id = current_setting('app.admin_id', true)
     5. No NULL-permissive carveout (strict shape)
     6. Downgrade drops policy + disables RLS
     7. Module importable
@@ -75,17 +75,17 @@ class TestC51MigrationShape(unittest.TestCase):
     def test_using_clause(self):
         self.assertRegex(
             self.text_lower,
-            r"using\s*\(\s*tenant_id\s*=\s*current_setting\(\s*'app\.admin_id'\s*,\s*true\s*\)\s*\)",
+            r"using\s*\(\s*admin_id\s*=\s*current_setting\(\s*'app\.admin_id'\s*,\s*true\s*\)\s*\)",
         )
 
     def test_with_check_clause(self):
         self.assertRegex(
             self.text_lower,
-            r"with\s+check\s*\(\s*tenant_id\s*=\s*current_setting\(\s*'app\.admin_id'\s*,\s*true\s*\)\s*\)",
+            r"with\s+check\s*\(\s*admin_id\s*=\s*current_setting\(\s*'app\.admin_id'\s*,\s*true\s*\)\s*\)",
         )
 
     def test_no_null_permissive_carveout(self):
-        # Strict shape -- no "OR tenant_id IS NULL" in the policy.
+        # Strict shape -- no "OR admin_id IS NULL" in the policy.
         # If this fires, the migration accidentally adopted the C3.3
         # / C4.3 NULL-permissive shape on a NOT-NULL column.
         self.assertNotIn("is null", self.text_lower)

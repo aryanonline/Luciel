@@ -21,18 +21,7 @@ class MessageModel(Base, TimestampMixin):
         nullable=False,
     )
 
-    # Arc 9 C5.0a/C5.3 -- denormalised tenant_id for Wall-1 RLS
-    # (messages_tenant_isolation policy). Populated from the parent
-    # session row at insert time by SessionRepository.add_message.
-    # NOT NULL post-C5.0a Phase 3. Indexed via the composite
-    # ix_messages_tenant_id_session_id (created in C5.0a Phase 4).
-    tenant_id: Mapped[str] = mapped_column(
-        String(100), nullable=False, index=False,
-    )
 
-
-    # Arc 9.2 PR #96 - additive admin_id (Option A collapses tenant_id -> admin_id).
-    # tenant_id remains during alias window; admin_id is source of truth.
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),

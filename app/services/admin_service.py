@@ -40,7 +40,7 @@ class AdminService:
         """Create an Admin row. Legacy name kept for caller compatibility.
 
         V2 translation table (Arc 9.2 PR #99 cleanup):
-          * ``tenant_id`` -> ``id``           (PK rename Arc 5 Rev C)
+          * ``admin_id`` -> ``id``           (PK rename Arc 5 Rev C)
           * ``display_name`` -> ``name``      (column rename Arc 5 Rev C)
           * ``description`` -> dropped        (no home on admins; V2 lives on instances)
           * ``escalation_contact`` -> dropped (legacy contact column removed Arc 5)
@@ -55,8 +55,8 @@ class AdminService:
         Arc-5-Rev-C drift; full schema simplification lands in the
         Arc 9.2 Option A migration (PR #100/#101).
         """
-        if "tenant_id" in kwargs and "id" not in kwargs:
-            kwargs["id"] = kwargs.pop("tenant_id")
+        if "admin_id" in kwargs and "id" not in kwargs:
+            kwargs["id"] = kwargs.pop("admin_id")
         if "display_name" in kwargs and "name" not in kwargs:
             kwargs["name"] = kwargs.pop("display_name")
         # Drop legacy kwargs the V2 admins table no longer accepts.
@@ -76,13 +76,13 @@ class AdminService:
         logger.info("Created admin (tenant_config): %s", config.id)
         return config
 
-    def get_tenant_config(self, tenant_id: str) -> Admin | None:
-        """Fetch an Admin row by its id (legacy ``tenant_id``)."""
-        stmt = select(Admin).where(Admin.id == tenant_id)
+    def get_tenant_config(self, admin_id: str) -> Admin | None:
+        """Fetch an Admin row by its id (legacy ``admin_id``)."""
+        stmt = select(Admin).where(Admin.id == admin_id)
         return self.db.scalars(stmt).first()
 
-    def update_tenant_config(self, tenant_id: str, **kwargs) -> Admin | None:
-        config = self.get_tenant_config(tenant_id)
+    def update_tenant_config(self, admin_id: str, **kwargs) -> Admin | None:
+        config = self.get_tenant_config(admin_id)
         if not config:
             return None
         for key, value in kwargs.items():
@@ -90,7 +90,7 @@ class AdminService:
                 setattr(config, key, value)
         self.db.commit()
         self.db.refresh(config)
-        logger.info("Updated admin (tenant_config): %s", tenant_id)
+        logger.info("Updated admin (tenant_config): %s", admin_id)
         return config
 
     def list_tenant_configs(self) -> list[Admin]:
@@ -115,7 +115,7 @@ class AdminService:
         self.db.commit()
         self.db.refresh(config)
         logger.info(
-            "Created agent config: %s/%s", config.tenant_id, config.agent_id
+            "Created agent config: %s/%s", config.admin_id, config.agent_id
         )
         return config
 
@@ -127,9 +127,9 @@ class AdminService:
         return self.db.scalars(stmt).first()
 
     def update_agent_config(
-        self, tenant_id: str, agent_id: str, **kwargs
+        self, admin_id: str, agent_id: str, **kwargs
     ) -> AgentConfig | None:
-        config = self.get_agent_config(tenant_id, agent_id)
+        config = self.get_agent_config(admin_id, agent_id)
         if not config:
             return None
         for key, value in kwargs.items():
@@ -137,12 +137,12 @@ class AdminService:
                 setattr(config, key, value)
         self.db.commit()
         self.db.refresh(config)
-        logger.info("Updated agent config: %s/%s", tenant_id, agent_id)
+        logger.info("Updated agent config: %s/%s", admin_id, agent_id)
         return config
 
     def list_agent_configs(self, tenant_id: str | None = None) -> list[AgentConfig]:
         stmt = select(AgentConfig).order_by(AgentConfig.created_at.desc())
-        if tenant_id:
+        if admin_id:
             stmt = stmt.where(AgentConfig.tenant_id == tenant_id)
         return list(self.db.scalars(stmt).all())
     
@@ -151,19 +151,19 @@ class AdminService:
     # and listing are no longer meaningful. AgentConfig is itself legacy
     # and dropped at Revision C; new code uses InstanceService instead.
     def list_agent_configs_by_domain(
-        self, tenant_id: str, domain_id: str,
+        self, admin_id: str, domain_id: str,
     ) -> list:
         """V2 no-op stub. Returns []. Domain layer is gone."""
         logger.info(
             "list_agent_configs_by_domain: V2 no-op stub tenant_id=%s domain_id=%s",
-            tenant_id,
+            admin_id,
             domain_id,
         )
         return []
 
     def deactivate_domain(
         self,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         *,
         audit_ctx=None,
@@ -178,15 +178,15 @@ class AdminService:
         """
         logger.info(
             "AdminService.deactivate_domain: Arc 5 Path A V2 no-op "
-            "stub tenant_id=%s domain_id=%s (V2 has no Domain layer).",
-            tenant_id,
+            "stub admin_id=%s domain_id=%s (V2 has no Domain layer).",
+            admin_id,
             domain_id,
         )
         return False
 
     def deactivate_agent(
         self,
-        tenant_id: str,
+        admin_id: str,
         agent_id: str,
         *,
         audit_ctx=None,                    # Step 24.5
@@ -210,7 +210,7 @@ class AdminService:
         )
         from app.repositories.admin_audit_repository import AdminAuditRepository
 
-        agent = self.get_agent_config(tenant_id, agent_id)
+        agent = self.get_agent_config(admin_id, agent_id)
         if not agent:
             return False
 
@@ -224,7 +224,7 @@ class AdminService:
             if audit_ctx is not None and was_active:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     action=ACTION_DEACTIVATE,
                     resource_type=RESOURCE_AGENT,
                     resource_pk=agent.id,
@@ -241,7 +241,7 @@ class AdminService:
             # autocommit=False -- this method commits the whole transaction.
             if audit_ctx is not None:
                 self.bulk_soft_deactivate_memory_items_for_agent(
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     agent_id=agent_id,
                     audit_ctx=audit_ctx,
                     updated_by=updated_by,
@@ -256,7 +256,7 @@ class AdminService:
             ):
                 luciel_instance_service.cascade_on_agent_deactivate(
                     audit_ctx=audit_ctx,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     domain_id=agent.domain_id,
                     agent_id=agent_id,
                     updated_by=updated_by,
@@ -273,7 +273,7 @@ class AdminService:
 
     def bulk_soft_deactivate_memory_items_for_tenant(
         self,
-        tenant_id: str,
+        admin_id: str,
         *,
         audit_ctx,
         updated_by: str | None = None,
@@ -322,7 +322,7 @@ class AdminService:
                     func.count().label("row_count"),
                 )
                 .filter(
-                    MemoryItem.tenant_id == tenant_id,
+                    MemoryItem.admin_id == admin_id,
                     MemoryItem.active.is_(True),
                 )
                 .group_by(MemoryItem.agent_id, MemoryItem.luciel_instance_id)
@@ -341,7 +341,7 @@ class AdminService:
             count = (
                 self.db.query(MemoryItem)
                 .filter(
-                    MemoryItem.tenant_id == tenant_id,
+                    MemoryItem.admin_id == admin_id,
                     MemoryItem.active.is_(True),
                 )
                 .update(
@@ -352,7 +352,7 @@ class AdminService:
 
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 action=ACTION_CASCADE_DEACTIVATE,
                 resource_type=RESOURCE_MEMORY,
                 resource_pk=None,
@@ -360,14 +360,14 @@ class AdminService:
                 after={
                     "count": count,
                     "scope": "tenant",
-                    "tenant_id": tenant_id,
+                    "admin_id": admin_id,
                     "breakdown": breakdown,
                     "trigger": "tenant_deactivate_cascade",
                     "updated_by": updated_by,
                 },
                 note=(
                     f"Cascade memory_items deactivation from tenant "
-                    f"{tenant_id} deactivation (PIPEDA P5)"
+                    f"{admin_id} deactivation (PIPEDA P5)"
                 ),
                 autocommit=False,
             )
@@ -383,7 +383,7 @@ class AdminService:
 
     def bulk_soft_deactivate_memory_items_for_agent(
         self,
-        tenant_id: str,
+        admin_id: str,
         agent_id: str,
         *,
         audit_ctx,
@@ -424,7 +424,7 @@ class AdminService:
                     func.count().label("row_count"),
                 )
                 .filter(
-                    MemoryItem.tenant_id == tenant_id,
+                    MemoryItem.admin_id == admin_id,
                     MemoryItem.agent_id == agent_id,
                     MemoryItem.active.is_(True),
                 )
@@ -442,7 +442,7 @@ class AdminService:
             count = (
                 self.db.query(MemoryItem)
                 .filter(
-                    MemoryItem.tenant_id == tenant_id,
+                    MemoryItem.admin_id == admin_id,
                     MemoryItem.agent_id == agent_id,
                     MemoryItem.active.is_(True),
                 )
@@ -454,7 +454,7 @@ class AdminService:
 
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 action=ACTION_CASCADE_DEACTIVATE,
                 resource_type=RESOURCE_MEMORY,
                 resource_pk=None,
@@ -463,7 +463,7 @@ class AdminService:
                 after={
                     "count": count,
                     "scope": "agent",
-                    "tenant_id": tenant_id,
+                    "admin_id": admin_id,
                     "agent_id": agent_id,
                     "breakdown": breakdown,
                     "trigger": "agent_deactivate_cascade",
@@ -471,7 +471,7 @@ class AdminService:
                 },
                 note=(
                     f"Cascade memory_items deactivation from agent "
-                    f"{tenant_id}/{agent_id} deactivation (PIPEDA P5)"
+                    f"{admin_id}/{agent_id} deactivation (PIPEDA P5)"
                 ),
                 autocommit=False,
             )
@@ -487,7 +487,7 @@ class AdminService:
 
     def bulk_soft_deactivate_memory_items_for_luciel_instance(
         self,
-        tenant_id: str,
+        admin_id: str,
         luciel_instance_id: int,
         *,
         audit_ctx,
@@ -527,7 +527,7 @@ class AdminService:
                     func.count().label("row_count"),
                 )
                 .filter(
-                    MemoryItem.tenant_id == tenant_id,
+                    MemoryItem.admin_id == admin_id,
                     MemoryItem.luciel_instance_id == luciel_instance_id,
                     MemoryItem.active.is_(True),
                 )
@@ -545,7 +545,7 @@ class AdminService:
             count = (
                 self.db.query(MemoryItem)
                 .filter(
-                    MemoryItem.tenant_id == tenant_id,
+                    MemoryItem.admin_id == admin_id,
                     MemoryItem.luciel_instance_id == luciel_instance_id,
                     MemoryItem.active.is_(True),
                 )
@@ -557,7 +557,7 @@ class AdminService:
 
             AdminAuditRepository(self.db).record(
                 ctx=audit_ctx,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 action=ACTION_CASCADE_DEACTIVATE,
                 resource_type=RESOURCE_MEMORY,
                 resource_pk=None,
@@ -566,7 +566,7 @@ class AdminService:
                 after={
                     "count": count,
                     "scope": "luciel_instance",
-                    "tenant_id": tenant_id,
+                    "admin_id": admin_id,
                     "luciel_instance_id": luciel_instance_id,
                     "breakdown": breakdown,
                     "trigger": "luciel_instance_deactivate_cascade",
@@ -574,7 +574,7 @@ class AdminService:
                 },
                 note=(
                     f"Cascade memory_items deactivation from luciel_instance "
-                    f"{luciel_instance_id} (tenant {tenant_id}) deactivation "
+                    f"{luciel_instance_id} (tenant {admin_id}) deactivation "
                     f"(PIPEDA P5)"
                 ),
                 autocommit=False,
@@ -597,7 +597,7 @@ class AdminService:
 
     def bulk_soft_deactivate_memory_items_for_domain(
         self,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str,
         *,
         audit_ctx,
@@ -615,8 +615,8 @@ class AdminService:
         """
         logger.info(
             "bulk_soft_deactivate_memory_items_for_domain: Arc 5 Path A "
-            "V2 no-op stub tenant_id=%s domain_id=%s.",
-            tenant_id,
+            "V2 no-op stub admin_id=%s domain_id=%s.",
+            admin_id,
             domain_id,
         )
         return 0
@@ -624,7 +624,7 @@ class AdminService:
 
     def deactivate_tenant_with_cascade(
         self,
-        tenant_id: str,
+        admin_id: str,
         *,
         audit_ctx,
         luciel_instance_service,
@@ -689,7 +689,7 @@ class AdminService:
         Step 30a.2 -- closed
         D-cancellation-cascade-incomplete-conversations-claims-2026-05-14:
         the cascade now visits ``conversations`` and ``identity_claims``
-        (both have ``tenant_id`` + ``active`` columns and were unreachable
+        (both have ``admin_id`` + ``active`` columns and were unreachable
         in the old 7-layer walk). And the tenant_config step itself stamps
         ``deactivated_at = now()`` so the retention worker can compute the
         90d purge cutoff.
@@ -752,7 +752,7 @@ class AdminService:
                 "tenant deactivation must always be audited."
             )
 
-        tenant = self.get_tenant_config(tenant_id)
+        tenant = self.get_tenant_config(admin_id)
         if tenant is None:
             return False
 
@@ -770,7 +770,7 @@ class AdminService:
             affected_conversations = (
                 self.db.query(Conversation.id)
                 .filter(
-                    Conversation.tenant_id == tenant_id,
+                    Conversation.admin_id == admin_id,
                     Conversation.active.is_(True),
                 )
                 .all()
@@ -779,7 +779,7 @@ class AdminService:
             conv_updated = (
                 self.db.query(Conversation)
                 .filter(
-                    Conversation.tenant_id == tenant_id,
+                    Conversation.admin_id == admin_id,
                     Conversation.active.is_(True),
                 )
                 .update(
@@ -793,7 +793,7 @@ class AdminService:
             if conv_updated:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     action=ACTION_CASCADE_DEACTIVATE,
                     resource_type=RESOURCE_CONVERSATION,
                     resource_pk=None,
@@ -806,7 +806,7 @@ class AdminService:
                     },
                     note=(
                         f"Cascade conversations from tenant "
-                        f"{tenant_id} deactivation (Step 30a.2)"
+                        f"{admin_id} deactivation (Step 30a.2)"
                     ),
                     autocommit=False,
                 )
@@ -824,7 +824,7 @@ class AdminService:
             affected_claims = (
                 self.db.query(IdentityClaim.id)
                 .filter(
-                    IdentityClaim.tenant_id == tenant_id,
+                    IdentityClaim.admin_id == admin_id,
                     IdentityClaim.active.is_(True),
                 )
                 .all()
@@ -833,7 +833,7 @@ class AdminService:
             claims_updated = (
                 self.db.query(IdentityClaim)
                 .filter(
-                    IdentityClaim.tenant_id == tenant_id,
+                    IdentityClaim.admin_id == admin_id,
                     IdentityClaim.active.is_(True),
                 )
                 .update(
@@ -847,7 +847,7 @@ class AdminService:
             if claims_updated:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     action=ACTION_CASCADE_DEACTIVATE,
                     resource_type=RESOURCE_IDENTITY_CLAIM,
                     resource_pk=None,
@@ -860,7 +860,7 @@ class AdminService:
                     },
                     note=(
                         f"Cascade identity_claims from tenant "
-                        f"{tenant_id} deactivation (Step 30a.2)"
+                        f"{admin_id} deactivation (Step 30a.2)"
                     ),
                     autocommit=False,
                 )
@@ -868,7 +868,7 @@ class AdminService:
             # --- 3. memory_items cascade (broadest leaf) ---------------
             # Service method emits its own RESOURCE_KNOWLEDGE audit row.
             self.bulk_soft_deactivate_memory_items_for_tenant(
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 audit_ctx=audit_ctx,
                 updated_by=updated_by,
                 autocommit=False,
@@ -879,7 +879,7 @@ class AdminService:
             # exists for it). Shares self.db -- transaction atomic.
             # Service method emits its own RESOURCE_API_KEY audit rows.
             ApiKeyService(self.db).deactivate_all_for_tenant(
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 audit_ctx=audit_ctx,
                 autocommit=False,
             )
@@ -887,7 +887,7 @@ class AdminService:
             # --- 5. luciel_instances cascade (all scope levels) --------
             # Repo method emits its own RESOURCE_LUCIEL_INSTANCE audit rows.
             luciel_instance_service.repo.deactivate_all_for_tenant(
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 updated_by=updated_by,
                 audit_ctx=audit_ctx,
                 autocommit=False,
@@ -896,7 +896,7 @@ class AdminService:
             # --- 6. agents (new-table) cascade -------------------------
             # Repo method emits its own RESOURCE_AGENT audit rows.
             agent_repo.deactivate_all_for_tenant(
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 updated_by=updated_by,
                 audit_ctx=audit_ctx,
                 autocommit=False,
@@ -930,7 +930,7 @@ class AdminService:
             if ac_updated:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     action=ACTION_CASCADE_DEACTIVATE,
                     resource_type=RESOURCE_AGENT,
                     resource_pk=None,
@@ -944,7 +944,7 @@ class AdminService:
                     },
                     note=(
                         f"Cascade legacy agent_configs from tenant "
-                        f"{tenant_id} deactivation"
+                        f"{admin_id} deactivation"
                     ),
                     autocommit=False,
                 )
@@ -972,7 +972,7 @@ class AdminService:
             affected_scope_assignments = (
                 self.db.query(ScopeAssignment.id, ScopeAssignment.user_id)
                 .filter(
-                    ScopeAssignment.tenant_id == tenant_id,
+                    ScopeAssignment.admin_id == admin_id,
                     ScopeAssignment.active.is_(True),
                 )
                 .all()
@@ -982,7 +982,7 @@ class AdminService:
             sa_updated = (
                 self.db.query(ScopeAssignment)
                 .filter(
-                    ScopeAssignment.tenant_id == tenant_id,
+                    ScopeAssignment.admin_id == admin_id,
                     ScopeAssignment.active.is_(True),
                 )
                 .update(
@@ -998,7 +998,7 @@ class AdminService:
             if sa_updated:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     action=ACTION_CASCADE_DEACTIVATE,
                     resource_type=RESOURCE_SCOPE_ASSIGNMENT,
                     resource_pk=None,
@@ -1018,7 +1018,7 @@ class AdminService:
                     },
                     note=(
                         f"Cascade scope_assignments from tenant "
-                        f"{tenant_id} deactivation (Step 30a.7)"
+                        f"{admin_id} deactivation (Step 30a.7)"
                     ),
                     autocommit=False,
                 )
@@ -1035,7 +1035,7 @@ class AdminService:
             affected_invites = (
                 self.db.query(UserInvite.id)
                 .filter(
-                    UserInvite.tenant_id == tenant_id,
+                    UserInvite.admin_id == admin_id,
                     UserInvite.status == InviteStatus.PENDING,
                 )
                 .all()
@@ -1044,7 +1044,7 @@ class AdminService:
             ui_updated = (
                 self.db.query(UserInvite)
                 .filter(
-                    UserInvite.tenant_id == tenant_id,
+                    UserInvite.admin_id == admin_id,
                     UserInvite.status == InviteStatus.PENDING,
                 )
                 .update(
@@ -1058,7 +1058,7 @@ class AdminService:
             if ui_updated:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     action=ACTION_INVITE_REVOKED,
                     resource_type=RESOURCE_USER_INVITE,
                     resource_pk=None,
@@ -1075,7 +1075,7 @@ class AdminService:
                     },
                     note=(
                         f"Cascade revoke pending user_invites from "
-                        f"tenant {tenant_id} deactivation (Step 30a.7)"
+                        f"tenant {admin_id} deactivation (Step 30a.7)"
                     ),
                     autocommit=False,
                 )
@@ -1095,7 +1095,7 @@ class AdminService:
             affected_sessions = (
                 self.db.query(SessionModel.id)
                 .filter(
-                    SessionModel.tenant_id == tenant_id,
+                    SessionModel.admin_id == admin_id,
                     SessionModel.status == "active",
                 )
                 .all()
@@ -1104,7 +1104,7 @@ class AdminService:
             sess_updated = (
                 self.db.query(SessionModel)
                 .filter(
-                    SessionModel.tenant_id == tenant_id,
+                    SessionModel.admin_id == admin_id,
                     SessionModel.status == "active",
                 )
                 .update(
@@ -1115,7 +1115,7 @@ class AdminService:
             if sess_updated:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     action=ACTION_CASCADE_DEACTIVATE,
                     resource_type=RESOURCE_SESSION,
                     resource_pk=None,
@@ -1130,13 +1130,13 @@ class AdminService:
                     },
                     note=(
                         f"Cascade revoke active sessions from tenant "
-                        f"{tenant_id} deactivation (Step 30a.7)"
+                        f"{admin_id} deactivation (Step 30a.7)"
                     ),
                     autocommit=False,
                 )
 
             # --- 11. synthetic_orphan_users cascade (Step 30a.7) -------
-            # users is a GLOBAL table -- users have no tenant_id column
+            # users is a GLOBAL table -- users have no admin_id column
             # (binding lives in scope_assignments). A blanket
             # users.active=False on cascade would wrongly deactivate real
             # users who hold scope on multiple tenants. Narrow case where
@@ -1182,7 +1182,7 @@ class AdminService:
                         synthetic_deactivated_user_ids.append(str(user_id))
                         AdminAuditRepository(self.db).record(
                             ctx=audit_ctx,
-                            tenant_id=tenant_id,
+                            admin_id=admin_id,
                             action=ACTION_CASCADE_DEACTIVATE,
                             resource_type=RESOURCE_USER,
                             resource_pk=None,
@@ -1196,7 +1196,7 @@ class AdminService:
                             },
                             note=(
                                 f"Cascade deactivate synthetic orphan user "
-                                f"{user_id} from tenant {tenant_id} "
+                                f"{user_id} from tenant {admin_id} "
                                 f"deactivation (Step 30a.7)"
                             ),
                             autocommit=False,
@@ -1216,11 +1216,11 @@ class AdminService:
             if was_active:
                 AdminAuditRepository(self.db).record(
                     ctx=audit_ctx,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     action=ACTION_DEACTIVATE,
                     resource_type=RESOURCE_TENANT,
                     resource_pk=tenant.id,
-                    resource_natural_id=tenant_id,
+                    resource_natural_id=admin_id,
                     before={"active": True},
                     after={
                         "active": False,
@@ -1230,7 +1230,7 @@ class AdminService:
                         # second source of truth that could drift.
                     },
                     note=(
-                        f"Tenant {tenant_id} deactivated with full cascade "
+                        f"Tenant {admin_id} deactivated with full cascade "
                         f"(PIPEDA P5 retention; Arc 5 B5 12-layer "
                         f"in-function + 1 upstream subscription; Domain "
                         f"layer removed per aggressive-cleanup amendment)"
@@ -1260,21 +1260,21 @@ class AdminService:
     # app/worker/tasks/retention.py::run_retention_purge.
     #
     # Order matters: we delete leaf-first to satisfy the FK RESTRICT
-    # constraints that protect tenant_configs.tenant_id from cascade-
-    # delete. ``conversations.tenant_id`` and
-    # ``identity_claims.tenant_id`` both have ON DELETE RESTRICT to
-    # tenant_configs.tenant_id, so we MUST delete them before the
+    # constraints that protect tenant_configs.admin_id from cascade-
+    # delete. ``conversations.admin_id`` and
+    # ``identity_claims.admin_id`` both have ON DELETE RESTRICT to
+    # tenant_configs.admin_id, so we MUST delete them before the
     # parent tenant_configs row. Same for any other FK-RESTRICT
     # children that may exist; we delete them all explicitly rather
     # than relying on FK behavior so the row-count audit is honest.
 
     def hard_delete_tenant_after_retention(
         self,
-        tenant_id: str,
+        admin_id: str,
         *,
         retention_window_days: int = 90,
     ) -> dict[str, int]:
-        """Hard-delete every row scoped to ``tenant_id`` after retention.
+        """Hard-delete every row scoped to ``admin_id`` after retention.
 
         Re-verifies the retention predicate (active=false AND
         deactivated_at < now - N days) inside this transaction as an
@@ -1284,16 +1284,16 @@ class AdminService:
 
         Order of deletion (leaf-first, RESTRICT-safe):
            1. messages          (via sessions FK CASCADE -- implicit)
-           2. sessions          WHERE tenant_id=:tid
-           3. conversations     WHERE tenant_id=:tid
-           4. identity_claims   WHERE tenant_id=:tid
-           5. memory_items      WHERE tenant_id=:tid
-           6. api_keys          WHERE tenant_id=:tid
-           7. luciel_instances  WHERE tenant_id=:tid
-           8. agents            WHERE tenant_id=:tid
+           2. sessions          WHERE admin_id=:tid
+           3. conversations     WHERE admin_id=:tid
+           4. identity_claims   WHERE admin_id=:tid
+           5. memory_items      WHERE admin_id=:tid
+           6. api_keys          WHERE admin_id=:tid
+           7. luciel_instances  WHERE admin_id=:tid
+           8. agents            WHERE admin_id=:tid
            9. agent_configs     WHERE tenant_id=:tid
-          10. domain_configs    WHERE tenant_id=:tid
-          11. tenant_configs    WHERE tenant_id=:tid
+          10. domain_configs    WHERE admin_id=:tid
+          11. tenant_configs    WHERE admin_id=:tid
           12. AdminAuditLog row recording the purge (action=
               ACTION_TENANT_HARD_PURGED) with per-table row-count map.
 
@@ -1327,7 +1327,7 @@ class AdminService:
         # This is intentionally done inside the same transaction as
         # the DELETEs (not as a pre-flight) so a concurrent reactivate
         # cannot race past us.
-        tenant = self.get_tenant_config(tenant_id)
+        tenant = self.get_tenant_config(admin_id)
         if tenant is None:
             # Already hard-purged on a prior run, or never existed.
             return {}
@@ -1335,7 +1335,7 @@ class AdminService:
         if tenant.active:
             raise RuntimeError(
                 f"hard_delete_tenant_after_retention called on ACTIVE "
-                f"tenant {tenant_id!r} -- this should never happen. "
+                f"tenant {admin_id!r} -- this should never happen. "
                 f"The cascade is the only writer of tenant_configs."
                 f"active=false; reactivation must roll back deactivated_at."
             )
@@ -1343,7 +1343,7 @@ class AdminService:
         if tenant.deactivated_at is None:
             raise RuntimeError(
                 f"hard_delete_tenant_after_retention called on tenant "
-                f"{tenant_id!r} with NULL deactivated_at -- this row "
+                f"{admin_id!r} with NULL deactivated_at -- this row "
                 f"was deactivated before Step 30a.2 and is excluded "
                 f"from automated purge by design. Manual purge only."
             )
@@ -1367,7 +1367,7 @@ class AdminService:
         # We coerce to int and store; the audit row reflects what we
         # actually saw, even if -1.
         def _delete(sql: str) -> int:
-            res = self.db.execute(sql_text(sql), {"tid": tenant_id})
+            res = self.db.execute(sql_text(sql), {"tid": admin_id})
             return int(res.rowcount or 0)
 
         # 1. messages cascade via SQL FK on sessions (implicit). We
@@ -1379,9 +1379,9 @@ class AdminService:
                 sql_text(
                     "SELECT COUNT(*) FROM messages m "
                     "JOIN sessions s ON s.id = m.session_id "
-                    "WHERE s.tenant_id = :tid"
+                    "WHERE s.admin_id = :tid"
                 ),
-                {"tid": tenant_id},
+                {"tid": admin_id},
             ).scalar()
             or 0
         )
@@ -1389,37 +1389,37 @@ class AdminService:
 
         # 2. sessions (cascades to messages via FK)
         row_counts["sessions"] = _delete(
-            "DELETE FROM sessions WHERE tenant_id = :tid"
+            "DELETE FROM sessions WHERE admin_id = :tid"
         )
 
         # 3. conversations
         row_counts["conversations"] = _delete(
-            "DELETE FROM conversations WHERE tenant_id = :tid"
+            "DELETE FROM conversations WHERE admin_id = :tid"
         )
 
         # 4. identity_claims
         row_counts["identity_claims"] = _delete(
-            "DELETE FROM identity_claims WHERE tenant_id = :tid"
+            "DELETE FROM identity_claims WHERE admin_id = :tid"
         )
 
         # 5. memory_items
         row_counts["memory_items"] = _delete(
-            "DELETE FROM memory_items WHERE tenant_id = :tid"
+            "DELETE FROM memory_items WHERE admin_id = :tid"
         )
 
         # 6. api_keys
         row_counts["api_keys"] = _delete(
-            "DELETE FROM api_keys WHERE tenant_id = :tid"
+            "DELETE FROM api_keys WHERE admin_id = :tid"
         )
 
         # 7. luciel_instances
         row_counts["luciel_instances"] = _delete(
-            "DELETE FROM luciel_instances WHERE tenant_id = :tid"
+            "DELETE FROM luciel_instances WHERE admin_id = :tid"
         )
 
         # 8. agents (new-table, Step 24.5)
         row_counts["agents"] = _delete(
-            "DELETE FROM agents WHERE tenant_id = :tid"
+            "DELETE FROM agents WHERE admin_id = :tid"
         )
 
         # 9. agent_configs (legacy)
@@ -1435,7 +1435,7 @@ class AdminService:
 
         # 11. admins (the parent row itself).
         # V2: tenant_configs table is renamed to admins at Revision C
-        # via rename; same primary key (tenant_id → id). During the
+        # via rename; same primary key (admin_id → id). During the
         # transition before Revision C lands, the table is still named
         # tenant_configs on disk; after Revision C, it is admins. Try
         # admins first, fall back to tenant_configs.
@@ -1448,7 +1448,7 @@ class AdminService:
         if row_counts["admins"] == 0:
             try:
                 row_counts["tenant_configs"] = _delete(
-                    "DELETE FROM tenant_configs WHERE tenant_id = :tid"
+                    "DELETE FROM tenant_configs WHERE admin_id = :tid"
                 )
             except Exception:
                 row_counts["tenant_configs"] = 0
@@ -1457,7 +1457,7 @@ class AdminService:
 
         # 12. Audit row -- write to AdminAuditLog with full row-count
         # manifest. The audit row uses the resource_natural_id field
-        # to preserve tenant_id as a searchable string AFTER the
+        # to preserve admin_id as a searchable string AFTER the
         # tenant_configs row itself is gone; the row_hash chain stays
         # walkable because AdminAuditLog rows are never FK'd to
         # tenant_configs.
@@ -1471,18 +1471,18 @@ class AdminService:
         system_ctx = AuditContext.system(label="retention_worker")
         AdminAuditRepository(self.db).record(
             ctx=system_ctx,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             action=ACTION_TENANT_HARD_PURGED,
             resource_type=RESOURCE_TENANT,
             resource_pk=None,
-            resource_natural_id=tenant_id,
+            resource_natural_id=admin_id,
             after={
                 "row_counts": row_counts,
                 "retention_window_days": retention_window_days,
                 "trigger": "retention_worker",
             },
             note=(
-                f"Hard-purge of tenant {tenant_id} after "
+                f"Hard-purge of tenant {admin_id} after "
                 f"{retention_window_days}d retention (PIPEDA P5)"
             ),
             autocommit=False,
@@ -1499,7 +1499,7 @@ class AdminService:
     # create_instance. Service-layer enforcement is intentional:
     #
     #   * the schema layer cannot know the caller's active subscription
-    #     (subscriptions are loaded by tenant_id from a DB lookup);
+    #     (subscriptions are loaded by admin_id from a DB lookup);
     #   * the policy layer (ScopePolicy) checks API-key authority, not
     #     billing entitlement, and we want those concerns separate.
     #
@@ -1514,7 +1514,7 @@ class AdminService:
     def _enforce_tier_scope(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         requested_level: str | None = None,
         **_legacy_kwargs,
     ) -> None:
@@ -1561,7 +1561,7 @@ class AdminService:
         sub: Subscription | None = (
             self.db.query(Subscription)
             .filter(
-                Subscription.tenant_id == tenant_id,
+                Subscription.admin_id == admin_id,
                 Subscription.active.is_(True),
             )
             .order_by(Subscription.id.desc())
@@ -1582,7 +1582,7 @@ class AdminService:
             # the post-checkout provisioning leg completes.
             admin_row = (
                 self.db.query(Admin)
-                .filter(Admin.id == tenant_id)
+                .filter(Admin.id == admin_id)
                 .first()
             )
             if admin_row is None:
@@ -1592,7 +1592,7 @@ class AdminService:
                 # with a session cookie but the tenant they resolved
                 # to has been hard-deleted or never provisioned.
                 raise TierScopeViolationError(
-                    f"Tenant {tenant_id!r} has no Admin row and no "
+                    f"Tenant {admin_id!r} has no Admin row and no "
                     f"active subscription; cannot create LucielInstance.",
                     reason=TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION,
                 )
@@ -1606,10 +1606,10 @@ class AdminService:
                 logger.warning(
                     "_enforce_tier_scope: tenant=%s has unknown tier=%r; "
                     "failing closed pending entitlement-map update.",
-                    tenant_id, tier,
+                    admin_id, tier,
                 )
                 raise TierScopeViolationError(
-                    f"Tenant {tenant_id!r} tier={tier!r} has no entitlement "
+                    f"Tenant {admin_id!r} tier={tier!r} has no entitlement "
                     f"mapping; cannot create LucielInstance.",
                     reason=TierScopeViolationError.REASON_NO_ACTIVE_SUBSCRIPTION,
                 )
@@ -1619,10 +1619,10 @@ class AdminService:
         # legacy "scope_level permitted by tier" check is dropped here.
         # Only the cap-enforcement guard remains.
         if cap is not None:
-            used = InstanceRepository(self.db).count_active_for_admin(tenant_id)
+            used = InstanceRepository(self.db).count_active_for_admin(admin_id)
             if used >= cap:
                 raise TierScopeViolationError(
-                    f"Tenant {tenant_id!r} has reached its instance_count_cap="
+                    f"Tenant {admin_id!r} has reached its instance_count_cap="
                     f"{cap} (currently {used} active LucielInstances). "
                     f"Deactivate an existing Luciel or upgrade your tier.",
                     reason=TierScopeViolationError.REASON_CAP_EXCEEDED,

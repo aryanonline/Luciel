@@ -62,7 +62,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 #
 # ``get_tenant_scoped_db`` is the parallel dependency to ``get_db``
 # that, on entry, reads the authenticated admin's slug off
-# ``request.state.tenant_id`` AND the authenticated instance id off
+# ``request.state.admin_id`` AND the authenticated instance id off
 # ``request.state.luciel_instance_id`` (both populated by
 # ApiKeyAuthMiddleware / SessionCookieAuthMiddleware) and pushes them
 # into the in-process ContextVars. The engine-level ``after_begin``
@@ -72,7 +72,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 #   SELECT set_config('app.admin_id',    '<slug>',    true);
 #   SELECT set_config('app.instance_id', '<int|empty>', true);
 #
-# The Arc 9 C3 and C4.3 RLS policies then enforce ``tenant_id`` and
+# The Arc 9 C3 and C4.3 RLS policies then enforce ``admin_id`` and
 # ``luciel_instance_id`` respectively against the GUCs.
 #
 # C2 lands this as a PARALLEL dep, not a replacement. Existing routes
@@ -86,7 +86,7 @@ def get_tenant_scoped_db(request: Request) -> Generator[Session, None, None]:
     Reads two pieces of state off the FastAPI request (both populated
     by the auth middleware):
 
-      * ``request.state.tenant_id`` -- the admin slug under Arc 5
+      * ``request.state.admin_id`` -- the admin slug under Arc 5
         Revision C aliasing. Bound to ``app.db.tenant_context`` and
         emitted as ``SET LOCAL app.admin_id`` by the listener.
 
@@ -113,9 +113,9 @@ def get_tenant_scoped_db(request: Request) -> Generator[Session, None, None]:
     reset one MUST NOT prevent the other from being reset (the
     clear_*() fallback path).
     """
-    tenant_id = getattr(request.state, "tenant_id", None)
+    admin_id = getattr(request.state, "admin_id", None)
     instance_id = getattr(request.state, "luciel_instance_id", None)
-    admin_token = set_current_admin_id(tenant_id)
+    admin_token = set_current_admin_id(admin_id)
     instance_token = set_current_instance_id(instance_id)
     db = SessionLocal()
     try:

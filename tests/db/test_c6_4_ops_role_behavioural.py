@@ -130,7 +130,7 @@ def _reseed_admin_audit_logs(engine):
         conn.execute(text("ALTER TABLE admin_audit_logs DISABLE ROW LEVEL SECURITY;"))
         conn.execute(text("DELETE FROM admin_audit_logs;"))
         conn.execute(text(
-            "INSERT INTO admin_audit_logs (tenant_id, action, actor, payload) "
+            "INSERT INTO admin_audit_logs (admin_id, action, actor, payload) "
             "VALUES ('tenant-a','TEST_SEED','fixture','{\"k\":\"v\"}'::jsonb),"
             "       ('tenant-b','TEST_SEED','fixture','{\"k\":\"v\"}'::jsonb);"
         ))
@@ -187,7 +187,7 @@ class TestC64NonOpsBlocked(unittest.TestCase):
         """UPDATE under luciel_app returns rowcount=0 (policy filtered)."""
         with self.engine.begin() as conn:
             result = conn.execute(
-                text("UPDATE admin_audit_logs SET action='HACKED' WHERE tenant_id=:t"),
+                text("UPDATE admin_audit_logs SET action='HACKED' WHERE admin_id=:t"),
                 {"t": "tenant-a"},
             )
             self.assertEqual(
@@ -200,7 +200,7 @@ class TestC64NonOpsBlocked(unittest.TestCase):
         """DELETE under luciel_app returns rowcount=0 (policy filtered)."""
         with self.engine.begin() as conn:
             result = conn.execute(
-                text("DELETE FROM admin_audit_logs WHERE tenant_id=:t"),
+                text("DELETE FROM admin_audit_logs WHERE admin_id=:t"),
                 {"t": "tenant-a"},
             )
             self.assertEqual(
@@ -218,7 +218,7 @@ class TestC64NonOpsBlocked(unittest.TestCase):
 
             # Verify the seed rows are still intact and unmodified.
             result = conn.execute(
-                text("SELECT tenant_id, action FROM admin_audit_logs ORDER BY id")
+                text("SELECT admin_id, action FROM admin_audit_logs ORDER BY id")
             ).fetchall()
             self.assertEqual(len(result), 2)
             self.assertEqual({r[1] for r in result}, {"TEST_SEED"})
@@ -254,7 +254,7 @@ class TestC64OpsAllowedAndBlocked(unittest.TestCase):
     def test_ops_can_select_admin_audit_logs(self):
         """luciel_ops sees all rows across all tenants (BYPASSRLS)."""
         with self.ops_engine.connect() as conn:
-            rows = conn.execute(text("SELECT tenant_id FROM admin_audit_logs")).fetchall()
+            rows = conn.execute(text("SELECT admin_id FROM admin_audit_logs")).fetchall()
             tenants = {r[0] for r in rows}
             self.assertIn("tenant-a", tenants)
             self.assertIn("tenant-b", tenants)
@@ -284,21 +284,21 @@ class TestC64OpsAllowedAndBlocked(unittest.TestCase):
 
             # Delete tenant-b rows.
             result = conn.execute(
-                text("DELETE FROM sessions WHERE tenant_id=:t"),
+                text("DELETE FROM sessions WHERE admin_id=:t"),
                 {"t": "tenant-b"},
             )
             self.assertGreater(result.rowcount, 0)
 
             # Reinsert via app role to leave fixture intact for next test.
         with self.app_engine.begin() as conn:
-            conn.execute(text("INSERT INTO sessions (tenant_id) VALUES ('tenant-b');"))
+            conn.execute(text("INSERT INTO sessions (admin_id) VALUES ('tenant-b');"))
 
     def test_ops_cannot_insert_into_retention_tables(self):
         """No INSERT grant on any retention table -- must raise."""
         with self.assertRaises(Exception) as ctx:
             with self.ops_engine.begin() as conn:
                 conn.execute(
-                    text("INSERT INTO sessions (tenant_id) VALUES ('tenant-x');")
+                    text("INSERT INTO sessions (admin_id) VALUES ('tenant-x');")
                 )
         self.assertIn("permission denied", str(ctx.exception).lower())
 

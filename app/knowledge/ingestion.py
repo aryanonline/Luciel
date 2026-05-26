@@ -12,7 +12,7 @@ Orchestrates the full pipeline:
         -> KnowledgeRepository.add_chunks()  (File 8)
 
 Scope binding:
-    Every ingest targets exactly one (tenant_id, domain_id,
+    Every ingest targets exactly one (admin_id, domain_id,
     luciel_instance_id) triple. Authorization happens upstream in the
     admin route (File 10) via ScopePolicy.enforce_luciel_instance_scope
     — this service does NOT re-check scope. Pure orchestration.
@@ -98,7 +98,7 @@ class IngestionService:
         *,
         file_bytes: bytes,
         filename: str,
-        tenant_id: str | None,
+        admin_id: str | None,
         domain_id: str | None,
         luciel_instance_id: int | None,
         knowledge_type: str = "luciel_knowledge",
@@ -134,7 +134,7 @@ class IngestionService:
         # 3. Delegate to the shared text-path.
         return self._ingest_text(
             text=parsed.text,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             luciel_instance_id=luciel_instance_id,
             knowledge_type=knowledge_type,
@@ -152,7 +152,7 @@ class IngestionService:
         self,
         *,
         content: str,
-        tenant_id: str | None,
+        admin_id: str | None,
         domain_id: str | None,
         luciel_instance_id: int | None,
         knowledge_type: str = "luciel_knowledge",
@@ -168,7 +168,7 @@ class IngestionService:
         self._validate_knowledge_type(knowledge_type)
         return self._ingest_text(
             text=content,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             luciel_instance_id=luciel_instance_id,
             knowledge_type=knowledge_type,
@@ -190,7 +190,7 @@ class IngestionService:
         self,
         *,
         text: str,
-        tenant_id: str | None,
+        admin_id: str | None,
         domain_id: str | None,
         luciel_instance_id: int | None,
         knowledge_type: str,
@@ -208,14 +208,14 @@ class IngestionService:
 
         # 4. Resolve the effective chunking config (instance -> domain -> tenant).
         cfg = self._resolve_chunking_config(
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             luciel_instance_id=luciel_instance_id,
         )
         logger.info(
             "Ingest: instance=%s tenant=%s domain=%s strategy=%s "
             "size=%s overlap=%s (size_src=%s overlap_src=%s strategy_src=%s)",
-            luciel_instance_id, tenant_id, domain_id,
+            luciel_instance_id, admin_id, domain_id,
             cfg.chunk_strategy, cfg.chunk_size, cfg.chunk_overlap,
             cfg.size_source, cfg.overlap_source, cfg.strategy_source,
         )
@@ -249,7 +249,7 @@ class IngestionService:
         self.repository.add_chunks(
             chunks=chunks,
             embeddings=embeddings,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=None,               # Step 25b writes use luciel_instance_id
             luciel_instance_id=luciel_instance_id,
@@ -292,7 +292,7 @@ class IngestionService:
     def _resolve_chunking_config(
         self,
         *,
-        tenant_id: str | None,
+        admin_id: str | None,
         domain_id: str | None,  # V2: ignored, kept for call-site compat
         luciel_instance_id: int | None,
     ) -> EffectiveChunkingConfig:
@@ -301,17 +301,17 @@ class IngestionService:
         The ``domain_id`` argument is accepted for source-compatibility
         with legacy callers but ignored — V2 has no Domain layer.
         """
-        if not tenant_id:
+        if not admin_id:
             raise IngestionError(
-                "tenant_id is required to resolve chunking config"
+                "admin_id is required to resolve chunking config"
             )
         tenant = (
             self.db.query(Admin)
-            .filter(Admin.id == tenant_id)
+            .filter(Admin.id == admin_id)
             .one_or_none()
         )
         if tenant is None:
-            raise IngestionError(f"Unknown tenant_id: {tenant_id!r}")
+            raise IngestionError(f"Unknown admin_id: {admin_id!r}")
 
         instance = None
         if luciel_instance_id is not None:
@@ -383,7 +383,7 @@ class IngestionService:
         *,
         content: str,
         knowledge_type: str,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
         domain_id: str | None = None,
         agent_id: str | None = None,   # accepted but not written (Step 25b)
         title: str | None = None,
@@ -403,7 +403,7 @@ class IngestionService:
         """
         result = self.ingest_text(
             content=content,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             luciel_instance_id=None,
             knowledge_type=knowledge_type,

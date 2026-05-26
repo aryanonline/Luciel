@@ -111,10 +111,10 @@ class _UpgradeBranchFallthrough(Exception):
 
 # ---------------------------------------------------------------------
 # Admin id minting (Arc 6 Commit 6 — webhook-noun rename Tenant→Admin).
-# The DB column ``subscriptions.tenant_id`` is deliberately retained
+# The DB column ``subscriptions.admin_id`` is deliberately retained
 # physically per Arc 5 Path A; this file's local vocab now matches the
 # Arc 5 B8 Admin rename, but the column attribute access
-# ``Subscription.tenant_id`` and the external service APIs
+# ``Subscription.admin_id`` and the external service APIs
 # ``OnboardingService.onboard_tenant`` /
 # ``AdminService.deactivate_tenant_with_cascade`` keep their Arc-5 names.
 # ---------------------------------------------------------------------
@@ -273,16 +273,16 @@ class BillingWebhookService:
             )
         ).scalars().first()
         if existing is not None:
-            # ``existing.tenant_id`` is the DB column attribute (Arc 5
+            # ``existing.admin_id`` is the DB column attribute (Arc 5
             # Path A kept it physically). Locally we treat the value as
-            # the admin id; the dict key remains ``tenant_id`` for
+            # the admin id; the dict key remains ``admin_id`` for
             # observability symmetry with the column.
             self._record_replay(
                 event_id=event_id,
-                tenant_id=existing.tenant_id,
+                admin_id=existing.admin_id,
                 stripe_subscription_id=stripe_subscription_id,
             )
-            return {"applied": False, "reason": "replay", "tenant_id": existing.tenant_id}
+            return {"applied": False, "reason": "replay", "admin_id": existing.admin_id}
 
         # Extract identity from metadata
         metadata = data_object.get("metadata") or {}
@@ -397,7 +397,7 @@ class BillingWebhookService:
 
             # Mint the admin via the existing onboarding primitive.
             # ``OnboardingService.onboard_tenant`` keeps its Arc-5
-            # external method name; the ``tenant_id`` kwarg threads
+            # external method name; the ``admin_id`` kwarg threads
             # through to the DB column of the same name.
             admin_id = _mint_admin_id_from_email(email, tier=tier)
             from app.services.onboarding_service import OnboardingService
@@ -414,7 +414,7 @@ class BillingWebhookService:
             # despite an active paid checkout -- the unified-signup
             # design tightens this to a single atomic write.
             onboarding.onboard_tenant(
-                tenant_id=admin_id,
+                admin_id=admin_id,
                 display_name=display_name,
                 tier=tier,
                 tier_source="stripe_webhook",
@@ -477,10 +477,10 @@ class BillingWebhookService:
                 return data_object.get(field, default)
 
             sub = Subscription(
-                # DB column attribute ``Subscription.tenant_id`` retained
+                # DB column attribute ``Subscription.admin_id`` retained
                 # physically by Arc 5 Path A; the value is the minted
                 # admin id.
-                tenant_id=admin_id,
+                admin_id=admin_id,
                 user_id=user.id,
                 customer_email=email,
                 stripe_customer_id=stripe_customer_id,
@@ -510,17 +510,17 @@ class BillingWebhookService:
             audit_repo.record(
                 ctx=ctx,
                 # ``AdminAuditRepository.record`` keeps its Arc-5
-                # ``tenant_id`` kwarg (column-mirrored); we pass
+                # ``admin_id`` kwarg (column-mirrored); we pass
                 # ``admin_id`` into it.
-                tenant_id=admin_id,
+                admin_id=admin_id,
                 action=ACTION_SUBSCRIPTION_CREATE,
                 resource_type=RESOURCE_SUBSCRIPTION,
                 resource_pk=sub.id,
                 resource_natural_id=stripe_subscription_id,
                 after={
-                    # Audit-row payload key retained as ``tenant_id``
+                    # Audit-row payload key retained as ``admin_id``
                     # for column symmetry; the value is the admin id.
-                    "tenant_id": admin_id,
+                    "admin_id": admin_id,
                     "user_id": str(user.id),
                     "customer_email": email,
                     "tier": tier,
@@ -553,8 +553,8 @@ class BillingWebhookService:
                 premint = TierProvisioningService(self.db)
                 premint.premint_for_tier(
                     # ``TierProvisioningService.premint_for_tier`` retains
-                    # its Arc-5 ``tenant_id`` kwarg (column-mirrored).
-                    tenant_id=admin_id,
+                    # its Arc-5 ``admin_id`` kwarg (column-mirrored).
+                    admin_id=admin_id,
                     tier=tier,
                     primary_user=user,
                     audit_ctx=ctx,
@@ -589,8 +589,8 @@ class BillingWebhookService:
                 user_id=user.id,
                 email=email,
                 # ``mint_set_password_token`` retains its Arc-5
-                # ``tenant_id`` kwarg (column-mirrored).
-                tenant_id=admin_id,
+                # ``admin_id`` kwarg (column-mirrored).
+                admin_id=admin_id,
                 purpose="signup",
             )
             url = build_set_password_url(token)
@@ -607,10 +607,10 @@ class BillingWebhookService:
                 admin_id,
             )
 
-        # Return-dict key ``tenant_id`` retained for column symmetry
+        # Return-dict key ``admin_id`` retained for column symmetry
         # (the value is the admin id). Stripe ignores the 200 body;
         # the key is purely observability.
-        return {"applied": True, "tenant_id": admin_id, "stripe_subscription_id": stripe_subscription_id}
+        return {"applied": True, "admin_id": admin_id, "stripe_subscription_id": stripe_subscription_id}
 
     # -----------------------------------------------------------------
     # checkout.session.completed -- UPGRADE branch (Arc 6 / Commit 8.5a)
@@ -699,7 +699,7 @@ class BillingWebhookService:
         #    Here at the webhook we re-verify.
         owner_row = self.db.execute(
             select(ScopeAssignment).where(
-                ScopeAssignment.tenant_id == admin_id,
+                ScopeAssignment.admin_id == admin_id,
                 ScopeAssignment.user_id == user.id,
                 ScopeAssignment.role == "owner",
                 ScopeAssignment.active.is_(True),
@@ -737,7 +737,7 @@ class BillingWebhookService:
                 return data_object.get(field, default)
 
             sub = Subscription(
-                tenant_id=admin_id,
+                admin_id=admin_id,
                 user_id=user.id,
                 customer_email=email,
                 stripe_customer_id=stripe_customer_id,
@@ -762,13 +762,13 @@ class BillingWebhookService:
             audit_repo = AdminAuditRepository(self.db)
             audit_repo.record(
                 ctx=ctx,
-                tenant_id=admin_id,
+                admin_id=admin_id,
                 action=ACTION_SUBSCRIPTION_CREATE,
                 resource_type=RESOURCE_SUBSCRIPTION,
                 resource_pk=sub.id,
                 resource_natural_id=stripe_subscription_id,
                 after={
-                    "tenant_id": admin_id,
+                    "admin_id": admin_id,
                     "user_id": str(user.id),
                     "customer_email": email,
                     "tier": tier,
@@ -832,7 +832,7 @@ class BillingWebhookService:
 
         return {
             "applied": True,
-            "tenant_id": admin_id,
+            "admin_id": admin_id,
             "stripe_subscription_id": stripe_subscription_id,
             "flow": "upgrade",
         }
@@ -865,7 +865,7 @@ class BillingWebhookService:
         if sub.last_event_id == event_id:
             self._record_replay(
                 event_id=event_id,
-                tenant_id=sub.tenant_id,
+                admin_id=sub.admin_id,
                 stripe_subscription_id=stripe_subscription_id,
             )
             return {"applied": False, "reason": "replay"}
@@ -898,7 +898,7 @@ class BillingWebhookService:
         audit_repo = AdminAuditRepository(self.db)
         audit_repo.record(
             ctx=ctx,
-            tenant_id=sub.tenant_id,
+            admin_id=sub.admin_id,
             action=ACTION_SUBSCRIPTION_UPDATE,
             resource_type=RESOURCE_SUBSCRIPTION,
             resource_pk=sub.id,
@@ -914,7 +914,7 @@ class BillingWebhookService:
             note="stripe customer.subscription.updated",
         )
         self.db.commit()
-        return {"applied": True, "tenant_id": sub.tenant_id}
+        return {"applied": True, "admin_id": sub.admin_id}
 
     # -----------------------------------------------------------------
     # customer.subscription.deleted
@@ -983,13 +983,13 @@ class BillingWebhookService:
         if sub.last_event_id == event_id:
             self._record_replay(
                 event_id=event_id,
-                tenant_id=sub.tenant_id,
+                admin_id=sub.admin_id,
                 stripe_subscription_id=stripe_subscription_id,
             )
             return {"applied": False, "reason": "replay"}
 
         ctx = _webhook_audit_ctx()
-        admin_id = sub.tenant_id  # legacy column name; semantically admin_id.
+        admin_id = sub.admin_id  # legacy column name; semantically admin_id.
         target_tier = sub.pending_downgrade_target  # branch discriminant
 
         # Shared step — flip the Subscription row inactive + canceled.
@@ -1116,7 +1116,7 @@ class BillingWebhookService:
         # joining four other tables.
         audit_repo.record(
             ctx=ctx,
-            tenant_id=admin_id,
+            admin_id=admin_id,
             action=ACTION_SUBSCRIPTION_DOWNGRADE_APPLIED,
             resource_type=RESOURCE_SUBSCRIPTION,
             resource_pk=sub.id,
@@ -1197,7 +1197,7 @@ class BillingWebhookService:
         audit_repo = AdminAuditRepository(self.db)
         audit_repo.record(
             ctx=ctx,
-            tenant_id=admin_id,
+            admin_id=admin_id,
             action=ACTION_SUBSCRIPTION_CANCEL,
             resource_type=RESOURCE_SUBSCRIPTION,
             resource_pk=sub.id,
@@ -1251,7 +1251,7 @@ class BillingWebhookService:
         return {
             "applied": True,
             "branch": "v1_hard_cancel",
-            "tenant_id": admin_id,
+            "admin_id": admin_id,
         }
 
     # -----------------------------------------------------------------
@@ -1281,7 +1281,7 @@ class BillingWebhookService:
         if sub.last_event_id == event_id:
             self._record_replay(
                 event_id=event_id,
-                tenant_id=sub.tenant_id,
+                admin_id=sub.admin_id,
                 stripe_subscription_id=stripe_subscription_id,
             )
             return {"applied": False, "reason": "replay"}
@@ -1290,7 +1290,7 @@ class BillingWebhookService:
         audit_repo = AdminAuditRepository(self.db)
         audit_repo.record(
             ctx=ctx,
-            tenant_id=sub.tenant_id,
+            admin_id=sub.admin_id,
             action=ACTION_SUBSCRIPTION_UPDATE,
             resource_type=RESOURCE_SUBSCRIPTION,
             resource_pk=sub.id,
@@ -1305,18 +1305,18 @@ class BillingWebhookService:
         )
         sub.last_event_id = event_id
         self.db.commit()
-        return {"applied": True, "tenant_id": sub.tenant_id}
+        return {"applied": True, "admin_id": sub.admin_id}
 
     # -----------------------------------------------------------------
     # Replay + unknown event recording
     # -----------------------------------------------------------------
 
-    def _record_replay(self, *, event_id: str, tenant_id: str, stripe_subscription_id: str) -> None:
+    def _record_replay(self, *, event_id: str, admin_id: str, stripe_subscription_id: str) -> None:
         ctx = _webhook_audit_ctx()
         audit_repo = AdminAuditRepository(self.db)
         audit_repo.record(
             ctx=ctx,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             action=ACTION_BILLING_WEBHOOK_REPLAY_REJECTED,
             resource_type=RESOURCE_SUBSCRIPTION,
             resource_natural_id=stripe_subscription_id,
@@ -1328,12 +1328,12 @@ class BillingWebhookService:
     def _record_unknown_event(self, *, event_id: str, event_type: str) -> None:
         ctx = _webhook_audit_ctx()
         audit_repo = AdminAuditRepository(self.db)
-        # The ``tenant_id`` column value for an unknown event is
+        # The ``admin_id`` column value for an unknown event is
         # unknowable (no admin can be resolved); use the 'platform'
         # sentinel reserved by AdminAuditRepository.
         audit_repo.record(
             ctx=ctx,
-            tenant_id="platform",
+            admin_id="platform",
             action=ACTION_BILLING_WEBHOOK_REPLAY_REJECTED,
             resource_type=RESOURCE_SUBSCRIPTION,
             resource_natural_id=f"unknown:{event_type}",

@@ -21,7 +21,7 @@ Usage:
         --region ca-central-1
 
 This script:
-  1. Calls ApiKeyService.create_key(ssm_write=True, tenant_id=None, ...)
+  1. Calls ApiKeyService.create_key(ssm_write=True, admin_id=None, ...)
   2. The raw key is written to AWS SSM Parameter Store as SecureString
      at /luciel/bootstrap/admin_key_<id>
   3. Prints ONLY the SSM path and key metadata to stdout — the raw key
@@ -118,7 +118,7 @@ def main() -> int:
 
     try:
         api_key, raw_key = svc.create_key(
-            tenant_id=None,
+            admin_id=None,
             domain_id=None,
             agent_id=None,
             luciel_instance_id=None,
@@ -150,7 +150,7 @@ def main() -> int:
     print(f"  key_prefix  : {api_key.key_prefix}")
     print(f"  display     : {api_key.display_name}")
     print(f"  permissions : {api_key.permissions}")
-    print(f"  tenant_id   : {api_key.tenant_id}  (NULL = platform-admin scope)")
+    print(f"  admin_id   : {api_key.admin_id}  (NULL = platform-admin scope)")
     print(f"  ssm_path    : {ssm_path}")
     print(f"  ssm_region  : {args.region}")
     print("=" * 72)

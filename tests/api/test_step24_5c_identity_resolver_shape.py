@@ -231,7 +231,7 @@ class TestResolverSurface:
         params = sig.parameters
         assert "claim_type" in params
         assert "claim_value" in params
-        assert "tenant_id" in params
+        assert "admin_id" in params
         assert "domain_id" in params
         assert "issuing_adapter" in params
         for name, p in params.items():
@@ -278,7 +278,7 @@ class TestResolverInputValidation:
             r.resolve(
                 claim_type=ClaimType.EMAIL,
                 claim_value="a@b.co",
-                tenant_id="",
+                admin_id="",
                 domain_id="d-1",
                 issuing_adapter="widget",
             )
@@ -291,7 +291,7 @@ class TestResolverInputValidation:
             r.resolve(
                 claim_type=ClaimType.EMAIL,
                 claim_value="a@b.co",
-                tenant_id="t-1",
+                admin_id="t-1",
                 domain_id="   ",
                 issuing_adapter="widget",
             )
@@ -304,7 +304,7 @@ class TestResolverInputValidation:
             r.resolve(
                 claim_type=ClaimType.EMAIL,
                 claim_value="a@b.co",
-                tenant_id="t-1",
+                admin_id="t-1",
                 domain_id="d-1",
                 issuing_adapter="",
             )
@@ -317,7 +317,7 @@ class TestResolverInputValidation:
             r.resolve(
                 claim_type=ClaimType.EMAIL,
                 claim_value="not-an-email",
-                tenant_id="t-1",
+                admin_id="t-1",
                 domain_id="d-1",
                 issuing_adapter="widget",
             )
@@ -383,7 +383,7 @@ class TestMintPath:
         res = r.resolve(
             claim_type=ClaimType.EMAIL,
             claim_value="Aryan@Example.COM",
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             issuing_adapter="widget",
         )
@@ -402,7 +402,7 @@ class TestMintPath:
         # Claim was minted with normalised value
         new_claim = next(o for o in db.added if isinstance(o, IdentityClaim))
         assert new_claim.claim_value == "aryan@example.com"
-        assert new_claim.tenant_id == "t-1"
+        assert new_claim.admin_id == "t-1"
         assert new_claim.domain_id == "d-1"
         assert new_claim.issuing_adapter == "widget"
         assert new_claim.verified_at is None
@@ -413,7 +413,7 @@ class TestMintPath:
         assert new_user.active is True
         # Conversation scoped to (t-1, d-1)
         new_conv = next(o for o in db.added if isinstance(o, Conversation))
-        assert new_conv.tenant_id == "t-1"
+        assert new_conv.admin_id == "t-1"
         assert new_conv.domain_id == "d-1"
         assert new_conv.active is True
         # Resolver MUST flush so caller sees PKs before commit.
@@ -456,7 +456,7 @@ class TestExistingClaimHitPath:
         res = r.resolve(
             claim_type=ClaimType.PHONE,
             claim_value="+14165551234",
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             issuing_adapter="voice_gateway",
         )
@@ -487,7 +487,7 @@ class TestExistingClaimHitPath:
         res = r.resolve(
             claim_type=ClaimType.SSO_SUBJECT,
             claim_value="okta|sub-007",
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             issuing_adapter="programmatic_api",
         )
@@ -497,7 +497,7 @@ class TestExistingClaimHitPath:
         assert all(not isinstance(o, User) for o in db.added)
         assert all(not isinstance(o, IdentityClaim) for o in db.added)
         new_conv = next(o for o in db.added if isinstance(o, Conversation))
-        assert new_conv.tenant_id == "t-1"
+        assert new_conv.admin_id == "t-1"
         assert new_conv.domain_id == "d-1"
         assert res.user_id == existing_user
         assert res.identity_claim_id == existing_claim
@@ -562,7 +562,7 @@ class TestExistingClaimPathDoesNotAddNewClaim:
         r.resolve(
             claim_type=ClaimType.EMAIL,
             claim_value="hit@example.com",
-            tenant_id="t-1",
+            admin_id="t-1",
             domain_id="d-1",
             issuing_adapter="widget",
         )

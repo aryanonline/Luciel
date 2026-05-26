@@ -34,7 +34,7 @@ THE BUGS THIS GUARDS AGAINST:
       regular luciel role) AND the read path (forensics queries
       return empty).
     - Author forgets WITH CHECK on the UPDATE policy
-      -> UPDATEs can change tenant_id to 'luciel_ops' value
+      -> UPDATEs can change admin_id to 'luciel_ops' value
       mid-flight if combined with a clever crafted row, or just
       fail unpredictably.
     - Author adds WITH CHECK to the DELETE policy

@@ -50,7 +50,7 @@ def chat(
             session_id=payload.session_id,
             message=payload.message,
             provider=payload.provider,
-            caller_tenant_id=getattr(request.state, "tenant_id", None),
+            caller_tenant_id=getattr(request.state, "admin_id", None),
             luciel_instance_id=getattr(request.state, "luciel_instance_id", None),  # Step 24.5 File 15
             actor_key_prefix=getattr(request.state, "key_prefix", None),  # Step 27b
             actor_user_id=getattr(request.state, "actor_user_id", None),  # Step 24.5b File 2.5
@@ -83,7 +83,7 @@ def chat_stream(
             session_id=payload.session_id,
             message=payload.message,
             provider=payload.provider,
-            caller_tenant_id=getattr(request.state, "tenant_id", None),
+            caller_tenant_id=getattr(request.state, "admin_id", None),
             luciel_instance_id=getattr(request.state, "luciel_instance_id", None),  # Step 24.5 File 15
             actor_key_prefix=getattr(request.state, "key_prefix", None),  # Step 27b
             actor_user_id=getattr(request.state, "actor_user_id", None),  # Step 24.5b File 2.5

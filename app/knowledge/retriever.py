@@ -35,7 +35,7 @@ class KnowledgeRetriever:
         self,
         *,
         query: str,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
         domain_id: str | None = None,
         luciel_instance_id: int | None = None,
         agent_id: str | None = None,
@@ -59,7 +59,7 @@ class KnowledgeRetriever:
             query_embedding = embed_single(query)
             results = self.repository.search_similar(
                 query_embedding=query_embedding,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 domain_id=domain_id,
                 luciel_instance_id=luciel_instance_id,
                 agent_id=agent_id,
@@ -84,6 +84,6 @@ class KnowledgeRetriever:
             "Retrieved %d knowledge chunks for tenant=%s domain=%s "
             "instance=%s agent=%s",
             len(knowledge_strings),
-            tenant_id, domain_id, luciel_instance_id, agent_id,
+            admin_id, domain_id, luciel_instance_id, agent_id,
         )
         return knowledge_strings

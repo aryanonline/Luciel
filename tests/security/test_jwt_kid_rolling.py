@@ -133,7 +133,7 @@ def _sample_user():
     return {
         "user_id": uuid.uuid4(),
         "email": "test@example.com",
-        "tenant_id": "tenant-test",
+        "admin_id": "tenant-test",
     }
 
 
@@ -184,7 +184,7 @@ def test_decode_succeeds_under_secondary_kid_during_grace(jwt_env):
         "iss": JWT_ISSUER,
         "sub": str(u["user_id"]),
         "email": u["email"],
-        "tenant_id": u["tenant_id"],
+        "admin_id": u["admin_id"],
         "typ": TOKEN_TYPE_MAGIC_LINK,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(hours=1)).timestamp()),
@@ -220,7 +220,7 @@ def test_unknown_kid_raises_invalid_token(jwt_env):
         "iss": JWT_ISSUER,
         "sub": str(u["user_id"]),
         "email": u["email"],
-        "tenant_id": u["tenant_id"],
+        "admin_id": u["admin_id"],
         "typ": TOKEN_TYPE_MAGIC_LINK,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(hours=1)).timestamp()),
@@ -258,7 +258,7 @@ def test_legacy_shim_decodes_kidless_token(jwt_env):
         "iss": JWT_ISSUER,
         "sub": str(u["user_id"]),
         "email": u["email"],
-        "tenant_id": u["tenant_id"],
+        "admin_id": u["admin_id"],
         "typ": TOKEN_TYPE_SESSION,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(days=1)).timestamp()),
@@ -303,7 +303,7 @@ def test_legacy_shim_then_kid_promotion_keeps_kidless_decoding(jwt_env):
         "iss": JWT_ISSUER,
         "sub": str(u["user_id"]),
         "email": u["email"],
-        "tenant_id": u["tenant_id"],
+        "admin_id": u["admin_id"],
         "typ": TOKEN_TYPE_SET_PASSWORD,
         "purpose": "signup",
         "iat": int(now.timestamp()),

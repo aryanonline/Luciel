@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 # ---------------------------------------------------------------------
 
 # Slug pattern: lowercase alphanumerics + hyphens, not starting or
-# ending with a hyphen. Same pattern used by tenant_id and domain_id
+# ending with a hyphen. Same pattern used by admin_id and domain_id
 # elsewhere in the codebase for consistency.
 _SLUG_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 
@@ -33,7 +33,7 @@ _SLUG_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 class AgentCreate(BaseModel):
     """Payload for POST /admin/agents."""
 
-    tenant_id: str = Field(
+    admin_id: str = Field(
         ...,
         min_length=2,
         max_length=100,
@@ -46,14 +46,14 @@ class AgentCreate(BaseModel):
         max_length=100,
         pattern=_SLUG_PATTERN,
         description="Domain (department/vertical slot) the agent belongs to. "
-                    "Must exist and be active under the given tenant_id.",
+                    "Must exist and be active under the given admin_id.",
     )
     agent_id: str = Field(
         ...,
         min_length=2,
         max_length=100,
         pattern=_SLUG_PATTERN,
-        description="URL-safe slug, unique within (tenant_id, domain_id).",
+        description="URL-safe slug, unique within (admin_id, domain_id).",
     )
     display_name: str = Field(..., min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=500)
@@ -70,7 +70,7 @@ class AgentCreate(BaseModel):
 # Bind-user payload (Step 28 Phase 2 - Commit 9)
 #
 # Dedicated platform-admin-only payload for the
-# POST /admin/agents/{tenant_id}/{agent_id}/bind-user route. Carved out
+# POST /admin/agents/{admin_id}/{agent_id}/bind-user route. Carved out
 # from AgentUpdate so user_id binding is explicit at the API surface
 # (cannot be smuggled in via a tenant-admin display_name PATCH).
 # ---------------------------------------------------------------------
@@ -98,9 +98,9 @@ class AgentBindUserPayload(BaseModel):
 
 
 class AgentUpdate(BaseModel):
-    """Payload for PATCH /admin/agents/{tenant_id}/{agent_id}.
+    """Payload for PATCH /admin/agents/{admin_id}/{agent_id}.
 
-    tenant_id / domain_id / agent_id are immutable after creation.
+    admin_id / domain_id / agent_id are immutable after creation.
     To move an agent between domains, deactivate and recreate — this
     keeps audit trails clean (see Step 24.5 decision on promotion /
     demotion handling).
@@ -123,7 +123,7 @@ class AgentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    tenant_id: str
+    admin_id: str
     domain_id: str
     agent_id: str
     display_name: str
@@ -151,7 +151,7 @@ class AgentSummary(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    tenant_id: str
+    admin_id: str
     domain_id: str
     agent_id: str
     display_name: str

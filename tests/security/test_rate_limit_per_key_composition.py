@@ -146,12 +146,12 @@ def test_per_key_zero_cap_returns_full_rpm() -> None:
 class _StubState:
     def __init__(
         self,
-        tenant_id: Any = None,
+        admin_id: Any = None,
         api_key_id: Any = None,
         key_kind: Any = None,
         luciel_instance_id: Any = None,
     ) -> None:
-        self.tenant_id = tenant_id
+        self.admin_id = admin_id
         self.api_key_id = api_key_id
         self.key_kind = key_kind
         self.luciel_instance_id = luciel_instance_id
@@ -165,14 +165,14 @@ class _StubClient:
 class _StubRequest:
     def __init__(
         self,
-        tenant_id: Any = None,
+        admin_id: Any = None,
         api_key_id: Any = None,
         key_kind: Any = None,
         ip: str = "1.2.3.4",
         headers: dict | None = None,
     ) -> None:
         self.state = _StubState(
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             api_key_id=api_key_id,
             key_kind=key_kind,
         )
@@ -181,7 +181,7 @@ class _StubRequest:
 
 
 def test_embed_key_func_anonymous_falls_back_to_ip() -> None:
-    req = _StubRequest(tenant_id=None, ip="7.7.7.7")
+    req = _StubRequest(admin_id=None, ip="7.7.7.7")
     key = get_embed_key_aware_key(req)
     assert key == "ip:7.7.7.7"
 
@@ -192,7 +192,7 @@ def test_embed_key_func_admin_key_falls_back_to_ip() -> None:
     the IP bucket so they cannot inherit the more-generous per-key
     derivation."""
     req = _StubRequest(
-        tenant_id="acme", api_key_id="key-123", key_kind="admin", ip="3.3.3.3"
+        admin_id="acme", api_key_id="key-123", key_kind="admin", ip="3.3.3.3"
     )
     key = get_embed_key_aware_key(req)
     assert key == "ip:3.3.3.3"
@@ -205,7 +205,7 @@ def test_embed_key_func_returns_per_key_bucket() -> None:
         "app.middleware.rate_limit._lookup_admin_tier", return_value="pro"
     ):
         req = _StubRequest(
-            tenant_id="acme", api_key_id="key-abc", key_kind="embed"
+            admin_id="acme", api_key_id="key-abc", key_kind="embed"
         )
         key = get_embed_key_aware_key(req)
     assert key == "embed:tier:pro:admin:acme:key:key-abc"
@@ -284,7 +284,7 @@ def test_handler_surfaces_embed_key_scope_on_429() -> None:
         "app.middleware.rate_limit._lookup_admin_tier", return_value="pro"
     ):
         req = _StubRequest(
-            tenant_id="acme", api_key_id="k1", key_kind="embed"
+            admin_id="acme", api_key_id="k1", key_kind="embed"
         )
         exc = _StubLimitExceeded("30/minute exceeded", get_embed_key_aware_key)
         resp = rate_limit_exceeded_handler(req, exc)
@@ -303,10 +303,10 @@ def test_handler_surfaces_tier_admin_instance_scope_on_429() -> None:
     with patch(
         "app.middleware.rate_limit._lookup_admin_tier", return_value="free"
     ):
-        # tenant_id populated, key_kind absent (admin path doesn't set
+        # admin_id populated, key_kind absent (admin path doesn't set
         # it on this stub) -- embed-key func will see no key_kind and
         # fall to ip, but the tier-aware key-func should fire here.
-        req = _StubRequest(tenant_id="ghost-admin")
+        req = _StubRequest(admin_id="ghost-admin")
         # Force the request through luciel_instance_id by mutating
         # state directly so the tier-aware key returns a tier:* bucket.
         req.state.luciel_instance_id = 7
@@ -321,7 +321,7 @@ def test_handler_surfaces_tier_admin_instance_scope_on_429() -> None:
 
 def test_handler_surfaces_ip_scope_on_429() -> None:
     """Anonymous caller 429: bucket_scope == 'ip'."""
-    req = _StubRequest(tenant_id=None, ip="9.9.9.9")
+    req = _StubRequest(admin_id=None, ip="9.9.9.9")
     exc = _StubLimitExceeded("30/minute exceeded", get_tier_aware_key)
     resp = rate_limit_exceeded_handler(req, exc)
 
@@ -337,7 +337,7 @@ def test_handler_falls_through_to_unknown_when_keyfunc_explodes() -> None:
     def boom(_req):
         raise RuntimeError("simulated key-func failure")
 
-    req = _StubRequest(tenant_id=None, ip="1.1.1.1")
+    req = _StubRequest(admin_id=None, ip="1.1.1.1")
     exc = _StubLimitExceeded("30/minute exceeded", boom)
     resp = rate_limit_exceeded_handler(req, exc)
 
@@ -370,7 +370,7 @@ def _build_widget_test_app(tier_for_admin: str = "pro") -> tuple[Starlette, Any]
             admin = request.headers.get("x-admin")
             api_key = request.headers.get("x-key")
             kind = request.headers.get("x-kind") or "embed"
-            request.state.tenant_id = admin or None
+            request.state.admin_id = admin or None
             request.state.api_key_id = api_key or None
             request.state.key_kind = kind if admin else None
             return await call_next(request)

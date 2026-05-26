@@ -4,7 +4,7 @@ THE GAP THIS CLOSES
 ===================
 ARC9_C12-C22_CORRIGENDUM §7 carry-forward:
 
-    "Structured error logging (request_id, user_id, tenant_id, route,
+    "Structured error logging (request_id, user_id, admin_id, route,
      status, detail) -- DEFERRED."
 
 The first Free-signup demo (C19 -> C22) wasted ~5 hours of debugging
@@ -28,7 +28,7 @@ downstream tool (CloudWatch Insights, Datadog, jq pipelines) can parse:
         "status":      201,
         "duration_ms": 38,
         "user_id":     "62e9d099-...",   # None if unauth'd / not resolved
-        "tenant_id":   "free-56c7f4e5",  # None if pre-bootstrap / no scope
+        "admin_id":   "free-56c7f4e5",  # None if pre-bootstrap / no scope
         "auth_method": "cookie",         # 'cookie' | 'api_key' | None
         "client_ip":   "203.0.113.7",
         "detail":      "...",            # set only on error paths
@@ -41,7 +41,7 @@ CONTRACT
   first on the way in and last on the way out -- it must observe the
   final status code (including 5xx raised from inner middleware / route
   handlers), and it must run AFTER auth middlewares so that user_id /
-  tenant_id / auth_method are populated on request.state when we read
+  admin_id / auth_method are populated on request.state when we read
   them.
 
 * Sets ``request.state.request_id`` if not already set. Echoes it back
@@ -185,7 +185,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             # the unauth'd path that never visited an auth middleware.
             state = request.state
             user_id = getattr(state, "user_id", None)
-            tenant_id = getattr(state, "tenant_id", None)
+            admin_id = getattr(state, "admin_id", None)
             auth_method = getattr(state, "auth_method", None)
 
             # On a 4xx/5xx without an exception, lift the response
@@ -208,8 +208,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "status": status,
                 "duration_ms": duration_ms,
                 "user_id": str(user_id) if user_id is not None else None,
-                "tenant_id": (
-                    str(tenant_id) if tenant_id is not None else None
+                "admin_id": (
+                    str(admin_id) if admin_id is not None else None
                 ),
                 "auth_method": auth_method,
                 "client_ip": _client_ip(request),

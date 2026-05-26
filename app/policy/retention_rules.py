@@ -1,7 +1,7 @@
 """
 Default retention periods per data category.
 
-These are seeded as platform-wide defaults (tenant_id = NULL).
+These are seeded as platform-wide defaults (admin_id = NULL).
 Tenants can override any of these through the admin API.
 
 Retention periods are based on PIPEDA Principle 4.5.3:

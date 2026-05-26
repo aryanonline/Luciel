@@ -4,23 +4,23 @@ NULL-permissive Wall-1 tables.
 
 C3.6 covers the two tables that complete the C3 per-table RLS series:
 
-  - retention_policies  (tenant_id nullable, NULL = platform-wide policy)
-  - deletion_logs       (tenant_id nullable, NULL = platform-issued bulk delete)
+  - retention_policies  (admin_id nullable, NULL = platform-wide policy)
+  - deletion_logs       (admin_id nullable, NULL = platform-issued bulk delete)
 
 Both use the C3.3 asymmetric NULL-permissive policy shape rather than
 the strict-both-halves shape of C3.2 / C3.5. The shape is identical to
 knowledge_embeddings (C3.3):
 
-  USING       = tenant_id IS NULL OR tenant_id = current_setting()
-  WITH CHECK  = (tenant_id IS NULL AND current_setting() = 'platform')
-                  OR tenant_id = current_setting()
+  USING       = admin_id IS NULL OR admin_id = current_setting()
+  WITH CHECK  = (admin_id IS NULL AND current_setting() = 'platform')
+                  OR admin_id = current_setting()
 
 CONTRACT GUARDED (per migration):
     1. Syntactically valid Alembic revision file
     2. Chains to the previous sibling
     3. ENABLE ROW LEVEL SECURITY on its target table
     4. CREATE POLICY <table>_tenant_isolation
-    5. USING has the NULL-permissive carveout (tenant_id IS NULL OR ...)
+    5. USING has the NULL-permissive carveout (admin_id IS NULL OR ...)
     6. WITH CHECK gates NULL writes to the 'platform' sentinel
     7. USING and WITH CHECK are textually asymmetric (this is the
        key regression signal: a future refactor that 'simplifies'
@@ -131,21 +131,21 @@ class TestC36MigrationsShape(unittest.TestCase):
             f"{rev_id}: policy not bound to table {table}",
         )
 
-        # USING has the NULL-permissive carveout. The 'tenant_id IS
+        # USING has the NULL-permissive carveout. The 'admin_id IS
         # NULL OR ...' shape is the structural signal of asymmetry
         # on the read side -- if a future refactor accidentally
         # removes this, platform-wide rows become invisible to all
         # admins.
         self.assertRegex(
             text_lower,
-            r"using\s*\(\s*tenant_id\s+is\s+null\s+or\s+tenant_id\s*=",
+            r"using\s*\(\s*admin_id\s+is\s+null\s+or\s+admin_id\s*=",
             f"{rev_id}: USING missing NULL-permissive carveout",
         )
 
         # WITH CHECK has the platform-sentinel branch. This is the
         # structural defence against any admin forging a NULL row.
         # We assert that the 'platform' literal appears inside a
-        # WITH CHECK clause that also references 'tenant_id IS NULL'.
+        # WITH CHECK clause that also references 'admin_id IS NULL'.
         with_check_match = re.search(
             r"with\s+check\s*\((?P<body>.*?)\)\s*;",
             text_lower,
@@ -157,7 +157,7 @@ class TestC36MigrationsShape(unittest.TestCase):
         )
         body = with_check_match.group("body")
         self.assertIn(
-            "tenant_id is null",
+            "admin_id is null",
             body,
             f"{rev_id}: WITH CHECK missing NULL branch",
         )

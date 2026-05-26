@@ -55,13 +55,13 @@ class MemoryService:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         agent_id: str | None = None,
         limit: int = 20,
     ) -> list[str]:
         items = self.repository.get_user_memories(
             user_id=user_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             agent_id=agent_id,
             limit=limit,
         )
@@ -72,7 +72,7 @@ class MemoryService:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         session_id: str,
         agent_id: str | None = None,
         messages: list[dict],
@@ -104,7 +104,7 @@ class MemoryService:
                 if message_id is not None:
                     saved = self.repository.upsert_by_message_id(
                         user_id=user_id,
-                        tenant_id=tenant_id,
+                        admin_id=admin_id,
                         agent_id=agent_id,
                         category=item["category"],
                         content=item["content"],
@@ -118,7 +118,7 @@ class MemoryService:
                 else:
                     self.repository.save_memory(
                         user_id=user_id,
-                        tenant_id=tenant_id,
+                        admin_id=admin_id,
                         agent_id=agent_id,
                         category=item["category"],
                         content=item["content"],
@@ -187,7 +187,7 @@ class MemoryService:
                     try:
                         AdminAuditRepository(side_db).record(
                             ctx=ctx,
-                            tenant_id=tenant_id,
+                            admin_id=admin_id,
                             action=ACTION_EXTRACTOR_SAVE_FAIL,
                             resource_type=RESOURCE_MEMORY,
                             resource_pk=None,
@@ -240,7 +240,7 @@ class MemoryService:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
         session_id: str,
         message_id: int,
         actor_key_prefix: str,
@@ -268,7 +268,7 @@ class MemoryService:
             logger.error(
                 "enqueue_extraction rejected malformed actor_key_prefix "
                 "(len=%d) for tenant=%s session=%s",
-                len(actor_key_prefix or ""), tenant_id, session_id,
+                len(actor_key_prefix or ""), admin_id, session_id,
             )
             raise ValueError("actor_key_prefix failed format validation")
 
@@ -284,19 +284,19 @@ class MemoryService:
         #   1. Future positional-arg additions cannot silently
         #      change which value lands in which kwarg.
         #   2. Kombu/SQS message headers carry trace_id and
-        #      tenant_id for cross-process correlation -- worker-side
+        #      admin_id for cross-process correlation -- worker-side
         #      log lines tag from headers without re-deriving from
         #      the payload, which speeds up incident-response grep.
         #   3. Headers travel through SQS as MessageAttributes so
         #      CloudWatch / DLQ tools can filter on them without
         #      decoding the body. Body still carries trace_id and
-        #      tenant_id too because the worker's _reject_with_audit
+        #      admin_id too because the worker's _reject_with_audit
         #      builds resource_natural_id from the body.
         async_result = extract_memory_from_turn.apply_async(
             kwargs={
                 "session_id": session_id,
                 "user_id": user_id,
-                "tenant_id": tenant_id,
+                "admin_id": admin_id,
                 "message_id": message_id,
                 "actor_key_prefix": actor_key_prefix,
                 "agent_id": agent_id,
@@ -306,7 +306,7 @@ class MemoryService:
             },
             headers={
                 "trace_id": trace_id,
-                "tenant_id": tenant_id,
+                "admin_id": admin_id,
             },
         )
         return async_result.id

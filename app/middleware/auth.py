@@ -1,7 +1,7 @@
 """
 Authentication middleware.
 
-Validates API keys on incoming requests and injects tenant_id, domain_id,
+Validates API keys on incoming requests and injects admin_id, domain_id,
 agent_id, luciel_instance_id, and (Step 24.5b) user_id into the request
 state.
 
@@ -24,7 +24,7 @@ origin checks. Enforcement lives in app/api/widget_deps.py, scoped
 only to the widget endpoint that needs it.
 
 PATCHED (Step 24.5b File 2.4): Inject actor_user_id onto request.state.
-Resolved from the Agent row keyed by (tenant_id, domain_id, agent_id) when
+Resolved from the Agent row keyed by (admin_id, domain_id, agent_id) when
 the key is agent-scoped. None for tenant-admin / platform-admin keys (no
 single bound User), and None for agent-scoped keys whose Agent.user_id is
 still NULL (legacy rows pending the Commit 3 backfill).
@@ -50,7 +50,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.db.session import SessionLocal
 # Arc 5 Path A — AgentRepository deleted at Commit A5. The actor_user_id
-# resolution block below previously walked (tenant_id, domain_id, agent_id)
+# resolution block below previously walked (admin_id, domain_id, agent_id)
 # → Agent.user_id. V2 has no Agent layer; the V2 resolution path is
 # (admin_id, instance_id) → ScopeAssignment.user_id, which B2 will land.
 # Until then the actor_user_id stays None for non-cookied paths (which
@@ -121,7 +121,7 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
         # Step 31.2 commit A: if SessionCookieAuthMiddleware already
         # authenticated this request via a Step 30a session cookie,
         # request.state.auth_method is set to "cookie" and request.state
-        # already carries tenant_id / permissions / actor_user_id /
+        # already carries admin_id / permissions / actor_user_id /
         # actor_label. Treat this as a pre-authenticated request and
         # skip the Authorization header check entirely. The cookie
         # middleware's path filter (COOKIE_AUTH_PATHS) restricts this
@@ -170,7 +170,7 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
                     content={"detail": "Invalid or inactive API key"},
                 )
 
-            tenant_id = apikey.tenant_id
+            admin_id = apikey.admin_id
             domain_id = apikey.domain_id
             agent_id = apikey.agent_id
             api_key_id = apikey.id
@@ -196,7 +196,7 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
             # the existing uq_agents_tenant_domain_agent unique
             # constraint composite index -- ~1ms.
             # Arc 5 Path A (Commit A5) — Agent layer eliminated; the
-            # legacy (tenant_id, domain_id, agent_id) → Agent.user_id
+            # legacy (admin_id, domain_id, agent_id) → Agent.user_id
             # resolution path is gone. V2 actor_user_id resolution
             # walks ScopeAssignment by (admin_id, instance_id) instead;
             # that B2 rewrite lands alongside the cascade-spine V2
@@ -224,7 +224,7 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
                 content={"detail": "This API key does not have admin permissions"},
             )
 
-        request.state.tenant_id = tenant_id
+        request.state.admin_id = admin_id
         request.state.domain_id = domain_id
         request.state.agent_id = agent_id
         request.state.api_key_id = api_key_id

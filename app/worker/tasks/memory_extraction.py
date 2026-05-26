@@ -8,7 +8,7 @@ Contract reference: docs/runbooks/step-27b-security-contract.md
 Payload (opaque ids only; NO user content):
     session_id            int
     user_id               str
-    tenant_id             str
+    admin_id             str
     message_id            int        # idempotency key; FK to messages.id
     actor_key_prefix      str        # enqueuing api_key.key_prefix (audit linkage)
     agent_id              str | None
@@ -22,7 +22,7 @@ Payload (opaque ids only; NO user content):
 Pre-flight gates (Invariant 8 -- defense in depth):
     1. Payload shape validation               -> Reject to DLQ on fail
     2. API key still active                   -> Reject to DLQ on fail
-    3. Session.tenant_id == payload.tenant_id -> Reject to DLQ on fail
+    3. Session.admin_id == payload.admin_id -> Reject to DLQ on fail
        (Invariant 13 -- mandatory tenant predicate; also catches
         cross-tenant enqueue attempts)
     4. LucielInstance.active is True (when luciel_instance_id present)
@@ -34,13 +34,13 @@ Pre-flight gates (Invariant 8 -- defense in depth):
     6. Agent.user_id == payload.actor_user_id (Step 24.5b -- Q6
        cross-tenant identity-spoof guard)     -> Reject to DLQ on fail
        Pillar 13 (Commit 3) asserts a malicious payload claiming
-       (user_id=U, tenant_id=T1, agent_id=A2_under_T2) lands in DLQ
-       because A2's row has tenant_id=T2 and user_id=U2, not the
+       (user_id=U, admin_id=T1, agent_id=A2_under_T2) lands in DLQ
+       because A2's row has admin_id=T2 and user_id=U2, not the
        payload's claimed values.
 
 Execution:
     - Re-read turn window from DB via join(MessageModel -> SessionModel)
-      scoped to (session_id, tenant_id, up_to message_id).
+      scoped to (session_id, admin_id, up_to message_id).
     - Call MemoryService.extract_and_save with re-read messages.
     - Audit row (action=MEMORY_EXTRACTED) lands in same txn as memory
       upsert (Invariant 4). Content is NEVER placed in audit row
@@ -123,7 +123,7 @@ def _reject_with_audit(
     db,
     *,
     action: str,
-    tenant_id: str | None,
+    admin_id: str | None,
     session_id: str | None,
     message_id: int | None,
     actor_key_prefix: str | None,
@@ -143,7 +143,7 @@ def _reject_with_audit(
         audit = AdminAuditRepository(db)
         audit.record(
             ctx=ctx,
-            tenant_id=tenant_id or "unknown",
+            admin_id=admin_id or "unknown",
             action=action,
             resource_type=RESOURCE_MEMORY,
             resource_pk=None,
@@ -218,7 +218,7 @@ def extract_memory_from_turn(
     *,
     session_id: str,
     user_id: str,
-    tenant_id: str,
+    admin_id: str,
     message_id: int,
     actor_key_prefix: str,
     agent_id: str | None = None,
@@ -229,7 +229,7 @@ def extract_memory_from_turn(
     """
     Extract durable memories from a just-completed chat turn and persist them.
 
-    Idempotent on (tenant_id, message_id) via composite partial unique index.
+    Idempotent on (admin_id, message_id) via composite partial unique index.
     Re-execution (replay, DLQ redrive) is a safe no-op.
     """
     task_id = self.request.id or "no-task-id"
@@ -240,7 +240,7 @@ def extract_memory_from_turn(
     # opening it outside would emit empty GUCs on the first lazy
     # BEGIN, which then linger on the pooled connection.
     with bind_tenant_scope(
-        admin_id=tenant_id if isinstance(tenant_id, str) and tenant_id else None,
+        admin_id=admin_id if isinstance(admin_id, str) and admin_id else None,
         instance_id=luciel_instance_id,
     ):
         db = SessionLocal()
@@ -249,18 +249,18 @@ def extract_memory_from_turn(
             if not (
                 isinstance(session_id, str)
                 and isinstance(user_id, str) and user_id
-                and isinstance(tenant_id, str) and tenant_id
+                and isinstance(admin_id, str) and admin_id
                 and isinstance(message_id, int)
                 and isinstance(actor_key_prefix, str) and actor_key_prefix
             ):
                 logger.error(
                     "gate1 malformed payload task=%s tenant=%s session=%s",
-                    task_id, tenant_id, session_id,
+                    task_id, admin_id, session_id,
                 )
                 _reject_with_audit(
                     db,
                     action=ACTION_WORKER_MALFORMED_PAYLOAD,
-                    tenant_id=tenant_id if isinstance(tenant_id, str) else None,
+                    admin_id=admin_id if isinstance(admin_id, str) else None,
                     session_id=session_id if isinstance(session_id, str) else None,
                     message_id=message_id if isinstance(message_id, int) else None,
                     actor_key_prefix=actor_key_prefix
@@ -282,7 +282,7 @@ def extract_memory_from_turn(
                 _reject_with_audit(
                     db,
                     action=ACTION_WORKER_KEY_REVOKED,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     session_id=session_id,
                     message_id=message_id,
                     actor_key_prefix=actor_key_prefix,
@@ -291,21 +291,21 @@ def extract_memory_from_turn(
                     trace_id=trace_id,
                 )
 
-            # ---------- Gate 3: session.tenant_id == payload.tenant_id ----------
+            # ---------- Gate 3: session.admin_id == payload.admin_id ----------
             session_row = db.get(SessionModel, session_id)
-            if session_row is None or session_row.tenant_id != tenant_id:
+            if session_row is None or session_row.admin_id != admin_id:
                 logger.warning(
                     "gate3 cross-tenant reject task=%s payload_tenant=%s session=%s",
-                    task_id, tenant_id, session_id,
+                    task_id, admin_id, session_id,
                 )
                 _reject_with_audit(
                     db,
                     action=ACTION_WORKER_CROSS_TENANT_REJECT,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     session_id=session_id,
                     message_id=message_id,
                     actor_key_prefix=actor_key_prefix,
-                    note="session.tenant_id mismatch or session missing",
+                    note="session.admin_id mismatch or session missing",
                     task_id=task_id,
                     trace_id=trace_id,
                 )
@@ -321,7 +321,7 @@ def extract_memory_from_turn(
                     _reject_with_audit(
                         db,
                         action=ACTION_WORKER_INSTANCE_DEACTIVATED,
-                        tenant_id=tenant_id,
+                        admin_id=admin_id,
                         session_id=session_id,
                         message_id=message_id,
                         actor_key_prefix=actor_key_prefix,
@@ -342,12 +342,12 @@ def extract_memory_from_turn(
                 except (ValueError, TypeError):
                     logger.error(
                         "gate5 actor_user_id unparseable task=%s tenant=%s",
-                        task_id, tenant_id,
+                        task_id, admin_id,
                     )
                     _reject_with_audit(
                         db,
                         action=ACTION_WORKER_MALFORMED_PAYLOAD,
-                        tenant_id=tenant_id,
+                        admin_id=admin_id,
                         session_id=session_id,
                         message_id=message_id,
                         actor_key_prefix=actor_key_prefix,
@@ -367,7 +367,7 @@ def extract_memory_from_turn(
                     _reject_with_audit(
                         db,
                         action=ACTION_WORKER_USER_INACTIVE,
-                        tenant_id=tenant_id,
+                        admin_id=admin_id,
                         session_id=session_id,
                         message_id=message_id,
                         actor_key_prefix=actor_key_prefix,
@@ -380,14 +380,14 @@ def extract_memory_from_turn(
                     )
 
             # ---------- Gate 6: cross-tenant identity-spoof guard (Step 24.5b -- Q6) ----------
-            # Arc 5 Path A: V2 binding is ScopeAssignment(user_id, tenant_id).
+            # Arc 5 Path A: V2 binding is ScopeAssignment(user_id, admin_id).
             # When actor_user_uuid is present and agent_id is supplied (legacy
             # field name preserved on the payload for transition), the actor
             # MUST have an active ScopeAssignment under this tenant.
             if actor_user_uuid is not None and agent_id is not None:
                 spoof_agent = db.scalars(
                     select(ScopeAssignment).where(
-                        ScopeAssignment.tenant_id == tenant_id,
+                        ScopeAssignment.admin_id == admin_id,
                         ScopeAssignment.user_id == actor_user_uuid,
                         ScopeAssignment.active.is_(True),
                     ).limit(1)
@@ -399,19 +399,19 @@ def extract_memory_from_turn(
                         task_id,
                         actor_user_uuid,
                         spoof_agent.user_id if spoof_agent else None,
-                        tenant_id,
+                        admin_id,
                         agent_id,
                     )
                     _reject_with_audit(
                         db,
                         action=ACTION_WORKER_IDENTITY_SPOOF_REJECT,
-                        tenant_id=tenant_id,
+                        admin_id=admin_id,
                         session_id=session_id,
                         message_id=message_id,
                         actor_key_prefix=actor_key_prefix,
                         note=(
                             f"actor_user_id mismatch: payload claims "
-                            f"{actor_user_uuid}, agent ({tenant_id},"
+                            f"{actor_user_uuid}, agent ({admin_id},"
                             f"{agent_id}) has "
                             f"{spoof_agent.user_id if spoof_agent else 'None'}"
                         ),
@@ -425,7 +425,7 @@ def extract_memory_from_turn(
                 .join(SessionModel, SessionModel.id == MessageModel.session_id)
                 .where(
                     SessionModel.id == session_id,
-                    SessionModel.tenant_id == tenant_id,
+                    SessionModel.admin_id == admin_id,
                     MessageModel.id <= message_id,
                 )
                 .order_by(MessageModel.id.desc())
@@ -456,7 +456,7 @@ def extract_memory_from_turn(
 
             saved_count = service.extract_and_save(
                 user_id=user_id,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 session_id=session_id,
                 agent_id=agent_id,
                 messages=messages_payload,
@@ -476,7 +476,7 @@ def extract_memory_from_turn(
             )
             AdminAuditRepository(db).record(
                 ctx=ctx,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 action=ACTION_MEMORY_EXTRACTED,
                 resource_type=RESOURCE_MEMORY,
                 resource_pk=None,   # memory_items are append-only; no single pk
@@ -507,7 +507,7 @@ def extract_memory_from_turn(
 
             logger.info(
                 "extraction ok task=%s tenant=%s session=%s message=%s saved=%d",
-                task_id, tenant_id, session_id, message_id, saved_count,
+                task_id, admin_id, session_id, message_id, saved_count,
             )
 
         except Reject:
@@ -537,7 +537,7 @@ def extract_memory_from_turn(
             # Route to DLQ via the same audit-then-reject path that
             # malformed-payload rejections use. The
             # ACTION_WORKER_PERMANENT_FAILURE action lands a single
-            # audit row keyed on (action, tenant_id, resource_natural_id)
+            # audit row keyed on (action, admin_id, resource_natural_id)
             # so a worker-crash redelivery is idempotent (E-2 partial
             # unique index).
             db.rollback()
@@ -549,7 +549,7 @@ def extract_memory_from_turn(
             _reject_with_audit(
                 db=db,
                 action=ACTION_WORKER_PERMANENT_FAILURE,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 session_id=session_id,
                 message_id=message_id,
                 actor_key_prefix=actor_key_prefix,

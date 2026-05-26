@@ -20,7 +20,7 @@ VALID_ACTIONS = {"delete", "anonymize"}
 
 
 class RetentionPolicyCreate(BaseModel):
-    tenant_id: str | None = None
+    admin_id: str | None = None
     data_category: str
     retention_days: int
     action: str = "anonymize"
@@ -79,7 +79,7 @@ class RetentionPolicyUpdate(BaseModel):
 
 class RetentionPolicyRead(BaseModel):
     id: int
-    tenant_id: str | None
+    admin_id: str | None
     data_category: str
     retention_days: int
     action: str
@@ -95,7 +95,7 @@ class RetentionPolicyRead(BaseModel):
 
 class DeletionLogRead(BaseModel):
     id: int
-    tenant_id: str | None
+    admin_id: str | None
     data_category: str
     action_taken: str
     rows_affected: int
@@ -109,7 +109,7 @@ class DeletionLogRead(BaseModel):
 
 class ManualPurgeRequest(BaseModel):
     data_category: str
-    tenant_id: str | None = None
+    admin_id: str | None = None
     reason: str
 
     @field_validator("data_category")
@@ -135,5 +135,5 @@ class EnforceResult(BaseModel):
     action: str
     rows_affected: int = 0
     cutoff_date: str | None = None
-    tenant_id: str | None = None
+    admin_id: str | None = None
     error: str | None = None

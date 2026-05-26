@@ -22,7 +22,7 @@ class ConsentPolicy:
         self,
         *,
         user_id: str,
-        tenant_id: str,
+        admin_id: str,
     ) -> bool:
         """
         Returns True if the user has granted memory_persistence consent.
@@ -30,13 +30,13 @@ class ConsentPolicy:
         """
         allowed = self.consent_repository.has_consent(
             user_id=user_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             consent_type="memory_persistence",
         )
         if not allowed:
             logger.debug(
                 "Memory persistence blocked: no consent for user=%s tenant=%s",
                 user_id,
-                tenant_id,
+                admin_id,
             )
         return allowed

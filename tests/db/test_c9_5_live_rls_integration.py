@@ -13,7 +13,7 @@ but does not prove that:
        table (RLS deny)
     3. A SELECT with the GUC set to tenant_A returns ONLY tenant_A
        rows (cross-tenant deny on read)
-    4. An INSERT with the GUC set to tenant_A but tenant_id pointing
+    4. An INSERT with the GUC set to tenant_A but admin_id pointing
        at tenant_B is denied (WITH CHECK enforcement)
     5. The set_config(..., is_local=true) GUC does NOT leak between
        transactions on the same connection (the contract that
@@ -93,7 +93,7 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
                 f"""
                 CREATE TABLE {cls.table} (
                     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                    tenant_id uuid NOT NULL,
+                    admin_id uuid NOT NULL,
                     payload text NOT NULL
                 );
                 """
@@ -107,17 +107,17 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
                 f"""
                 CREATE POLICY tenant_isolation ON {cls.table}
                     USING (
-                        tenant_id::text = current_setting('app.admin_id', true)
+                        admin_id::text = current_setting('app.admin_id', true)
                     )
                     WITH CHECK (
-                        tenant_id::text = current_setting('app.admin_id', true)
+                        admin_id::text = current_setting('app.admin_id', true)
                     );
                 """
             )
             # Seed as superuser (bypasses RLS, mirrors migrator role).
             for tenant in (cls.tenant_a, cls.tenant_b, cls.tenant_c):
                 c.execute(
-                    f"INSERT INTO {cls.table} (tenant_id, payload) "
+                    f"INSERT INTO {cls.table} (admin_id, payload) "
                     f"VALUES (%s, %s), (%s, %s);",
                     (tenant, f"row1-{tenant}", tenant, f"row2-{tenant}"),
                 )
@@ -150,7 +150,7 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
         """The C7 GUC-leak invariant: no GUC, no rows.
 
         With no app.admin_id bound, current_setting(..., true) returns
-        empty string. The predicate tenant_id::text = '' is FALSE for
+        empty string. The predicate admin_id::text = '' is FALSE for
         every row (UUIDs never stringify to ''). Result: 0 rows.
         """
         with self.psycopg.connect(self.app_url) as conn:
@@ -173,7 +173,7 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
                     "SELECT set_config('app.admin_id', %s, true);",
                     (str(self.tenant_a),),
                 )
-                c.execute(f"SELECT tenant_id FROM {self.table};")
+                c.execute(f"SELECT admin_id FROM {self.table};")
                 rows = c.fetchall()
                 self.assertEqual(
                     len(rows), 2,
@@ -182,7 +182,7 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
                 for (tid,) in rows:
                     self.assertEqual(
                         str(tid), str(self.tenant_a),
-                        f"Cross-tenant leak: GUC=A returned tenant_id={tid}",
+                        f"Cross-tenant leak: GUC=A returned admin_id={tid}",
                     )
 
     def test_guc_set_to_tenant_b_returns_only_tenant_b_rows(self):
@@ -194,7 +194,7 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
                     "SELECT set_config('app.admin_id', %s, true);",
                     (str(self.tenant_b),),
                 )
-                c.execute(f"SELECT tenant_id FROM {self.table};")
+                c.execute(f"SELECT admin_id FROM {self.table};")
                 rows = c.fetchall()
                 self.assertEqual(len(rows), 2)
                 for (tid,) in rows:
@@ -203,7 +203,7 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
     def test_insert_with_mismatched_tenant_id_is_denied(self):
         """WITH CHECK enforcement: cannot write to another tenant.
 
-        With GUC=A, an INSERT placing tenant_id=B must fail. Proves the
+        With GUC=A, an INSERT placing admin_id=B must fail. Proves the
         WITH CHECK clause evaluates against the same GUC as USING.
         """
         with self.psycopg.connect(self.app_url) as conn:
@@ -218,7 +218,7 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
                 ):
                     c.execute(
                         f"INSERT INTO {self.table} "
-                        f"(tenant_id, payload) VALUES (%s, %s);",
+                        f"(admin_id, payload) VALUES (%s, %s);",
                         (self.tenant_b, "cross-tenant write attempt"),
                     )
             conn.rollback()
@@ -274,7 +274,7 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
                 ):
                     c.execute(
                         f"UPDATE {self.table} "
-                        f"SET tenant_id = %s WHERE id = %s;",
+                        f"SET admin_id = %s WHERE id = %s;",
                         (self.tenant_b, row_id),
                     )
             conn.rollback()

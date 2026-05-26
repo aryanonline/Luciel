@@ -71,7 +71,7 @@ class OnboardingService:
     def onboard_tenant(
         self,
         *,
-        tenant_id: str,
+        admin_id: str,
         display_name: str,
         tier: str = TIER_PRO,
         tier_source: str = TIER_SOURCE_STRIPE_WEBHOOK,
@@ -122,13 +122,13 @@ class OnboardingService:
             )
 
         # --- Guard: no duplicates ---
-        existing = self.admin.get_tenant_config(tenant_id)
+        existing = self.admin.get_tenant_config(admin_id)
         if existing:
-            raise ValueError(f"Tenant '{tenant_id}' already exists")
+            raise ValueError(f"Tenant '{admin_id}' already exists")
 
         try:
             # 1. Create Admin (formerly TenantConfig).
-            # Arc 5 Path A: ``tenant_id`` is the Admin primary key (`id`).
+            # Arc 5 Path A: ``admin_id`` is the Admin primary key (`id`).
             # Arc 6 Commit 8: ONLY V2 columns. The verified V2 column set
             # (per app/models/admin.py) is: id, name, tier, tier_source,
             # active, stripe_customer_id, legacy_tenant_id, created_at,
@@ -136,7 +136,7 @@ class OnboardingService:
             # timestamps are server-defaulted; stripe_customer_id and
             # legacy_tenant_id are set elsewhere (webhook / data migration).
             tenant = Admin(
-                id=tenant_id,
+                id=admin_id,
                 name=display_name,
                 tier=tier,
                 tier_source=tier_source,
@@ -146,7 +146,7 @@ class OnboardingService:
             self.db.flush()  # get ID without committing
             logger.info(
                 "Onboard: created admin id=%s tier=%s tier_source=%s",
-                tenant_id, tier, tier_source,
+                admin_id, tier, tier_source,
             )
 
             # Arc 9 C13 hotfix (demo-day-2026-05-25): bootstrap GUC.
@@ -154,8 +154,8 @@ class OnboardingService:
             # listener saw no admin_id in the ContextVar and set
             # app.admin_id to ''. The RLS with_check on retention_policies
             # (and api_keys, audit rows) requires app.admin_id ==
-            # tenant_id::text. We just minted the Admin row, so it is
-            # now safe to push the new tenant_id.
+            # admin_id::text. We just minted the Admin row, so it is
+            # now safe to push the new admin_id.
             #
             # We push at BOTH layers:
             #   1. SET LOCAL on the live transaction so the immediate
@@ -180,9 +180,9 @@ class OnboardingService:
             from app.db.tenant_context import set_current_admin_id as _set_admin
             self.db.execute(
                 _text("SELECT set_config('app.admin_id', :tid, true)"),
-                {"tid": tenant_id},
+                {"tid": admin_id},
             )
-            _set_admin(tenant_id)
+            _set_admin(admin_id)
 
             # 2. Default DomainConfig: REMOVED (Arc 5 Path A).
             # V2 has no Domain layer; ``default_domain_id`` is retained
@@ -200,7 +200,7 @@ class OnboardingService:
             retention_policies = []
             for category, days in retention_map.items():
                 policy = RetentionPolicy(
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     data_category=category,
                     retention_days=days,
                     action="anonymize",
@@ -211,7 +211,7 @@ class OnboardingService:
                 self.db.add(policy)
                 retention_policies.append(policy)
             self.db.flush()
-            logger.info("Onboard: created %d retention policies for %s", len(retention_policies), tenant_id)
+            logger.info("Onboard: created %d retention policies for %s", len(retention_policies), admin_id)
 
             # 4b. Create the tenant's admin API key (management).
             #
@@ -228,7 +228,7 @@ class OnboardingService:
                 label="onboard_tenant"
             )
             admin_key, admin_raw = self.api_key_service.create_key(
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 domain_id=None,
                 agent_id=None,
                 display_name=f"{display_name} — Admin Key",
@@ -238,7 +238,7 @@ class OnboardingService:
                 auto_commit=False,
                 audit_ctx=ctx,
             )
-            logger.info("Onboard: created admin API key for %s", tenant_id)
+            logger.info("Onboard: created admin API key for %s", admin_id)
 
             # 4c. Emit audit rows (P3-A) — three ACTION_CREATE rows for
             # tenant_config, domain_config, and retention_policy,
@@ -253,10 +253,10 @@ class OnboardingService:
 
             audit_repo.record(
                 ctx=ctx,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 action=ACTION_CREATE,
                 resource_type=RESOURCE_TENANT,
-                resource_natural_id=tenant_id,
+                resource_natural_id=admin_id,
                 after={
                     # Arc 6 / Commit 8 -- audit row mirrors the V2 Admin
                     # write. Legacy fields (description,
@@ -284,10 +284,10 @@ class OnboardingService:
             # category breakdown in after_json. Five categories.
             audit_repo.record(
                 ctx=ctx,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 action=ACTION_CREATE,
                 resource_type=RESOURCE_RETENTION_POLICY,
-                resource_natural_id=f"onboard:{tenant_id}",
+                resource_natural_id=f"onboard:{admin_id}",
                 after={
                     "categories": list(retention_map.keys()),
                     "retention_days_by_category": dict(retention_map),
@@ -300,7 +300,7 @@ class OnboardingService:
             # emitted it (P3-B). Three rows here + one from create_key
             # = four total, satisfying Pillar 20's pair-coverage
             # assertion.
-            logger.info("Onboard: emitted 3 audit rows for %s (4th from create_key)", tenant_id)
+            logger.info("Onboard: emitted 3 audit rows for %s (4th from create_key)", admin_id)
 
             # 5. Commit everything atomically
             self.db.commit()
@@ -309,7 +309,7 @@ class OnboardingService:
             for p in retention_policies:
                 self.db.refresh(p)
 
-            logger.info("Onboard: tenant %s fully onboarded", tenant_id)
+            logger.info("Onboard: tenant %s fully onboarded", admin_id)
             return {
                 "tenant": tenant,
                 "default_domain": domain,
@@ -320,5 +320,5 @@ class OnboardingService:
 
         except Exception:
             self.db.rollback()
-            logger.exception("Onboard: failed for tenant %s — rolled back", tenant_id)
+            logger.exception("Onboard: failed for tenant %s — rolled back", admin_id)
             raise

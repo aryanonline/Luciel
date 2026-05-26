@@ -8,7 +8,7 @@ Permission vocabulary (Step 24):
                    (tenant-, domain-, or agent-scoped based on key fields)
 - platform_admin : may act across all tenants (VantageMind operators only)
 
-Scope is determined by the key's tenant_id / domain_id / agent_id columns,
+Scope is determined by the key's admin_id / domain_id / agent_id columns,
 not by the permissions list. Permissions gate WHICH actions;
 scope gates WHICH rows those actions may touch.
 
@@ -78,7 +78,7 @@ _ORIGIN_REGEX = re.compile(
 
 
 class ApiKeyCreate(BaseModel):
-    tenant_id: str | None = Field(
+    admin_id: str | None = Field(
         default=None,
         min_length=2,
         max_length=100,
@@ -140,7 +140,7 @@ class ApiKeyRead(BaseModel):
 
     id: int
     key_prefix: str
-    tenant_id: str | None
+    admin_id: str | None
     domain_id: str | None
     agent_id: str | None
     display_name: str
@@ -283,12 +283,12 @@ class EmbedKeyCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    tenant_id: str = Field(
+    admin_id: str = Field(
         min_length=2,
         max_length=100,
         description=(
             "Required. Embed keys MUST be tenant-scoped -- a NULL "
-            "tenant_id would mean a customer-shipped key that crosses "
+            "admin_id would mean a customer-shipped key that crosses "
             "tenants, which is the exact failure mode embed keys exist "
             "to prevent."
         ),
@@ -430,7 +430,7 @@ class EmbedKeyRead(BaseModel):
 
     id: int
     key_prefix: str
-    tenant_id: str
+    admin_id: str
     domain_id: str | None
     luciel_instance_id: int | None
     display_name: str

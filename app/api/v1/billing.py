@@ -407,14 +407,14 @@ def onboarding_claim(payload: OnboardingClaimRequest, db: DbSession) -> Onboardi
             # Password already set -- degrade to a reset link so we
             # do not silently overwrite their hash on a resend.
             token = mint_reset_password_token(
-                user_id=user.id, email=user.email, tenant_id=sub.tenant_id,
+                user_id=user.id, email=user.email, admin_id=sub.admin_id,
             )
             purpose = "reset"
         else:
             token = mint_set_password_token(
                 user_id=user.id,
                 email=user.email,
-                tenant_id=sub.tenant_id,
+                admin_id=sub.admin_id,
                 purpose="signup",
             )
             purpose = "signup"
@@ -460,20 +460,20 @@ def login_with_magic_link(token: str, db: DbSession) -> JSONResponse:
 
     user_id = payload.get("sub")
     email = payload.get("email")
-    tenant_id = payload.get("tenant_id")
-    if not user_id or not email or not tenant_id:
+    admin_id = payload.get("admin_id")
+    if not user_id or not email or not admin_id:
         raise HTTPException(status_code=401, detail="Malformed token.")
 
     user = db.get(User, user_id)
     if user is None or not user.active:
         raise HTTPException(status_code=401, detail="User not found or inactive.")
 
-    session_token = mint_session_token(user_id=user.id, email=email, tenant_id=tenant_id)
+    session_token = mint_session_token(user_id=user.id, email=email, admin_id=admin_id)
     body = {
         "ok": True,
         "redirect_to": "/account/billing",
         "email": email,
-        "tenant_id": tenant_id,
+        "admin_id": admin_id,
     }
     response = JSONResponse(content=body, status_code=200)
     _set_session_cookie(response, session_token)
@@ -592,7 +592,7 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
 
     Step 30a.5: also surfaces ``active_role`` -- the cookied user's
     role on their active ScopeAssignment (preferring the assignment
-    matching the session JWT's tenant_id, falling back to the first
+    matching the session JWT's admin_id, falling back to the first
     active assignment for single-tenant common case). The dashboard
     gates the CompanyTab on (tier=='enterprise' AND role in
     ('tenant_admin','owner')) and the TeamTab on (tier in
@@ -602,7 +602,7 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
     cookie = request.cookies.get(settings.session_cookie_name)
     user = _resolve_cookied_user(db=db, session_cookie=cookie)
 
-    # Re-decode the JWT for tenant_id only. The cookie has already
+    # Re-decode the JWT for admin_id only. The cookie has already
     # been validated above by _resolve_cookied_user (which raises 401
     # on failure), so this second decode is safe; we accept the small
     # duplication rather than reshape the helper's return type and
@@ -611,16 +611,16 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
     session_tenant_id: str | None = None
     try:
         payload = validate_session_token(cookie or "")
-        session_tenant_id = payload.get("tenant_id")
+        session_tenant_id = payload.get("admin_id")
     except MagicLinkError:
         # Already validated upstream; if it somehow fails here we just
         # leave session_tenant_id None and pick the first active scope.
         session_tenant_id = None
 
     # Resolve the cookied user's active ScopeAssignment (preferring
-    # the assignment matching the session JWT's tenant_id). This is
+    # the assignment matching the session JWT's admin_id). This is
     # also where we derive ``admin_id`` for the Admin-row lookup
-    # below: ScopeAssignment.tenant_id physically retains the column
+    # below: ScopeAssignment.admin_id physically retains the column
     # name from Arc 5 Path A but semantically points at admins.id.
     from app.repositories.scope_assignment_repository import (
         ScopeAssignmentRepository,
@@ -631,11 +631,11 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
     chosen_admin_id: str | None = None
     if active_assignments:
         chosen = next(
-            (a for a in active_assignments if a.tenant_id == session_tenant_id),
+            (a for a in active_assignments if a.admin_id == session_tenant_id),
             active_assignments[0],
         )
         active_role = chosen.role
-        chosen_admin_id = chosen.tenant_id
+        chosen_admin_id = chosen.admin_id
 
     # Read the Admin row to source the tier (V2 source of truth).
     # A cookied user with no active ScopeAssignment is a forensic
@@ -661,7 +661,7 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
         from app.models.subscription import TIER_INSTANCE_CAPS
         return SubscriptionStatusResponse(
             has_subscription=False,
-            tenant_id=resolved_admin_id,
+            admin_id=resolved_admin_id,
             tier=admin_tier,
             status="free",
             active=admin is not None and admin.active,
@@ -717,7 +717,7 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
     # webhook commits Subscription THEN flips Admin.tier).
     return SubscriptionStatusResponse(
         has_subscription=True,
-        tenant_id=sub.tenant_id,
+        admin_id=sub.admin_id,
         tier=sub.tier,
         status=sub.status,
         active=sub.active,
@@ -756,7 +756,7 @@ def upgrade_tier(
     """Create a Stripe Checkout session for an existing-admin tier upgrade.
 
     Cookie-authenticated. The admin id is derived from the session
-    JWT's tenant_id claim (which physically points at admins.id in
+    JWT's admin_id claim (which physically points at admins.id in
     V2 after the Arc 5 Path A rename retained the column name); the
     buyer cannot specify it in the body. This closes a class of
     cross-admin-upgrade attacks where a Free user could POST another
@@ -782,13 +782,13 @@ def upgrade_tier(
     cookie = request.cookies.get(settings.session_cookie_name)
     user = _resolve_cookied_user(db=db, session_cookie=cookie)
 
-    # Resolve admin_id off the session's tenant_id JWT claim, falling
+    # Resolve admin_id off the session's admin_id JWT claim, falling
     # back to the cookied user's active ScopeAssignment (single-scope
     # users). Mirrors the resolution order in /me above.
     session_tenant_id: str | None = None
     try:
         sess_payload = validate_session_token(cookie or "")
-        session_tenant_id = sess_payload.get("tenant_id")
+        session_tenant_id = sess_payload.get("admin_id")
     except MagicLinkError:
         session_tenant_id = None
 
@@ -800,7 +800,7 @@ def upgrade_tier(
     if not active_assignments:
         raise HTTPException(status_code=400, detail="no_admin_for_user")
     chosen = next(
-        (a for a in active_assignments if a.tenant_id == session_tenant_id),
+        (a for a in active_assignments if a.admin_id == session_tenant_id),
         active_assignments[0],
     )
     # Only owners may initiate an upgrade. department_leads and
@@ -809,7 +809,7 @@ def upgrade_tier(
     # the first user, so every Free admin has exactly one owner.)
     if chosen.role != "owner":
         raise HTTPException(status_code=403, detail="upgrade_requires_owner")
-    admin_id = chosen.tenant_id
+    admin_id = chosen.admin_id
 
     # Read current Admin.tier to enforce strict upgrade direction.
     from app.models.admin import Admin as AdminModel
@@ -870,7 +870,7 @@ def _resolve_owner_admin_id(
 
     Shared helper for the downgrade twin routes. Returns the validated
     cookied User plus the admin (tenant) id derived from the session
-    JWT's tenant_id claim (falling back to the user's first active
+    JWT's admin_id claim (falling back to the user's first active
     ScopeAssignment for single-scope users).
 
     Raises:
@@ -891,7 +891,7 @@ def _resolve_owner_admin_id(
     session_tenant_id: str | None = None
     try:
         sess_payload = validate_session_token(cookie or "")
-        session_tenant_id = sess_payload.get("tenant_id")
+        session_tenant_id = sess_payload.get("admin_id")
     except MagicLinkError:
         session_tenant_id = None
 
@@ -903,7 +903,7 @@ def _resolve_owner_admin_id(
     if not active_assignments:
         raise HTTPException(status_code=400, detail="no_admin_for_user")
     chosen = next(
-        (a for a in active_assignments if a.tenant_id == session_tenant_id),
+        (a for a in active_assignments if a.admin_id == session_tenant_id),
         active_assignments[0],
     )
     # Only owners may initiate a downgrade. Same gate as upgrade: a
@@ -914,7 +914,7 @@ def _resolve_owner_admin_id(
         raise HTTPException(
             status_code=403, detail="downgrade_requires_owner",
         )
-    return user, chosen.tenant_id
+    return user, chosen.admin_id
 
 
 @router.post(
@@ -930,7 +930,7 @@ def downgrade_tier(
     """Arm a deferred tier downgrade for the cookied admin owner.
 
     Cookie-authenticated. Admin id is derived server-side from the
-    session JWT's tenant_id claim (with single-scope ScopeAssignment
+    session JWT's admin_id claim (with single-scope ScopeAssignment
     fallback); the body cannot specify it. This mirrors the
     cross-admin-attack mitigation on the upgrade route -- a hostile
     Free user cannot post somebody else's admin_id to trigger their
@@ -1334,7 +1334,7 @@ async def signup_free(
     onboarding = OnboardingService(db)
     try:
         onboarding.onboard_tenant(
-            tenant_id=admin_id,
+            admin_id=admin_id,
             display_name=display_name,
             tier="free",
             tier_source="free_signup",
@@ -1389,7 +1389,7 @@ async def signup_free(
     try:
         premint = TierProvisioningService(db)
         premint.premint_for_tier(
-            tenant_id=admin_id,
+            admin_id=admin_id,
             tier="free",
             primary_user=user,
             audit_ctx=audit_ctx,
@@ -1409,7 +1409,7 @@ async def signup_free(
         token = mint_set_password_token(
             user_id=user.id,
             email=email,
-            tenant_id=admin_id,
+            admin_id=admin_id,
             purpose="signup",
         )
         url = build_set_password_url(token)

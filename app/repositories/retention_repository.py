@@ -31,16 +31,16 @@ class RetentionRepository:
         self,
         *,
         data_category: str,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
     ) -> RetentionPolicy | None:
         """
         Get the effective policy for a data category.
         Tenant-specific policy takes priority over platform default.
         """
         # Try tenant-specific first
-        if tenant_id:
+        if admin_id:
             stmt = select(RetentionPolicy).where(
-                RetentionPolicy.tenant_id == tenant_id,
+                RetentionPolicy.admin_id == admin_id,
                 RetentionPolicy.data_category == data_category,
                 RetentionPolicy.active == True,
             )
@@ -48,9 +48,9 @@ class RetentionRepository:
             if result:
                 return result
 
-        # Fall back to platform default (tenant_id IS NULL)
+        # Fall back to platform default (admin_id IS NULL)
         stmt = select(RetentionPolicy).where(
-            RetentionPolicy.tenant_id.is_(None),
+            RetentionPolicy.admin_id.is_(None),
             RetentionPolicy.data_category == data_category,
             RetentionPolicy.active == True,
         )
@@ -59,26 +59,26 @@ class RetentionRepository:
     def list_policies(
         self,
         *,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
         include_defaults: bool = True,
     ) -> list[RetentionPolicy]:
         stmt = select(RetentionPolicy).where(
             RetentionPolicy.active == True,
         ).order_by(RetentionPolicy.data_category)
 
-        if tenant_id and include_defaults:
+        if admin_id and include_defaults:
             # Return both tenant-specific and platform defaults
             from sqlalchemy import or_
             stmt = stmt.where(
                 or_(
-                    RetentionPolicy.tenant_id == tenant_id,
-                    RetentionPolicy.tenant_id.is_(None),
+                    RetentionPolicy.admin_id == admin_id,
+                    RetentionPolicy.admin_id.is_(None),
                 )
             )
-        elif tenant_id:
-            stmt = stmt.where(RetentionPolicy.tenant_id == tenant_id)
+        elif admin_id:
+            stmt = stmt.where(RetentionPolicy.admin_id == admin_id)
         else:
-            stmt = stmt.where(RetentionPolicy.tenant_id.is_(None))
+            stmt = stmt.where(RetentionPolicy.admin_id.is_(None))
 
         return list(self.db.scalars(stmt).all())
 
@@ -116,7 +116,7 @@ class RetentionRepository:
     def list_deletion_logs(
         self,
         *,
-        tenant_id: str | None = None,
+        admin_id: str | None = None,
         data_category: str | None = None,
         limit: int = 100,
     ) -> list[DeletionLog]:
@@ -125,8 +125,8 @@ class RetentionRepository:
             .order_by(DeletionLog.created_at.desc())
             .limit(limit)
         )
-        if tenant_id:
-            stmt = stmt.where(DeletionLog.tenant_id == tenant_id)
+        if admin_id:
+            stmt = stmt.where(DeletionLog.admin_id == admin_id)
         if data_category:
             stmt = stmt.where(DeletionLog.data_category == data_category)
         return list(self.db.scalars(stmt).all())

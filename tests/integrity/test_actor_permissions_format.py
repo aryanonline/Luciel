@@ -175,7 +175,7 @@ def test_audit_context_from_request_string_input_dual_format():
             self.permissions = perms
             self.key_prefix = "kp123"
             self.actor_label = "tester"
-            self.tenant_id = "t1"
+            self.admin_id = "t1"
 
     class _Req:
         def __init__(self, state):
@@ -210,7 +210,7 @@ def test_hash_chain_stable_for_legacy_comma_row():
     """
     legacy_row = {k: None for k in _CHAIN_FIELDS}
     legacy_row.update({
-        "tenant_id": "t1",
+        "admin_id": "t1",
         "actor_key_prefix": "kp123",
         "actor_permissions": "admin,worker",  # legacy comma form
         "actor_label": "tester",
@@ -253,7 +253,7 @@ def test_audit_log_read_normalizes_legacy_comma_form():
         actor_key_prefix="kp123",
         actor_permissions="admin,worker",  # legacy form from DB
         actor_label="tester",
-        tenant_id="t1",
+        admin_id="t1",
         domain_id=None,
         agent_id=None,
         luciel_instance_id=None,
@@ -278,7 +278,7 @@ def test_audit_log_read_normalizes_json_form():
         actor_key_prefix="kp123",
         actor_permissions='["admin","worker"]',  # new form from DB
         actor_label="tester",
-        tenant_id="t1",
+        admin_id="t1",
         domain_id=None,
         agent_id=None,
         luciel_instance_id=None,
@@ -303,7 +303,7 @@ def test_audit_log_read_handles_null():
         actor_key_prefix=None,
         actor_permissions=None,
         actor_label=None,
-        tenant_id="t1",
+        admin_id="t1",
         domain_id=None,
         agent_id=None,
         luciel_instance_id=None,

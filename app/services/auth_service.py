@@ -276,21 +276,21 @@ def request_password_reset(*, db: Session, email: str) -> bool:
         )
         return False
 
-    # Find an active subscription to thread the tenant_id through. If
+    # Find an active subscription to thread the admin_id through. If
     # the user has no active subscription (cancelled, never paid) we
     # still let them reset their password -- the magic-link token does
     # not need a *current* tenant binding to be valid; the consume
     # path re-resolves the user's tenancy when it mints the session
-    # cookie. We use a placeholder tenant_id="" in that case; the
+    # cookie. We use a placeholder admin_id="" in that case; the
     # cookie mint path is happy with that because Step 31.2's
     # middleware re-resolves tenant from the active subscription at
     # cookie-redeem time.
     svc = BillingService(db=db, stripe_client=None)  # type: ignore[arg-type]
     sub = svc.get_active_subscription_for_user(user_id=user.id)
-    tenant_id = sub.tenant_id if sub is not None else ""
+    admin_id = sub.admin_id if sub is not None else ""
 
     token = mint_reset_password_token(
-        user_id=user.id, email=user.email, tenant_id=tenant_id,
+        user_id=user.id, email=user.email, admin_id=admin_id,
     )
     url = build_set_password_url(token)
 

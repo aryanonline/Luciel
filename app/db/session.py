@@ -84,12 +84,9 @@ from app.repositories.audit_chain import install_audit_chain_event  # noqa: E402
 
 install_audit_chain_event()
 
-# Arc 9.2 PR #96 -- dual-write tenant_id -> admin_id on every INSERT until the
-# backend (PR #98) writes admin_id natively.  The hook is idempotent and is
-# removed wholesale in PR #101 when tenant_id is finally dropped.
-from app.db.admin_id_dual_write import install_admin_id_dual_write  # noqa: E402
-
-install_admin_id_dual_write()
+# Arc 9.2 PR #101: admin_id_dual_write listener REMOVED.  tenant_id column
+# is gone; admin_id is now the sole source of truth and is populated by
+# every code path directly.
 
 
 # Arc 9 C2 — In-app RLS connection-pool wrapper (Layer 3 of Wall 1).
@@ -99,7 +96,7 @@ install_admin_id_dual_write()
 # FastAPI dependency ``get_tenant_scoped_db`` (or by background-task
 # wiring in worker tasks). The matching RLS policies (Arc 9 C3) read
 # this GUC via ``current_setting('app.admin_id', true)`` and reject
-# rows whose tenant_id does not match.
+# rows whose admin_id does not match.
 #
 # We use SQLAlchemy's ``after_begin`` event rather than a raw DBAPI
 # ``checkout`` listener because:

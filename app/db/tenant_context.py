@@ -5,12 +5,12 @@ This module is the Layer-3 of the three-layer Wall 1 (admin_id) tenant
 isolation model defined in ARC9_RUNBOOK (Drive, canonical):
 
   L1  Service-layer filtering — every repository SELECT/UPDATE includes
-      an explicit ``WHERE tenant_id = :admin_id`` clause. Already in
-      place (see C1 audit: 18/19 customer-data tables carry tenant_id).
+      an explicit ``WHERE admin_id = :admin_id`` clause. Already in
+      place (see C1 audit: 18/19 customer-data tables carry admin_id).
       First line of defence.
 
   L2  PostgreSQL Row-Level-Security (RLS) — per-table policies that
-      compare ``tenant_id`` to ``current_setting('app.admin_id')`` and
+      compare ``admin_id`` to ``current_setting('app.admin_id')`` and
       reject rows that don't match. Backstop in case L1 is forgotten.
       Lands in C3 (per-table feature-flagged rollout).
 
@@ -67,11 +67,11 @@ from typing import Optional
 #
 #     id: Mapped[str] = mapped_column(String(100), primary_key=True)
 #
-# Every customer-data table's ``tenant_id`` column is correspondingly
+# Every customer-data table's ``admin_id`` column is correspondingly
 # String(100), and the literal string ``'platform'`` is used as the
-# system-actions sentinel in admin_audit_logs.tenant_id. The middleware
-# at app/middleware/auth.py:227 writes ``request.state.tenant_id =
-# apikey.tenant_id`` where the source is also String(100).
+# system-actions sentinel in admin_audit_logs.admin_id. The middleware
+# at app/middleware/auth.py:227 writes ``request.state.admin_id =
+# apikey.admin_id`` where the source is also String(100).
 #
 # A UUID type annotation here would have crashed every request whose
 # admin slug is not a valid UUID (which is most of them). The hot-fix

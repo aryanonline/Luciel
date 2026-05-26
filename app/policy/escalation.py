@@ -29,7 +29,7 @@ class EscalationService:
         *,
         session_id: str,
         user_id: str | None,
-        tenant_id: str,
+        admin_id: str,
         reason: str,
     ) -> None:
         """
@@ -42,6 +42,6 @@ class EscalationService:
             "ESCALATION | session=%s | user=%s | tenant=%s | reason=%s",
             session_id,
             user_id,
-            tenant_id,
+            admin_id,
             reason,
         )

@@ -35,7 +35,7 @@ Coverage (all AST + import only -- no Postgres, no FastAPI runtime):
     * The route emits exactly THREE distinct `logger.info` event
       names with the documented field shapes.
     * Each of the three emissions carries the required scope-bearing
-      fields (`tenant_id`, `domain_id`, `session_id` where
+      fields (`admin_id`, `domain_id`, `session_id` where
       applicable).
     * Critical PII defense: NO `logger.info` call references
       `payload.message` directly (only `message_length` is logged).
@@ -272,7 +272,7 @@ class TestAuditLogEmissions:
         keys = _call_extra_keys(candidates[0])
         required = {
             "event",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "agent_id",
             "luciel_instance_id",
@@ -300,7 +300,7 @@ class TestAuditLogEmissions:
         keys = _call_extra_keys(candidates[0])
         required = {
             "event",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "session_id",
             "user_id",
@@ -333,7 +333,7 @@ class TestAuditLogEmissions:
         )
         required = {
             "event",
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "session_id",
             "latency_ms",
@@ -500,7 +500,7 @@ class TestSessionServiceSignaturePreserved:
             SessionService.create_session_with_identity
         )
         for required in [
-            "tenant_id",
+            "admin_id",
             "domain_id",
             "agent_id",
             "channel",

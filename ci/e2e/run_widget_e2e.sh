@@ -123,7 +123,7 @@ echo "==> [1/5] POST /api/v1/admin/tenants"
     "${BASE_URL}/api/v1/admin/tenants" \
     -d "$(cat <<JSON
 {
-  "tenant_id": "${TENANT_ID}",
+  "admin_id": "${TENANT_ID}",
   "display_name": "E2E tenant ${TS}",
   "system_prompt_additions": "You are an E2E test assistant. Reply tersely.",
   "created_by": "widget-e2e@arc9_2-pr99"
@@ -187,7 +187,7 @@ EMBED_RESPONSE="$(
         "${BASE_URL}/api/v1/admin/embed-keys" \
         -d "$(cat <<JSON
 {
-  "tenant_id": "${TENANT_ID}",
+  "admin_id": "${TENANT_ID}",
   "luciel_instance_id": ${INSTANCE_ID},
   "display_name": "E2E embed key ${TS}",
   "allowed_origins": ["${TEST_ORIGIN}"],

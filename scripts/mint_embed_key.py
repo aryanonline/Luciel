@@ -64,7 +64,7 @@ What this script does NOT do
 
   - It does NOT support an interactive prompt mode. Embed keys are
     minted infrequently, by an operator who already has all required
-    fields in front of them (customer name -> tenant_id, domain
+    fields in front of them (customer name -> admin_id, domain
     list, branding spec from the customer's brand book). A
     non-interactive flag-based CLI is auditable in shell history and
     composable with future automation; an interactive mode would
@@ -220,7 +220,7 @@ def main() -> int:
             greeting_message=args.greeting_message,
         )
         payload = EmbedKeyCreate(
-            tenant_id=args.tenant_id,
+            admin_id=args.admin_id,
             domain_id=args.domain_id,
             display_name=args.display_name,
             allowed_origins=_parse_origins(args.origins),
@@ -262,7 +262,7 @@ def main() -> int:
         try:
             ScopePromptPreflight.check(
                 db,
-                tenant_id=payload.tenant_id,
+                admin_id=payload.admin_id,
                 domain_id=payload.domain_id,
             )
         except ScopePromptMissingError as exc:
@@ -276,7 +276,7 @@ def main() -> int:
 
     try:
         api_key, raw_key = svc.create_key(
-            tenant_id=payload.tenant_id,
+            admin_id=payload.admin_id,
             domain_id=payload.domain_id,
             agent_id=None,
             luciel_instance_id=None,
@@ -328,7 +328,7 @@ def main() -> int:
     print(f"  key_id                 : {api_key.id}")
     print(f"  key_prefix             : {api_key.key_prefix}")
     print(f"  display_name           : {api_key.display_name}")
-    print(f"  tenant_id              : {api_key.tenant_id}")
+    print(f"  admin_id              : {api_key.admin_id}")
     print(f"  domain_id              : {api_key.domain_id}")
     print(f"  permissions            : {api_key.permissions}")
     print(f"  key_kind               : {api_key.key_kind}")

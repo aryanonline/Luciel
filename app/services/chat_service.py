@@ -142,7 +142,7 @@ class ChatService:
         self,
         *,
         luciel_instance_id: int | None,
-        tenant_id: str,
+        admin_id: str,
         domain_id: str | None,
         agent_id: str | None,
     ) -> LucielContext:
@@ -174,7 +174,7 @@ class ChatService:
         # Instance row. The Admin row no longer carries a prompt, so the
         # tenant layer always degrades to None here; the prompt content
         # is now exclusively contributed by the Instance layer below.
-        tenant_config = self.config_repository.get_tenant_config(tenant_id)
+        tenant_config = self.config_repository.get_tenant_config(admin_id)
         if tenant_config:
             ctx.tenant_prompt = getattr(
                 tenant_config, "system_prompt_additions", None
@@ -193,7 +193,7 @@ class ChatService:
 
         # --- Legacy agent config ---
         if agent_id:
-            agent_config = self.config_repository.get_agent_config(tenant_id, agent_id)
+            agent_config = self.config_repository.get_agent_config(admin_id, agent_id)
             if agent_config:
                 ctx.agent_prompt = agent_config.system_prompt_additions
                 ctx.agent_config_id = agent_config.id
@@ -224,12 +224,12 @@ class ChatService:
             )
             return ctx
         # Arc 5 Path A — V2 Instance carries admin_id; compare against the
-        # session tenant_id (V2 == Admin slug post-Revision-B backfill).
-        if getattr(instance, "admin_id", None) != tenant_id:
+        # session admin_id (V2 == Admin slug post-Revision-B backfill).
+        if getattr(instance, "admin_id", None) != admin_id:
             logger.warning(
                 "Chat turn bound to luciel_instance_id=%s whose admin=%s does "
                 "not match session tenant=%s; falling back to legacy resolution.",
-                luciel_instance_id, getattr(instance, "admin_id", None), tenant_id,
+                luciel_instance_id, getattr(instance, "admin_id", None), admin_id,
             )
             return ctx
 
@@ -295,11 +295,11 @@ class ChatService:
         session = self.session_service.get_session(session_id)
         if session is None:
             raise ValueError("Session not found")
-        if caller_tenant_id and session.tenant_id != caller_tenant_id:
+        if caller_tenant_id and session.admin_id != caller_tenant_id:
             raise PermissionError("Session does not belong to this tenant")
 
         user_id = session.user_id
-        tenant_id = session.tenant_id
+        admin_id = session.admin_id
         domain_id = session.domain_id
         agent_id = getattr(session, "agent_id", None)
 
@@ -312,7 +312,7 @@ class ChatService:
         #    replaces the old 3-step tenant/domain/agent resolution).
         ctx = self._resolve_luciel_context(
             luciel_instance_id=luciel_instance_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
         )
@@ -326,19 +326,19 @@ class ChatService:
         can_use_memory = True
         if self.consent_policy and user_id:
             can_use_memory = self.consent_policy.can_persist_memory(
-                user_id=user_id, tenant_id=tenant_id,
+                user_id=user_id, admin_id=admin_id,
             )
         if user_id and can_use_memory:
             memories = self.memory_service.retrieve_memories(
                 user_id=user_id,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 agent_id=agent_id,
             )
 
         # 5. Retrieve relevant knowledge (scope-inherited).
         knowledge = self.knowledge_retriever.retrieve(
             query=message,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
             luciel_instance_id=ctx.luciel_instance_id,
@@ -410,7 +410,7 @@ class ChatService:
                 try:
                     self.memory_service.repository.save_memory(
                         user_id=user_id,
-                        tenant_id=tenant_id,
+                        admin_id=admin_id,
                         agent_id=agent_id,
                         category=category,
                         content=content,
@@ -449,7 +449,7 @@ class ChatService:
             self.escalation_service.handle_escalation(
                 session_id=session_id,
                 user_id=user_id,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 reason=decision.escalation_reason,
             )
 
@@ -473,7 +473,7 @@ class ChatService:
                     try:
                         self.memory_service.enqueue_extraction(
                             user_id=user_id,
-                            tenant_id=tenant_id,
+                            admin_id=admin_id,
                             session_id=session_id,
                             message_id=assistant_msg.id,
                             actor_key_prefix=actor_key_prefix,
@@ -502,7 +502,7 @@ class ChatService:
                     # Legacy sync path — still idempotent if message_id provided.
                     memories_extracted = self.memory_service.extract_and_save(
                         user_id=user_id,
-                        tenant_id=tenant_id,
+                        admin_id=admin_id,
                         session_id=session_id,
                         agent_id=agent_id,
                         messages=recent_messages,
@@ -530,7 +530,7 @@ class ChatService:
             self.trace_service.record_trace(
                 session_id=session_id,
                 user_id=user_id,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 domain_id=domain_id,
                 agent_id=agent_id,
                 user_message=message,
@@ -571,11 +571,11 @@ class ChatService:
         session = self.session_service.get_session(session_id)
         if session is None:
             raise ValueError("Session not found")
-        if caller_tenant_id and session.tenant_id != caller_tenant_id:
+        if caller_tenant_id and session.admin_id != caller_tenant_id:
             raise PermissionError("Session does not belong to this tenant")
 
         user_id = session.user_id
-        tenant_id = session.tenant_id
+        admin_id = session.admin_id
         domain_id = session.domain_id
         agent_id = getattr(session, "agent_id", None)
 
@@ -586,7 +586,7 @@ class ChatService:
         # Step 24.5 File 15: unified context resolution.
         ctx = self._resolve_luciel_context(
             luciel_instance_id=luciel_instance_id,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
         )
@@ -598,18 +598,18 @@ class ChatService:
         can_use_memory = True
         if self.consent_policy and user_id:
             can_use_memory = self.consent_policy.can_persist_memory(
-                user_id=user_id, tenant_id=tenant_id,
+                user_id=user_id, admin_id=admin_id,
             )
         if user_id and can_use_memory:
             memories = self.memory_service.retrieve_memories(
                 user_id=user_id,
-                tenant_id=tenant_id,
+                admin_id=admin_id,
                 agent_id=agent_id,
             )
 
         knowledge = self.knowledge_retriever.retrieve(
             query=message,
-            tenant_id=tenant_id,
+            admin_id=admin_id,
             domain_id=domain_id,
             agent_id=agent_id,
             luciel_instance_id=ctx.luciel_instance_id,
@@ -663,7 +663,7 @@ class ChatService:
                 self.escalation_service.handle_escalation(
                     session_id=session_id,
                     user_id=user_id,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     reason=decision.escalation_reason,
                 )
 
@@ -683,7 +683,7 @@ class ChatService:
                         try:
                             self.memory_service.enqueue_extraction(
                                 user_id=user_id,
-                                tenant_id=tenant_id,
+                                admin_id=admin_id,
                                 session_id=session_id,
                                 message_id=assistant_msg.id,
                                 actor_key_prefix=actor_key_prefix,
@@ -705,7 +705,7 @@ class ChatService:
                     else:
                         self.memory_service.extract_and_save(
                             user_id=user_id,
-                            tenant_id=tenant_id,
+                            admin_id=admin_id,
                             session_id=session_id,
                             agent_id=agent_id,
                             messages=recent_messages,
@@ -729,7 +729,7 @@ class ChatService:
                 self.trace_service.record_trace(
                     session_id=session_id,
                     user_id=user_id,
-                    tenant_id=tenant_id,
+                    admin_id=admin_id,
                     domain_id=domain_id,
                     agent_id=agent_id,
                     user_message=message,

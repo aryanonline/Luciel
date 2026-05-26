@@ -7,18 +7,18 @@ GET  /api/v1/consent/status     -- check current consent state
 Step 29.y Cluster 1 (G-3 + G-7 resolution)
 ==========================================
 
-Pre-29.y, all three routes accepted ``tenant_id`` from the request body
+Pre-29.y, all three routes accepted ``admin_id`` from the request body
 and trusted it. There was no rate limit, no scope enforcement, and no
 audit row written for grant/withdraw. This was a PIPEDA-deceptive
 forgery surface: a holder of any tenant-A API key could write to
-tenant-B's user_consents table by simply passing ``tenant_id="tenant-B"``
+tenant-B's user_consents table by simply passing ``admin_id="tenant-B"``
 in the body. See findings_phase1g.md G-3 for the four documented
 attacks (cross-tenant forgery, withdrawal-DoS, status enumeration,
 table-flood).
 
 The hardened contract:
 
-  1. ``tenant_id`` is derived from ``request.state.tenant_id`` (set by
+  1. ``admin_id`` is derived from ``request.state.admin_id`` (set by
      the auth middleware from the API key). It can never come from the
      request body for non-platform-admin callers. Platform-admin keys
      MAY override via the body but the override is logged and audited.
@@ -35,7 +35,7 @@ The hardened contract:
      the same convention applied to GET /admin/verification).
   4. The body still carries ``user_id`` because that is the chat
      end-user identifier (free-form, supplied by the caller's client),
-     distinct from the platform User UUID. ``tenant_id`` in the body
+     distinct from the platform User UUID. ``admin_id`` in the body
      becomes optional (default None); if supplied AND the caller is
      not platform_admin AND it does not match the key's tenant, the
      request is rejected with 403.
@@ -82,11 +82,11 @@ router = APIRouter(prefix="/consent", tags=["consent"])
 
 
 def _resolve_tenant_id(request: Request, body_tenant_id: str | None) -> str:
-    """Derive the effective tenant_id for a consent mutation.
+    """Derive the effective admin_id for a consent mutation.
 
     Rules:
-      * Non-platform-admin: tenant_id comes from the API key. If the
-        body also supplies a tenant_id and it does not match, reject.
+      * Non-platform-admin: admin_id comes from the API key. If the
+        body also supplies a admin_id and it does not match, reject.
       * Platform-admin: may target any tenant. If the body supplies one
         we use it; otherwise fall back to the key's tenant binding (if
         any). If neither is set, reject -- platform_admin keys without
@@ -95,7 +95,7 @@ def _resolve_tenant_id(request: Request, body_tenant_id: str | None) -> str:
     Raises HTTPException(403) on cross-tenant attempts by non-platform
     callers, HTTPException(400) when neither path can resolve.
     """
-    key_tenant_id = getattr(request.state, "tenant_id", None)
+    key_tenant_id = getattr(request.state, "admin_id", None)
     is_platform = ScopePolicy.is_platform_admin(request)
 
     if not is_platform:
@@ -116,7 +116,7 @@ def _resolve_tenant_id(request: Request, body_tenant_id: str | None) -> str:
                 detail={
                     "code": "cross_tenant_denied",
                     "message": (
-                        "tenant_id in request body does not match the "
+                        "admin_id in request body does not match the "
                         "calling API key's tenant scope."
                     ),
                 },
@@ -132,7 +132,7 @@ def _resolve_tenant_id(request: Request, body_tenant_id: str | None) -> str:
                 "code": "tenant_id_required",
                 "message": (
                     "Platform-admin consent calls must specify "
-                    "tenant_id in the request body."
+                    "admin_id in the request body."
                 ),
             },
         )
@@ -158,11 +158,11 @@ def grant_consent(
     collection_method/consent_text/consent_context fields on the
     existing row.
     """
-    effective_tenant_id = _resolve_tenant_id(request, body.tenant_id)
+    effective_tenant_id = _resolve_tenant_id(request, body.admin_id)
 
     existing = repo.get_consent(
         user_id=body.user_id,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         consent_type=body.consent_type,
     )
     before = (
@@ -176,7 +176,7 @@ def grant_consent(
     # Same invariant locked at admin_forensics.py line 779.
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         action=ACTION_CONSENT_GRANT,
         resource_type=RESOURCE_CONSENT,
         resource_pk=existing.id if existing is not None else None,
@@ -194,7 +194,7 @@ def grant_consent(
 
     record = repo.grant_consent(
         user_id=body.user_id,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         consent_type=body.consent_type,
         collection_method=body.collection_method,
         consent_text=body.consent_text,
@@ -228,13 +228,13 @@ def withdraw_consent(
     """Withdraw a previously-granted consent.
 
     Auditable: writes an ACTION_CONSENT_WITHDRAW row before committing.
-    404 if no consent record exists for (user_id, tenant_id, consent_type).
+    404 if no consent record exists for (user_id, admin_id, consent_type).
     """
-    effective_tenant_id = _resolve_tenant_id(request, body.tenant_id)
+    effective_tenant_id = _resolve_tenant_id(request, body.admin_id)
 
     existing = repo.get_consent(
         user_id=body.user_id,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         consent_type=body.consent_type,
     )
     if existing is None:
@@ -248,7 +248,7 @@ def withdraw_consent(
 
     audit_repo.record(
         ctx=audit_ctx,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         action=ACTION_CONSENT_WITHDRAW,
         resource_type=RESOURCE_CONSENT,
         resource_pk=existing.id,
@@ -263,7 +263,7 @@ def withdraw_consent(
 
     repo.withdraw_consent(
         user_id=body.user_id,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         consent_type=body.consent_type,
     )
     if db.in_transaction():
@@ -280,7 +280,7 @@ def consent_status(
     request: Request,
     user_id: Annotated[str, Query(min_length=1, max_length=200)],
     repo: Annotated[ConsentRepository, Depends(get_consent_repository)],
-    tenant_id: Annotated[str | None, Query(max_length=100)] = None,
+    admin_id: Annotated[str | None, Query(max_length=100)] = None,
     consent_type: Annotated[str, Query(max_length=100)] = "memory_persistence",
 ) -> ConsentStatusResponse:
     """Return current consent state for a user under the caller's tenant.
@@ -290,22 +290,22 @@ def consent_status(
     blocked by ``_resolve_tenant_id`` -- a tenant-A key cannot read
     tenant-B's consent records.
     """
-    effective_tenant_id = _resolve_tenant_id(request, tenant_id)
+    effective_tenant_id = _resolve_tenant_id(request, admin_id)
     record = repo.get_consent(
         user_id=user_id,
-        tenant_id=effective_tenant_id,
+        admin_id=effective_tenant_id,
         consent_type=consent_type,
     )
     if record is None:
         return ConsentStatusResponse(
             user_id=user_id,
-            tenant_id=effective_tenant_id,
+            admin_id=effective_tenant_id,
             consent_type=consent_type,
             granted=False,
         )
     return ConsentStatusResponse(
         user_id=record.user_id,
-        tenant_id=record.tenant_id,
+        admin_id=record.admin_id,
         consent_type=record.consent_type,
         granted=record.granted,
         collection_method=record.collection_method,

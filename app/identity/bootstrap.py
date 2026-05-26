@@ -7,7 +7,7 @@ Every authenticated cookied request hits the same chicken-and-egg
 with Wall-1 (Account) FORCE RLS:
 
   1. We know the User from the session cookie's user_id claim.
-  2. We need to know the canonical tenant_id, the user's tier, and
+  2. We need to know the canonical admin_id, the user's tier, and
      the full list of active scope assignments to (a) set
      ``app.admin_id`` GUC for the rest of the request, (b) enforce
      tier-aware authorisation, and (c) populate billing/admin
@@ -42,7 +42,7 @@ Doctrine
 ========
 
 * This is a DISCOVERY read only. No writes, no side effects, no
-  audit. The caller writes audit rows under the resolved tenant_id.
+  audit. The caller writes audit rows under the resolved admin_id.
 
 * Once the snapshot is taken, the caller is responsible for binding
   ``current_admin_id`` (and ``current_instance_id`` where applicable)
@@ -132,7 +132,7 @@ class IdentitySnapshot:
     def canonical_role(self) -> str:
         """Role on the canonical tenant ('' if no scope).
 
-        Picks the scope whose tenant_id matches canonical_tenant_id;
+        Picks the scope whose admin_id matches canonical_tenant_id;
         if multiple match (shouldn't happen in steady state), prefers
         ``role='owner'``.
         """
@@ -140,7 +140,7 @@ class IdentitySnapshot:
             return ""
         on_canonical = [
             s for s in self.active_scopes
-            if s.tenant_id == self.canonical_tenant_id
+            if s.admin_id == self.canonical_tenant_id
         ]
         if not on_canonical:
             return ""
@@ -168,7 +168,7 @@ class IdentityBootstrap:
         "canonical_tenant_id",
         "canonical_tier",
         "scope_assignment_id",
-        "tenant_id",
+        "admin_id",
         "domain_id",
         "role",
         "started_at",
@@ -187,7 +187,7 @@ class IdentityBootstrap:
         rows = self.db.execute(
             _sa_text(
                 "SELECT canonical_tenant_id, canonical_tier, "
-                "scope_assignment_id, tenant_id, domain_id, role, "
+                "scope_assignment_id, admin_id, domain_id, role, "
                 "started_at, ended_at, ended_reason, ended_note, "
                 "ended_by_api_key_id, active "
                 "FROM public.arc9_c22_bootstrap_identity(:uid)"
@@ -217,7 +217,7 @@ class IdentityBootstrap:
                 _hydrate_scope_assignment(
                     scope_id=r.scope_assignment_id,
                     user_id=user_id,
-                    tenant_id=r.tenant_id,
+                    admin_id=r.admin_id,
                     domain_id=r.domain_id,
                     role=r.role,
                     started_at=r.started_at,
@@ -246,7 +246,7 @@ def _hydrate_scope_assignment(
     *,
     scope_id: uuid.UUID,
     user_id: uuid.UUID,
-    tenant_id: str,
+    admin_id: str,
     domain_id: str,
     role: str,
     started_at: datetime,
@@ -266,7 +266,7 @@ def _hydrate_scope_assignment(
     return ScopeAssignment(
         id=scope_id,
         user_id=user_id,
-        tenant_id=tenant_id,
+        admin_id=admin_id,
         domain_id=domain_id,
         role=role,
         started_at=started_at,
