@@ -790,6 +790,139 @@ class BillingService:
         return self.db.execute(stmt).scalars().first()
 
     # -----------------------------------------------------------------
+    # Arc 10 -- closure / reactivation helpers.
+    # -----------------------------------------------------------------
+    # These three methods are called by ClosureService and
+    # ReactivationService respectively. They are thin facades over the
+    # existing Stripe primitives (cancel_subscription,
+    # schedule_cancellation_at_period_end, create_checkout_session,
+    # retrieve_checkout_session) so the closure / reactivation
+    # services do not couple directly to the Stripe SDK.
+
+    def cancel_for_closure(
+        self,
+        *,
+        admin_id: str,
+        cancel_mode: str,
+        audit_ctx,
+    ) -> bool:
+        """Cancel the admin's Stripe subscription as part of closure.
+
+        cancel_mode:
+          'immediate'  -- cancel now, no proration (StripeClient.
+                          cancel_subscription).
+          'period_end' -- cancel at current_period_end (StripeClient.
+                          schedule_cancellation_at_period_end).
+
+        Returns True iff a Stripe modification was actually issued.
+        False on Free admins (no subscription) or admins whose
+        subscription is already cancelled.
+
+        Failure modes:
+          * No subscription found -> return False (Free admin).
+          * Subscription already cancelled (status='canceled') ->
+            return False (idempotent against re-closure).
+          * Stripe API exception -> let it bubble; the caller
+            (ClosureService.initiate_closure) catches and continues
+            with the local closure regardless.
+
+        We do NOT mirror the Stripe state into the local
+        subscriptions row here -- the webhook
+        ``_on_subscription_deleted`` is the canonical writer for
+        the local cancel state. This keeps the source-of-truth
+        contract clean: Stripe owns billing state, our DB mirrors it
+        on webhook receipt.
+        """
+        sub = self.get_active_subscription_for_tenant(admin_id=admin_id)
+        if sub is None or not sub.stripe_subscription_id:
+            return False
+        if sub.status == "canceled":
+            # Idempotent against re-closure: Stripe has already
+            # cancelled this sub via some prior path (manual
+            # Dashboard cancel, prior closure attempt).
+            return False
+
+        if cancel_mode == "immediate":
+            self.stripe.cancel_subscription(
+                stripe_subscription_id=sub.stripe_subscription_id,
+            )
+        elif cancel_mode == "period_end":
+            self.stripe.schedule_cancellation_at_period_end(
+                stripe_subscription_id=sub.stripe_subscription_id,
+            )
+        else:
+            # ClosureService.initiate_closure validates cancel_mode
+            # before this method is called; reaching here means a
+            # programmer error, not a user error. Loud failure is
+            # the right posture.
+            raise ValueError(
+                f"BillingService.cancel_for_closure: cancel_mode "
+                f"{cancel_mode!r} is not legal."
+            )
+        return True
+
+    def create_reactivation_checkout(
+        self,
+        *,
+        admin_id: str,
+        target_tier: str,
+        success_url: str,
+        cancel_url: str,
+    ):
+        """Create a fresh Stripe Checkout session for reactivation.
+
+        Per Vision §6.4: reactivation requires resubscribe -- a fresh
+        Stripe checkout, not a resurrection of the old subscription.
+        The previous subscription row stays in the DB as historical
+        record; the new checkout will create a new Subscription row
+        when the webhook fires.
+
+        Looks up the existing admin to source customer_email (so the
+        buyer does not re-type it) and uses metadata to carry admin_id
+        so the complete_reactivation phase can verify the session
+        belongs to the right admin.
+        """
+        # Look up the admin to get customer_email. We import Admin
+        # here rather than at module top so this method composes
+        # cleanly even if a future cycle changes the module layout.
+        from app.models.admin import Admin
+        admin = self.db.get(Admin, admin_id)
+        if admin is None:
+            raise ValueError(
+                f"BillingService.create_reactivation_checkout: "
+                f"admin {admin_id!r} not found."
+            )
+        # The admin's name has been redacted to '[REDACTED]' only
+        # post-hard-delete; pre-hard-delete it's still the real name.
+        # We don't need customer_email here strictly -- Stripe will
+        # collect one on the checkout page -- but we pass it through
+        # if the admin row carries it via a related user record. For
+        # the v1 reactivation flow, we let Stripe collect.
+        price_id = self.resolve_price_id(tier=target_tier, cadence="monthly")
+        session = self.stripe.create_checkout_session(
+            customer_email="",  # let Stripe collect
+            price_id=price_id,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                "admin_id": admin_id,
+                "purpose": "arc10_reactivation",
+                "target_tier": target_tier,
+            },
+            idempotency_key=f"reactivate:{admin_id}",
+        )
+        return session
+
+    def retrieve_checkout_session(self, *, session_id: str):
+        """Look up a Stripe checkout session by id.
+
+        Thin facade around StripeClient.retrieve_checkout_session so
+        ReactivationService.complete_reactivation does not import
+        StripeClient directly.
+        """
+        return self.stripe.retrieve_checkout_session(session_id)
+
+    # -----------------------------------------------------------------
     # Step 30a.2-pilot: self-serve refund of the one-time intro fee.
     # -----------------------------------------------------------------
 

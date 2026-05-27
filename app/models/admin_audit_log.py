@@ -33,7 +33,9 @@ Domain-agnostic: no vertical enums, no imports from app/domain/.
 """
 from __future__ import annotations
 
-from sqlalchemy import CHAR, ForeignKey, Index, Integer, String, Text
+from datetime import datetime  # Arc 10: cold_archived_at column
+
+from sqlalchemy import CHAR, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -79,6 +81,27 @@ ACTION_WORKER_PERMANENT_FAILURE = "worker_permanent_failure"
 # rotated as a security cascade." Auditors filter on this to find all
 # role-change-induced revocations.
 ACTION_KEY_ROTATED_ON_ROLE_CHANGE = "key_rotated_on_role_change"
+
+# -----------------------------------------------------------------
+# Arc 10 (Alembic arc10_lifecycle_subsystem) — lifecycle action verbs.
+# -----------------------------------------------------------------
+# One verb per distinct user-visible (or audit-trail-relevant)
+# lifecycle event. The verbs are advisory (no DB-side ENUM) so future
+# additions land without a schema migration. Forensics queries filter
+# on these strings.
+ACTION_ACCOUNT_CLOSURE_INITIATED = "account_closure_initiated"
+ACTION_ACCOUNT_REACTIVATED = "account_reactivated"
+ACTION_ACCOUNT_HARD_DELETED = "account_hard_deleted"
+ACTION_DATA_EXPORT_REQUESTED = "data_export_requested"
+ACTION_DATA_EXPORT_GENERATED = "data_export_generated"
+ACTION_DATA_EXPORT_FAILED = "data_export_failed"
+ACTION_DATA_EXPORT_EXPIRED = "data_export_expired"
+ACTION_DOWNGRADE_INITIATED = "downgrade_initiated"
+ACTION_DOWNGRADE_GRACE_ENFORCED = "downgrade_grace_enforced"
+ACTION_AUDIT_LOG_TIER_ARCHIVED = "audit_log_tier_archived"
+ACTION_INSTANCE_DEACTIVATED = "instance_deactivated"
+ACTION_KNOWLEDGE_SOFT_DELETED = "knowledge_soft_deleted"
+ACTION_KNOWLEDGE_HARD_DELETED = "knowledge_hard_deleted"
 
 # Step 28 C8 (P3-O): durable record for memory extractor save-time failures.
 # The chat turn must NOT fail when memory persistence fails (fail-open
@@ -720,6 +743,45 @@ class AdminAuditLog(Base, TimestampMixin):
         comment="row_hash of the prior row in id ASC order; "
                 "genesis = '0'*64. NOT NULL post Step 29.y "
                 "Cluster 3 (D-8).",
+    )
+
+    # -----------------------------------------------------------------
+    # Arc 10 (Alembic arc10_lifecycle_subsystem) — audit-tier retention.
+    # -----------------------------------------------------------------
+    # Reconciles Arc 9 C6.1's "forward-only forever" stance with Vision
+    # §6.5 ("audit log archived to cold storage for legal retention
+    # window") and §7 (tier-conditional retention: 30d Free / 1y Pro /
+    # 7y Enterprise). The Vision is canonical per Vision §10 doctrine-
+    # anchor.
+    #
+    # tier_at_write: STICKY — the admin's tier at the moment this row
+    # was written. A Pro→Free downgrade does NOT retroactively shorten
+    # the retention of Pro-era audit rows. Backfilled best-effort in
+    # the Arc 10 migration from the admin's current tier. New rows
+    # written by AdminAuditRepository.record() must populate this from
+    # the writing context (paired code change in a follow-up commit
+    # if the repo doesn't already do it).
+    #
+    # cold_archived_at: set by AuditRetentionService when this row has
+    # been written to S3 cold storage with the hash chain extended
+    # across the boundary. The hot row stays in place (chain stays
+    # walkable from current rows back through history). A future arc
+    # may add a hot-purge step that DELETEs rows whose cold_archived_at
+    # is well-past retention; Arc 10 does NOT do that (luciel_audit_
+    # archiver has SELECT + UPDATE only, no DELETE).
+    tier_at_write: Mapped[str | None] = mapped_column(
+        String(16), nullable=True,
+        comment=(
+            "Arc 10 — admin's tier AT THE MOMENT this row was written. "
+            "Sticky across downgrades."
+        ),
+    )
+    cold_archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment=(
+            "Arc 10 — set when this row has been archived to S3 cold "
+            "storage with hash-chain extension. Hot row retained."
+        ),
     )
 
     __table_args__ = (

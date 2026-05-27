@@ -119,6 +119,32 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     """Set when a newer version of this source_id is ingested. NULL = active.
     Retrieval (File 11) filters on superseded_at IS NULL."""
 
+    # Arc 10 (Alembic arc10_lifecycle_subsystem) — two lifecycle flags
+    # distinct from superseded_at:
+    #
+    # soft_deleted_at: set when the parent instance is deactivated and
+    # this chunk enters the 30-day soft-delete window per Vision §6.1.
+    # The Arc 10 soft-delete worker physically removes chunks whose
+    # soft_deleted_at is older than 30 days. Retrieval (Arc 11 will
+    # update its filter) must exclude soft_deleted_at IS NOT NULL.
+    #
+    # pending_downgrade_archived_at: set when DowngradeArchiveService
+    # archives this chunk's source at a Pro→Free boundary. All chunks
+    # sharing a source_id archive together (LRU at the source level).
+    # Recoverable on re-upgrade per Customer Journey Phase 8 Pro
+    # ("archived (not deleted) until he upgrades again"). Retrieval
+    # must exclude pending_downgrade_archived_at IS NOT NULL.
+    #
+    # No knowledge_sources table exists today; the "source" is rows-
+    # grouped-by-source_id on this table. The downgrade-archive 5th
+    # axis (AXIS_KNOWLEDGE) operates via GROUP BY source_id.
+    soft_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    pending_downgrade_archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # ---- Audit ----
     created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     """--- Audit ---"""

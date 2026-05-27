@@ -106,6 +106,48 @@ class Admin(Base):
         onupdate=func.now(),
     )
 
+    # -----------------------------------------------------------------
+    # Arc 10 Lifecycle Subsystem (Alembic arc10_lifecycle_subsystem).
+    # -----------------------------------------------------------------
+    # See Vision §6 and Architecture §3.6 for the full lifecycle
+    # spec. The four columns below describe the closure / hard-delete
+    # lifecycle of an Admin row.
+    #
+    # deactivated_at: drift reconciliation — the Arc 5 rename of
+    # tenant_configs → admins did not carry this column. Backfilled
+    # from legacy tenant_configs in the Arc 10 migration. Stamped by
+    # AdminService.deactivate_tenant_with_cascade.
+    #
+    # closure_initiated_at: distinct from deactivated_at. Set ONLY by
+    # POST /api/v1/admin/account/close. Starts the 30-day grace clock.
+    # The retention worker (app/worker/tasks/retention.py) keys hard-
+    # delete eligibility off THIS column, not off deactivated_at. This
+    # is what enforces "closure is the only trigger for hard-delete;
+    # platform-admin deactivation does NOT advance toward hard-delete."
+    #
+    # closure_cancel_mode: the admin's Stripe-cancel choice at closure.
+    # 'immediate' or 'period_end'. Read by _on_subscription_deleted.
+    #
+    # hard_deleted_at: terminal tombstone stamp. Set by
+    # hard_delete_tenant_after_retention (Arc 10 changed step 11 from
+    # row-delete to tombstone UPDATE per Vision §6.5 "minimal compliance
+    # record"). Once set, the row is audit-only: name, stripe_customer_id,
+    # last_signup_ip are redacted to NULL / '[REDACTED]'. The row
+    # persists so the audit chain's row_natural_id references stay
+    # walkable.
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    closure_initiated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    closure_cancel_mode: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )
+    hard_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     __table_args__ = (
         CheckConstraint(
             "tier IN ('free', 'pro', 'enterprise', 'individual', 'solo', 'team', 'company')",
@@ -116,6 +158,11 @@ class Admin(Base):
             "'free_signup', 'revision_b_backfill', 'manual')",
             name="ck_admins_tier_source_valid",
         ),
+        # Arc 10: closure_cancel_mode is a free-text VARCHAR(16) at the
+        # column level but only two values are legal. The CHECK
+        # constraint is created in the Arc 10 migration; this Index
+        # block must not redeclare it (SQLAlchemy would try to issue
+        # CREATE on table-create and conflict with the migration).
         Index("ix_admins_tier", "tier"),
         Index("ix_admins_active", "active"),
         # ix_admins_last_signup_ip is a PARTIAL index created in

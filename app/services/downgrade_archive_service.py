@@ -54,12 +54,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import Session
 
 from app.models.admin_widget_domain import AdminWidgetDomain
 from app.models.api_key import ApiKey
 from app.models.instance import Instance
+from app.models.knowledge import KnowledgeEmbedding  # Arc 10: AXIS_KNOWLEDGE
 from app.models.scope_assignment import EndReason, ScopeAssignment
 from app.policy.entitlements import (
     TIER_ENTERPRISE,
@@ -142,8 +143,16 @@ AXIS_INSTANCES = "instances"
 AXIS_EMBED_KEYS = "embed_keys"
 AXIS_CNAMES = "cnames"
 AXIS_SEATS = "seats"
+# Arc 10: knowledge axis. Unlike the count-of-rows axes above,
+# AXIS_KNOWLEDGE is a sum-of-bytes axis whose unit is source_id
+# (a group of chunks sharing the same source_id). LRU selection
+# picks oldest sources by their newest chunk's updated_at, and
+# archives whole sources until total bytes <= cap. All chunks
+# sharing a source_id archive together.
+AXIS_KNOWLEDGE = "knowledge"
 ALL_AXES: tuple[str, ...] = (
     AXIS_INSTANCES, AXIS_EMBED_KEYS, AXIS_CNAMES, AXIS_SEATS,
+    AXIS_KNOWLEDGE,
 )
 
 
@@ -279,6 +288,12 @@ class DowngradeArchiveService:
         if cap is None:
             return AxisOverflow(axis=axis, cap=None, current=0, overflow=0)
 
+        # Arc 10: AXIS_KNOWLEDGE is a sum-of-bytes axis, not
+        # count-of-rows. Special-cased here so the existing count
+        # path stays untouched for the four original axes.
+        if axis == AXIS_KNOWLEDGE:
+            return self._compute_knowledge_axis(admin_id, cap)
+
         active_rows = self._active_rows_for_axis(admin_id, axis)
         current = len(active_rows)
         overflow = max(current - cap, 0)
@@ -312,6 +327,86 @@ class DowngradeArchiveService:
         return AxisOverflow(
             axis=axis, cap=cap, current=current,
             overflow=overflow, archived_ids=ids,
+        )
+
+    # -----------------------------------------------------------------
+    # AXIS_KNOWLEDGE -- sum-of-bytes overflow with source-id grouping.
+    # -----------------------------------------------------------------
+
+    def _compute_knowledge_axis(
+        self,
+        admin_id: str,
+        cap_bytes: int,
+    ) -> AxisOverflow:
+        """Compute the knowledge axis overflow for one admin.
+
+        Unit-of-archive is source_id (a group of chunks sharing
+        the same source_id). Per-source size approximated by
+        SUM(LENGTH(content)) over active chunks of that source.
+
+        LRU sort: oldest source first, where "age" is the source's
+        most-recent chunk's updated_at. A source that has been
+        recently re-ingested or edited counts as recently-used.
+
+        Selection rule: take sources in LRU order, accumulate their
+        bytes, stop when total active bytes (after archiving the
+        selected sources) is <= cap.
+
+        Returns AxisOverflow whose archived_ids field is a list of
+        source_id strings (not row ids). _apply_axis dispatches on
+        axis name and reads source_ids accordingly.
+        """
+        from sqlalchemy import func, select as sa_select
+
+        # Per-source aggregation: source_id, total bytes, most-recent
+        # updated_at.
+        per_source_stmt = (
+            sa_select(
+                KnowledgeEmbedding.source_id,
+                func.sum(func.length(KnowledgeEmbedding.content)).label("bytes"),
+                func.max(KnowledgeEmbedding.updated_at).label("recency"),
+            )
+            .where(
+                KnowledgeEmbedding.admin_id == admin_id,
+                KnowledgeEmbedding.source_id.is_not(None),
+                KnowledgeEmbedding.superseded_at.is_(None),
+                KnowledgeEmbedding.soft_deleted_at.is_(None),
+                KnowledgeEmbedding.pending_downgrade_archived_at.is_(None),
+            )
+            .group_by(KnowledgeEmbedding.source_id)
+        )
+        rows = list(self.db.execute(per_source_stmt).all())
+
+        # Compute current total bytes.
+        current_bytes = sum(int(r.bytes or 0) for r in rows)
+        if current_bytes <= cap_bytes:
+            return AxisOverflow(
+                axis=AXIS_KNOWLEDGE,
+                cap=cap_bytes,
+                current=current_bytes,
+                overflow=0,
+            )
+
+        # LRU sort by recency ascending (oldest first), tiebreak by
+        # source_id so two sources with identical recency archive in
+        # deterministic order.
+        rows.sort(key=lambda r: (r.recency or datetime.min, r.source_id))
+
+        # Greedy: archive sources oldest-first until we are under cap.
+        archived_source_ids: list[str | int] = []
+        bytes_remaining = current_bytes
+        for r in rows:
+            if bytes_remaining <= cap_bytes:
+                break
+            archived_source_ids.append(r.source_id)
+            bytes_remaining -= int(r.bytes or 0)
+
+        return AxisOverflow(
+            axis=AXIS_KNOWLEDGE,
+            cap=cap_bytes,
+            current=current_bytes,
+            overflow=current_bytes - bytes_remaining,  # bytes archived
+            archived_ids=archived_source_ids,
         )
 
     # -----------------------------------------------------------------
@@ -431,6 +526,29 @@ class DowngradeArchiveService:
                 row.pending_downgrade_archived_at = archived_at
             return
 
+        if axis == AXIS_KNOWLEDGE:
+            # archive_ids here are source_id values (strings), not
+            # row PKs. Stamp every active chunk sharing one of these
+            # source_ids in a single UPDATE per source -- this is
+            # what the "all chunks sharing a source_id archive
+            # together" invariant requires.
+            for source_id in ids_list:
+                self.db.execute(
+                    sql_text(
+                        """
+                        UPDATE knowledge_embeddings
+                           SET pending_downgrade_archived_at = :ts
+                         WHERE admin_id = :aid
+                           AND source_id = :sid
+                           AND superseded_at IS NULL
+                           AND soft_deleted_at IS NULL
+                           AND pending_downgrade_archived_at IS NULL
+                        """
+                    ),
+                    {"ts": archived_at, "aid": admin_id, "sid": source_id},
+                )
+            return
+
         if axis == AXIS_SEATS:
             # Reuse Pattern E lifecycle columns. The repository's
             # end_assignment is the right entry point because it
@@ -467,6 +585,10 @@ _CAP_AXIS_TO_ATTR: dict[str, str] = {
     AXIS_EMBED_KEYS:  "embed_key_count_cap",
     AXIS_CNAMES:      "widget_custom_domain_cname_cap",
     AXIS_SEATS:       "seat_cap",
+    # Arc 10: knowledge cap is in BYTES, not in count-of-rows. The
+    # _compute_axis path special-cases AXIS_KNOWLEDGE to compute
+    # overflow as sum(bytes) - cap rather than count(rows) - cap.
+    AXIS_KNOWLEDGE:   "knowledge_bytes_cap",
 }
 
 

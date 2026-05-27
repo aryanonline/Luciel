@@ -134,3 +134,15 @@ class ApiKey(Base, TimestampMixin):
     )
     """Arc 6 Commit 8.5b — overflow archive stamp on embed-key rows.
     NULL on admin keys (uncapped) and on un-archived embed keys."""
+
+    # Arc 10 (Alembic arc10_lifecycle_subsystem) — revoke-time forensic
+    # stamp. Set when ApiKeyService.deactivate_key /
+    # .deactivate_all_for_tenant runs. Distinct from 'active'
+    # (operational on/off) and from pending_downgrade_archived_at
+    # (recoverable downgrade archive). Once revoked, never reissued —
+    # the reactivation path mints NEW keys, leaving revoked rows as-is.
+    # See Vision §6.4 ("Instance: … embed keys re-minted (new keys,
+    # old keys stay revoked)").
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

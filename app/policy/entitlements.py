@@ -129,6 +129,15 @@ class TierEntitlement:
     # Axis 8 -- Audit retention (days; None = unlimited / contract)
     audit_retention_days: int | None
 
+    # Axis 8b -- Knowledge byte cap per Admin (Arc 10).
+    # Vision §7 tier matrix knowledge quotas:
+    #   Free       :   100 MB
+    #   Pro        : 5,000 MB (5 GB)
+    #   Enterprise : None (unlimited)
+    # The downgrade-archive 5th axis (AXIS_KNOWLEDGE) reads this cap
+    # to decide which sources to LRU-archive at the downgrade boundary.
+    knowledge_bytes_cap: int | None
+
     # Axis 9 -- SSO
     sso_enabled: bool
 
@@ -181,6 +190,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         # 2026-05-23 revision: leads 10\u2192100, API disabled\u2192enabled at
         # 30rpm, embed keys 0\u21921 (more generous Free per Option A).
         instance_count_cap=1,
+        # Arc 10: 100 MB per Vision §7 tier matrix.
+        knowledge_bytes_cap=100 * 1024 * 1024,
         model_tier_default="base",
         composition_enabled=False,
         max_composition_depth=0,
@@ -210,6 +221,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         # expansion per Option A; opens
         # D-pro-tier-rate-limit-abuse-surface-2026-05-23 P1).
         instance_count_cap=10,
+        # Arc 10: 5 GB per Vision §7 tier matrix.
+        knowledge_bytes_cap=5 * 1024 * 1024 * 1024,
         model_tier_default="mid",
         composition_enabled=True,
         max_composition_depth=2,
@@ -236,6 +249,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         stripe_customer_record_required=True,
     ),
     TIER_ENTERPRISE: TierEntitlement(
+        # Arc 10: unlimited per Vision §7 tier matrix.
+        knowledge_bytes_cap=None,
         # 2026-05-24 Arc 7 doctrine pivot: Enterprise is now FLAT-recurring
         # symmetric with Pro (monthly $2,800 CAD or annual $24,000 CAD,
         # self-serve via Stripe Checkout). Metering RETIRED -- abuse-prevention

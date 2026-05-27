@@ -1441,3 +1441,85 @@ async def signup_free(
             "password -- the link also confirms your email address."
         ),
     )
+
+
+# =====================================================================
+# Arc 10 -- Downgrade grace status endpoint.
+# =====================================================================
+#
+# GET /billing/downgrade/grace
+#
+# Returns whether the calling admin is currently in a downgrade grace
+# window, and if so, when day-30 enforcement runs. The frontend reads
+# this to render the read-only banner and to gate UI controls during
+# grace.
+# =====================================================================
+
+from app.schemas.lifecycle import DowngradeGraceStatus
+from app.services.downgrade_grace_service import DowngradeGraceService
+
+
+@router.get(
+    "/downgrade/grace",
+    response_model=DowngradeGraceStatus,
+    status_code=status.HTTP_200_OK,
+)
+def downgrade_grace_status(
+    request: Request,
+    db: DbSession,
+) -> DowngradeGraceStatus:
+    # Read-only -- no service mutations. The frontend polls this on
+    # the dashboard to know whether to render the "downgrade in
+    # progress, X days remaining" banner.
+    admin_id = getattr(request.state, "admin_id", None)
+    if not admin_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin authentication required.",
+        )
+
+    from sqlalchemy import text as sql_text
+    row = db.execute(
+        sql_text(
+            """
+            SELECT pending_downgrade_target,
+                   pending_downgrade_initiated_at
+              FROM subscriptions
+             WHERE admin_id = :aid
+               AND pending_downgrade_target IS NOT NULL
+               AND pending_downgrade_initiated_at IS NOT NULL
+               AND pending_downgrade_enforced_at IS NULL
+             LIMIT 1
+            """
+        ),
+        {"aid": admin_id},
+    ).first()
+
+    if row is None:
+        return DowngradeGraceStatus(in_grace=False)
+
+    target_tier, initiated_at = row
+    # Compose with DowngradeGraceService for the expires-at math --
+    # keeps the GRACE_WINDOW_DAYS constant in one place.
+    from app.services.downgrade_archive_service import DowngradeArchiveService
+    archive_svc = DowngradeArchiveService(db)
+    # audit_repository is required by the service constructor but
+    # this endpoint is read-only and never emits an audit row, so we
+    # pass a no-op stand-in. The standalone enforcement worker uses a
+    # real AdminAuditRepository.
+    class _NoOpAuditRepo:
+        def record(self, *args, **kwargs) -> None:
+            return None
+    grace_svc = DowngradeGraceService(
+        db,
+        downgrade_archive_service=archive_svc,
+        audit_repository=_NoOpAuditRepo(),
+    )
+    expires_at = grace_svc.grace_expires_at(admin_id)
+
+    return DowngradeGraceStatus(
+        in_grace=True,
+        target_tier=target_tier,
+        initiated_at=initiated_at,
+        expires_at=expires_at,
+    )
