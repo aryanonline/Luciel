@@ -56,6 +56,13 @@ on:
     branches:
       - main
       - "step-*"
+      # Arc 10 PR #102: feature branches matching arc*/** now trigger CI
+      # so the backend-image-build job below can produce ECR images for
+      # the migration runner and the ECS service update *before* the
+      # branch lands on main. The CI run on the eventual merge commit
+      # to main is still the gate of record (branch protection).
+      - "arc*/**"
+      - "arc*"
   pull_request:
     branches:
       - main
@@ -340,6 +347,111 @@ jobs:
           echo "::error::widget.js did not return 200 + application/javascript after 6 attempts"
           cat /tmp/curl.out
           exit 1
+
+  backend-image-build-and-push:
+    # ---------------------------------------------------------------------------
+    # Arc 10: builds the backend Docker image from the current ref and pushes
+    # it to the luciel-backend ECR repo. Required because the migration
+    # runner ECS one-shot, the worker service redeploy, and the backend
+    # service redeploy all need an Arc-10 image tag in ECR before they can
+    # run. Prior to Arc 10 this build happened on the founder's laptop
+    # via scripts/deploy_arc8.ps1; closing that drift is part of Arc 10's
+    # "production-grade standards" alignment with Vision Section 6 / 7.
+    #
+    # Pushes two tags per build:
+    #   * <branch-slug>-<short-sha>  (immutable, what services reference)
+    #   * <branch-slug>-latest        (mutable, for diagnostic 'is main
+    #     ahead of staging?' grep-ability; never referenced by a service)
+    #
+    # Trust scoping: the luciel-backend-ci-build OIDC role's trust policy
+    # only accepts subs of repo:aryanonline/Luciel:ref:refs/heads/main
+    # and repo:aryanonline/Luciel:ref:refs/heads/arc*/**. Other refs
+    # cannot AssumeRoleWithWebIdentity even if this if: condition is bypassed.
+    # ---------------------------------------------------------------------------
+    name: Backend image build + push to ECR (Arc 10)
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/arc'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ca-central-1
+      BACKEND_CI_BUILD_ROLE_ARN: arn:aws:iam::729005488042:role/luciel-backend-ci-build
+      ECR_REGISTRY: 729005488042.dkr.ecr.ca-central-1.amazonaws.com
+      ECR_REPOSITORY: luciel-backend
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: compute image tags
+        id: tags
+        # The branch slug replaces / with - so refs/heads/arc10/lifecycle-subsystem
+        # becomes arc10-lifecycle-subsystem. The short sha is the canonical
+        # immutable identifier; the -latest tag is only for grep convenience.
+        run: |
+          BRANCH_RAW="${GITHUB_REF#refs/heads/}"
+          BRANCH_SLUG=$(echo "$BRANCH_RAW" | tr '/' '-' | tr -c 'a-zA-Z0-9._-' '-' | sed 's/--*/-/g; s/^-//; s/-$//')
+          SHORT_SHA="$(echo "$GITHUB_SHA" | cut -c1-7)"
+          IMMUTABLE_TAG="${BRANCH_SLUG}-${SHORT_SHA}"
+          LATEST_TAG="${BRANCH_SLUG}-latest"
+          echo "branch_slug=${BRANCH_SLUG}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}"     >> "$GITHUB_OUTPUT"
+          echo "immutable_tag=${IMMUTABLE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=${LATEST_TAG}"    >> "$GITHUB_OUTPUT"
+          echo "==> branch_slug=${BRANCH_SLUG}"
+          echo "==> immutable_tag=${IMMUTABLE_TAG}"
+          echo "==> latest_tag=${LATEST_TAG}"
+
+      - name: configure AWS credentials via GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.BACKEND_CI_BUILD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-backend-build-${{ github.run_id }}
+          role-duration-seconds: 1800
+
+      - name: ECR login
+        # aws-actions/amazon-ecr-login@v2 returns the registry URL as an
+        # output; we don't use it (the registry is hard-coded above) but
+        # the action also configures the docker credential helper.
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: docker build + push (immutable + latest tags)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # BUILD_GIT_SHA matches the deploy_arc8.ps1 convention -- the
+          # /api/v1/version endpoint reads this at runtime, so the
+          # CI-built image is observably equivalent to a laptop-built one.
+          build-args: |
+            BUILD_GIT_SHA=${{ steps.tags.outputs.short_sha }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.tags.outputs.immutable_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.tags.outputs.latest_tag }}
+          # Buildx in-line cache: speeds up subsequent builds without
+          # requiring an external registry cache backend. ECR doesn't
+          # support cache manifests, so inline is the simplest valid option.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: post-push verification
+        # Confirm the immutable tag is resolvable in ECR. This catches
+        # the case where docker push silently no-ops due to a registry
+        # permissions gap on PutImage (which our scoped role permits but
+        # has been a footgun on prior arcs).
+        run: |
+          set -euo pipefail
+          aws ecr describe-images \
+            --repository-name "${ECR_REPOSITORY}" \
+            --image-ids imageTag="${{ steps.tags.outputs.immutable_tag }}" \
+            --query 'imageDetails[0].[imageTags,imagePushedAt,imageSizeInBytes]' \
+            --output table
 
   # ---------------------------------------------------------------------------
   # Future job (intentionally not enabled now): full pillar verify suite.
