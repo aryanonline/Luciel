@@ -2,8 +2,18 @@
 audit-tier retention, data-export jobs, C6 BYPASSRLS role.
 
 Revision ID: arc10_lifecycle_subsystem
-Revises: b2e5f17a3d9c
+Revises: arc9_2_pr101_drop_tenant_id_column
 Create Date: 2026-05-27
+
+Migration-graph note: Arc 10 was originally drafted against down_revision
+b2e5f17a3d9c (Arc 8 WU-6 email_suppression), which was the head at the
+time of branch creation. Arc 9.2 PR #101
+(arc9_2_pr101_drop_tenant_id_column) landed on main between branch
+creation and Arc 10 ready-to-apply, creating a second head and a fork
+in the migration graph. Per Vision Section 6 / 7 'no inconsistent
+deployments at completion', Arc 10 is rebased to chain after the
+later head so the graph stays linear. Arc 10 does not reference
+tenant_id (PR #101 dropped it), so the rebase is semantically safe.
 
 Why this migration exists
 -------------------------
@@ -213,7 +223,9 @@ from sqlalchemy.dialects import postgresql
 # Alembic identifiers.
 # ---------------------------------------------------------------------
 revision = "arc10_lifecycle_subsystem"
-down_revision = "b2e5f17a3d9c"
+# Rebased from b2e5f17a3d9c to arc9_2_pr101_drop_tenant_id_column on
+# 2026-05-27 to collapse two heads back to one. See module docstring.
+down_revision = "arc9_2_pr101_drop_tenant_id_column"
 branch_labels = None
 depends_on = None
 
