@@ -445,13 +445,18 @@ jobs:
         # the case where docker push silently no-ops due to a registry
         # permissions gap on PutImage (which our scoped role permits but
         # has been a footgun on prior arcs).
+        #
+        # Uses --output json because --output table chokes when a row
+        # element is an array (imageTags is array<string>), failing with
+        # "Row should have 2 elements, instead it has 1". The first build
+        # of this job hit that exact bug; the push itself was fine.
         run: |
           set -euo pipefail
           aws ecr describe-images \
             --repository-name "${ECR_REPOSITORY}" \
             --image-ids imageTag="${{ steps.tags.outputs.immutable_tag }}" \
-            --query 'imageDetails[0].[imageTags,imagePushedAt,imageSizeInBytes]' \
-            --output table
+            --query 'imageDetails[0].{tags:imageTags,pushedAt:imagePushedAt,sizeBytes:imageSizeInBytes,digest:imageDigest}' \
+            --output json
 
   # ---------------------------------------------------------------------------
   # Future job (intentionally not enabled now): full pillar verify suite.
