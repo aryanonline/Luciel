@@ -293,3 +293,105 @@ def test_audit_retention_service_uses_canonical_action_constant():
         "action= kwarg to AuditRepository.record(); a string literal "
         "would bypass the ALLOWED_ACTIONS membership guarantee."
     )
+
+
+# ---------------------------------------------------------------------
+# Arc 10 Gap 6 close part 2 (D-arc10-audit-archiver-cannot-insert-
+# batch-audit-row-2026-05-27).
+#
+# The original arc10_lifecycle_subsystem migration granted SELECT +
+# UPDATE only to luciel_audit_archiver. The audit retention service
+# also INSERTs a per-batch audit row (action='audit_log_tier_archived')
+# in the same transaction that stamps cold_archived_at. Without INSERT
+# the worker hit psycopg.errors.InsufficientPrivilege and rolled back
+# the entire archive transaction AFTER the S3 object was written.
+#
+# Fix: arc10_gap6_archiver_insert_grant.py grants INSERT on
+# admin_audit_logs to luciel_audit_archiver. These tests pin the
+# follow-up migration's existence + content so the grant cannot get
+# silently dropped or downgraded.
+# ---------------------------------------------------------------------
+
+GAP6_MIGRATION_PATH = (
+    REPO_ROOT
+    / "alembic"
+    / "versions"
+    / "arc10_gap6_archiver_insert_grant.py"
+)
+
+
+def test_gap6_archiver_insert_grant_migration_exists():
+    """The follow-up migration file must exist on disk."""
+    assert GAP6_MIGRATION_PATH.exists(), (
+        f"Missing migration file at {GAP6_MIGRATION_PATH}. "
+        "Without this grant the audit_retention worker rolls back "
+        "every archive transaction with InsufficientPrivilege."
+    )
+
+
+def test_gap6_migration_chains_off_arc10_lifecycle():
+    """The new migration must point at arc10_lifecycle_subsystem as
+    down_revision -- it depends on the role existing.
+    """
+    src = GAP6_MIGRATION_PATH.read_text(encoding="utf-8")
+    assert 'down_revision = "arc10_lifecycle_subsystem"' in src, (
+        "Gap 6 grant migration must chain off arc10_lifecycle_subsystem "
+        "since it depends on the luciel_audit_archiver role created there."
+    )
+
+
+def test_gap6_migration_grants_insert_on_admin_audit_logs():
+    """The upgrade body must GRANT INSERT to the archiver role.
+
+    Pinned as a string so a refactor that accidentally drops the
+    grant statement fails this test instead of silently re-introducing
+    the production bug.
+    """
+    src = GAP6_MIGRATION_PATH.read_text(encoding="utf-8")
+    assert "GRANT INSERT ON" in src, (
+        "Migration must contain a GRANT INSERT statement."
+    )
+    assert "admin_audit_logs" in src, (
+        "GRANT must target admin_audit_logs specifically."
+    )
+    assert "luciel_audit_archiver" in src, (
+        "GRANT must be issued TO luciel_audit_archiver, not any other role."
+    )
+
+
+def test_gap6_migration_does_not_widen_to_delete():
+    """Doctrine guardrail: the move-to-cold path must never DELETE
+    audit rows. Arc 9 C6.1 "forward-only forever, no DELETE" is
+    preserved through Arc 10 + Gap 6. INSERT is forward-only;
+    DELETE is destruction. If a future patch ever appends a DELETE
+    grant here, this test must fail.
+    """
+    src = GAP6_MIGRATION_PATH.read_text(encoding="utf-8")
+    assert "GRANT DELETE" not in src, (
+        "DOCTRINE VIOLATION: the move-to-cold path must remain "
+        "DELETE-free (Arc 9 C6.1 + Arc 10 reconciliation). The hash "
+        "chain stays append-only across hot+cold combined."
+    )
+
+
+def test_gap6_migration_downgrade_only_revokes_insert():
+    """Downgrade must NOT revoke SELECT or UPDATE -- those were
+    granted by arc10_lifecycle_subsystem and a downgrade of THIS
+    migration should leave the prior arc10 state intact, not
+    half-revert it.
+    """
+    src = GAP6_MIGRATION_PATH.read_text(encoding="utf-8")
+    # Find the downgrade body.
+    down_idx = src.find("def downgrade(")
+    assert down_idx >= 0, "downgrade() must exist for migration symmetry"
+    down_body = src[down_idx:]
+    assert "REVOKE INSERT" in down_body, (
+        "downgrade must REVOKE INSERT to mirror the upgrade."
+    )
+    assert "REVOKE SELECT" not in down_body, (
+        "downgrade must NOT revoke SELECT -- that grant belongs to "
+        "arc10_lifecycle_subsystem and surviving its own downgrade."
+    )
+    assert "REVOKE UPDATE" not in down_body, (
+        "downgrade must NOT revoke UPDATE -- same reasoning as SELECT."
+    )
