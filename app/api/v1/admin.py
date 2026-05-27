@@ -2381,12 +2381,17 @@ def close_account(
     else:
         data_export_svc = None
 
-    # luciel_instance_service / agent_repo wiring matches the existing
-    # cascade route at line ~320 of this file.
+    # luciel_instance_service wiring matches the cascade route at
+    # line ~320 of this file. AgentRepository was deleted at Arc 5
+    # Path A (Commit A5); the cascade no longer touches the dropped
+    # `agents` / `agent_configs` tables (see
+    # app/services/admin_service.py::deactivate_tenant_with_cascade
+    # and D-arc10-close-path-imports-deleted-agent-repository-
+    # 2026-05-27). Passing agent_repo=None here aligns with the
+    # /tenants/{admin_id} PATCH route's contract.
     from app.services.instance_service import InstanceService
-    from app.repositories.agent_repository import AgentRepository
     instance_svc = InstanceService(db)
-    agent_repo = AgentRepository(db)
+    agent_repo = None
 
     closure_svc = ClosureService(
         db,
