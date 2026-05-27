@@ -53,12 +53,17 @@ def generate_export_bundle(self, job_id: str) -> dict:
     # Lazy imports avoid the circular-import dance described in the
     # parallel retention.py task.
     from app.core.config import settings
-    from app.db.session import SessionLocal
+    from app.db.session import OpsSessionLocal, SessionLocal
     from app.repositories.admin_audit_repository import AdminAuditRepository
     from app.services.data_export_service import DataExportService
     import boto3
 
-    db = SessionLocal()
+    # Arc 10 re-open Gap 5: use OpsSessionLocal (luciel_ops, BYPASSRLS)
+    # when available so cross-admin bundle reads are not silently blocked
+    # by per-admin RLS policies. Fall back to SessionLocal only when the
+    # ops role is not wired (local dev / CI without LUCIEL_OPS_DB_URL).
+    # Same pattern as app/worker/tasks/retention.py.
+    db = (OpsSessionLocal or SessionLocal)()
     try:
         s3 = boto3.client("s3", region_name=settings.aws_region)
         audit_repo = AdminAuditRepository(db)
@@ -108,9 +113,15 @@ def expire_old_signed_urls(self) -> dict:
 
     from sqlalchemy import text as sql_text
 
-    from app.db.session import SessionLocal
+    from app.db.session import OpsSessionLocal, SessionLocal
 
-    db = SessionLocal()
+    # Arc 10 re-open Gap 5: BYPASSRLS via OpsSessionLocal so the
+    # cross-admin expiry UPDATE actually matches rows. Without this,
+    # SessionLocal (luciel_app role) ran against the data_export_jobs
+    # RLS policy with no app.admin_id GUC set -> zero matches per scan
+    # -> exports never expire (silent dead letter). Caught by the new
+    # Gap 5 test suite (test_arc10_data_export.py).
+    db = (OpsSessionLocal or SessionLocal)()
     try:
         now = datetime.now(timezone.utc)
         res = db.execute(
