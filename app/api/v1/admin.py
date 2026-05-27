@@ -2297,6 +2297,7 @@ from app.schemas.lifecycle import (
     AccountCloseResponse,
     DataExportJobResponse,
     DataExportReadyResponse,
+    LifecycleStateResponse,
     ReactivationCompleteRequest,
     ReactivationCompleteResponse,
     ReactivationStageRequest,
@@ -2305,6 +2306,7 @@ from app.schemas.lifecycle import (
 from app.services.closure_service import (
     AccountAlreadyClosedError,
     AccountAlreadyTombstoneError,
+    AccountNotFoundError,
     ClosureService,
     InvalidCancelModeError,
     InvalidConfirmationError,
@@ -2683,4 +2685,56 @@ def get_data_export(
         signed_url=signed_url,
         signed_url_expires_at=expires_at,
         bytes_size=int(job_bytes or 0),
+    )
+
+
+@router.get(
+    "/account/lifecycle-state",
+    response_model=LifecycleStateResponse,
+    status_code=status.HTTP_200_OK,
+)
+def get_lifecycle_state(
+    request: Request,
+    db: DbSession,
+) -> LifecycleStateResponse:
+    """Return authoritative lifecycle state for the cookied admin.
+
+    Arc 10 re-open Gap 1: the original frontend sourced the closure-grace
+    banner state from localStorage, which fails the obvious case where an
+    admin closes on one device and signs in on another. This route is the
+    server-sourced replacement. Cheap (single SELECT on admins) so the
+    /account and /dashboard pages can call it on every mount.
+
+    Returns 200 with closed=false / in_grace=false / hard_deleted=false
+    for admins that have never been closed -- callers branch on the
+    booleans rather than on the HTTP status.
+    """
+    admin_id = _require_admin_id(request)
+
+    from app.services.closure_service import ClosureService
+    audit_repo = AdminAuditRepository(db)  # not used for the read but
+    # ClosureService's __init__ requires it (write-path concern). Cheap
+    # to construct; no side effects.
+    closure_svc = ClosureService(db=db, audit_repository=audit_repo)
+
+    try:
+        state = closure_svc.get_lifecycle_state(admin_id)
+    except AccountNotFoundError as exc:
+        # Cookie carried a stale admin_id whose row was removed. This is
+        # not a "you don't exist" case in the normal flow -- but a 404
+        # here lets the frontend force a sign-out cleanly.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    return LifecycleStateResponse(
+        admin_id=state.admin_id,
+        closed=state.closed,
+        in_grace=state.in_grace,
+        hard_deleted=state.hard_deleted,
+        cancel_mode=state.cancel_mode,
+        closure_initiated_at=state.closure_initiated_at,
+        grace_window_expires_at=state.grace_window_expires_at,
+        hard_deleted_at=state.hard_deleted_at,
     )

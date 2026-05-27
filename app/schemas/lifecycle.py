@@ -6,6 +6,7 @@ Request and response models for:
   POST  /admin/account/reactivate/complete
   POST  /admin/account/export
   GET   /admin/account/export/{job_id}
+  GET   /admin/account/lifecycle-state    (Arc 10 re-open Gap 1)
   GET   /billing/downgrade/grace
 """
 from __future__ import annotations
@@ -163,3 +164,46 @@ class DowngradeGraceStatus(BaseModel):
     target_tier: Literal["free", "pro", "enterprise"] | None = None
     initiated_at: datetime | None = None
     expires_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------
+# Lifecycle state (Arc 10 re-open Gap 1).
+# ---------------------------------------------------------------------
+
+class LifecycleStateResponse(BaseModel):
+    """GET /admin/account/lifecycle-state 200 body.
+
+    Authoritative server-sourced view of the cookied admin's closure
+    lifecycle. Replaces the localStorage-only client surface that the
+    original Arc 10 frontend shipped with -- localStorage is wrong as
+    the source of truth because it does not survive a device switch
+    (admin closes on phone, signs in on laptop, sees no banner).
+
+    Field semantics:
+      * ``closed``  -- admins.closure_initiated_at IS NOT NULL.
+      * ``in_grace`` -- closed AND now() < grace_window_expires_at AND
+                        admins.hard_deleted_at IS NULL. This is the
+                        signal the closure-grace banner reads.
+      * ``hard_deleted`` -- admins.hard_deleted_at IS NOT NULL.
+                        Should never be observed via this route
+                        because a hard-deleted admin cannot hold a
+                        live session, but exposed for the post-grace
+                        explicit-state probe path.
+      * ``cancel_mode`` -- the admin's Stripe-cancel choice at close.
+      * ``closure_initiated_at`` / ``grace_window_expires_at`` --
+                        precise timestamps for the banner's
+                        day-counter + 'hard-delete scheduled for X'
+                        copy.
+      * ``hard_deleted_at`` -- non-null iff hard_deleted=True.
+
+    All datetimes are timezone-aware UTC.
+    """
+
+    admin_id: str
+    closed: bool
+    in_grace: bool
+    hard_deleted: bool
+    cancel_mode: Literal["immediate", "period_end"] | None = None
+    closure_initiated_at: datetime | None = None
+    grace_window_expires_at: datetime | None = None
+    hard_deleted_at: datetime | None = None
