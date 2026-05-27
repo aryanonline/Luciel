@@ -447,3 +447,131 @@ def test_gap6_sequence_migration_grants_usage_on_sequence():
     assert "luciel_audit_archiver" in src, (
         "GRANT must be issued TO luciel_audit_archiver."
     )
+
+
+# ---------------------------------------------------------------------
+# Arc 10 Gap 6 close part 4 (D-arc10-audit-batch-spans-multiple-
+# instances-2026-05-27).
+#
+# After parts 1+2+3 (ALLOWED_ACTIONS + INSERT grant + sequence grant),
+# the re-run E2E surfaced the final-layer drift:
+#
+#   psycopg.errors.NotNullViolation: null value in column
+#   "luciel_instance_id" of relation "admin_audit_logs"
+#
+# Arc 9.1 Phase A tenant-isolation seal made admin_audit_logs.
+# luciel_instance_id NOT NULL on every instance-scoped table. The Arc
+# 10 audit-retention worker grouped batches by admin_id only and
+# passed luciel_instance_id=None to the batch-audit emission, which
+# made it impossible for the INSERT to satisfy the NOT NULL constraint.
+#
+# Fix: sub-group batches by (admin_id, luciel_instance_id) so each
+# emitted batch-audit row carries a real instance_id. An admin with
+# N instances produces N batch-audit rows per worker run instead of
+# 1; trades a small row-count increase for doctrine compliance and
+# more precise forensic scoping.
+# ---------------------------------------------------------------------
+
+def test_audit_retention_select_includes_luciel_instance_id():
+    """The _fetch_batch SELECT must include luciel_instance_id.
+
+    Without it the worker cannot sub-group by (admin, instance) and
+    cannot pass a non-NULL instance_id to the batch-audit emission.
+    """
+    src = AUDIT_SERVICE_PATH.read_text(encoding="utf-8")
+    # The SELECT statement must list luciel_instance_id alongside
+    # admin_id. Pinning as a substring rather than parsing SQL to
+    # keep the test resilient to whitespace + comment changes.
+    assert (
+        "id, admin_id, luciel_instance_id" in src
+        or "id, luciel_instance_id, admin_id" in src
+        or "admin_id, luciel_instance_id" in src
+    ), (
+        "_fetch_batch SELECT must include luciel_instance_id so "
+        "the worker can carry instance scope into the batch-audit "
+        "emission. Arc 9.1 Phase A made the column NOT NULL."
+    )
+
+
+def test_audit_retention_groups_batches_by_admin_and_instance():
+    """The archive loop must sub-group batches by (admin_id, instance_id).
+
+    Pinned by checking for the dict type annotation tuple[str, int],
+    which is the in-loop key. If a future refactor flattens the
+    grouping back to admin-only, the type annotation will change and
+    this test fails -- catching the regression before the NOT NULL
+    constraint catches it in prod.
+    """
+    src = AUDIT_SERVICE_PATH.read_text(encoding="utf-8")
+    assert "tuple[str, int]" in src, (
+        "Archive loop must group by (admin_id, instance_id) tuple. "
+        "Single-axis grouping by admin_id alone caused the Arc 9.1 "
+        "NOT NULL violation on luciel_instance_id."
+    )
+
+
+def test_emit_batch_audit_passes_luciel_instance_id():
+    """The _emit_batch_audit call must pass luciel_instance_id.
+
+    Pinned as a kwarg name to prevent a future refactor from
+    silently dropping it (kwarg keeps it self-documenting at the
+    call site).
+    """
+    src = AUDIT_SERVICE_PATH.read_text(encoding="utf-8")
+    # The call site inside _archive_one_tier
+    assert "luciel_instance_id=instance_id" in src, (
+        "_emit_batch_audit must be invoked with luciel_instance_id "
+        "matching the sub-grouping key."
+    )
+    # The function signature itself
+    assert "def _emit_batch_audit(" in src, (
+        "_emit_batch_audit method must still exist."
+    )
+    # And the record() invocation inside _emit_batch_audit must
+    # forward luciel_instance_id
+    emit_idx = src.find("def _emit_batch_audit(")
+    assert emit_idx >= 0
+    emit_body = src[emit_idx:emit_idx + 3000]
+    assert "luciel_instance_id=luciel_instance_id" in emit_body, (
+        "_emit_batch_audit body must forward luciel_instance_id "
+        "to AuditRepository.record()."
+    )
+
+
+def test_s3_key_encodes_instance_id():
+    """The S3 key shape must include the instance id so a forensic
+    walk can scope by (admin, instance) without listing all admin
+    objects. The dir boundary stays at admin_id so an admin's full
+    archive is still locatable by a single prefix scan.
+    """
+    src = AUDIT_SERVICE_PATH.read_text(encoding="utf-8")
+    assert "inst-{instance_id}" in src, (
+        "S3 key shape must encode instance_id in the filename "
+        "(format: inst-{instance_id}-{first_id}-{last_id}.jsonl)."
+    )
+
+
+def test_cold_archive_hash_unchanged_by_instance_fix():
+    """_cold_archive_hash must NOT include luciel_instance_id.
+
+    The cold-archive hash function is part of the verification
+    contract for previously-archived cold rows. Adding a new field
+    to its canonical content would break verification of every cold
+    row written before the change. luciel_instance_id surfaces in
+    the JSONL output for forensic readers (separate concern) but
+    must stay OUT of the hash input.
+    """
+    src = AUDIT_SERVICE_PATH.read_text(encoding="utf-8")
+    # Find the _cold_archive_hash function body and pin its payload
+    # keys list.
+    hash_idx = src.find("def _cold_archive_hash(")
+    assert hash_idx >= 0, "_cold_archive_hash must still exist"
+    # Take just the payload dict literal (next ~1500 chars covers it).
+    hash_body = src[hash_idx:hash_idx + 1500]
+    assert '"luciel_instance_id"' not in hash_body, (
+        "DOCTRINE VIOLATION: _cold_archive_hash must NOT include "
+        "luciel_instance_id in its canonical payload. Doing so "
+        "would break verification of every cold row written before "
+        "this change. The field belongs in the JSONL output, not "
+        "in the hash input."
+    )
