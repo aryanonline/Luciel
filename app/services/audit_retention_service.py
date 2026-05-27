@@ -265,15 +265,26 @@ class AuditRetentionService:
 
             scanned += len(batch)
 
-            # Group by admin_id so each S3 object is admin-scoped.
-            by_admin: dict[str, list[dict]] = {}
+            # Group by (admin_id, luciel_instance_id) so each batch-audit
+            # emission can carry a non-NULL luciel_instance_id (Arc 9.1
+            # Phase A tenant-isolation seal -- admin_audit_logs.
+            # luciel_instance_id is NOT NULL across all instance-scoped
+            # tables). The S3 key still groups by admin_id at the top
+            # level (admin's full archive is locatable by admin scan)
+            # but the in-key filename includes the instance_id so a
+            # forensic walk can scope by (admin, instance) without
+            # downloading every object. See
+            # D-arc10-audit-batch-spans-multiple-instances-2026-05-27.
+            by_admin_instance: dict[tuple[str, int], list[dict]] = {}
             for row in batch:
-                by_admin.setdefault(row["admin_id"], []).append(row)
+                key = (row["admin_id"], row["luciel_instance_id"])
+                by_admin_instance.setdefault(key, []).append(row)
 
-            for admin_id, admin_rows in by_admin.items():
+            for (admin_id, instance_id), admin_rows in by_admin_instance.items():
                 try:
                     s3_key = self._write_batch_to_s3(
                         admin_id=admin_id,
+                        instance_id=instance_id,
                         tier=tier,
                         rows=admin_rows,
                     )
@@ -283,9 +294,10 @@ class AuditRetentionService:
                         row_ids=[r["id"] for r in admin_rows],
                     )
                     archived += len(admin_rows)
-                    # One audit row per (admin_id, batch).
+                    # One audit row per (admin_id, instance_id, batch).
                     self._emit_batch_audit(
                         admin_id=admin_id,
+                        luciel_instance_id=instance_id,
                         tier=tier,
                         row_ids=[r["id"] for r in admin_rows],
                         s3_key=s3_key,
@@ -297,8 +309,8 @@ class AuditRetentionService:
                     errored_ids.extend(r["id"] for r in admin_rows)
                     logger.exception(
                         "audit_retention: batch archive failed "
-                        "admin_id=%s tier=%s row_count=%d",
-                        admin_id, tier, len(admin_rows),
+                        "admin_id=%s instance_id=%s tier=%s row_count=%d",
+                        admin_id, instance_id, tier, len(admin_rows),
                     )
 
             # If the batch was smaller than batch_size, we've drained
@@ -319,11 +331,18 @@ class AuditRetentionService:
         cutoff: datetime,
         limit: int,
     ) -> list[dict]:
-        """SELECT eligible rows. FIFO by created_at."""
+        """SELECT eligible rows. FIFO by created_at.
+
+        Includes luciel_instance_id so the move-to-cold path can sub-
+        group by (admin_id, instance_id) and emit a per-instance batch
+        audit row -- required by Arc 9.1 Phase A tenant-isolation seal
+        which made admin_audit_logs.luciel_instance_id NOT NULL.
+        """
         rows = self.db.execute(
             sql_text(
                 """
-                SELECT id, admin_id, created_at, action, resource_type,
+                SELECT id, admin_id, luciel_instance_id, created_at,
+                       action, resource_type,
                        resource_pk, resource_natural_id,
                        actor_key_prefix, actor_permissions,
                        before_json, after_json, note,
@@ -343,19 +362,20 @@ class AuditRetentionService:
             out.append({
                 "id": r[0],
                 "admin_id": r[1],
-                "created_at": r[2],
-                "action": r[3],
-                "resource_type": r[4],
-                "resource_pk": r[5],
-                "resource_natural_id": r[6],
-                "actor_key_prefix": r[7],
-                "actor_permissions": r[8],
-                "before_json": r[9],
-                "after_json": r[10],
-                "note": r[11],
-                "row_hash": r[12],
-                "prev_row_hash": r[13],
-                "tier_at_write": r[14],
+                "luciel_instance_id": r[2],
+                "created_at": r[3],
+                "action": r[4],
+                "resource_type": r[5],
+                "resource_pk": r[6],
+                "resource_natural_id": r[7],
+                "actor_key_prefix": r[8],
+                "actor_permissions": r[9],
+                "before_json": r[10],
+                "after_json": r[11],
+                "note": r[12],
+                "row_hash": r[13],
+                "prev_row_hash": r[14],
+                "tier_at_write": r[15],
             })
         return out
 
@@ -388,6 +408,7 @@ class AuditRetentionService:
         self,
         *,
         admin_id: str,
+        instance_id: int,
         tier: str,
         rows: list[dict],
     ) -> str:
@@ -425,9 +446,13 @@ class AuditRetentionService:
         yyyy = first_created.strftime("%Y")
         mm = first_created.strftime("%m")
         dd = first_created.strftime("%d")
+        # Include instance_id in the filename so a forensic walk can
+        # scope by (admin, instance) without downloading every object.
+        # Keeping admin_id as the directory boundary keeps an admin's
+        # full archive locatable by single prefix scan.
         s3_key = (
             f"{_S3_COLD_PREFIX}/{tier}/{admin_id}/"
-            f"{yyyy}/{mm}/{dd}/{first_id}-{last_id}.jsonl"
+            f"{yyyy}/{mm}/{dd}/inst-{instance_id}-{first_id}-{last_id}.jsonl"
         )
 
         lines: list[str] = []
@@ -436,6 +461,12 @@ class AuditRetentionService:
             entry = {
                 "id": r["id"],
                 "admin_id": r["admin_id"],
+                # Arc 9.1 instance scoping: surface in cold archive so
+                # forensic readers can re-derive instance ownership.
+                # NOT included in _cold_archive_hash because changing
+                # the canonical-content shape would break verification
+                # of pre-existing cold rows.
+                "luciel_instance_id": r["luciel_instance_id"],
                 "created_at": _iso(r["created_at"]),
                 "action": r["action"],
                 "resource_type": r["resource_type"],
@@ -474,26 +505,41 @@ class AuditRetentionService:
         self,
         *,
         admin_id: str,
+        luciel_instance_id: int,
         tier: str,
         row_ids: list[int],
         s3_key: str,
     ) -> None:
-        """One audit row per (admin_id, batch). NOT per archived row.
+        """One audit row per (admin_id, instance_id, batch). NOT per row.
 
         Per-row emission would explode the audit table size as it
         chases its own tail. Batch granularity is enough to answer
-        "when was admin X's tier-Y window archived?" forensically.
+        "when was admin X's instance Y tier-Z window archived?"
+        forensically.
+
+        Doctrine: admin_audit_logs.luciel_instance_id is NOT NULL
+        (Arc 9.1 Phase A tenant-isolation seal). Originally Arc 10
+        emitted one batch row per (admin_id, tier_window) and passed
+        luciel_instance_id=None, which violated the NOT NULL
+        constraint. Per-instance batching is the doctrinal fix --
+        an admin with N instances now produces N batch-audit rows
+        per worker run instead of 1, but each carries a real
+        instance_id and the (admin, instance) forensic scope is
+        more precise. See D-arc10-audit-batch-spans-multiple-
+        instances-2026-05-27.
         """
         from app.repositories.admin_audit_repository import AuditContext
         sys_ctx = AuditContext.system(label="audit_retention_worker")
         self.audit_repository.record(
             ctx=sys_ctx,
             admin_id=admin_id,
+            luciel_instance_id=luciel_instance_id,
             action=ACTION_AUDIT_LOG_TIER_ARCHIVED,
             resource_type=RESOURCE_TENANT,
             resource_natural_id=admin_id,
             after={
                 "tier_at_write": tier,
+                "luciel_instance_id": luciel_instance_id,
                 "rows_archived": len(row_ids),
                 "first_row_id": row_ids[0],
                 "last_row_id": row_ids[-1],
@@ -502,7 +548,7 @@ class AuditRetentionService:
             },
             note=(
                 f"Audit-tier retention: archived {len(row_ids)} rows "
-                f"for {admin_id} (tier={tier})."
+                f"for {admin_id}/instance={luciel_instance_id} (tier={tier})."
             ),
             autocommit=False,
         )
