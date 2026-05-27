@@ -628,7 +628,7 @@ class AdminService:
         *,
         audit_ctx,
         luciel_instance_service,
-        agent_repo,
+        agent_repo=None,  # Deprecated: ignored. See docstring.
         updated_by: str | None = None,
         autocommit: bool = True,
     ) -> bool:
@@ -644,24 +644,32 @@ class AdminService:
         ``app/services/billing_webhook_service.py`` and emits its own
         audit row; this cascade does not touch ``subscriptions`` because
         the Stripe-driven webhook is the source of truth for that layer.
-        Total audit-row count for a full tenant teardown is therefore
-        13 = 12 in-function + 1 upstream subscription (was 14 pre-B5).
+        Total audit-row count for a full tenant teardown is 11 = 10
+        in-function + 1 upstream subscription. (The previous "13 = 12
+        + 1" docstring claim was stale: layers 6+7 of the pre-Arc-10
+        cascade -- agents and agent_configs -- were structurally dead
+        since Arc 5C and have been removed in the Gap 7 prune.)
 
-        Canonical cascade order:
+        Canonical cascade order (Arc 10 Gap 7 prune of dead agents layers):
           1.  conversations             (Step 30a.2 -- soft-delete + ts)
           2.  identity_claims           (Step 30a.2 -- soft-delete + ts)
           3.  memory_items              (broadest leaf below)
           4.  api_keys
-          5.  luciel_instances          (legacy table — dropped at Revision C)
-          6.  agents                    (legacy table — dropped at Revision C)
-          7.  agent_configs             (legacy)
-          8.  scope_assignments         (Step 30a.7 -- privilege revocation)
-          9.  user_invites              (Step 30a.7 -- pending-invite revoke)
-          10. sessions                  (Step 30a.7 -- session-cookie revoke)
-          11. synthetic_orphan_users    (Step 30a.7 -- test-fixture cleanup,
+          5.  luciel_instances          (V2 instance layer)
+          6.  scope_assignments         (Step 30a.7 -- privilege revocation)
+          7.  user_invites              (Step 30a.7 -- pending-invite revoke)
+          8.  sessions                  (Step 30a.7 -- session-cookie revoke)
+          9.  synthetic_orphan_users    (Step 30a.7 -- test-fixture cleanup,
                                          synthetic=True AND zero remaining
                                          active scope_assignments)
-          12. tenant_config             (active=False, deactivated_at=now())
+          10. tenant_config             (active=False, deactivated_at=now())
+
+        Layers 6+7 of the pre-Arc-10 cascade (`agents` and
+        `agent_configs`) were REMOVED: their underlying tables were
+        DROPPED at arc5_c_admin_instance_subtractive (Arc 5 Path A
+        ratification). The cascade attempted to use the deleted
+        AgentRepository and crashed structurally; see
+        D-arc10-close-path-imports-deleted-agent-repository-2026-05-27.
 
         Each in-function layer emits exactly one ``cascade_deactivate``-shape
         audit row per touched row, with the documented exception of layer 10
@@ -672,10 +680,16 @@ class AdminService:
         audit_ctx is REQUIRED. Tenant deactivation is the most privileged
         mutation in the platform; an audit trail is non-negotiable.
 
-        luciel_instance_service / agent_repo are required injected
-        dependencies (mirrors the deactivate_domain pattern). ApiKeyService
-        has no FastAPI dep factory and is instantiated inline; it shares
-        self.db so transactional atomicity is preserved.
+        luciel_instance_service is a required injected dependency
+        (mirrors the deactivate_domain pattern). agent_repo is kept
+        in the signature for backward compat with route call sites
+        that still pass it, but its value is ignored -- the agents
+        cascade layers were removed in the Gap 7 prune (see
+        D-arc10-close-path-imports-deleted-agent-repository-2026-05-27
+        and the in-body comment at the removed sections 6/7).
+        ApiKeyService has no FastAPI dep factory and is instantiated
+        inline; it shares self.db so transactional atomicity is
+        preserved.
 
         Returns True if the tenant was found and deactivated. Returns False
         if the tenant config row does not exist. Idempotent on re-run --
@@ -720,7 +734,8 @@ class AdminService:
         """
         from sqlalchemy import func
 
-        from app.models.agent_config import AgentConfig
+        # AgentConfig: REMOVED (Arc 10 Gap 7) - cascade sections 6+7
+        # (agents / agent_configs) were dead since Arc 5C.
         from app.models.conversation import Conversation
         # DomainConfig: REMOVED (Arc 5 Path A) - V2 has no Domain layer
         from app.models.identity_claim import IdentityClaim
@@ -893,72 +908,53 @@ class AdminService:
                 autocommit=False,
             )
 
-            # --- 6. agents (new-table) cascade -------------------------
-            # Repo method emits its own RESOURCE_AGENT audit rows.
-            agent_repo.deactivate_all_for_tenant(
-                admin_id=admin_id,
-                updated_by=updated_by,
-                audit_ctx=audit_ctx,
-                autocommit=False,
-            )
+            # NOTE (Arc 10 Gap 7): the pre-Arc-10 cascade had two
+            # additional layers between luciel_instances and
+            # scope_assignments:
+            #
+            #   layer 6: agents       cascade  (REMOVED)
+            #   layer 7: agent_configs cascade (REMOVED)
+            #
+            # Removal rationale
+            # (D-arc10-close-path-imports-deleted-agent-repository-2026-05-27):
+            # the `agents` table was DROPPED at
+            # alembic/versions/arc5_c_admin_instance_subtractive.py and the
+            # `AgentRepository` class itself was deleted at the same arc
+            # (app/api/deps.py::get_agent_repository now raises). Calling
+            # agent_repo.deactivate_all_for_tenant here would crash with
+            # ModuleNotFoundError if the route ever attempted to import
+            # it, which it does at app/api/v1/admin.py::close_account.
+            # Net effect on prod: /account/close was structurally broken
+            # since Arc 5C until this fix. Removed entirely (not None-
+            # guarded) because the table is gone and there is no "future
+            # re-introduction" pathway -- V2 has no Agent layer per the
+            # Arc 5 Path A doctrine ratification.
+            #
+            # agent_configs was DROPPED at the same migration. The
+            # inline query AgentConfig.tenant_id == tenant_id was
+            # double-broken: (a) the table is gone, (b) the
+            # tenant_id column on remaining tables was collapsed to
+            # admin_id at Arc 9.2 (PR #101).
+            #
+            # Both removals align the implementation with Architecture
+            # §3.6.1 (canonical 7-step deactivation cascade) and
+            # Architecture §3.6.2 (account closure flow) -- neither
+            # document mentions an `agents` or `agent_configs` layer.
+            # Cascade layer count is now 10 (was 12 nominal; actually
+            # 10 because removed layers were no-ops-by-crash). Total
+            # audit-row count for a full tenant teardown is 11 = 10
+            # in-function + 1 upstream subscription.
 
-            # --- 7. agent_configs (legacy) cascade (inline) ------------
-            affected_agent_configs = (
-                self.db.query(AgentConfig.id, AgentConfig.agent_id)
-                .filter(
-                    AgentConfig.tenant_id == tenant_id,
-                    AgentConfig.active.is_(True),
-                )
-                .all()
-            )
-            ac_pks = [pk for pk, _ in affected_agent_configs]
-            ac_ids = [nid for _, nid in affected_agent_configs]
-            ac_updated = (
-                self.db.query(AgentConfig)
-                .filter(
-                    AgentConfig.tenant_id == tenant_id,
-                    AgentConfig.active.is_(True),
-                )
-                .update(
-                    {
-                        AgentConfig.active: False,
-                        AgentConfig.updated_by: updated_by,
-                    },
-                    synchronize_session=False,
-                )
-            )
-            if ac_updated:
-                AdminAuditRepository(self.db).record(
-                    ctx=audit_ctx,
-                    admin_id=admin_id,
-                    action=ACTION_CASCADE_DEACTIVATE,
-                    resource_type=RESOURCE_AGENT,
-                    resource_pk=None,
-                    resource_natural_id=None,
-                    after={
-                        "count": int(ac_updated),
-                        "affected_pks": ac_pks,
-                        "affected_agent_ids": ac_ids,
-                        "table": "agent_configs",
-                        "trigger": "tenant_deactivate",
-                    },
-                    note=(
-                        f"Cascade legacy agent_configs from tenant "
-                        f"{admin_id} deactivation"
-                    ),
-                    autocommit=False,
-                )
+            # NOTE (Arc 5 B5): the pre-B5 cascade had a Domain layer
+            # (domain_configs) between agent_configs and
+            # scope_assignments. It was eliminated per the
+            # aggressive-cleanup amendment
+            # D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23.
+            # The table was dropped at Revision C; V2 has no Domain
+            # layer to cascade. Cascade proceeds directly to the
+            # privilege-revocation layers below.
 
-            # --- 8. (removed at Arc 5 B5) -------------------------------
-            # Domain layer was eliminated per the aggressive-cleanup
-            # amendment (D-arc5-aggressive-cleanup-doctrine-amendment-
-            # 2026-05-23). Previously this cascade visited domain_configs
-            # at layer 8; the table itself is dropped at Revision C and
-            # the V2 Admin → Instance hierarchy has no Domain layer to
-            # cascade. Layer numbering: 7 → 8 (scope_assignments) skipping
-            # the former domain_configs slot.
-
-            # --- 8. scope_assignments cascade (Step 30a.7) -------------
+            # --- 6. scope_assignments cascade (Step 30a.7) -------------
             # Privilege-revocation layer. scope_assignments is the single
             # source of truth for tenant binding (post Step-30a.5 invitee
             # resolver fix); leaving rows active=True against a soft-
@@ -1023,7 +1019,7 @@ class AdminService:
                     autocommit=False,
                 )
 
-            # --- 9. user_invites cascade (Step 30a.7) ------------------
+            # --- 7. user_invites cascade (Step 30a.7) ------------------
             # Pending invites against a soft-deleted tenant are by
             # definition revocable -- the JWT is still redeemable until
             # expires_at unless we flip status='revoked' here. Reuse
@@ -1080,7 +1076,7 @@ class AdminService:
                     autocommit=False,
                 )
 
-            # --- 10. sessions cascade (Step 30a.7) ---------------------
+            # --- 8. sessions cascade (Step 30a.7) ----------------------
             # session.status='active' is the runtime authenticator for
             # every cookie-bearing request. Flip to 'revoked' in the same
             # transaction as tenant.active=False so there is no race
@@ -1135,7 +1131,7 @@ class AdminService:
                     autocommit=False,
                 )
 
-            # --- 11. synthetic_orphan_users cascade (Step 30a.7) -------
+            # --- 9. synthetic_orphan_users cascade (Step 30a.7) --------
             # users is a GLOBAL table -- users have no admin_id column
             # (binding lives in scope_assignments). A blanket
             # users.active=False on cascade would wrongly deactivate real
@@ -1202,7 +1198,7 @@ class AdminService:
                             autocommit=False,
                         )
 
-            # --- 12. tenant_config itself ------------------------------
+            # --- 10. tenant_config itself ------------------------------
             # Step 30a.2: also stamp deactivated_at = now() so the
             # retention worker can compute the 90d purge cutoff. Only
             # set when was_active=True (idempotent re-runs don't
