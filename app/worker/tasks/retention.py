@@ -1,19 +1,43 @@
 """
-Tenant retention hard-purge task (Step 30a.2).
+Tenant retention hard-purge task.
 
-Closes D-no-retention-worker-pipeda-principle-5-2026-05-14.
+Historical references:
+  * Step 30a.2 (Alembic dfea1a04e037) created the 90-day uniform
+    retention window. Closed by Arc 10 (this file).
+  * Arc 9 C6.1 (Alembic arc9_c6_1_luciel_ops_role) created the
+    luciel_ops Postgres role with BYPASSRLS; Arc 9 C6.3 wired
+    OpsSessionLocal in app/db/session.py. Arc 10 now wires the
+    worker to use it (drift entry
+    D-arc10-retention-worker-still-on-default-session-2026-05-27).
+  * Arc 10 (Alembic arc10_lifecycle_subsystem):
+      - Collapsed RETENTION_WINDOW_DAYS from 90 to 30 to match
+        Vision §6.5 ("after 30 days: GDPR-style hard delete of all
+        customer data"). Supersedes the prior 90-day lock dated
+        2026-05-14 09:55 EDT.
+      - Switched scan predicate from tenant_configs.deactivated_at
+        to admins.closure_initiated_at. Closure is the only
+        trigger for hard-delete; deactivation by other sources
+        (platform-admin ToS action, webhook) does NOT advance a
+        tenant toward hard-delete. See drift entry
+        D-arc10-no-closure-clock-distinct-from-deactivation-2026-05-27.
+      - Switched SessionLocal -> OpsSessionLocal so the worker uses
+        the BYPASSRLS luciel_ops role. Removed the
+        rls_tenant_context_enabled guard because BYPASSRLS makes
+        the underlying Wall-3-with-empty-instance-id gap
+        unreachable for that role.
 
 Why this task exists
 --------------------
 
-PIPEDA Principle 5 (Limiting Use, Disclosure, and Retention) requires
-that personal data be destroyed when no longer needed for the purpose
-it was collected for. The Step 30a.2 cancellation path soft-deactivates
-a tenant and all its children via
-``admin_service.deactivate_tenant_with_cascade`` (9-layer leaf-first
+Vision §6.5 and PIPEDA Principle 5 both require that personal data be
+destroyed when no longer needed for the purpose it was collected for.
+The Vision specifies a 30-day grace clock; PIPEDA requires a defined
+retention period (30 days satisfies this). The closure cascade soft-
+deactivates a tenant and all its children via
+``admin_service.deactivate_tenant_with_cascade`` (12-layer leaf-first
 soft-delete), but soft-deletion alone is not destruction. The
 retention worker is the scheduled job that converts soft-deletion into
-hard-deletion after a defined retention window.
+hard-deletion after the 30-day grace window has elapsed.
 
 Schedule:
     Celery beat fires this task once nightly at 08:00 UTC (04:00 EDT
@@ -21,35 +45,41 @@ Schedule:
     seasons). Wired in ``app.worker.celery_app::celery_app.conf.beat_schedule``.
 
 Retention window:
-    90 days, uniform across all tiers. Set at module-level constant
-    ``RETENTION_WINDOW_DAYS`` so future per-tenant or per-tier
-    overrides can land without touching the scan predicate.
+    30 days, uniform across all tiers. Set at module-level constant
+    ``RETENTION_WINDOW_DAYS``. Matches Vision §6.5 verbatim. Future
+    per-tenant or per-tier overrides can land via a column on admins
+    without touching the scan predicate shape.
 
 Scan predicate (single SELECT per nightly run):
-    SELECT admin_id FROM tenant_configs
+    SELECT id FROM admins
     WHERE active = false
-      AND deactivated_at IS NOT NULL
-      AND deactivated_at < (now() - INTERVAL '90 days')
-    ORDER BY deactivated_at ASC
+      AND closure_initiated_at IS NOT NULL
+      AND closure_initiated_at < (now() - INTERVAL '30 days')
+      AND hard_deleted_at IS NULL
+    ORDER BY closure_initiated_at ASC
 
-The composite index ``ix_tenant_configs_active_deactivated_at``
-(Alembic dfea1a04e037) backs this query so the scan stays O(log n).
+The partial index ``ix_admins_closure_clock_eligible`` (Alembic
+arc10_lifecycle_subsystem) backs this query so the scan stays O(log n).
+The hard_deleted_at IS NULL clause makes the scan tombstone-aware: an
+admin that has already been tombstoned in a prior run is not re-
+selected, even if the row is still in the table.
 
 Per-tenant action:
     For each row returned by the scan, the task calls
     ``AdminService.hard_delete_tenant_after_retention(admin_id)``,
-    which runs a 12-step DELETE chain inside a single transaction.
+    which runs the cascade DELETE chain (step 11 is now a tombstone
+    UPDATE per Arc 10, not a DELETE) inside a single transaction.
     Any error rolls back that tenant's purge and the worker logs +
     moves on to the next tenant -- one bad row should not block a
     nightly run.
 
 Idempotency:
-    The hard-purge method re-verifies the 90-day predicate inside
+    The hard-purge method re-verifies the 30-day predicate inside
     its own transaction before deleting. If two beat instances race
     (which cannot happen with embedded beat on a single replica, but
     is a defensive guard for future multi-replica scaling), the
-    second one finds the tenant_configs row already gone and exits
-    cleanly.
+    second one finds the admins row already tombstoned (hard_deleted_at
+    IS NOT NULL) and exits cleanly.
 
 What this task does NOT do:
     - It does not delete AdminAuditLog rows. Those are the legal
@@ -88,8 +118,14 @@ from typing import TYPE_CHECKING
 from celery import shared_task
 from sqlalchemy import text
 
-from app.db.session import SessionLocal
-from app.db.tenant_scope import bind_tenant_scope  # Arc 9 C4.4
+# Arc 10: switched from SessionLocal to OpsSessionLocal.
+# OpsSessionLocal binds the connection to the luciel_ops role created
+# in Arc 9 C6.1, which has BYPASSRLS. This makes the underlying
+# Wall-3-with-empty-instance-id gap unreachable for this worker, so the
+# rls_tenant_context_enabled guard (previously required as a safety
+# net) is removed below.
+from app.db.session import OpsSessionLocal, get_ops_db_session  # noqa: F401
+from app.db.tenant_scope import bind_tenant_scope  # Arc 9 C4.4 (unused under BYPASSRLS; kept for import compatibility)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -98,12 +134,17 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
-# 90-day uniform retention window, locked by Aryan 2026-05-14 09:55 EDT.
+# 30-day uniform retention window, locked by Aryan 2026-05-27 (Arc 10)
+# in alignment with Vision §6.5 ("after 30 days: GDPR-style hard delete
+# of all customer data"). Supersedes the prior 90-day lock dated
+# 2026-05-14 09:55 EDT, which carried a PIPEDA-Principle-5-only
+# justification. 30 days is also a defined retention period under PIPEDA
+# Principle 5 -- strictly tighter than the prior lock -- and matches
+# the founder-approved Vision verbatim.
+#
 # Constant-as-policy: future per-tenant overrides land via a column on
-# tenant_configs (e.g. retention_days_override) without changing this
-# default. PIPEDA Principle 5 requires a defined retention period; this
-# is it.
-RETENTION_WINDOW_DAYS = 90
+# admins (e.g. retention_days_override) without changing this default.
+RETENTION_WINDOW_DAYS = 30
 
 
 @shared_task(
@@ -143,10 +184,32 @@ def run_retention_purge(self):
         started_at.isoformat(),
     )
 
-    # Use a fresh session for the scan; per-tenant purges use their
-    # own sessions so a single bad tenant can roll back cleanly
-    # without poisoning the scan-session transaction.
-    scan_db: Session = SessionLocal()
+    # Arc 10: use OpsSessionLocal (luciel_ops role, BYPASSRLS) for the
+    # scan. Per-tenant purges also use OpsSessionLocal sessions so the
+    # cascade DELETEs / tombstone UPDATE all run under the same role.
+    # A single bad tenant rolls back cleanly without poisoning the
+    # scan-session transaction.
+    if OpsSessionLocal is None:
+        # Defense in depth: get_ops_db_session() raises if luciel_ops
+        # is not wired in this environment. We mirror that posture
+        # here so the worker emits a clear log line rather than
+        # falling back to SessionLocal (which would re-introduce the
+        # Wall-3 gap C6.1 was created to close).
+        _log.error(
+            "retention_purge ABORTED: OpsSessionLocal is None. "
+            "settings.luciel_ops_db_url must be configured for the "
+            "retention worker to run. See Arc 9 C6.3 + Arc 10 paired "
+            "code change."
+        )
+        return {
+            "scanned_count": 0,
+            "purged_count": 0,
+            "errored_count": 0,
+            "errored_tenant_ids": [],
+            "aborted": "ops_session_unavailable",
+        }
+
+    scan_db: Session = OpsSessionLocal()
     try:
         eligible_tenant_ids = _scan_eligible_tenants(scan_db, cutoff)
     finally:
@@ -165,74 +228,54 @@ def run_retention_purge(self):
         # Each tenant gets its own session + transaction so one
         # failing purge does not block the rest of the nightly batch.
         # AdminService.hard_delete_tenant_after_retention runs the
-        # 12-step DELETE chain atomically; any error inside it rolls
-        # back ONLY that tenant.
+        # cascade DELETE chain (step 11 is a tombstone UPDATE per
+        # Arc 10, not a DELETE) atomically; any error inside it
+        # rolls back ONLY that tenant.
         #
-        # Arc 9 C4.4: bind Wall-1 scope to THIS tenant so every
-        # DELETE in the 12-step chain runs under RLS policies that
-        # match the tenant. instance_id is bound to None because
-        # retention is an admin-level purge that crosses ALL
-        # instances of the tenant.
+        # Arc 10: BYPASSRLS via OpsSessionLocal removes the prior
+        # rls_tenant_context_enabled guard. The Wall-3 gap C6.1 was
+        # created to close is unreachable for the luciel_ops role
+        # because RLS policies don't fire for it at all.
         #
-        # KNOWN GAP (BLOCKED ON C6): the Wall-3 policy is
-        #   luciel_instance_id::text = current_setting('app.instance_id', true)
-        #   OR luciel_instance_id IS NULL
-        # which with instance_id=None (empty GUC) admits ONLY rows
-        # with luciel_instance_id IS NULL. Instance-scoped Wall-3
-        # rows (memory_items, sessions, traces) would SURVIVE the
-        # purge under the master flag.
-        #
-        # The correct fix is a dedicated DB role with BYPASSRLS,
-        # scheduled for C6 alongside the audit-log immutability
-        # role. Until C6 lands, retention MUST run with the master
-        # flag OFF -- guard below enforces this so we cannot ship
-        # a deploy that silently produces inconsistent purges.
-        #
-        # Refs ARC9_RUNBOOK §C4.4, §C6; _arc9/C4_service_audit.md.
-        from app.core.config import settings as _settings
-        if getattr(_settings, "rls_tenant_context_enabled", False):
+        # bind_tenant_scope is no longer called here. The per-tenant
+        # context binding existed to populate app.admin_id /
+        # app.instance_id for RLS. Under BYPASSRLS those GUCs have
+        # no effect on the worker's view. AdminService's audit-row
+        # writer reads admin_id from its method argument, not from
+        # any context var, so removing bind_tenant_scope here does
+        # not affect audit emission. (Belt + suspenders: see test
+        # tests/services/test_arc10_retention_audit_emission.py.)
+        per_tenant_db: Session = OpsSessionLocal()
+        try:
+            # Import here (not at module top) to avoid a circular
+            # import: admin_service imports from app.models which
+            # imports from app.worker via the Celery audit-chain
+            # signal wiring.
+            from app.services.admin_service import AdminService
+
+            admin_svc = AdminService(per_tenant_db)
+            row_counts = admin_svc.hard_delete_tenant_after_retention(
+                admin_id=admin_id,
+                retention_window_days=RETENTION_WINDOW_DAYS,
+            )
+            per_tenant_db.commit()
+            purged_count += 1
+            _log.info(
+                "retention_purge OK admin_id=%s row_counts=%s",
+                admin_id,
+                row_counts,
+            )
+        except Exception:
+            per_tenant_db.rollback()
             errored_count += 1
             errored_tenant_ids.append(admin_id)
             _log.error(
-                "retention_purge BLOCKED admin_id=%s reason=%s",
+                "retention_purge FAILED admin_id=%s traceback:\n%s",
                 admin_id,
-                "rls_tenant_context_enabled=True but C6 BYPASSRLS "
-                "role not yet wired; refusing to run for safety.",
+                traceback.format_exc(),
             )
-            continue
-
-        with bind_tenant_scope(admin_id=admin_id, instance_id=None):
-            per_tenant_db: Session = SessionLocal()
-            try:
-                # Import here (not at module top) to avoid a circular
-                # import: admin_service imports from app.models which
-                # imports from app.worker via the Celery audit-chain
-                # signal wiring.
-                from app.services.admin_service import AdminService
-
-                admin_svc = AdminService(per_tenant_db)
-                row_counts = admin_svc.hard_delete_tenant_after_retention(
-                    admin_id=admin_id,
-                    retention_window_days=RETENTION_WINDOW_DAYS,
-                )
-                per_tenant_db.commit()
-                purged_count += 1
-                _log.info(
-                    "retention_purge OK admin_id=%s row_counts=%s",
-                    admin_id,
-                    row_counts,
-                )
-            except Exception:
-                per_tenant_db.rollback()
-                errored_count += 1
-                errored_tenant_ids.append(admin_id)
-                _log.error(
-                    "retention_purge FAILED admin_id=%s traceback:\n%s",
-                    admin_id,
-                    traceback.format_exc(),
-                )
-            finally:
-                per_tenant_db.close()
+        finally:
+            per_tenant_db.close()
 
     summary = {
         "scanned_count": len(eligible_tenant_ids),
@@ -245,24 +288,37 @@ def run_retention_purge(self):
 
 
 def _scan_eligible_tenants(db: "Session", cutoff: datetime) -> list[str]:
-    """Return tenant_ids whose tenant_configs row is past the retention cutoff.
+    """Return admin ids whose closure-grace clock has expired.
 
-    Single SELECT against the ``ix_tenant_configs_active_deactivated_at``
-    composite index. Ordered by ``deactivated_at ASC`` so the oldest
-    purges run first -- if the nightly job is interrupted partway, the
-    next run picks up where this one left off in FIFO order.
+    Arc 10: predicate changed from tenant_configs.deactivated_at to
+    admins.closure_initiated_at. Closure is the only trigger for
+    hard-delete; deactivation by other sources (platform-admin ToS
+    action, webhook for sub-cancellation without admin closure) does
+    NOT advance a tenant toward hard-delete. See drift entry
+    D-arc10-no-closure-clock-distinct-from-deactivation-2026-05-27.
+
+    Single SELECT against the partial index
+    ``ix_admins_closure_clock_eligible`` (arc10_lifecycle_subsystem).
+    Ordered by ``closure_initiated_at ASC`` so the oldest purges run
+    first -- if the nightly job is interrupted partway, the next run
+    picks up where this one left off in FIFO order.
+
+    The hard_deleted_at IS NULL clause makes the scan tombstone-aware:
+    an admin row already tombstoned (and thus already purged of its
+    customer-data children) is not re-selected on subsequent runs.
     """
     # Plain SQL keeps the scan close to the index shape; using the ORM
-    # here would load TenantConfig objects (heavier) when all we need
-    # is the admin_id string.
+    # here would load Admin objects (heavier) when all we need is the
+    # admin id string.
     sql = text(
         """
-        SELECT admin_id
-          FROM tenant_configs
+        SELECT id
+          FROM admins
          WHERE active = false
-           AND deactivated_at IS NOT NULL
-           AND deactivated_at < :cutoff
-         ORDER BY deactivated_at ASC
+           AND closure_initiated_at IS NOT NULL
+           AND closure_initiated_at < :cutoff
+           AND hard_deleted_at IS NULL
+         ORDER BY closure_initiated_at ASC
         """
     )
     result = db.execute(sql, {"cutoff": cutoff})

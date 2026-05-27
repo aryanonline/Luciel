@@ -1272,15 +1272,28 @@ class AdminService:
         self,
         admin_id: str,
         *,
-        retention_window_days: int = 90,
+        retention_window_days: int = 30,
     ) -> dict[str, int]:
         """Hard-delete every row scoped to ``admin_id`` after retention.
 
-        Re-verifies the retention predicate (active=false AND
-        deactivated_at < now - N days) inside this transaction as an
-        idempotency guard. If the row is not eligible (already purged,
-        re-activated, or insufficient retention age), returns an empty
-        dict and makes no DB changes.
+        Arc 10: retention_window_days defaults to 30 (was 90). The
+        retention worker calls with RETENTION_WINDOW_DAYS=30, matching
+        Vision §6.5. Manual callers (e.g. GDPR right-to-erasure
+        workflow when it lands) may pass a smaller value for
+        immediate erasure.
+
+        Arc 10: the eligibility predicate read in the calling worker
+        is now admins.closure_initiated_at, not deactivated_at. This
+        method re-verifies the predicate inside its transaction
+        using closure_initiated_at as well. If the row is not
+        eligible (already tombstoned, re-activated, or insufficient
+        retention age), returns an empty dict and makes no DB
+        changes.
+
+        Arc 10: step 11 is a tombstone UPDATE, not a row DELETE.
+        The admins row persists with hard_deleted_at set and every
+        PII column redacted. This is the Vision §6.5 "minimal
+        compliance record" posture.
 
         Order of deletion (leaf-first, RESTRICT-safe):
            1. messages          (via sessions FK CASCADE -- implicit)
@@ -1289,11 +1302,14 @@ class AdminService:
            4. identity_claims   WHERE admin_id=:tid
            5. memory_items      WHERE admin_id=:tid
            6. api_keys          WHERE admin_id=:tid
-           7. luciel_instances  WHERE admin_id=:tid
-           8. agents            WHERE admin_id=:tid
-           9. agent_configs     WHERE tenant_id=:tid
-          10. domain_configs    WHERE admin_id=:tid
-          11. tenant_configs    WHERE admin_id=:tid
+           7. luciel_instances  WHERE admin_id=:tid (legacy, may be 0)
+           8. agents            WHERE admin_id=:tid (legacy, may be 0)
+           9. agent_configs     WHERE tenant_id=:tid (legacy)
+          10. domain_configs    REMOVED at Arc 5 Path A (no-op, kept
+              in row-counts map at 0 for audit-row schema stability)
+          11. admins            TOMBSTONE (Arc 10): UPDATE with
+              hard_deleted_at=now() + PII redaction. NOT a DELETE.
+              Vision §6.5 minimal-compliance-record posture.
           12. AdminAuditLog row recording the purge (action=
               ACTION_TENANT_HARD_PURGED) with per-table row-count map.
 
@@ -1351,12 +1367,28 @@ class AdminService:
         cutoff = datetime.now(timezone.utc) - timedelta(
             days=retention_window_days
         )
-        # tenant.deactivated_at is timezone-aware (timestamptz) so the
+        # Arc 10: eligibility re-verification uses closure_initiated_at
+        # (the 30-day grace clock) instead of deactivated_at. Closure
+        # is the only trigger for hard-delete. If the admin was
+        # deactivated by some other path (platform-admin ToS action,
+        # webhook for sub-cancellation without explicit closure) the
+        # column is NULL and this re-verification refuses the purge.
+        closure_ts = getattr(tenant, "closure_initiated_at", None)
+        if closure_ts is None:
+            # Defensive skip — raced past the scan's predicate or the
+            # closure was rolled back between scan and purge.
+            return {}
+        # closure_initiated_at is timezone-aware (timestamptz) so the
         # comparison is well-defined; mixing tz-aware and naive would
         # raise TypeError, which is the correct behavior.
-        if tenant.deactivated_at >= cutoff:
+        if closure_ts >= cutoff:
             # Eligible per the scan but raced -- another beat or a
             # bug shrank the window. Defensive skip.
+            return {}
+        # Also refuse to re-tombstone an already-tombstoned row.
+        # The scan predicate filters on hard_deleted_at IS NULL but
+        # belt-and-suspenders against concurrent runs.
+        if getattr(tenant, "hard_deleted_at", None) is not None:
             return {}
 
         # ---- Hard-delete chain ----
@@ -1433,27 +1465,60 @@ class AdminService:
         # audit-row schema stability.
         row_counts["domain_configs"] = 0
 
-        # 11. admins (the parent row itself).
-        # V2: tenant_configs table is renamed to admins at Revision C
-        # via rename; same primary key (admin_id → id). During the
-        # transition before Revision C lands, the table is still named
-        # tenant_configs on disk; after Revision C, it is admins. Try
-        # admins first, fall back to tenant_configs.
-        try:
-            row_counts["admins"] = _delete(
-                "DELETE FROM admins WHERE id = :tid"
-            )
-        except Exception:
-            row_counts["admins"] = 0
-        if row_counts["admins"] == 0:
-            try:
-                row_counts["tenant_configs"] = _delete(
-                    "DELETE FROM tenant_configs WHERE admin_id = :tid"
-                )
-            except Exception:
-                row_counts["tenant_configs"] = 0
-        else:
-            row_counts["tenant_configs"] = 0
+        # 11. admins — TOMBSTONE, not DELETE (Arc 10).
+        #
+        # Vision §6.5: "GDPR-style hard delete of all customer data;
+        # Audit log + minimal compliance record retained per legal
+        # requirements." The tombstone IS the minimal compliance record:
+        # the row persists so the audit chain's resource_natural_id
+        # references stay walkable, but every PII column is redacted.
+        #
+        # Arc 10 also REMOVES the tenant_configs fallback that this
+        # cascade had pre-arc5_c. The Arc 10 migration's drift-
+        # reconciliation step backfilled tenant_configs.deactivated_at
+        # into admins.deactivated_at, so the post-arc5_c shape is now
+        # complete and the legacy table is no longer queried by code
+        # (the table itself remains; a future cleanup migration may
+        # drop it).
+        #
+        # PII columns redacted:
+        #   - name             → '[REDACTED]'
+        #   - stripe_customer_id → NULL
+        #   - last_signup_ip   → NULL
+        # Columns preserved (audit-trail integrity):
+        #   - id, created_at, tier, tier_source, active=false,
+        #     deactivated_at, closure_initiated_at, closure_cancel_mode
+        # Columns set by this UPDATE:
+        #   - hard_deleted_at = now()
+        #
+        # Idempotency: the WHERE clause filters on hard_deleted_at
+        # IS NULL, so a re-run hits zero rows and reports 0 tombstoned.
+        # The retention worker's scan predicate also filters on
+        # hard_deleted_at IS NULL, so re-scan never re-selects.
+        res = self.db.execute(
+            sql_text(
+                """
+                UPDATE admins
+                   SET hard_deleted_at = now(),
+                       name = '[REDACTED]',
+                       stripe_customer_id = NULL,
+                       last_signup_ip = NULL,
+                       active = false
+                 WHERE id = :tid
+                   AND hard_deleted_at IS NULL
+                """
+            ),
+            {"tid": admin_id},
+        )
+        row_counts["admins_tombstoned"] = int(res.rowcount or 0)
+        # Backwards-compat key for tests still asserting the old key.
+        # Future Arc 10 follow-up: tests are updated and this dual
+        # write is dropped.
+        row_counts["admins"] = row_counts["admins_tombstoned"]
+        # tenant_configs fallback removed (drift entry D-arc10-admins-
+        # deactivated-at-missing-from-rename-2026-05-27). Key preserved
+        # at 0 for audit-row schema stability.
+        row_counts["tenant_configs"] = 0
 
         # 12. Audit row -- write to AdminAuditLog with full row-count
         # manifest. The audit row uses the resource_natural_id field

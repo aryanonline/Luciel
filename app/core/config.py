@@ -592,6 +592,32 @@ class Settings(BaseSettings):
     # tags arc-9-tenant-isolation-complete.
     audit_log_immutability_enabled: bool = False
 
+    # -----------------------------------------------------------------
+    # Arc 10 -- Lifecycle subsystem settings.
+    # -----------------------------------------------------------------
+    # audit_archiver_db_url:
+    #   Connection URL for the luciel_audit_archiver Postgres role
+    #   created by the Arc 10 migration. This role has SELECT + UPDATE
+    #   on admin_audit_log only and BYPASSRLS. Used exclusively by
+    #   AuditRetentionService. The audit-retention beat task runs as
+    #   a no-op when this is unset, so local dev / CI do not
+    #   accidentally archive audit rows.
+    audit_archiver_db_url: str | None = None
+
+    # data_export_bucket:
+    #   S3 bucket name for pre-closure export bundles (Arc 10
+    #   DataExportService). Lifecycle policy on the bucket aborts
+    #   incomplete multipart uploads after 24h so interrupted
+    #   generations do not leak storage forever.
+    data_export_bucket: str = "luciel-data-exports"
+
+    # audit_cold_archive_bucket:
+    #   S3 bucket name for tier-conditional audit cold archive.
+    #   Per Vision 6.5 / 7: hot rows whose tier window has elapsed
+    #   are moved here with the hash chain extended across the
+    #   hot/cold boundary.
+    audit_cold_archive_bucket: str = "luciel-audit-cold-archive"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

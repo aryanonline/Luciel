@@ -299,6 +299,41 @@ class Subscription(Base, TimestampMixin):
     )
 
     # -----------------------------------------------------------------
+    # Arc 10 (Alembic arc10_lifecycle_subsystem) — downgrade grace clock.
+    # -----------------------------------------------------------------
+    # Customer Journey Phase 8 Pro: "The system enters a read-only
+    # grace window (30 days): existing Luciels keep running, but he
+    # cannot create new instances or upload new knowledge… At day 30,
+    # the system enforces caps." These two columns power that flow:
+    #
+    # pending_downgrade_initiated_at: set when POST /billing/downgrade
+    # fires (sets pending_downgrade_target to 'free' and stamps this
+    # column with now()). The downgrade-grace middleware reads
+    # NOW() - pending_downgrade_initiated_at to compute the read-only
+    # state and the day-30 boundary.
+    #
+    # pending_downgrade_enforced_at: set by the day-30 enforcement
+    # worker after it runs DowngradeArchiveService.archive_overflow_
+    # for_admin. NOT NULL means the archive ran and the worker should
+    # not re-archive on the next scan. The partial index
+    # ix_subscriptions_downgrade_grace_eligible filters to rows where
+    # this is still NULL so re-scans skip already-enforced rows.
+    pending_downgrade_initiated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment=(
+            "Arc 10 — set when POST /billing/downgrade fires. Starts "
+            "the 30-day read-only grace clock."
+        ),
+    )
+    pending_downgrade_enforced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment=(
+            "Arc 10 — set by the day-30 enforcement worker. Makes the "
+            "enforcement idempotent against re-scans."
+        ),
+    )
+
+    # -----------------------------------------------------------------
     # Provider payload + last event marker — debugging + replay.
     # -----------------------------------------------------------------
     # Last raw Stripe object snapshot (subscription.* event). Bounded

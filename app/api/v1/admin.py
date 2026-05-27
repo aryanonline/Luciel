@@ -2273,3 +2273,414 @@ def deactivate_user_p2c12(
     except _UserNotFoundError_p2c12 as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return None
+
+
+# =====================================================================
+# Arc 10 -- Lifecycle endpoints (closure, reactivation, data export).
+# =====================================================================
+#
+# These routes are the customer-facing surface of the Arc 10 lifecycle
+# subsystem. Each one composes a single service call and translates
+# typed service errors to HTTP responses.
+#
+# All routes:
+#   * require an admin-scoped session (admin_id resolved from
+#     request.state.admin_id by the auth middleware -- not platform_admin)
+#   * write via the tenant-scoped session that emits app.admin_id GUC
+#     so RLS policies on the new tables (data_export_jobs) fire
+#     correctly
+#   * emit one audit row per state transition via the services
+# =====================================================================
+
+from app.schemas.lifecycle import (
+    AccountCloseRequest,
+    AccountCloseResponse,
+    DataExportJobResponse,
+    DataExportReadyResponse,
+    ReactivationCompleteRequest,
+    ReactivationCompleteResponse,
+    ReactivationStageRequest,
+    ReactivationStageResponse,
+)
+from app.services.closure_service import (
+    AccountAlreadyClosedError,
+    AccountAlreadyTombstoneError,
+    ClosureService,
+    InvalidCancelModeError,
+    InvalidConfirmationError,
+)
+from app.services.reactivation_service import (
+    AccountAlreadyTombstoneError as ReactAccountTombstoneError,
+    AccountNotInGraceError,
+    ReactivationError,
+    ReactivationService,
+    ReactivationWindowExpiredError,
+    StripeReactivationCheckoutFailedError,
+    StripeSubscriptionMismatchError,
+)
+from app.services.data_export_service import (
+    DataExportService,
+    ExportAlreadyInFlightError,
+    ExportNotFoundError,
+    ExportNotReadyError,
+)
+
+
+def _require_admin_id(request: Request) -> str:
+    # Helper -- centralizes the "you must be authenticated as an
+    # admin" check. The closure / reactivation / export endpoints
+    # all require an admin scope; an embed key or unauthenticated
+    # request must 401 before reaching the service layer.
+    admin_id = getattr(request.state, "admin_id", None)
+    if not admin_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin authentication required.",
+        )
+    return admin_id
+
+
+@router.post(
+    "/account/close",
+    response_model=AccountCloseResponse,
+    status_code=status.HTTP_200_OK,
+)
+def close_account(
+    request: Request,
+    body: AccountCloseRequest,
+    db: DbSession,
+) -> AccountCloseResponse:
+    # Vision 6.3: admin-initiated closure with optional pre-closure
+    # data export. Starts the 30-day grace clock. The hard-delete
+    # cascade runs 30 days later via the retention worker.
+    admin_id = _require_admin_id(request)
+    audit_ctx = AuditContext.from_request(request)
+
+    # Compose services. Each is request-scoped.
+    from app.services.admin_service import AdminService
+    from app.services.billing_service import BillingService
+    from app.integrations.stripe import get_stripe_client
+    admin_svc = AdminService(db)
+    billing_svc = BillingService(db, get_stripe_client())
+    audit_repo = AdminAuditRepository(db)
+    # Data export service constructed lazily only when needed -- the
+    # S3 client / bucket settings are not required for closures that
+    # do not request an export.
+    if body.request_export:
+        from app.core.config import settings
+        import boto3
+        s3 = boto3.client("s3", region_name=settings.aws_region)
+        data_export_svc = DataExportService(
+            db=db,
+            s3_client=s3,
+            s3_bucket=getattr(settings, "data_export_bucket", "luciel-data-exports"),
+            audit_repository=audit_repo,
+        )
+    else:
+        data_export_svc = None
+
+    # luciel_instance_service / agent_repo wiring matches the existing
+    # cascade route at line ~320 of this file.
+    from app.services.instance_service import InstanceService
+    from app.repositories.agent_repository import AgentRepository
+    instance_svc = InstanceService(db)
+    agent_repo = AgentRepository(db)
+
+    closure_svc = ClosureService(
+        db,
+        admin_service=admin_svc,
+        billing_service=billing_svc,
+        data_export_service=data_export_svc,
+        audit_repository=audit_repo,
+    )
+
+    try:
+        outcome = closure_svc.initiate_closure(
+            admin_id=admin_id,
+            cancel_mode=body.cancel_mode,
+            confirm_account_name=body.confirm_account_name,
+            request_export=body.request_export,
+            audit_ctx=audit_ctx,
+            luciel_instance_service=instance_svc,
+            agent_repo=agent_repo,
+        )
+    except InvalidConfirmationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account-name confirmation did not match.",
+        ) from exc
+    except InvalidCancelModeError as exc:
+        # Pydantic should have caught this at the route boundary;
+        # belt-and-suspenders.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except AccountAlreadyClosedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except AccountAlreadyTombstoneError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+
+    db.commit()
+    return AccountCloseResponse(
+        admin_id=outcome.admin_id,
+        closure_initiated_at=outcome.closure_initiated_at,
+        grace_window_expires_at=outcome.grace_window_expires_at,
+        cancel_mode=outcome.cancel_mode,
+        stripe_cancellation_applied=outcome.stripe_cancellation_applied,
+        data_export_job_id=outcome.data_export_job_id,
+    )
+
+
+@router.post(
+    "/account/reactivate/stage",
+    response_model=ReactivationStageResponse,
+    status_code=status.HTTP_200_OK,
+)
+def reactivate_stage(
+    request: Request,
+    body: ReactivationStageRequest,
+    db: DbSession,
+) -> ReactivationStageResponse:
+    # Vision 6.4 phase 1: admin within 30-day grace requests a new
+    # Stripe checkout to re-subscribe. No DB mutation in this phase.
+    admin_id = _require_admin_id(request)
+    from app.services.billing_service import BillingService
+    from app.integrations.stripe import get_stripe_client
+    billing_svc = BillingService(db, get_stripe_client())
+    audit_repo = AdminAuditRepository(db)
+
+    react_svc = ReactivationService(
+        db,
+        billing_service=billing_svc,
+        audit_repository=audit_repo,
+    )
+    try:
+        staged = react_svc.stage_reactivation(
+            admin_id=admin_id,
+            target_tier=body.target_tier,
+            success_url=body.success_url,
+            cancel_url=body.cancel_url,
+        )
+    except AccountNotInGraceError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ReactivationWindowExpiredError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except ReactAccountTombstoneError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except StripeReactivationCheckoutFailedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    return ReactivationStageResponse(
+        admin_id=staged.admin_id,
+        closure_initiated_at=staged.closure_initiated_at,
+        grace_window_expires_at=staged.grace_window_expires_at,
+        stripe_checkout_url=staged.stripe_checkout_url,
+        stripe_checkout_session_id=staged.stripe_checkout_session_id,
+    )
+
+
+@router.post(
+    "/account/reactivate/complete",
+    response_model=ReactivationCompleteResponse,
+    status_code=status.HTTP_200_OK,
+)
+def reactivate_complete(
+    request: Request,
+    body: ReactivationCompleteRequest,
+    db: DbSession,
+) -> ReactivationCompleteResponse:
+    # Vision 6.4 phase 2: Stripe has confirmed the new subscription;
+    # run the inverse cascade and clear closure stamps.
+    admin_id = _require_admin_id(request)
+    audit_ctx = AuditContext.from_request(request)
+    from app.services.billing_service import BillingService
+    from app.integrations.stripe import get_stripe_client
+    billing_svc = BillingService(db, get_stripe_client())
+    audit_repo = AdminAuditRepository(db)
+
+    react_svc = ReactivationService(
+        db,
+        billing_service=billing_svc,
+        audit_repository=audit_repo,
+    )
+    try:
+        completed = react_svc.complete_reactivation(
+            admin_id=admin_id,
+            stripe_checkout_session_id=body.stripe_checkout_session_id,
+            audit_ctx=audit_ctx,
+        )
+    except AccountNotInGraceError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ReactivationWindowExpiredError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except ReactAccountTombstoneError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except StripeSubscriptionMismatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except ReactivationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    db.commit()
+    return ReactivationCompleteResponse(
+        admin_id=completed.admin_id,
+        reactivated_at=completed.reactivated_at,
+        new_subscription_id=completed.new_subscription_id,
+        instances_restored=completed.instances_restored,
+        api_keys_revoked_count=completed.api_keys_revoked_count,
+        team_members_restored=completed.team_members_restored,
+    )
+
+
+@router.post(
+    "/account/export",
+    response_model=DataExportJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_data_export(
+    request: Request,
+    db: DbSession,
+) -> DataExportJobResponse:
+    # Standalone export request. Used both by an active admin
+    # exercising GDPR data-portability and by an admin within the
+    # closure grace window who did not check the export box at
+    # closure time.
+    admin_id = _require_admin_id(request)
+    audit_ctx = AuditContext.from_request(request)
+
+    # Determine triggered_by by reading the admin's closure state.
+    from app.models.admin import Admin
+    admin = db.get(Admin, admin_id)
+    if admin is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin not found.")
+    if admin.hard_deleted_at is not None:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Account already hard-deleted.")
+    triggered_by = (
+        "grace_window_request"
+        if admin.closure_initiated_at is not None
+        else "admin_request"
+    )
+
+    from app.core.config import settings
+    import boto3
+    s3 = boto3.client("s3", region_name=settings.aws_region)
+    audit_repo = AdminAuditRepository(db)
+    data_export_svc = DataExportService(
+        db=db,
+        s3_client=s3,
+        s3_bucket=getattr(settings, "data_export_bucket", "luciel-data-exports"),
+        audit_repository=audit_repo,
+    )
+
+    try:
+        job = data_export_svc.enqueue(
+            admin_id=admin_id,
+            triggered_by=triggered_by,
+            tier_at_request=admin.tier,
+            audit_ctx=audit_ctx,
+        )
+    except ExportAlreadyInFlightError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    db.commit()
+
+    # The Celery task is dispatched by the route layer rather than by
+    # the service so the service stays test-friendly without a Celery
+    # dependency. We import the task lazily to avoid a circular import
+    # at module load.
+    from app.worker.tasks.data_export import generate_export_bundle
+    generate_export_bundle.delay(job.id)
+
+    return DataExportJobResponse(
+        id=job.id,
+        admin_id=job.admin_id,
+        status=job.status,
+        requested_at=job.requested_at,
+        tier_at_request=job.tier_at_request,
+        triggered_by=job.triggered_by,
+        ready_at=job.ready_at,
+        signed_url_expires_at=job.signed_url_expires_at,
+    )
+
+
+@router.get(
+    "/account/export/{job_id}",
+    response_model=None,  # response varies (job-status vs signed-url)
+    status_code=status.HTTP_200_OK,
+)
+def get_data_export(
+    request: Request,
+    job_id: str,
+    db: DbSession,
+):
+    # Poll status. If ready -> returns DataExportReadyResponse with
+    # the signed URL. Otherwise returns DataExportJobResponse with
+    # the current status.
+    admin_id = _require_admin_id(request)
+    from app.core.config import settings
+    import boto3
+    s3 = boto3.client("s3", region_name=settings.aws_region)
+    audit_repo = AdminAuditRepository(db)
+    data_export_svc = DataExportService(
+        db=db,
+        s3_client=s3,
+        s3_bucket=getattr(settings, "data_export_bucket", "luciel-data-exports"),
+        audit_repository=audit_repo,
+    )
+
+    # Read the job row.
+    from sqlalchemy import text as sql_text
+    row = db.execute(
+        sql_text(
+            """
+            SELECT id, admin_id, status, requested_at, tier_at_request,
+                   triggered_by, ready_at, signed_url_expires_at,
+                   bytes_size
+              FROM data_export_jobs
+             WHERE id = :id
+               AND admin_id = :aid
+            """
+        ),
+        {"id": job_id, "aid": admin_id},
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Export job not found.")
+    (job_pk, job_admin, job_status, job_req_at, job_tier,
+     job_trigger, job_ready_at, job_expires_at, job_bytes) = row
+
+    if job_status != "ready":
+        return DataExportJobResponse(
+            id=str(job_pk),
+            admin_id=job_admin,
+            status=job_status,
+            requested_at=job_req_at,
+            tier_at_request=job_tier,
+            triggered_by=job_trigger,
+            ready_at=job_ready_at,
+            signed_url_expires_at=job_expires_at,
+        )
+
+    try:
+        signed_url, expires_at = data_export_svc.get_signed_url(
+            job_id=str(job_pk),
+            admin_id=admin_id,
+        )
+    except ExportNotReadyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ExportNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return DataExportReadyResponse(
+        id=str(job_pk),
+        admin_id=job_admin,
+        status="ready",
+        signed_url=signed_url,
+        signed_url_expires_at=expires_at,
+        bytes_size=int(job_bytes or 0),
+    )

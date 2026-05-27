@@ -85,6 +85,17 @@ class Instance(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Arc 10 (Alembic arc10_lifecycle_subsystem) — instance soft-delete
+    # clock per Architecture §3.6.1 ("soft-delete window measured from
+    # soft_deleted_at (locked)"). Set when the instance is deactivated.
+    # The soft-delete worker reads this column to find instances 30 days
+    # past deactivation and hard-deletes their knowledge embeddings.
+    # Distinct from active=false (operational flag) and from
+    # pending_downgrade_archived_at (downgrade-archived).
+    soft_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     __table_args__ = (
         UniqueConstraint(
             "admin_id", "instance_slug", name="uq_instances_admin_id_slug"

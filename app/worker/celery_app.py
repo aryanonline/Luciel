@@ -177,6 +177,9 @@ celery_app = Celery(
     include=[
         "app.worker.tasks.memory_extraction",
         "app.worker.tasks.retention",
+        # Arc 10 -- lifecycle subsystem tasks.
+        "app.worker.tasks.data_export",
+        "app.worker.tasks.audit_retention",
     ],
 )
 
@@ -262,6 +265,29 @@ celery_app.conf.update(
                 # work never starves user-facing memory_extraction.
                 "queue": "luciel-memory-tasks",
             },
+        },
+        # Arc 10 -- audit-tier cold-archive nightly. Runs an hour
+        # after retention-purge so the two beat tasks do not contend
+        # for the worker's prefetch slot.
+        "audit-tier-retention-nightly": {
+            "task": "app.worker.tasks.audit_retention.run_audit_tier_retention",
+            "schedule": crontab(hour=9, minute=0),
+            "options": {"queue": "luciel-memory-tasks"},
+        },
+        # Arc 10 -- downgrade-grace enforcement nightly. Runs at the
+        # same slot as retention because both scan for grace-expired
+        # rows; they are independent across rows so no contention.
+        "downgrade-grace-enforcement-nightly": {
+            "task": "app.worker.tasks.audit_retention.run_downgrade_grace_enforcement",
+            "schedule": crontab(hour=9, minute=30),
+            "options": {"queue": "luciel-memory-tasks"},
+        },
+        # Arc 10 -- expire ready exports whose signed-URL TTL elapsed.
+        # Cheap query; runs alongside the others.
+        "data-export-expire-signed-urls": {
+            "task": "app.worker.tasks.data_export.expire_old_signed_urls",
+            "schedule": crontab(hour=10, minute=0),
+            "options": {"queue": "luciel-memory-tasks"},
         },
     },
 )
