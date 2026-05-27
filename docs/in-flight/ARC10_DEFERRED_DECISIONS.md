@@ -1,7 +1,7 @@
 # Arc 10 — Deferred Decisions and Follow-Up Items
 
 **Arc:** 10 — Deactivation Lifecycle, Cap Reclamation, Pre-Closure Data Export
-**Status:** RE-OPENED 2026-05-27 15:52 EDT · IN PROGRESS (Gap 1/3/4 closed; Gap 2/5/6/7 remaining)
+**Status:** RE-OPENED 2026-05-27 15:52 EDT · IN PROGRESS (Gap 1/2/3/4/5 closed; Gap 6/7 remaining)
 **Author:** Sandbox agent (under founder direction)
 
 ---
@@ -49,18 +49,39 @@ founder explicitly re-opens that decision against the docs.
   `auth.kind === "ok"` branch above the tab nav. Same component as
   `/account`, so the two surfaces stay in lockstep. Live in prod.
 
-* **Gap 2 (frontend Vitest coverage)** — PENDING.
-  Need tests for `lib/lifecycle.ts` (mock fetch, per-function request
-  shape + response parsing + BillingApiError), `CloseAccountSection`
-  (modal open/close, type-to-confirm gating, payload assembly,
-  redirect path), `LifecycleBanners` (each banner's render states +
-  polling cleanup on unmount).
+* **Gap 2 (frontend Vitest coverage)** — CLOSED 2026-05-27 20:23 EDT.
+  56 new tests across 3 files in `src/test/`:
+  `lifecycle.test.ts` (18), `CloseAccountSection.test.tsx` (18),
+  `LifecycleBanners.test.tsx` (20). Plus `pilot.test.tsx` refactored to
+  a URL-dispatcher fetch mock because Account now fires 3 mount-time
+  fetches. 99/99 frontend tests pass. PR aryanonline/Luciel-Website#10
+  merged.
 
-* **Gap 5 (4 deferred backend test suites)** — PENDING.
-  test_arc10_data_export, test_arc10_downgrade_grace,
-  test_arc10_reactivation, test_arc10_audit_archiver_role_privileges.
-  Each needs live-DB pytest fixtures (Arc 9 C7 PRs have the pattern);
-  CI extended to bring up Postgres service container.
+* **Gap 5 (4 deferred backend test suites)** — CLOSED 2026-05-27 20:30 EDT.
+  72 new tests across 4 files:
+  `tests/services/test_arc10_data_export.py` (21),
+  `tests/services/test_arc10_downgrade_grace.py` (17),
+  `tests/services/test_arc10_reactivation.py` (20),
+  `tests/db/test_arc10_audit_archiver_role_privileges.py` (14).
+  Test strategy: AST + text assertions against shipped source --
+  matches existing Arc 10 / Arc 8 WU-6 doctrine, sandbox-runnable, no
+  Postgres container needed. The DB-level grant assertions were
+  proven against prod RDS by the original arc's e2e harness; these
+  tests are the regression net. PR aryanonline/Luciel#105 merged.
+  Backend redeployed (luciel-backend:119; image main-b485e68).
+
+  Real bug caught + fixed in the same PR:
+  `D-arc10-data-export-worker-uses-session-local-not-ops-2026-05-27`.
+  Both `generate_export_bundle` and `expire_old_signed_urls` in
+  `app/worker/tasks/data_export.py` used `SessionLocal()` (luciel_app
+  role, RLS-enforced) instead of `OpsSessionLocal()`.
+  `expire_old_signed_urls` runs a cross-admin UPDATE; without an
+  `app.admin_id` GUC, RLS made every UPDATE match zero rows -- silent
+  dead letter, exports would NEVER expire in prod. Fixed both tasks
+  to use `(OpsSessionLocal or SessionLocal)()` matching the
+  retention.py pattern. Caught by
+  `test_data_export_task_uses_ops_session_for_bypassrls` -- exactly
+  the kind of value the missing test suite was supposed to deliver.
 
 * **Gap 6 (audit-archiver observability)** — PENDING.
   Beat-fired confirmation via CloudWatch Logs Insights query +
@@ -74,20 +95,29 @@ founder explicitly re-opens that decision against the docs.
   close → reactivate → close cycle, observes webhook + DB state
   transitions.
 
-### In-flight bugs caught during Gap 1/3/4 deploy
+### In-flight bugs caught during the re-open
 
 * `D-arc10-reopen-tsc-misses-jsx-fragment-imbalance-2026-05-27`
-  My multi-step edit batch fail-atomically silently dropped the open
-  `<>` tag in Dashboard.tsx. `tsc --noEmit` passed (surface-level TS),
-  but esbuild's stricter JSX parse failed Amplify build #41. Caught
-  by reading the build log, fixed in hotfix PR #9. Pattern for
-  future: run `vite build` locally (not just `tsc --noEmit`) before
-  any frontend push that touches JSX structure.
+  (Gap 4 wave). My multi-step edit batch fail-atomically silently
+  dropped the open `<>` tag in Dashboard.tsx. `tsc --noEmit` passed
+  (surface-level TS), but esbuild's stricter JSX parse failed Amplify
+  build #41. Caught by reading the build log, fixed in hotfix
+  aryanonline/Luciel-Website#9. Pattern for future: run `vite build`
+  locally (not just `tsc --noEmit`) before any frontend push that
+  touches JSX structure.
+
+* `D-arc10-data-export-worker-uses-session-local-not-ops-2026-05-27`
+  (Gap 5 wave). Both data_export worker tasks used SessionLocal
+  instead of OpsSessionLocal. `expire_old_signed_urls` would never
+  expire any export in prod due to RLS blocking the cross-admin
+  UPDATE. Caught by the new Gap 5 test suite
+  (`test_data_export_task_uses_ops_session_for_bypassrls`). Fixed in
+  the same PR (#105). Backend redeployed (luciel-backend:119).
 
 ### Remaining work to fully close Arc 10
 
-Three more turns per the re-open plan. Arc 11 does not start until
-Gap 2/5/6/7 are closed.
+One more wave -- Gap 6 + 7 (audit-archiver observability + Stripe-
+integrated E2E). Arc 11 does not start until both are closed.
 
 ---
 
