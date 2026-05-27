@@ -1198,7 +1198,28 @@ async def signup_free(
     # layer -- a future ALB / WAF rewrite of the trusted-IP chain is
     # tracked separately; for now, ``request.client.host`` is what
     # the FastAPI app sees from the ALB-target uvicorn worker.
-    remote_ip = request.client.host if request.client else None
+    #
+    # Validate as a real IP before use. ``last_signup_ip`` is a
+    # PostgreSQL INET column; passing a non-IP token (e.g. the
+    # FastAPI TestClient default ``"testclient"``) into a SELECT or
+    # INSERT against an INET column raises
+    # psycopg.errors.InvalidTextRepresentation. We treat a present-
+    # but-invalid host the same as a missing host (fail-open on the
+    # IP gate, NULL on the stamp) -- the captcha gate already covers
+    # the same abuse surface, and a hard 500 here would be a self-
+    # inflicted DoS as called out below.
+    raw_client_host = request.client.host if request.client else None
+    remote_ip: str | None = None
+    if raw_client_host is not None:
+        import ipaddress
+        try:
+            ipaddress.ip_address(raw_client_host)
+            remote_ip = raw_client_host
+        except ValueError:
+            logger.info(
+                "signup_free.invalid_client_host_ignored host=%r",
+                raw_client_host,
+            )
 
     # ----- 1.pre (Soft-gate) 1-per-IP rolling 24h gate ----------------------
     #

@@ -207,9 +207,14 @@ class TestC61MigrationShape(unittest.TestCase):
             "identity_claims",
             "memory_items",
             "api_keys",
-            "luciel_instances",
-            "agents",
-            "agent_configs",
+            # Live table is `instances` (Architecture v1 §3.6 —
+            # "Instance" is the customer-data entity). The legacy
+            # name `luciel_instances` was renamed before Arc 10 and
+            # `agents` / `agent_configs` were dropped entirely
+            # (V2 has no Agent layer per Vision §3 — the five
+            # configuration pillars are channels, tools, knowledge,
+            # escalation, personality, not agent_configs).
+            "instances",
         )
         for table in required_tables:
             self.assertIn(

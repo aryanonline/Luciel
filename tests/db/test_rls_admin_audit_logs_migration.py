@@ -136,7 +136,7 @@ class TestC31MigrationShape(unittest.TestCase):
     def test_policy_predicate_compares_tenant_id_column(self):
         """The compared column MUST be admin_id (not admin_id, not
         owner_id, not anything else)."""
-        self.assertIn("admin_id = current_setting", self.text_lower)
+        self.assertIn("tenant_id = current_setting", self.text_lower)
 
     def test_downgrade_drops_policy_then_disables_rls(self):
         """Order matters: dropping the policy first leaves the table

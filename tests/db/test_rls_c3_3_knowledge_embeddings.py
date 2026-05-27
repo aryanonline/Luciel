@@ -92,13 +92,13 @@ class TestC33MigrationShape(unittest.TestCase):
         self.assertIsNotNone(m, "USING ... WITH CHECK block not found")
         using_body = m.group(1)
         self.assertIn(
-            "admin_id is null",
+            "tenant_id is null",
             using_body,
-            "USING MUST include `admin_id IS NULL` so cross-tenant "
+            "USING MUST include `tenant_id IS NULL` so cross-tenant "
             "domain_knowledge rows remain visible.",
         )
         self.assertIn(
-            "admin_id = current_setting",
+            "tenant_id = current_setting",
             using_body,
             "USING MUST also include the own-tenant match.",
         )
@@ -116,9 +116,9 @@ class TestC33MigrationShape(unittest.TestCase):
         self.assertIsNotNone(m, "WITH CHECK block not found")
         check_body = m.group(1)
         # The NULL branch MUST be gated by = 'platform'.
-        # We look for both 'admin_id is null' and a 'platform' token
+        # We look for both 'tenant_id is null' and a 'platform' token
         # appearing together in the same body.
-        self.assertIn("admin_id is null", check_body)
+        self.assertIn("tenant_id is null", check_body)
         self.assertIn(
             "'platform'",
             check_body,
@@ -127,7 +127,7 @@ class TestC33MigrationShape(unittest.TestCase):
             "admins can write cross-tenant rows.",
         )
         # The own-tenant branch is also present.
-        self.assertIn("admin_id = current_setting", check_body)
+        self.assertIn("tenant_id = current_setting", check_body)
 
     def test_using_and_with_check_are_asymmetric(self):
         """The whole point of this policy is that USING is more

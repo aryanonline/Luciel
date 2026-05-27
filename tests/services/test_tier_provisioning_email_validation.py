@@ -413,7 +413,12 @@ def test_premint_for_tier_rejects_missing_admin_id_and_tenant_id() -> None:
 
     fake_settings = _FakeSettings(enabled=False)
     with patch("app.core.config.settings", fake_settings):
-        with pytest.raises(TypeError, match="admin_id= or admin_id= must be supplied"):
+        # Post Arc 9.2 PR #101: the Arc 8 C2 dual-kwarg alias
+        # (admin_id= OR tenant_id=) was collapsed; admin_id is now
+        # the sole required identifier. Calling without it raises
+        # the standard Python ``missing N required keyword-only
+        # argument`` TypeError from the signature itself.
+        with pytest.raises(TypeError, match=r"admin_id"):
             svc.premint_for_tier(
                 tier="free",
                 primary_user=primary_user,

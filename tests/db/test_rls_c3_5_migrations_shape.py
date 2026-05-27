@@ -11,7 +11,7 @@ C3.5 covers the 5 strict NOT-NULL tables that were NOT in C3.2:
   - admin_widget_domains  (admin_id  NOT NULL, FK->admins.id)
 
 Note the wall-column NAME differs for instances and admin_widget_domains
-(`admin_id` rather than `admin_id`) -- both are equivalent slug
+(`tenant_id` rather than `tenant_id`) -- both are equivalent slug
 references to admins.id but the column name follows the V2 model
 nomenclature on those two tables. The RLS predicate adapts accordingly;
 the GUC name itself (`app.admin_id`) stays constant across all 16
@@ -114,11 +114,15 @@ class TestC35MigrationsShape(unittest.TestCase):
     ):
         """Common per-table shape assertions.
 
-        wall_col matters for the strict-RLS predicate: most C3 tables
-        use `admin_id` but instances + admin_widget_domains use
-        `admin_id` (same FK target, different column name). This
-        helper asserts the predicate references THE column actually
-        on the table, not a hardcoded `admin_id`.
+        wall_col is the column name AS WRITTEN in the migration source.
+        Pre-Arc-9.2 migrations source-text use ``tenant_id`` (the live
+        column was later renamed to ``admin_id`` by PR #101 but alembic
+        files are immutable historical artifacts). Two post-Arc-9.2
+        migrations -- ``instances`` and ``admin_widget_domains`` -- use
+        ``admin_id`` directly because they shipped after the rename.
+        Architecture v1 §3.7.1 (Wall 1) mandates the semantic property
+        (RLS filters customer-data rows by admin identity), not a
+        specific column name.
         """
         path = _migration_path(rev_id)
         self.assertTrue(path.exists(), f"Missing migration: {path}")
@@ -207,7 +211,7 @@ class TestC35MigrationsShape(unittest.TestCase):
     def test_c35a_user_invites(self):
         self._assert_migration_shape(
             "user_invites",
-            "admin_id",
+            "tenant_id",  # pre-Arc-9.2 source; live column is now admin_id
             "arc9_c3_5a_rls_user_invites",
             "arc9_c3_4_rls_api_keys",
         )
@@ -215,7 +219,7 @@ class TestC35MigrationsShape(unittest.TestCase):
     def test_c35b_user_consents(self):
         self._assert_migration_shape(
             "user_consents",
-            "admin_id",
+            "tenant_id",  # pre-Arc-9.2 source; live column is now admin_id
             "arc9_c3_5b_rls_user_consents",
             "arc9_c3_5a_rls_user_invites",
         )
@@ -223,7 +227,7 @@ class TestC35MigrationsShape(unittest.TestCase):
     def test_c35c_identity_claims(self):
         self._assert_migration_shape(
             "identity_claims",
-            "admin_id",
+            "tenant_id",  # pre-Arc-9.2 source; live column is now admin_id
             "arc9_c3_5c_rls_identity_claims",
             "arc9_c3_5b_rls_user_consents",
         )

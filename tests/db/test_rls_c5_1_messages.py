@@ -75,13 +75,13 @@ class TestC51MigrationShape(unittest.TestCase):
     def test_using_clause(self):
         self.assertRegex(
             self.text_lower,
-            r"using\s*\(\s*admin_id\s*=\s*current_setting\(\s*'app\.admin_id'\s*,\s*true\s*\)\s*\)",
+            r"using\s*\(\s*tenant_id\s*=\s*current_setting\(\s*'app\.admin_id'\s*,\s*true\s*\)\s*\)",
         )
 
     def test_with_check_clause(self):
         self.assertRegex(
             self.text_lower,
-            r"with\s+check\s*\(\s*admin_id\s*=\s*current_setting\(\s*'app\.admin_id'\s*,\s*true\s*\)\s*\)",
+            r"with\s+check\s*\(\s*tenant_id\s*=\s*current_setting\(\s*'app\.admin_id'\s*,\s*true\s*\)\s*\)",
         )
 
     def test_no_null_permissive_carveout(self):

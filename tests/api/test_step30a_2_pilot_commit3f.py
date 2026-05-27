@@ -130,17 +130,46 @@ def test_webhook_handler_no_longer_reads_status_from_session():
 
 
 def test_webhook_handler_fetch_is_wrapped_in_try():
-    """The retrieve_subscription call must be wrapped so a Stripe outage
-    does not 500 the webhook (graceful degrade to inline session data)."""
+    """Every retrieve_subscription call must be wrapped so a Stripe
+    outage does not 500 the webhook.
+
+    Customer Journey §2 (signup -> Stripe sub creation) and §8
+    (closure -> Stripe sub cancel) both depend on this. A 500 here
+    causes Stripe to redeliver the event indefinitely, which then
+    causes duplicate writes when the underlying issue clears.
+
+    Walks every line that calls ``self.stripe.retrieve_subscription(``
+    (skipping comment/docstring mentions) and asserts each one has
+    a ``try:`` in the preceding 600 source bytes of REAL code lines.
+    """
     text = WEBHOOK_SVC.read_text()
-    idx = text.find("self.stripe.retrieve_subscription(")
-    assert idx >= 0
-    # Walk backwards to confirm a try: precedes this call within the
-    # nearest 500 chars.
-    preamble = text[max(0, idx - 500): idx]
-    assert "try:" in preamble, (
-        "retrieve_subscription call is not wrapped in try/except"
+    lines = text.splitlines(keepends=True)
+    # Compute byte offset of each line so we can compute preambles.
+    offsets = []
+    o = 0
+    for ln in lines:
+        offsets.append(o)
+        o += len(ln)
+
+    real_call_lines = []
+    for i, ln in enumerate(lines):
+        stripped = ln.lstrip()
+        if stripped.startswith("#"):
+            continue
+        if "self.stripe.retrieve_subscription(" in ln:
+            real_call_lines.append(i)
+
+    assert real_call_lines, (
+        "No non-comment call site to self.stripe.retrieve_subscription "
+        "found in billing_webhook_service.py"
     )
+    for i in real_call_lines:
+        call_offset = offsets[i]
+        preamble = text[max(0, call_offset - 600): call_offset]
+        assert "try:" in preamble, (
+            f"retrieve_subscription call at line {i+1} is not wrapped "
+            f"in try/except (no `try:` within preceding 600 bytes)."
+        )
 
 
 # ---------------------------------------------------------------------

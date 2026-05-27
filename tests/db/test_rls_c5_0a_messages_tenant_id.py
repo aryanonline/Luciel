@@ -66,7 +66,7 @@ class TestC50aMigrationShape(unittest.TestCase):
         # The add_column call must mark the new column as nullable=True
         # so existing rows survive the metadata-only ALTER.
         self.assertIn("op.add_column", self.text)
-        self.assertIn('"admin_id"', self.text)
+        self.assertIn('"tenant_id"', self.text)
         self.assertIn("nullable=True", self.text)
         self.assertIn("sa.String(length=100)", self.text)
 
@@ -75,7 +75,7 @@ class TestC50aMigrationShape(unittest.TestCase):
         # adding it -- otherwise a partial-failure rerun blows up on
         # the second ALTER.
         self.assertIn("inspect", self.text_lower)
-        self.assertIn('if "admin_id" not in cols', self.text)
+        self.assertIn('if "tenant_id" not in cols', self.text)
 
     def test_phase2_chunked_backfill(self):
         # The backfill must:
@@ -93,7 +93,7 @@ class TestC50aMigrationShape(unittest.TestCase):
     def test_phase3_orphan_guard(self):
         # Refuse to set NOT NULL if any row still has NULL admin_id
         # after the backfill loop completes.
-        self.assertIn("WHERE admin_id IS NULL", self.text)
+        self.assertIn("WHERE tenant_id IS NULL", self.text)
         self.assertIn("RuntimeError", self.text)
         self.assertIn("backfill incomplete", self.text)
 
@@ -105,7 +105,7 @@ class TestC50aMigrationShape(unittest.TestCase):
         # Composite index on (admin_id, session_id) supports RLS
         # predicate AND list_messages access pattern.
         self.assertIn("ix_messages_tenant_id_session_id", self.text)
-        self.assertIn('["admin_id", "session_id"]', self.text)
+        self.assertIn('["tenant_id", "session_id"]', self.text)
 
     def test_downgrade_drops_index_then_column(self):
         # Reverse order: index first, then column. SQL would error

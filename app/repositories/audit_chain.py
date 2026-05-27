@@ -104,6 +104,15 @@ _CHAIN_FIELDS = (
     "after_json",
     "note",
     "created_at",
+    # NOTE: ``tier_at_write`` is intentionally NOT in this tuple.
+    # See _AUDIT_INTERNAL_COLUMNS in
+    # tests/integrity/test_audit_chain_fields_in_sync.py for the
+    # full rationale. Summary: per Architecture v1 §5.3 the chain
+    # captures content the app wrote; per §3.6.2 tier_at_write is
+    # retention-policy metadata for the archive worker, not row
+    # content. Adding it would also invalidate every pre-Arc-10
+    # row_hash since those rows were hashed before the column
+    # existed.
 )
 
 
