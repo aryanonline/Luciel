@@ -78,6 +78,20 @@ class AccountClosureError(Exception):
     """Base for closure-flow errors."""
 
 
+class AccountNotFoundError(AccountClosureError):
+    """Arc 10 re-open Gap 1: the admin_id passed to get_lifecycle_state
+    does not resolve.
+
+    Distinct from AccountAlreadyTombstoneError -- a tombstoned admin's
+    row still exists (Vision 6.5 'minimal compliance record retained')
+    and get_lifecycle_state returns it with hard_deleted=True. This
+    error is raised only when the row truly does not exist, which in
+    practice means the cookie carries a stale admin_id that has been
+    removed by some other path. The /admin/account/lifecycle-state
+    route maps this to HTTP 404.
+    """
+
+
 class AccountAlreadyClosedError(AccountClosureError):
     """Admin row already carries closure_initiated_at."""
 
@@ -102,6 +116,25 @@ class InvalidCancelModeError(AccountClosureError):
 # ---------------------------------------------------------------------
 # Result shape \u2014 what the route returns to the frontend.
 # ---------------------------------------------------------------------
+
+@dataclass
+class LifecycleState:
+    """In-memory shape of the get_lifecycle_state return.
+
+    Maps 1:1 to app.schemas.lifecycle.LifecycleStateResponse so the
+    route can pass straight through. Kept as a dataclass (not a
+    Pydantic model) so the service layer stays Pydantic-free.
+    """
+
+    admin_id: str
+    closed: bool
+    in_grace: bool
+    hard_deleted: bool
+    cancel_mode: Literal["immediate", "period_end"] | None
+    closure_initiated_at: datetime | None
+    grace_window_expires_at: datetime | None
+    hard_deleted_at: datetime | None
+
 
 @dataclass(frozen=True)
 class ClosureOutcome:
@@ -357,6 +390,66 @@ class ClosureService:
             cancel_mode=cancel_mode,  # type: ignore[arg-type]
             stripe_cancellation_applied=stripe_applied,
             data_export_job_id=export_job_id,
+        )
+
+    # -----------------------------------------------------------------
+    # Public -- read-only lifecycle state (Arc 10 re-open Gap 1).
+    # -----------------------------------------------------------------
+
+    def get_lifecycle_state(self, admin_id: str) -> "LifecycleState":
+        """Return the authoritative lifecycle state for ``admin_id``.
+
+        Computed entirely from the admins row plus the
+        ``GRACE_WINDOW_DAYS`` module constant; no Stripe round-trip,
+        no Celery touch. Cheap enough to call on every page load.
+
+        Returns a populated LifecycleState even for admins that have
+        never been closed -- in that case ``closed=False, in_grace=
+        False, hard_deleted=False`` and the four datetime fields are
+        None.
+
+        Raises ``AccountNotFoundError`` if ``admin_id`` does not
+        resolve. The route maps this to HTTP 404. A 401
+        ('unauthenticated') is the route's responsibility, not ours.
+        """
+        admin = (
+            self.db.query(Admin)
+            .filter(Admin.id == admin_id)
+            .first()
+        )
+        if admin is None:
+            raise AccountNotFoundError(
+                f"admin {admin_id!r} not found"
+            )
+
+        closure_initiated_at = admin.closure_initiated_at
+        hard_deleted_at = admin.hard_deleted_at
+        cancel_mode = admin.closure_cancel_mode
+
+        closed = closure_initiated_at is not None
+        hard_deleted = hard_deleted_at is not None
+
+        grace_window_expires_at: datetime | None = None
+        in_grace = False
+        if closure_initiated_at is not None:
+            grace_window_expires_at = _add_days(
+                closure_initiated_at, GRACE_WINDOW_DAYS
+            )
+            now = datetime.now(timezone.utc)
+            in_grace = (
+                not hard_deleted
+                and now < grace_window_expires_at
+            )
+
+        return LifecycleState(
+            admin_id=admin_id,
+            closed=closed,
+            in_grace=in_grace,
+            hard_deleted=hard_deleted,
+            cancel_mode=cancel_mode,  # type: ignore[arg-type]
+            closure_initiated_at=closure_initiated_at,
+            grace_window_expires_at=grace_window_expires_at,
+            hard_deleted_at=hard_deleted_at,
         )
 
 
