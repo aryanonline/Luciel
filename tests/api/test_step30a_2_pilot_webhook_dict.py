@@ -154,11 +154,19 @@ class TestMaterialisationBlock:
 
     def test_handle_is_called_with_event_dict_not_event(self, billing_source: str):
         # The handle() call must receive the materialised plain dict,
-        # not the raw StripeObject.
-        assert "BillingWebhookService(db).handle(event_dict)" in billing_source, (
-            "BillingWebhookService(db).handle(...) must be called with the "
-            "materialised plain `event_dict`, not the raw StripeObject. "
-            "Commit 3e renamed the conversion result to `event_dict`."
+        # not the raw StripeObject. We accept any constructor form
+        # (``BillingWebhookService(db)`` or
+        # ``BillingWebhookService(db, stripe_client=...)``) -- the
+        # invariant is the argument passed to .handle().
+        import re
+        m = re.search(
+            r"BillingWebhookService\([^)]*\)\.handle\(event_dict\)",
+            billing_source,
+        )
+        assert m is not None, (
+            "BillingWebhookService(...).handle(event_dict) call site "
+            "not found. .handle(...) must be called with the "
+            "materialised plain `event_dict`, not the raw StripeObject."
         )
 
     def test_fallback_to_dict_recursive_getattr_chain_present(self, billing_source: str):
@@ -231,7 +239,14 @@ class TestMaterialisationOrder:
         json_pos = billing_source.find("json.loads(str(event))")
         handle_pos = billing_source.find("BillingWebhookService(db).handle(event_dict)")
         assert json_pos > 0, "json.loads(str(event)) missing"
-        assert handle_pos > 0, "handle(event_dict) missing"
+        # Accept any constructor form before .handle(event_dict).
+        import re
+        m_handle = re.search(
+            r"BillingWebhookService\([^)]*\)\.handle\(event_dict\)",
+            billing_source,
+        )
+        assert m_handle is not None, "handle(event_dict) missing"
+        handle_pos = m_handle.start()
         assert json_pos < handle_pos, (
             "json.loads(str(event)) must appear BEFORE "
             "BillingWebhookService(db).handle(event_dict) in source order. "

@@ -1,54 +1,52 @@
 """
-Regression test for D-pillar-13-a3-real-root-cause-2026-05-04.
+Regression test for the actor_user_id binding contract on the API-key
+auth path.
 
-CONTRACT GUARDED:
-    For agent-scoped API keys whose Agent has a non-NULL user_id, the
-    auth middleware MUST set request.state.actor_user_id to that user_id.
+CONTRACT GUARDED (post Arc 5 Path A)
+====================================
 
-THE BUG THIS GUARDS AGAINST:
-    The original code at app/middleware/auth.py:124 read:
-        user_id = agent.user_id
-    creating a never-read local variable instead of mutating the
-    actor_user_id captured at line 115. As a result,
-    request.state.actor_user_id remained None for every agent-scoped
-    key in production from Step 24.5b through Step 28 Phase 2.
+API keys authenticate one of three kinds of caller per the
+Architecture v1 model:
 
-    Downstream effect: the worker memory-extraction task wrote
-    actor_user_id=NULL, which the Step 28 Phase 1 D11 NOT NULL
-    constraint then rejected. The IntegrityError was swallowed by
-    MemoryService.extract_and_save's generic except, surfacing as
-    0 MemoryItem rows in Pillar 13 A3 with no error visible to the
-    chat caller.
+  * Embed-key (data-plane chat-widget traffic; Architecture v1 \u00a71.2).
+  * Channel webhook signed for an Admin (data-plane channel ingress).
+  * Platform-admin keys (cross-tenant operator surface).
 
-THE FIX:
-    Line 124 now reads:
-        actor_user_id = agent.user_id
+NONE of these carries a platform User identity. The platform User
+identity that backs ``actor_user_id`` is established by the Control
+Plane cookied-auth path (web dashboard sign-in, Architecture v1
+\u00a71.1) -- not by an API key.
 
-WHY MOCK INSTEAD OF DB:
-    The bug is purely in variable scoping inside the middleware
-    function -- it has nothing to do with DB state, schema, or
-    Postgres. A mocked AgentRepository exercises the exact code path
-    in isolation. A full DB-backed assertion already runs as part of
-    Pillar 13 A3 (which previously failed and now passes). This test
-    catches the regression *first* and *fastest*.
+Therefore, the invariant on the API-key middleware path is:
 
-RUN:
-    python -m pytest tests/middleware/test_actor_user_id_binding.py -v
-    OR (no pytest needed):
-    python tests/middleware/test_actor_user_id_binding.py
+  ``request.state.actor_user_id is None`` after API-key auth completes.
+
+This file pins that invariant at the source level (no app deps
+required to verify) and at the behavioural level (runs the actual
+middleware when deps are available).
+
+HISTORY
+=======
+
+A previous iteration of this test file guarded a different invariant:
+that ``actor_user_id`` was set from ``agent.user_id`` when an
+``agent`` row was resolved during API-key dispatch. That code path
+was removed at Arc 5 Path A when the Agent layer was deleted (Vision
+v1 \u00a72/\u00a73 -- V2 has Admin -> Instance, no intermediate Agent layer).
+Re-asserting the deleted path with mocks of a deleted class is not a
+regression guard; it is dead scaffolding. This file now asserts the
+current contract directly.
 """
 from __future__ import annotations
 
 import ast
 import asyncio
 import sys
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-# Allow running via `python tests/middleware/test_actor_user_id_binding.py`
-# from any cwd by inserting the project root on sys.path before imports.
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -56,14 +54,43 @@ if str(_PROJECT_ROOT) not in sys.path:
 _AUTH_PATH = _PROJECT_ROOT / "app" / "middleware" / "auth.py"
 
 
-# ---------------------------------------------------------------- test 0
-# Source-level AST proof. Runnable without ANY app deps installed --
-# catches regressions in CI/sandbox even when sqlalchemy/pgvector/etc.
-# are unavailable. This is the canary.
-def test_source_level_assignment_targets_actor_user_id() -> None:
+# ---------------------------------------------------------------------
+# Source-level invariants. Runnable without ANY app deps installed.
+# ---------------------------------------------------------------------
+
+def test_source_does_not_import_deleted_agent_repository() -> None:
+    """auth.py must not import the deleted AgentRepository class.
+
+    AgentRepository was removed at Arc 5 Path A. A surviving import
+    here would either (a) fail at module load (ModuleNotFoundError,
+    every request rejected) or (b) succeed by accident if a future
+    contributor re-introduces a stub, silently re-attaching the
+    deleted resolution path the test file's previous iteration was
+    meant to guard.
+    """
+    src = _AUTH_PATH.read_text()
+    assert "from app.repositories.agent_repository" not in src, (
+        "auth.py imports the deleted AgentRepository module; "
+        "remove the import per Arc 5 Path A doctrine."
+    )
+    assert "import AgentRepository" not in src, (
+        "auth.py references the deleted AgentRepository class; "
+        "remove per Arc 5 Path A doctrine."
+    )
+
+
+def test_source_dispatch_assigns_actor_user_id_to_none_on_api_key_path() -> None:
+    """The API-key dispatch path must explicitly set actor_user_id = None.
+
+    Per Architecture v1 \u00a71.2, the data-plane authenticates as an
+    embed key or channel webhook signed for an Admin -- neither
+    carries a platform User identity. The middleware must therefore
+    set ``actor_user_id = None`` on the API-key path so downstream
+    consumers (audit chain, traces, metrics) read a definite value
+    rather than tripping on AttributeError.
+    """
     src = _AUTH_PATH.read_text()
     tree = ast.parse(src)
-
     dispatch = None
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "dispatch":
@@ -71,60 +98,40 @@ def test_source_level_assignment_targets_actor_user_id() -> None:
             break
     assert dispatch is not None, "dispatch() not found in app/middleware/auth.py"
 
-    found_assignment = None
+    # Look for `actor_user_id = None` literal assignment somewhere
+    # inside dispatch -- that is the load-bearing line for the
+    # current contract.
+    found = False
     for node in ast.walk(dispatch):
-        if isinstance(node, ast.If):
-            t = node.test
-            if (isinstance(t, ast.Compare) and len(t.ops) == 1
-                    and isinstance(t.ops[0], ast.IsNot)
-                    and isinstance(t.left, ast.Name) and t.left.id == "agent"
-                    and isinstance(t.comparators[0], ast.Constant)
-                    and t.comparators[0].value is None):
-                for stmt in node.body:
-                    if isinstance(stmt, ast.Assign):
-                        val = stmt.value
-                        if (isinstance(val, ast.Attribute)
-                                and isinstance(val.value, ast.Name)
-                                and val.value.id == "agent"
-                                and val.attr == "user_id"):
-                            found_assignment = stmt
-                            break
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            tgt = node.targets[0]
+            if (isinstance(tgt, ast.Name)
+                    and tgt.id == "actor_user_id"
+                    and isinstance(node.value, ast.Constant)
+                    and node.value.value is None):
+                found = True
                 break
-
-    assert found_assignment is not None, (
-        "could not locate any `<x> = agent.user_id` assignment inside "
-        "`if agent is not None:` -- the structure of dispatch() has changed"
-    )
-    target = found_assignment.targets[0]
-    assert isinstance(target, ast.Name), "target is not a simple Name"
-    assert target.id == "actor_user_id", (
-        f"REGRESSION of D-pillar-13-a3-real-root-cause-2026-05-04: "
-        f"line {found_assignment.lineno} assigns `agent.user_id` to "
-        f"`{target.id}` -- expected `actor_user_id`. The original typo "
-        f"created a never-read local and left request.state.actor_user_id "
-        f"=None for every agent-scoped key in production."
+    assert found, (
+        "dispatch() must contain `actor_user_id = None` per the post-"
+        "Arc-5-Path-A contract -- API keys do not carry a platform "
+        "User identity. See module docstring."
     )
 
-    # Also assert there is NO stray `user_id = agent.user_id` anywhere in dispatch.
-    for node in ast.walk(dispatch):
-        if isinstance(node, ast.Assign):
-            val = node.value
-            if (isinstance(val, ast.Attribute)
-                    and isinstance(val.value, ast.Name)
-                    and val.value.id == "agent"
-                    and val.attr == "user_id"):
-                tgt = node.targets[0]
-                assert isinstance(tgt, ast.Name) and tgt.id == "actor_user_id", (
-                    f"stray `{tgt.id} = agent.user_id` at line {node.lineno} "
-                    f"-- partial regression"
-                )
+
+def test_source_state_actor_user_id_is_bound() -> None:
+    """dispatch() must bind request.state.actor_user_id before handing\n    off to call_next. Downstream consumers (audit chain, traces)\n    rely on the attribute existing, even if the value is None.\n    """
+    src = _AUTH_PATH.read_text()
+    assert "request.state.actor_user_id = actor_user_id" in src, (
+        "dispatch() must bind request.state.actor_user_id before "
+        "calling call_next. Without this, downstream consumers raise "
+        "AttributeError on missing state."
+    )
 
 
-# Behavioral tests below require app deps (sqlalchemy, pydantic-settings,
-# pgvector, etc.) and a stub DATABASE_URL env var. They are the
-# functional layer of the test guard. If the import fails (e.g. running
-# in a minimal sandbox), the source-level test 0 above is sufficient on
-# its own to catch the regression -- the behavioral tests are skipped.
+# ---------------------------------------------------------------------
+# Behavioural test. Runs only when app deps are importable.
+# ---------------------------------------------------------------------
+
 _BEHAVIORAL_AVAILABLE = True
 _BEHAVIORAL_IMPORT_ERROR: Exception | None = None
 try:
@@ -136,21 +143,20 @@ except Exception as _exc:  # noqa: BLE001
 
 
 def _make_request(path: str = "/api/v1/sessions",
-                  bearer: str = "luc_sk_fake-raw-key-value") -> object:
-    """Build the smallest object that quacks like a Starlette Request."""
+                  bearer: str = "luc_sk_fake-raw-key-value",
+                  method: str = "POST") -> object:
     return SimpleNamespace(
+        method=method,
         url=SimpleNamespace(path=path),
         headers={"Authorization": f"Bearer {bearer}"},
         state=SimpleNamespace(),
     )
 
 
-async def _invoke(middleware: ApiKeyAuthMiddleware, request: object) -> object:
-    """Run the middleware's dispatch with a captured call_next."""
+async def _invoke(middleware, request):
     captured = {}
 
-    async def call_next(req: object) -> object:
-        # Capture request.state at the moment dispatch hands off.
+    async def call_next(req):
         captured["state"] = req.state
         return SimpleNamespace(status_code=200)
 
@@ -158,179 +164,40 @@ async def _invoke(middleware: ApiKeyAuthMiddleware, request: object) -> object:
     return response, captured.get("state")
 
 
-def _run(coro) -> tuple:
-    return asyncio.run(coro)
-
-
-class _SkipTest(Exception):
-    """Raised by behavioral tests when their imports are unavailable."""
-
-
-def _require_behavioral() -> None:
+def test_api_key_path_leaves_actor_user_id_none() -> None:
+    """End-to-end: a successful API-key dispatch must set\n    request.state.actor_user_id = None.\n    """
     if not _BEHAVIORAL_AVAILABLE:
-        raise _SkipTest(
-            f"behavioral test skipped: app deps unavailable in this env "
-            f"({type(_BEHAVIORAL_IMPORT_ERROR).__name__}: {_BEHAVIORAL_IMPORT_ERROR})"
+        import pytest  # noqa: PLC0415
+        pytest.skip(
+            f"behavioral test skipped: app deps unavailable "
+            f"({type(_BEHAVIORAL_IMPORT_ERROR).__name__}: "
+            f"{_BEHAVIORAL_IMPORT_ERROR})"
         )
 
-
-# ---------------------------------------------------------------- test 1
-def test_agent_scoped_key_with_user_id_binds_actor_user_id() -> None:
-    """The fix: actor_user_id MUST equal agent.user_id for agent-scoped keys."""
-    _require_behavioral()
-    expected_user_id = uuid.uuid4()
-
     fake_apikey = SimpleNamespace(
-        id=42,
-        admin_id="t-test",
-        domain_id="d-test",
-        agent_id="a-test",
-        permissions=["chat", "sessions"],
-        key_prefix="luc_sk_fakepfx",
-        created_by="test-actor",
+        id="ak_test_123",
+        admin_id="acme-corp",
+        domain_id=None,
+        agent_id=None,
         luciel_instance_id=None,
+        permissions=["chat:write"],
+        key_prefix="luc_sk_fa",
+        created_by="acme-corp api-key",
     )
-    fake_agent = SimpleNamespace(user_id=expected_user_id)
 
     with patch("app.middleware.auth.SessionLocal") as session_local, \
-         patch("app.middleware.auth.ApiKeyService") as api_key_service_cls, \
-         patch("app.middleware.auth.AgentRepository") as agent_repo_cls:
+         patch("app.middleware.auth.ApiKeyService") as api_key_service_cls:
         session_local.return_value = MagicMock()
         api_key_service_cls.return_value.validate_key.return_value = fake_apikey
-        agent_repo_cls.return_value.get_scoped.return_value = fake_agent
 
         mw = ApiKeyAuthMiddleware(app=None)
         request = _make_request()
-        _, state = _run(_invoke(mw, request))
+        _, state = asyncio.run(_invoke(mw, request))
 
     assert state is not None, (
         "middleware did not invoke call_next -- request was rejected pre-dispatch"
     )
-    assert state.actor_user_id == expected_user_id, (
-        f"actor_user_id binding regression: expected {expected_user_id}, "
-        f"got {state.actor_user_id!r}. The auth.py:124 typo is back."
-    )
-
-
-# ---------------------------------------------------------------- test 2
-def test_agent_with_null_user_id_yields_none_actor_user_id() -> None:
-    """Legacy contract: agents pending Commit 3 backfill (user_id=None)
-    correctly produce actor_user_id=None -- NOT a bug, just deferred."""
-    _require_behavioral()
-    fake_apikey = SimpleNamespace(
-        id=43, admin_id="t-test", domain_id="d-test", agent_id="a-test",
-        permissions=["chat"], key_prefix="luc_sk_fakepfx",
-        created_by="test-actor", luciel_instance_id=None,
-    )
-    fake_agent = SimpleNamespace(user_id=None)  # backfill pending
-
-    with patch("app.middleware.auth.SessionLocal") as session_local, \
-         patch("app.middleware.auth.ApiKeyService") as api_key_service_cls, \
-         patch("app.middleware.auth.AgentRepository") as agent_repo_cls:
-        session_local.return_value = MagicMock()
-        api_key_service_cls.return_value.validate_key.return_value = fake_apikey
-        agent_repo_cls.return_value.get_scoped.return_value = fake_agent
-
-        mw = ApiKeyAuthMiddleware(app=None)
-        request = _make_request()
-        _, state = _run(_invoke(mw, request))
-
-    assert state is not None
     assert state.actor_user_id is None, (
-        "agent.user_id=None should pass through as actor_user_id=None "
-        f"(deferred backfill); got {state.actor_user_id!r}"
+        f"API-key dispatch must leave actor_user_id=None per the "
+        f"post-Arc-5-Path-A contract; got {state.actor_user_id!r}"
     )
-
-
-# ---------------------------------------------------------------- test 3
-def test_tenant_admin_key_yields_none_actor_user_id() -> None:
-    """Tenant-admin / platform-admin keys have agent_id=None and MUST
-    NOT trigger the agent lookup at all -- actor_user_id stays None."""
-    _require_behavioral()
-    fake_apikey = SimpleNamespace(
-        id=44, admin_id="t-test", domain_id=None, agent_id=None,
-        permissions=["admin"], key_prefix="luc_sk_adminpfx",
-        created_by="test-actor", luciel_instance_id=None,
-    )
-
-    with patch("app.middleware.auth.SessionLocal") as session_local, \
-         patch("app.middleware.auth.ApiKeyService") as api_key_service_cls, \
-         patch("app.middleware.auth.AgentRepository") as agent_repo_cls:
-        session_local.return_value = MagicMock()
-        api_key_service_cls.return_value.validate_key.return_value = fake_apikey
-
-        mw = ApiKeyAuthMiddleware(app=None)
-        request = _make_request(path="/api/v1/sessions")
-        _, state = _run(_invoke(mw, request))
-
-    assert state is not None
-    assert state.actor_user_id is None
-    # The repo must NOT have been instantiated -- this proves the
-    # admin_id/domain_id/agent_id triple-non-null guard is working.
-    agent_repo_cls.assert_not_called()
-
-
-# ---------------------------------------------------------------- test 4
-def test_orphan_apikey_missing_agent_yields_none_actor_user_id() -> None:
-    """Defensive contract: ApiKey references a non-existent Agent (drift).
-    Must log a warning AND leave actor_user_id=None -- never crash."""
-    _require_behavioral()
-    fake_apikey = SimpleNamespace(
-        id=45, admin_id="t-test", domain_id="d-test", agent_id="a-orphan",
-        permissions=["chat"], key_prefix="luc_sk_orphpfx",
-        created_by="test-actor", luciel_instance_id=None,
-    )
-
-    with patch("app.middleware.auth.SessionLocal") as session_local, \
-         patch("app.middleware.auth.ApiKeyService") as api_key_service_cls, \
-         patch("app.middleware.auth.AgentRepository") as agent_repo_cls:
-        session_local.return_value = MagicMock()
-        api_key_service_cls.return_value.validate_key.return_value = fake_apikey
-        agent_repo_cls.return_value.get_scoped.return_value = None  # orphan
-
-        mw = ApiKeyAuthMiddleware(app=None)
-        request = _make_request()
-        _, state = _run(_invoke(mw, request))
-
-    assert state is not None
-    assert state.actor_user_id is None
-
-
-# ---------------------------------------------------------------- harness
-def _main() -> int:
-    """Allow `python tests/middleware/test_actor_user_id_binding.py` (no pytest)."""
-    failures: list[str] = []
-    skipped: list[tuple[str, str]] = []
-    # Run test_source... first deterministically (it is the canary).
-    ordered = sorted(
-        [(n, fn) for n, fn in globals().items()
-         if n.startswith("test_") and callable(fn)],
-        key=lambda kv: (0 if "source_level" in kv[0] else 1, kv[0]),
-    )
-    for name, fn in ordered:
-        try:
-            fn()
-            print(f"PASS  {name}")
-        except _SkipTest as exc:
-            print(f"SKIP  {name}: {exc}")
-            skipped.append((name, str(exc)))
-        except AssertionError as exc:
-            print(f"FAIL  {name}: {exc}")
-            failures.append(name)
-        except Exception as exc:
-            print(f"ERROR {name}: {type(exc).__name__}: {exc}")
-            failures.append(name)
-    print("-" * 60)
-    if failures:
-        print(f"{len(failures)} failures: {failures}")
-        return 1
-    if skipped:
-        print(f"{len(skipped)} skipped (env-limited), source-level canary green")
-    else:
-        print("all green")
-    return 0
-
-
-if __name__ == "__main__":
-    import sys
-    sys.exit(_main())

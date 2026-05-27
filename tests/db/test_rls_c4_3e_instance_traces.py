@@ -26,9 +26,7 @@ import sys
 import unittest
 from pathlib import Path
 
-MIGRATION_PATH = Path(
-    "/home/user/workspace/luciel/alembic/versions/arc9_c4_3e_rls_instance_traces.py"
-)
+MIGRATION_PATH = Path(__file__).resolve().parents[2] / "alembic/versions/arc9_c4_3e_rls_instance_traces.py"
 
 
 class TestC43EMigrationShape(unittest.TestCase):

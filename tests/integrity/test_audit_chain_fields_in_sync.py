@@ -49,6 +49,35 @@ _AUDIT_INTERNAL_COLUMNS = frozenset(
         "id",            # PK; row identity, not content
         "row_hash",      # the hash output itself
         "prev_row_hash", # chain pointer, not content
+        # ``cold_archived_at`` is stamped by the audit-retention
+        # worker AFTER the row exists -- Architecture v1 §3.6.2
+        # describes the cold-archive lifecycle (per-tier retention,
+        # archive after the in-hot-storage window expires) and
+        # §5.3 declares the audit chain immutable AT THE APP LAYER.
+        # The cold-archive UPDATE is the deliberately privileged
+        # exception: a separate Postgres role with SELECT+UPDATE on
+        # admin_audit_logs only stamps this column. Including it in
+        # _CHAIN_FIELDS would invalidate the row_hash on every
+        # archive operation -- so this column is EXPLICITLY content-
+        # less. The cold archive itself preserves chain integrity
+        # via its own sha256(canonical_content + row_hash)
+        # extension (per the audit retention service).
+        "cold_archived_at",
+        # ``tier_at_write`` is stamped at INSERT time but is policy
+        # metadata for the archive worker (per-tier retention window
+        # selection: 30d Free / 1y Pro / 7y Enterprise per
+        # Architecture v1 §3.6.2), not content the audit row
+        # attests to. Architecture §5.3 says the chain captures the
+        # row as written; tier is captured separately by the
+        # admin's subscription record and is denormalised here only
+        # for stickiness (a tier downgrade must not retroactively
+        # shorten Pro-era retention). Including it in _CHAIN_FIELDS
+        # would also invalidate every pre-Arc-10 row_hash since
+        # those rows were hashed before this column existed (the
+        # Arc 10 backfill stamps the column but does NOT rehash
+        # historical rows by design — see arc10_lifecycle_subsystem
+        # migration).
+        "tier_at_write",
         # ``updated_at`` is inherited from TimestampMixin and ends
         # up on admin_audit_logs as a side effect. The audit log
         # is append-only at the DB privilege layer (the migration

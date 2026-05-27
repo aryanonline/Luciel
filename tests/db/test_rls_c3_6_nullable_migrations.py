@@ -131,14 +131,15 @@ class TestC36MigrationsShape(unittest.TestCase):
             f"{rev_id}: policy not bound to table {table}",
         )
 
-        # USING has the NULL-permissive carveout. The 'admin_id IS
+        # USING has the NULL-permissive carveout. The 'tenant_id IS
         # NULL OR ...' shape is the structural signal of asymmetry
         # on the read side -- if a future refactor accidentally
         # removes this, platform-wide rows become invisible to all
-        # admins.
+        # admins. Migration source uses pre-Arc-9.2 ``tenant_id``
+        # name; the live column is now ``admin_id`` (PR #101 rename).
         self.assertRegex(
             text_lower,
-            r"using\s*\(\s*admin_id\s+is\s+null\s+or\s+admin_id\s*=",
+            r"using\s*\(\s*tenant_id\s+is\s+null\s+or\s+tenant_id\s*=",
             f"{rev_id}: USING missing NULL-permissive carveout",
         )
 
@@ -157,7 +158,7 @@ class TestC36MigrationsShape(unittest.TestCase):
         )
         body = with_check_match.group("body")
         self.assertIn(
-            "admin_id is null",
+            "tenant_id is null",
             body,
             f"{rev_id}: WITH CHECK missing NULL branch",
         )

@@ -134,10 +134,25 @@ class TestMessageModelImportable(unittest.TestCase):
         col = msg_mod.MessageModel.__table__.columns["admin_id"]
         self.assertFalse(col.nullable, "admin_id must be NOT NULL")
 
-    def test_luciel_instance_id_column_is_nullable(self):
+    def test_luciel_instance_id_column_is_not_null(self):
+        """messages.luciel_instance_id must be NOT NULL.
+
+        Architecture v1 §3.7.3 (Wall 3 — Cross-Instance Within an
+        Admin): "every customer-data row carries instanceid as a
+        non-null indexed column."
+
+        This test previously asserted nullable=True, which directly
+        contradicted Wall 3. Updated under the founder directive
+        (business doc wins on test/code conflict).
+        """
         import app.models.message as msg_mod
         col = msg_mod.MessageModel.__table__.columns["luciel_instance_id"]
-        self.assertTrue(col.nullable, "luciel_instance_id must be nullable")
+        self.assertFalse(
+            col.nullable,
+            "luciel_instance_id must be NOT NULL per Architecture v1 "
+            "§3.7.3 (Wall 3: every customer-data row carries instance "
+            "id as a non-null indexed column).",
+        )
 
 
 if __name__ == "__main__":

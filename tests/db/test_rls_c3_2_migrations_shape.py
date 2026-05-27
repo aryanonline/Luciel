@@ -174,18 +174,20 @@ class TestC32MigrationsShape(unittest.TestCase):
             "arc9_c3_2b_rls_memory_items",
         )
 
-    def test_c32d_agent_configs(self):
-        self._assert_migration_shape(
-            "agent_configs",
-            "arc9_c3_2d_rls_agent_configs",
-            "arc9_c3_2c_rls_conversations",
-        )
+    # test_c32d_agent_configs: REMOVED. The agent_configs table is gone
+    # (legacy V1 surface dropped before Arc 10) so its RLS migration
+    # file was also removed and the chain skips from 2c -> 2e. There
+    # is no business-document requirement for agent_configs (Vision
+    # and Architecture do not mention any per-instance agent_configs
+    # table) so the cleanup is aligned with doctrine.
 
     def test_c32e_sessions(self):
+        # Chain now skips the removed 2d agent_configs migration and
+        # points directly back to 2c conversations.
         self._assert_migration_shape(
             "sessions",
             "arc9_c3_2e_rls_sessions",
-            "arc9_c3_2d_rls_agent_configs",
+            "arc9_c3_2c_rls_conversations",
         )
 
     def test_c32f_subscriptions(self):

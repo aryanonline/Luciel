@@ -81,13 +81,24 @@ VERSIONS_DIR = (
 # ---------------------------------------------------------------------
 @dataclass(frozen=True)
 class Wall1Entry:
-    """One Wall-1 table entry. Most tables follow the canonical shape
-    (admin_id column, table-prefixed policy name). The handful that
-    deviate carry per-field overrides plus a docstring rationale.
+    """One Wall-1 table entry. Most pre-Arc-9.2 migrations wrote the
+    column name ``tenant_id`` in their policy predicate (Arc 9.2 PR
+    #101 renamed every customer-data ``tenant_id`` column to
+    ``admin_id`` AFTER these migrations shipped; alembic migrations
+    are immutable historical artifacts, so they still text-contain
+    the pre-rename name even though the live column is now
+    ``admin_id``).
+
+    The ``wall_column`` field tracks the column name **as written in
+    the migration source text**, not the current live column name.
+    Two post-Arc-9.2 migrations (``instances`` and
+    ``admin_widget_domains``) shipped after the rename and use
+    ``admin_id`` directly; everything else still text-contains
+    ``tenant_id``.
     """
     db_table: str                  # the actual table name in PG
     revision: str                  # alembic revision id
-    wall_column: str = "admin_id"  # which column carries the tenant
+    wall_column: str = "tenant_id"  # column name AS WRITTEN in the migration source
     policy_name: str | None = None  # default: f"{db_table}_tenant_isolation"
     auth_perimeter: bool = False   # api_keys-style permissive USING
     rationale: str = ""            # required for any non-default field
@@ -113,7 +124,15 @@ WALL_1_ENTRIES: list[Wall1Entry] = [
     Wall1Entry("traces", "arc9_c3_2a_rls_traces"),
     Wall1Entry("memory_items", "arc9_c3_2b_rls_memory_items"),
     Wall1Entry("conversations", "arc9_c3_2c_rls_conversations"),
-    Wall1Entry("agent_configs", "arc9_c3_2d_rls_agent_configs"),
+    # agent_configs entry REMOVED (Arc 10 Gap 7,
+    # D-arc10-close-path-imports-deleted-agent-repository-2026-05-27):
+    # the `agent_configs` table was DROPPED at
+    # arc5_c_admin_instance_subtractive (Arc 5 Path A). Its RLS
+    # migration arc9_c3_2d_rls_agent_configs.py is preserved on disk
+    # as an immutable historical artifact, but it has no live target
+    # table anymore so the cross-cutting inventory must not include
+    # it. The cascade in app/services/admin_service.py was pruned in
+    # the same Gap 7 PR.
     Wall1Entry("sessions", "arc9_c3_2e_rls_sessions"),
     Wall1Entry("subscriptions", "arc9_c3_2f_rls_subscriptions"),
     Wall1Entry("scope_assignments", "arc9_c3_2g_rls_scope_assignments"),
@@ -143,9 +162,10 @@ WALL_1_ENTRIES: list[Wall1Entry] = [
         policy_name="instances_tenant_isolation",
         rationale=(
             "DB table name is ``instances`` (the model class is "
-            "LucielInstance). Wall column is ``admin_id`` (FK -> "
-            "admins.id), not ``admin_id``. Strict shape; same "
-            "app.admin_id GUC."
+            "LucielInstance). This migration shipped AFTER the Arc 9.2 "
+            "tenant_id -> admin_id rename, so its source text uses "
+            "``admin_id`` directly rather than the pre-rename "
+            "``tenant_id`` that earlier C3 migrations carry."
         ),
     ),
     Wall1Entry(
@@ -153,8 +173,9 @@ WALL_1_ENTRIES: list[Wall1Entry] = [
         revision="arc9_c3_5e_rls_admin_widget_domains",
         wall_column="admin_id",
         rationale=(
-            "Wall column is ``admin_id`` (FK -> admins.id), not "
-            "``admin_id``. Strict shape; same app.admin_id GUC."
+            "Shipped post Arc 9.2 rename; source text uses "
+            "``admin_id`` directly (no pre-rename ``tenant_id`` "
+            "residue to translate)."
         ),
     ),
     Wall1Entry("retention_policies", "arc9_c3_6a_rls_retention_policies"),
@@ -206,9 +227,11 @@ class TestWall1CoverageInventory(unittest.TestCase):
 
     def test_inventory_size_floor(self):
         self.assertGreaterEqual(
-            len(WALL_1_ENTRIES), 18,
-            "Wall-1 inventory shrank below the C5.4 baseline of 18 "
-            "tables (17 from C3 + messages from C5.1).",
+            len(WALL_1_ENTRIES), 17,
+            "Wall-1 inventory shrank below the post-Gap-7 baseline of 17 "
+            "tables (16 from C3 + messages from C5.1). Pre-Gap-7 baseline "
+            "was 18 (included agent_configs); Arc 10 Gap 7 removed "
+            "agent_configs after Arc 5C dropped the underlying table.",
         )
 
     def test_no_duplicate_revisions(self):
@@ -221,10 +244,16 @@ class TestWall1CoverageInventory(unittest.TestCase):
     def test_documented_variations_have_rationale(self):
         """If a Wall-1 entry deviates from the default shape, it MUST
         carry a non-empty rationale string. Forces the next developer
-        to read why before editing."""
+        to read why before editing.
+
+        Default after Arc 10 Gap 7 = (wall_column='tenant_id',
+        no policy_name override, auth_perimeter=False). Pre-Arc-9.2
+        C3 migrations all match this default because their source text
+        carries the pre-rename ``tenant_id`` column name.
+        """
         for e in WALL_1_ENTRIES:
             deviates = (
-                e.wall_column != "admin_id"
+                e.wall_column != "tenant_id"
                 or e.policy_name is not None
                 or e.auth_perimeter
             )
@@ -293,6 +322,7 @@ class TestWall1PolicyShape(unittest.TestCase):
     def _check_auth_perimeter(self, e: Wall1Entry) -> None:
         body = _read_migration(e.revision).lower()
         table = e.db_table.lower()
+        col = e.wall_column.lower()  # source-as-written, see Wall1Entry docstring
 
         self.assertRegex(
             body,
@@ -313,13 +343,16 @@ class TestWall1PolicyShape(unittest.TestCase):
             f"{table}: auth-perimeter USING is not `using (true)`",
         )
 
-        # WITH CHECK references the 'platform' sentinel and admin_id
-        # equality. Both branches required.
+        # WITH CHECK references the 'platform' sentinel and the wall-column
+        # equality. Both branches required. We look for the column name AS
+        # WRITTEN in the migration source (pre-Arc-9.2 migrations carry
+        # ``tenant_id`` text even though the live column is now
+        # ``admin_id`` post-PR-#101).
         self.assertIn(
-            "admin_id is null",
+            f"{col} is null",
             body,
             f"{table}: auth-perimeter WITH CHECK is missing the "
-            "NULL-admin_id branch (platform sentinel)",
+            f"NULL-{col} branch (platform sentinel)",
         )
         self.assertIn(
             "= 'platform'",
@@ -328,10 +361,10 @@ class TestWall1PolicyShape(unittest.TestCase):
             "'platform' sentinel value",
         )
         self.assertIn(
-            "admin_id = current_setting('app.admin_id', true)",
+            f"{col} = current_setting('app.admin_id', true)",
             body,
             f"{table}: auth-perimeter WITH CHECK is missing the "
-            "non-null admin_id equality branch",
+            f"non-null {col} equality branch",
         )
 
     def _dispatch(self, e: Wall1Entry) -> None:
@@ -353,8 +386,11 @@ class TestWall1PolicyShape(unittest.TestCase):
     def test_conversations(self):
         self._dispatch(_by_table(WALL_1_ENTRIES, "conversations"))
 
-    def test_agent_configs(self):
-        self._dispatch(_by_table(WALL_1_ENTRIES, "agent_configs"))
+    # test_agent_configs: REMOVED (Arc 10 Gap 7,
+    # D-arc10-close-path-imports-deleted-agent-repository-2026-05-27).
+    # The `agent_configs` table was DROPPED at Arc 5 Path A; the entry
+    # was removed from WALL_1_ENTRIES so dispatching to it would raise
+    # AttributeError on _by_table.
 
     def test_sessions(self):
         self._dispatch(_by_table(WALL_1_ENTRIES, "sessions"))
@@ -622,28 +658,40 @@ class TestWall4MessagesPosture(unittest.TestCase):
             "MessageModel.admin_id must be NOT NULL.",
         )
 
-    def test_message_model_luciel_instance_id_nullable(self):
+    def test_message_model_luciel_instance_id_not_null(self):
+        """messages.luciel_instance_id must be NOT NULL.
+
+        Architecture v1 §3.7.3 (Wall 3 — Cross-Instance Within an
+        Admin) is unambiguous: "every customer-data row carries
+        instanceid as a non-null indexed column. Default retrieval
+        scope WHERE adminid = x AND instanceid = y." The messages
+        table is customer-data; therefore luciel_instance_id is
+        NOT NULL.
+
+        This test previously asserted the field was NULLABLE, which
+        directly contradicted Wall 3. Updated under the founder
+        directive: when a test and the business document conflict,
+        the business document wins.
+        """
         body = self._read(self.MODEL_FILE)
         self.assertIn("luciel_instance_id", body)
-        has_typed = (
+        has_typed_not_null = (
             re.search(
-                r"luciel_instance_id\s*:\s*Mapped\[\s*int\s*\|\s*None\s*\]",
-                body,
-            ) is not None
-            or re.search(
-                r"luciel_instance_id\s*:\s*Mapped\[\s*Optional\[\s*int\s*\]\s*\]",
+                r"luciel_instance_id\s*:\s*Mapped\[\s*int\s*\]",
                 body,
             ) is not None
         )
-        has_explicit = (
+        has_explicit_not_null = (
             re.search(
-                r"luciel_instance_id[^\n]*nullable\s*=\s*true",
+                r"luciel_instance_id[^\n]*nullable\s*=\s*false",
                 body.lower(),
             ) is not None
         )
         self.assertTrue(
-            has_typed or has_explicit,
-            "MessageModel.luciel_instance_id must be nullable.",
+            has_typed_not_null or has_explicit_not_null,
+            "MessageModel.luciel_instance_id must be NOT NULL per "
+            "Architecture v1 §3.7.3 (Wall 3: every customer-data row "
+            "carries instanceid as a non-null indexed column).",
         )
 
     def test_add_message_inherits_parent_scope(self):

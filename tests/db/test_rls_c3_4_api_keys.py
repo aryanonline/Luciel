@@ -103,15 +103,21 @@ class TestC34MigrationShape:
         )
 
     def test_using_does_not_check_tenant(self) -> None:
-        """USING clause must NOT reference current_setting or admin_id.
+        """USING clause must NOT reference current_setting or tenant.
 
         Defence-in-depth on top of test_using_is_permissive_true: we
         assert the USING line specifically does not contain a tenant-
         equality check (which would re-introduce the chicken-and-egg).
+
+        Migration source uses pre-Arc-9.2 column name ``tenant_id``;
+        live column is now ``admin_id``. Architecture v1 §3.7.1 only
+        cares about the semantic property (no tenant-equality in
+        USING for the auth-perimeter table), not the literal name.
         """
         text = _read_migration_text()
         # Find the USING(...) block specifically (before WITH CHECK)
-        # and assert it contains neither current_setting nor admin_id.
+        # and assert it contains neither current_setting nor tenant_id
+        # (pre-rename name in this migration's source text).
         match = re.search(
             r"USING\s*\((?P<using>[^)]*)\)", text, re.IGNORECASE
         )
@@ -121,8 +127,8 @@ class TestC34MigrationShape:
             "USING clause must not reference current_setting — that "
             "would break the auth-perimeter lookup."
         )
-        assert "admin_id" not in using_body.lower(), (
-            "USING clause must not reference admin_id — see C3.4 "
+        assert "tenant_id" not in using_body.lower(), (
+            "USING clause must not reference tenant_id — see C3.4 "
             "docstring for the auth chicken-and-egg rationale."
         )
 
@@ -138,19 +144,23 @@ class TestC34MigrationShape:
         text = _read_migration_text()
         # The WITH CHECK clause must reference both the platform
         # sentinel branch and the tenant-equality branch.
+        # Migration source uses pre-Arc-9.2 column name ``tenant_id``;
+        # live column is now ``admin_id`` (PR #101 rename). Migrations
+        # are immutable historical artifacts so we check the
+        # as-written name.
         assert "WITH CHECK" in text, "WITH CHECK clause missing"
-        # Platform sentinel: NULL admin_id is only writable when GUC
+        # Platform sentinel: NULL tenant_id is only writable when GUC
         # is the literal 'platform'.
         assert re.search(
-            r"admin_id\s+IS\s+NULL", text, re.IGNORECASE
-        ), "WITH CHECK must handle NULL admin_id branch"
+            r"tenant_id\s+IS\s+NULL", text, re.IGNORECASE
+        ), "WITH CHECK must handle NULL tenant_id branch"
         assert "'platform'" in text, (
             "WITH CHECK must reference the 'platform' sentinel literal"
         )
         # Tenant-equality branch.
         assert re.search(
-            r"admin_id\s*=\s*current_setting", text, re.IGNORECASE
-        ), "WITH CHECK must include admin_id = current_setting() branch"
+            r"tenant_id\s*=\s*current_setting", text, re.IGNORECASE
+        ), "WITH CHECK must include tenant_id = current_setting() branch"
 
     def test_current_setting_uses_missing_ok_arg(self) -> None:
         """current_setting must use the two-arg form returning '' on miss.
