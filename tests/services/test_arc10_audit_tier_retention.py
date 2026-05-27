@@ -395,3 +395,55 @@ def test_gap6_migration_downgrade_only_revokes_insert():
     assert "REVOKE UPDATE" not in down_body, (
         "downgrade must NOT revoke UPDATE -- same reasoning as SELECT."
     )
+
+
+# ---------------------------------------------------------------------
+# Arc 10 Gap 6 close part 3 (D-arc10-audit-archiver-sequence-grant-
+# missing-2026-05-27).
+#
+# After parts 1+2, the re-run E2E surfaced one more missing privilege:
+# PostgreSQL requires USAGE on admin_audit_logs_id_seq to call
+# nextval() during INSERT. Without it the transaction rolls back
+# AFTER the S3 object is written -- same partial-state class as
+# parts 1+2.
+# ---------------------------------------------------------------------
+
+GAP6_SEQ_MIGRATION_PATH = (
+    REPO_ROOT
+    / "alembic"
+    / "versions"
+    / "arc10_gap6_archiver_sequence_grant.py"
+)
+
+
+def test_gap6_sequence_grant_migration_exists():
+    """The sequence-grant follow-up migration file must exist."""
+    assert GAP6_SEQ_MIGRATION_PATH.exists(), (
+        f"Missing migration file at {GAP6_SEQ_MIGRATION_PATH}. "
+        "Without it the archiver INSERT fails on sequence USAGE."
+    )
+
+
+def test_gap6_sequence_migration_chains_off_insert_grant():
+    """The sequence grant must chain off the INSERT grant migration."""
+    src = GAP6_SEQ_MIGRATION_PATH.read_text(encoding="utf-8")
+    assert 'down_revision = "arc10_gap6_archiver_insert_grant"' in src, (
+        "Sequence-grant migration must chain off the INSERT-grant "
+        "migration so the migration history reflects the order in "
+        "which the bugs surfaced and were fixed in production."
+    )
+
+
+def test_gap6_sequence_migration_grants_usage_on_sequence():
+    """The migration body must GRANT USAGE on the sequence to the role."""
+    src = GAP6_SEQ_MIGRATION_PATH.read_text(encoding="utf-8")
+    assert "GRANT USAGE ON SEQUENCE" in src, (
+        "Migration must contain GRANT USAGE ON SEQUENCE -- USAGE is "
+        "the minimum sequence privilege for nextval() in INSERT."
+    )
+    assert "admin_audit_logs_id_seq" in src, (
+        "GRANT must target admin_audit_logs_id_seq specifically."
+    )
+    assert "luciel_audit_archiver" in src, (
+        "GRANT must be issued TO luciel_audit_archiver."
+    )
