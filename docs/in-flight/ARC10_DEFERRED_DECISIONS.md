@@ -1,8 +1,83 @@
 # Arc 10 — Deferred Decisions and Follow-Up Items
 
 **Arc:** 10 — Deactivation Lifecycle, Cap Reclamation, Pre-Closure Data Export
-**Status:** Authored 2026-05-27 at arc-close
+**Status:** CLOSED 2026-05-27 19:45 EDT (deployed end-to-end to prod, E2E verified)
 **Author:** Sandbox agent (under founder direction)
+
+---
+
+## 0. Arc-Close State (in-sync verification)
+
+Verified at close 2026-05-27 19:45 EDT:
+
+* **Schema**: `alembic_version = arc10_lifecycle_subsystem`. All 25 expected
+  schema objects verified live in prod via the one-shot luciel-arc10-verify
+  ECS task (Phase 2c). Migration was rebased onto
+  `arc9_2_pr101_drop_tenant_id_column` to collapse a fork the original
+  draft created against `b2e5f17a3d9c`.
+
+* **AWS infra**: `luciel-data-exports` + `luciel-audit-cold-archive` S3
+  buckets created, encrypted (SSE-S3), versioned, public-access blocked,
+  with lifecycle policies (30d-expire on exports/, GLACIER_IR @90d +
+  DEEP_ARCHIVE @365d on audit cold). IAM grants on `luciel-ecs-worker-role`
+  and `luciel-ecs-web-role` (least-privilege per bucket). Two SSM
+  SecureStrings live: `/luciel/production/audit_archiver_password`,
+  `/luciel/production/audit_archiver_db_url`.
+
+* **ECS**: `luciel-backend-service` running task definition `:117`,
+  `luciel-worker-service` running `:49`, both on image
+  `arc10-lifecycle-subsystem-f56874f`. Backend `/api/v1/version` reports
+  `git_sha: f56874f` (probe verified). Both services stable and serving.
+
+* **Frontend**: `Luciel-Website` main branch deployed by Amplify job 40
+  (commit 5725b57) at 2026-05-27 19:40 EDT. Bundle contains all four
+  Arc 10 data-testid markers (`closure-grace-banner`, `close-account`,
+  `reactivate-button`, `export-ready-banner`). Live at vantagemind.ai.
+
+* **CI/CD**: New backend-image build/push job in
+  `.github/workflows/ci.yml` triggers on `main` + `arc*/**` branches via
+  the dedicated `luciel-backend-ci-build` OIDC role (ECR-push scoped to
+  the `luciel-backend` repo only). Closes the founder-laptop-in-deploy-
+  chain drift that existed since Arc 8.
+
+* **CloudWatch alarms**: Four metric-filter-based alarms on the worker
+  log group (retention, audit archiver, data export, downgrade-grace),
+  all wired to the `luciel-prod-alerts` SNS topic.
+
+* **E2E**: DB-level harness ran in-cluster against prod RDS
+  (luciel-arc10-e2e:2). Three suites passed: close→grace→reactivate full
+  cycle (E2E A), close→backdate-31d→tombstone→idempotency (E2E B),
+  archiver role privilege/restriction matrix (E2E C). Test admins
+  cleaned up at end of run.
+
+* **Rollback**: Post-migration RDS snapshot
+  `luciel-db-arc10-post-migration-20260527-191955` retained.
+
+### In-flight drifts resolved during deploy
+
+1. `D-arc10-migration-graph-forked-against-pr101-2026-05-27` — rebased
+   `down_revision` from `b2e5f17a3d9c` to `arc9_2_pr101_drop_tenant_id_column`.
+2. `D-arc10-migration-runner-wrong-db-role-2026-05-27` — migration TD
+   was pointing `DATABASE_URL` at the `luciel_app` SSM key (the runtime
+   role); migrations need `luciel_admin`. Patched to `/luciel/database-url`.
+3. `D-arc10-table-identifier-singular-vs-plural-2026-05-27` — Arc 10
+   migration + audit-retention service + data-export service all
+   referenced `admin_audit_log` (singular, the Python module name) as
+   the SQL identifier; real table is `admin_audit_logs` (plural). 32
+   lines patched across 4 files.
+4. `D-arc10-founder-laptop-required-for-backend-deploy-2026-05-27` —
+   Path A (CI build/push) chosen; new OIDC role + CI job make backend
+   image build reproducible without a Windows laptop.
+5. `D-arc10-closure-grace-no-server-fetch-2026-05-27` — frontend reads
+   closure grace from localStorage rather than from a dedicated server
+   route. Functional for the redirect path but won't surface on a fresh
+   device until that admin clicks the URL their email-receipt provided.
+   Follow-up: add a server route or extend `getBillingStatus()` to
+   include closure fields.
+
+---
+
+**Authored:** 2026-05-27 at arc-close
 **Anchors:** Vision §6 / §7 / §9 / §10 · Architecture §3.6 / §5.3 / §5.5 / §6
 **Companion files:** `alembic/versions/arc10_lifecycle_subsystem.py`, the v2 migration plan at `workspace/arc10/ARC10_MIGRATION_PLAN_v2.md`
 
