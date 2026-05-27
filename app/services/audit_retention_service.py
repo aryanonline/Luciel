@@ -18,20 +18,20 @@ prev_row_hash) so a forensic walk back from any current hot row
 through cold-archived rows reconstructs the same chain.
 
 This service uses a SEPARATE Postgres role (luciel_audit_archiver,
-Arc 10 migration) that has SELECT + UPDATE on admin_audit_log only.
+Arc 10 migration) that has SELECT + UPDATE on admin_audit_logs only.
 That role is NEVER used by application code \u2014 only by this worker.
 The grant surface guarantees:
   * The application's regular session (luciel role) cannot UPDATE
-    admin_audit_log \u2014 the forward-only invariant holds for normal
+    admin_audit_logs \u2014 the forward-only invariant holds for normal
     code paths.
-  * luciel_ops (Arc 9 C6.1) still cannot UPDATE admin_audit_log \u2014
+  * luciel_ops (Arc 9 C6.1) still cannot UPDATE admin_audit_logs \u2014
     the C6.1 blast-radius discipline holds.
   * Only this worker, on its own connection, can stamp
     cold_archived_at on rows it has already written to S3.
 
 What this service does:
 
-  1. Scan admin_audit_log for rows whose tier_at_write window has
+  1. Scan admin_audit_logs for rows whose tier_at_write window has
      elapsed AND cold_archived_at IS NULL:
        Free  : created_at < now - 30 days
        Pro   : created_at < now - 1 year
@@ -58,7 +58,7 @@ What this service does NOT do:
   * Does NOT delete hot rows. Arc 10 ships move-to-cold without
     hot-purge. A future arc may add a hot-purge step once the cold
     chain integrity is proven in production. The luciel_audit_archiver
-    role explicitly has NO DELETE grant on admin_audit_log to make
+    role explicitly has NO DELETE grant on admin_audit_logs to make
     accidental hot-purge impossible.
   * Does NOT touch rows whose admin row has been hard-deleted; the
     closure cascade's audit emissions belong to the legal-record
@@ -134,7 +134,7 @@ class AuditRetentionService:
 
     Lifetime: one instance per Celery task invocation. Uses a session
     bound to the luciel_audit_archiver role, which is the ONLY
-    Postgres role with UPDATE on admin_audit_log.
+    Postgres role with UPDATE on admin_audit_logs.
     """
 
     def __init__(
@@ -328,7 +328,7 @@ class AuditRetentionService:
                        actor_key_prefix, actor_permissions,
                        before_json, after_json, note,
                        row_hash, prev_row_hash, tier_at_write
-                  FROM admin_audit_log
+                  FROM admin_audit_logs
                  WHERE tier_at_write = :tier
                    AND created_at < :cutoff
                    AND cold_archived_at IS NULL
@@ -363,7 +363,7 @@ class AuditRetentionService:
         """Stamp cold_archived_at on the hot rows.
 
         This is the ONLY UPDATE the luciel_audit_archiver role
-        performs on admin_audit_log. The grant matrix permits exactly
+        performs on admin_audit_logs. The grant matrix permits exactly
         this and nothing else.
         """
         if not row_ids:
@@ -371,7 +371,7 @@ class AuditRetentionService:
         self.db.execute(
             sql_text(
                 """
-                UPDATE admin_audit_log
+                UPDATE admin_audit_logs
                    SET cold_archived_at = now()
                  WHERE id = ANY(:ids)
                    AND cold_archived_at IS NULL

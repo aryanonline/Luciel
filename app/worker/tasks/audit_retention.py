@@ -1,6 +1,6 @@
 """Arc 10 -- audit-tier retention beat task.
 
-Nightly task that archives admin_audit_log rows to S3 cold storage
+Nightly task that archives admin_audit_logs rows to S3 cold storage
 per Vision section 6.5 / section 7 tier-conditional retention:
 
     Free       :  30 days hot
@@ -14,7 +14,7 @@ stamped so re-scans skip the row. The hot row itself stays in place
 
 Runs under the luciel_audit_archiver Postgres role (Arc 10 migration)
 via a dedicated SessionLocal bound to that role. The role has
-SELECT + UPDATE on admin_audit_log only -- no DELETE, no access to
+SELECT + UPDATE on admin_audit_logs only -- no DELETE, no access to
 other tables. This is the surgical-minimum privilege surface for
 the tier-archive work.
 
@@ -66,7 +66,7 @@ def run_audit_tier_retention(self) -> dict:
 
     # We do NOT use SessionLocal here. The worker must run under the
     # luciel_audit_archiver role, which is the only Postgres role
-    # granted UPDATE on admin_audit_log. Wiring of the dedicated
+    # granted UPDATE on admin_audit_logs. Wiring of the dedicated
     # SessionLocal is deferred to a follow-up commit because the
     # settings field for the archiver DB URL lands in the same
     # commit; for the initial migration apply the worker runs

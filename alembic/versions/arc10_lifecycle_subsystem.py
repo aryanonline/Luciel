@@ -92,7 +92,7 @@ Drift entries closed
       C6.1's blast-radius discipline (luciel_ops still does NOT get
       audit UPDATE) by giving the audit-tier work its own, even-more-
       narrowly-granted role: luciel_audit_archiver, SELECT + UPDATE
-      on admin_audit_log only, no DELETE.
+      on admin_audit_logs only, no DELETE.
 
   * ``D-arc10-retention-worker-still-on-default-session-2026-05-27``
       Arc 9 C6.1 created luciel_ops with BYPASSRLS and C6.3 wired
@@ -120,7 +120,7 @@ Columns on existing tables:
       - closure_initiated_at   (Arc 10 grace clock)
       - closure_cancel_mode    ('immediate' | 'period_end')
       - hard_deleted_at        (tombstone terminal stamp)
-  * admin_audit_log:
+  * admin_audit_logs:
       - tier_at_write          (sticky per row for L5 invariant)
       - cold_archived_at       (chain-of-custody marker)
   * api_keys:
@@ -136,7 +136,7 @@ Columns on existing tables:
 
 Roles:
   * luciel_audit_archiver  (BYPASSRLS; SELECT + UPDATE on
-    admin_audit_log ONLY; no DELETE, no DDL, no other table access.
+    admin_audit_logs ONLY; no DELETE, no DDL, no other table access.
     Single-purpose role for the audit-tier-retention worker. Reconciles
     Vision §6.5/§7 with C6.1's blast-radius discipline.)
   * (luciel_ops, from Arc 9 C6.1, is REUSED for the tenant hard-delete
@@ -187,7 +187,7 @@ Paired code changes — landing in the same PR
       - New RetentionSessionLocal factory bound to RETENTION_DATABASE_URL
   * app/core/config.py:
       - New setting retention_database_url
-  * app/models/{admin,instance,api_key,knowledge,subscription,admin_audit_log}.py:
+  * app/models/{admin,instance,api_key,knowledge,subscription,admin_audit_logs}.py:
       - ORM-side column declarations matching the new schema
   * New service modules:
       - closure_service, reactivation_service, data_export_service,
@@ -250,7 +250,7 @@ depends_on = None
 #   * Separate from luciel_ops (preserves C6.1 blast-radius discipline:
 #     luciel_ops STILL cannot mutate audit rows; only this new,
 #     single-purpose role can).
-#   * Narrowly granted to SELECT + UPDATE on admin_audit_log ONLY
+#   * Narrowly granted to SELECT + UPDATE on admin_audit_logs ONLY
 #     (no DELETE in this arc; chain stays append-only in hot+cold
 #     combined; we move rows to S3 cold storage, not delete them).
 #   * BYPASSRLS so the worker can scan rows across all admins.
@@ -262,7 +262,7 @@ _ARCHIVER_AUDIT_TABLES_RU = (
     # by tier_at_write + created_at against the per-tier window) and
     # UPDATEs cold_archived_at after the S3 cold-archive write succeeds.
     # No DELETE — the chain is append-only in hot+cold combined.
-    "admin_audit_log",
+    "admin_audit_logs",
 )
 
 
@@ -392,14 +392,14 @@ def upgrade() -> None:
     )
 
     # -----------------------------------------------------------------
-    # 2. admin_audit_log — sticky tier + cold-archive marker.
+    # 2. admin_audit_logs — sticky tier + cold-archive marker.
     # -----------------------------------------------------------------
     # tier_at_write is nullable in schema so the backfill below cannot
     # fail on rows whose admin_id no longer exists. Going forward,
     # AdminAuditRepository.record() writes it NOT NULL via the
     # repository contract (paired code change).
     op.add_column(
-        "admin_audit_log",
+        "admin_audit_logs",
         sa.Column(
             "tier_at_write",
             sa.String(length=16),
@@ -416,7 +416,7 @@ def upgrade() -> None:
     # historical tier is unknowable from this point in code.
     op.execute(
         """
-        UPDATE admin_audit_log aal
+        UPDATE admin_audit_logs aal
            SET tier_at_write = a.tier
           FROM admins a
          WHERE aal.admin_id = a.id
@@ -425,7 +425,7 @@ def upgrade() -> None:
     )
 
     op.add_column(
-        "admin_audit_log",
+        "admin_audit_logs",
         sa.Column(
             "cold_archived_at",
             sa.DateTime(timezone=True),
@@ -440,13 +440,13 @@ def upgrade() -> None:
 
     op.create_index(
         "ix_admin_audit_log_tier_at_write_created",
-        "admin_audit_log",
+        "admin_audit_logs",
         ["tier_at_write", "created_at"],
     )
     op.execute(
         """
         CREATE INDEX ix_admin_audit_log_cold_archived
-            ON admin_audit_log (cold_archived_at)
+            ON admin_audit_logs (cold_archived_at)
             WHERE cold_archived_at IS NOT NULL
         """
     )
@@ -791,7 +791,7 @@ def upgrade() -> None:
         # Defense in depth: explicitly clear the session-local GUC.
         conn.exec_driver_sql("SELECT set_config('arc10.archiver_pw', '', true)")
 
-    # Grants — strictly admin_audit_log only.
+    # Grants — strictly admin_audit_logs only.
     # CONNECT, then USAGE on schema, then the narrow per-table grant.
     #
     # Database name comes from current_database() rather than from the
@@ -814,7 +814,7 @@ def upgrade() -> None:
         op.execute(f"GRANT SELECT, UPDATE ON {tbl} TO {_ARCHIVER_ROLE}")
 
     # Explicit denial: no schema-altering privileges; no DELETE on
-    # admin_audit_log (chain integrity); no access to any other table.
+    # admin_audit_logs (chain integrity); no access to any other table.
     op.execute(f"REVOKE CREATE ON SCHEMA public FROM {_ARCHIVER_ROLE}")
 
     # -----------------------------------------------------------------
@@ -927,15 +927,15 @@ def downgrade() -> None:
     op.drop_column("api_keys", "revoked_at")
 
     # -----------------------------------------------------------------
-    # 2. admin_audit_log.
+    # 2. admin_audit_logs.
     # -----------------------------------------------------------------
     op.execute("DROP INDEX IF EXISTS ix_admin_audit_log_cold_archived")
     op.drop_index(
         "ix_admin_audit_log_tier_at_write_created",
-        table_name="admin_audit_log",
+        table_name="admin_audit_logs",
     )
-    op.drop_column("admin_audit_log", "cold_archived_at")
-    op.drop_column("admin_audit_log", "tier_at_write")
+    op.drop_column("admin_audit_logs", "cold_archived_at")
+    op.drop_column("admin_audit_logs", "tier_at_write")
 
     # -----------------------------------------------------------------
     # 1. admins.

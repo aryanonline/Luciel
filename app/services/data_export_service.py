@@ -657,7 +657,7 @@ class DataExportService:
         """Audit log as CSV. Tier retention has already been applied
 
         upstream by AuditRetentionService; the rows still present
-        in admin_audit_log for this admin are what the export
+        in admin_audit_logs for this admin are what the export
         includes. cold_archived_at rows are included too \u2014 they're
         still the customer's data \u2014 with a column noting their
         archive state.
@@ -669,7 +669,7 @@ class DataExportService:
                        resource_pk, resource_natural_id, actor_key_prefix,
                        tier_at_write, cold_archived_at,
                        before_json, after_json, note
-                  FROM admin_audit_log
+                  FROM admin_audit_logs
                  WHERE admin_id = :aid
               ORDER BY id ASC
                 """
