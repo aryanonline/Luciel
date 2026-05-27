@@ -442,6 +442,17 @@ ALLOWED_ACTIONS = (
     ACTION_INSTANCE_CREATED,
     ACTION_TIER_RENAME_APPLIED,
     ACTION_LEGACY_FIXTURE_PURGED,
+    # Arc 10 Gap 6 close (D-arc10-audit-archiver-action-not-in-allowed-actions-
+    # 2026-05-27): the audit retention service
+    # (app/services/audit_retention_service.py::_emit_batch_audit) emits this
+    # action once per archived batch to record which (admin_id, tier_window)
+    # rows were moved to cold storage. The constant was declared at line 101
+    # but never wired into ALLOWED_ACTIONS, so AdminAuditRepository.record()
+    # rejected the emission with ValueError and rolled back the archive
+    # transaction, leaving cold_archived_at NULL after a successful S3 write
+    # (partial-state bug). Closing here so the move-to-cold path is fully
+    # transactional end-to-end.
+    ACTION_AUDIT_LOG_TIER_ARCHIVED,
 )
 
 

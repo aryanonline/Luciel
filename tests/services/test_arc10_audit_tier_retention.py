@@ -225,3 +225,71 @@ def test_cold_archive_writer_extends_hash_chain():
         "Cold hash input must include the row's own row_hash so the "
         "cold record references a specific hot chain position."
     )
+
+
+# ---------------------------------------------------------------------
+# Arc 10 Gap 6 close (D-arc10-audit-archiver-action-not-in-allowed-actions-
+# 2026-05-27).
+#
+# Bug: the audit retention service emits ACTION_AUDIT_LOG_TIER_ARCHIVED
+# once per archived batch, but that constant -- though declared in
+# app/models/admin_audit_log.py -- was never wired into ALLOWED_ACTIONS.
+# AdminAuditRepository.record() validates action against ALLOWED_ACTIONS
+# and raised ValueError, rolling back the archive transaction AFTER the
+# S3 object had already been written. Net effect: partial state where
+# cold_archived_at stayed NULL but the cold-storage S3 object existed.
+#
+# These tests pin (a) the constant exists, (b) it is wired into
+# ALLOWED_ACTIONS, and (c) the retention service still references it,
+# so the three pieces cannot drift apart again without a test failure.
+# ---------------------------------------------------------------------
+
+def test_audit_log_tier_archived_action_constant_exists():
+    """The string constant must exist on the model module."""
+    from app.models import admin_audit_log as m
+    assert hasattr(m, "ACTION_AUDIT_LOG_TIER_ARCHIVED"), (
+        "ACTION_AUDIT_LOG_TIER_ARCHIVED constant missing from "
+        "app/models/admin_audit_log.py. The audit retention worker "
+        "imports it; removing the symbol breaks the worker."
+    )
+    assert m.ACTION_AUDIT_LOG_TIER_ARCHIVED == "audit_log_tier_archived", (
+        "Constant value must not drift -- existing audit rows on disk "
+        "carry this exact string and forensic queries filter on it."
+    )
+
+
+def test_audit_log_tier_archived_action_is_in_allowed_actions():
+    """The constant must be registered in ALLOWED_ACTIONS.
+
+    AdminAuditRepository.record() rejects any action not present in
+    ALLOWED_ACTIONS with ValueError, which rolls back the surrounding
+    transaction. The retention worker calls record() AFTER writing the
+    S3 cold-archive object, so a missing entry here causes a partial-
+    state bug: S3 object exists, cold_archived_at stays NULL, and the
+    same rows get re-archived on the next worker tick.
+    """
+    from app.models import admin_audit_log as m
+    assert m.ACTION_AUDIT_LOG_TIER_ARCHIVED in m.ALLOWED_ACTIONS, (
+        "ACTION_AUDIT_LOG_TIER_ARCHIVED must be in ALLOWED_ACTIONS. "
+        "See D-arc10-audit-archiver-action-not-in-allowed-actions-"
+        "2026-05-27 for the production partial-state bug this prevents."
+    )
+
+
+def test_audit_retention_service_uses_canonical_action_constant():
+    """The service must import + use the constant, not a string literal.
+
+    A string literal would silently desync from the constant if either
+    side were renamed. The import + reference forces a NameError on
+    any drift.
+    """
+    src = AUDIT_SERVICE_PATH.read_text(encoding="utf-8")
+    assert "ACTION_AUDIT_LOG_TIER_ARCHIVED" in src, (
+        "audit_retention_service.py must reference the canonical "
+        "ACTION_AUDIT_LOG_TIER_ARCHIVED constant by name."
+    )
+    assert "action=ACTION_AUDIT_LOG_TIER_ARCHIVED" in src, (
+        "The batch-audit emission must pass the constant as the "
+        "action= kwarg to AuditRepository.record(); a string literal "
+        "would bypass the ALLOWED_ACTIONS membership guarantee."
+    )
