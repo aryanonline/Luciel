@@ -80,7 +80,7 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     # 1a. alembic heads is single and points at the latest Arc 11
     # migration (Cleanup A's data_category rename is the post-Step-4
     # head once the no-deferrals closeout lands).
-    expected_head = "arc11_cleanup_c_scope_assignment_role_enum"
+    expected_head = "arc11_cleanup_c_user_invites_role_enum"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],

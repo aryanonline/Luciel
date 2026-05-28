@@ -100,6 +100,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+from app.models.scope_assignment import ScopeRole
 
 if TYPE_CHECKING:
     from app.models.user import User
@@ -170,15 +171,28 @@ class UserInvite(Base, TimestampMixin):
         nullable=False,
     )
 
-    # Role label within the (tenant, domain) scope. Free-form for v1,
-    # mirroring ScopeAssignment.role. Step 30a.4's Team tier defaults to
-    # "teammate"; Step 30a.5's Company tier uses "department_lead" for the
-    # Company-admin-invites-lead leg and "teammate" for the
-    # lead-invites-agents leg.
-    role: Mapped[str] = mapped_column(
-        String(100),
+    # Role label within the (Admin, Instance) scope. Arc 11 Cleanup C
+    # promoted this column to the same PG enum (``scope_role``) as
+    # ScopeAssignment.role so the canonical four-role taxonomy
+    # (Architecture §3.2.2: admin_owner, admin_manager,
+    # instance_operator, read_only_viewer) is enforced at every
+    # boundary that touches a role string. The default landed on
+    # ``instance_operator`` because that is the role Pro-tier team
+    # invites mint (Customer Journey §10.3: "12 agents have
+    # instance_operator scope"). The legacy ``teammate`` value was
+    # retired in the same arc — it predated the locked four-role
+    # matrix and never mapped cleanly onto it.
+    role: Mapped[ScopeRole] = mapped_column(
+        SAEnum(
+            ScopeRole,
+            name="scope_role",
+            native_enum=True,
+            create_constraint=False,  # type already created by Cleanup C migration
+            validate_strings=True,
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
         nullable=False,
-        server_default=text("'teammate'"),
+        server_default=text("'instance_operator'"),
     )
 
     # JWT jti of the currently-outstanding token for this invite. Unique
