@@ -311,23 +311,38 @@ def test_broker_constructor_accepts_classifier() -> None:
 
 
 def test_broker_classifies_before_executing() -> None:
-    """In ToolBroker.execute_tool, self._classifier.classify must
+    """In the broker's run path, self._classifier.classify must
     appear at a lower line number than tool.execute.
 
     This is the core structural guarantee of Step 30c: an
     APPROVAL_REQUIRED action cannot leak past the gate and execute.
     A maintainer who reorders these silently breaks the contract
     Recap §4 names as load-bearing.
+
+    Arc 12 WU1 moved the classify+execute body into the async
+    ``_run`` helper called by ``execute_tool``; this test now pins
+    the order inside ``_run`` (the function that actually contains
+    both calls).
     """
 
     tree = _parse("app/tools/broker.py")
     cls = _find_class(tree, "ToolBroker")
     fn = next(
         (n for n in ast.walk(cls)
-         if isinstance(n, ast.FunctionDef) and n.name == "execute_tool"),
+         if isinstance(n, ast.FunctionDef) and n.name == "_run"),
         None,
     )
-    assert fn is not None
+    if fn is None:
+        fn = next(
+            (n for n in ast.walk(cls)
+             if isinstance(n, ast.AsyncFunctionDef) and n.name == "_run"),
+            None,
+        )
+    assert fn is not None, (
+        "Arc 12 WU1: ToolBroker must expose an internal `_run` "
+        "method that holds the classify+execute body. Renaming this "
+        "without updating the test re-opens the drift."
+    )
 
     classify_line = _first_lineno_of_self_attr_call(fn, "_classifier", "classify")
     execute_line = _first_lineno_of_call_attr(fn, "tool", "execute")
@@ -350,17 +365,21 @@ def test_broker_classifies_before_executing() -> None:
 
 
 def test_broker_short_circuits_approval_required_without_executing() -> None:
-    """execute_tool must contain an `if classification.tier ==
+    """The broker's `_run` body must contain an `if classification.tier ==
     ActionTier.APPROVAL_REQUIRED:` branch that returns BEFORE the
     `tool.execute(...)` call site. A maintainer who removes this
     branch (or moves the return below tool.execute) opens the gate.
+
+    Arc 12 WU1 moved the classify+execute body into the async
+    ``_run`` helper; this test pins the short-circuit there.
     """
 
     tree = _parse("app/tools/broker.py")
     cls = _find_class(tree, "ToolBroker")
     fn = next(
         (n for n in ast.walk(cls)
-         if isinstance(n, ast.FunctionDef) and n.name == "execute_tool"),
+         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+         and n.name == "_run"),
         None,
     )
     assert fn is not None
@@ -799,22 +818,36 @@ def test_broker_refuses_undeclared_tier_tool_without_executing() -> None:
     class _UndeclaredTool(LucielTool):
         # Deliberately no declared_tier override.
         @property
-        def name(self) -> str:
+        def tool_id(self) -> str:
             return "undeclared_test_tool"
+
+        @property
+        def display_name(self) -> str:
+            return "Undeclared test tool"
 
         @property
         def description(self) -> str:
             return "test tool with no declared tier"
 
         @property
-        def parameter_schema(self) -> dict:
-            return {}
+        def input_schema(self) -> dict:
+            return {"type": "object", "additionalProperties": True}
 
-        def execute(self, **kwargs) -> ToolResult:
-            executed.append(dict(kwargs))
-            return ToolResult(
-                success=True, output="SHOULD NOT BE REACHED"
-            )
+        @property
+        def output_schema(self) -> dict:
+            return {"type": "object", "additionalProperties": True}
+
+        @property
+        def requires_tier(self) -> tuple[str, ...]:
+            return ("free", "pro", "enterprise")
+
+        @property
+        def execution_mode(self) -> str:
+            return "in_process"
+
+        async def execute(self, input, context) -> dict:
+            executed.append(dict(input))
+            return {"success": True, "output": "SHOULD NOT BE REACHED"}
 
     registry = ToolRegistry()
     registry.register(_UndeclaredTool())
@@ -859,20 +892,36 @@ def test_broker_with_null_classifier_executes_undeclared_tool() -> None:
 
     class _UndeclaredTool(LucielTool):
         @property
-        def name(self) -> str:
+        def tool_id(self) -> str:
             return "null_clf_test_tool"
+
+        @property
+        def display_name(self) -> str:
+            return "Null-clf test tool"
 
         @property
         def description(self) -> str:
             return "x"
 
         @property
-        def parameter_schema(self) -> dict:
-            return {}
+        def input_schema(self) -> dict:
+            return {"type": "object", "additionalProperties": True}
 
-        def execute(self, **kwargs) -> ToolResult:
+        @property
+        def output_schema(self) -> dict:
+            return {"type": "object", "additionalProperties": True}
+
+        @property
+        def requires_tier(self) -> tuple[str, ...]:
+            return ("free", "pro", "enterprise")
+
+        @property
+        def execution_mode(self) -> str:
+            return "in_process"
+
+        async def execute(self, input, context) -> dict:
             executed.append(True)
-            return ToolResult(success=True, output="ran")
+            return {"success": True, "output": "ran"}
 
     registry = ToolRegistry()
     registry.register(_UndeclaredTool())

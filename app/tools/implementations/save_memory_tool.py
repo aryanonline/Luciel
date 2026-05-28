@@ -1,13 +1,13 @@
 """
-Save Memory tool.
+Save Memory tool — §3.3.1-conformant shim.
 
-Allows Luciel to explicitly save a fact about the user
-when the conversation makes it clear something should be remembered.
+WU1 migrated this tool onto the new §3.3.1 base contract. Behaviour
+is unchanged from v1: the tool does NOT write to the DB directly; it
+returns the memory payload so the orchestration layer can handle
+persistence with the right user/tenant context.
 
-This is different from automatic memory extraction (Step 5).
-Automatic extraction runs after every turn silently.
-This tool lets Luciel deliberately choose to save something
-when the model decides it is important.
+This tool will be evicted from the registry at WU7 and relocated to
+the cognition module (Arc 12 founder ruling 4).
 """
 
 from __future__ import annotations
@@ -15,20 +15,24 @@ from __future__ import annotations
 from typing import Any
 
 from app.policy.action_classification import ActionTier
-from app.tools.base import LucielTool, ToolResult
+from app.tools.base import LucielTool, ToolContext
 
 
 class SaveMemoryTool(LucielTool):
 
-    # Step 30c: ROUTINE. Writing a memory row is reversible (Pattern
-    # E retention), low-blast-radius (one row keyed to the current
-    # user/tenant scope), and is exactly the senior-advisor work
-    # Recap §4 names as not consequential.
+    # Step 30c -- ROUTINE. Writing a memory row is reversible
+    # (Pattern E retention), low-blast-radius (one row keyed to the
+    # current user/tenant scope), and is exactly the senior-advisor
+    # work Recap §4 names as not consequential.
     declared_tier = ActionTier.ROUTINE
 
     @property
-    def name(self) -> str:
+    def tool_id(self) -> str:
         return "save_memory"
+
+    @property
+    def display_name(self) -> str:
+        return "Save memory"
 
     @property
     def description(self) -> str:
@@ -39,38 +43,68 @@ class SaveMemoryTool(LucielTool):
         )
 
     @property
-    def parameter_schema(self) -> dict[str, Any]:
+    def input_schema(self) -> dict[str, Any]:
         return {
-            "category": {
-                "type": "string",
-                "description": "One of: preference, constraint, goal, fact, operational",
-                "required": True,
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": (
+                        "One of: preference, constraint, goal, fact, "
+                        "operational"
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "The fact to remember, as a short clear sentence"
+                    ),
+                },
             },
-            "content": {
-                "type": "string",
-                "description": "The fact to remember, as a short clear sentence",
-                "required": True,
-            },
+            "required": ["category", "content"],
+            "additionalProperties": True,
         }
 
-    def execute(self, **kwargs: Any) -> ToolResult:
-        """
-        This tool does not write to the DB directly.
-        It returns the memory data so the orchestration layer
-        can handle persistence with the right user/tenant context.
-        """
-        category = kwargs.get("category", "")
-        content = kwargs.get("content", "")
+    @property
+    def output_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "output": {"type": "string"},
+                "category": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["success", "output"],
+            "additionalProperties": True,
+        }
+
+    @property
+    def requires_tier(self) -> tuple[str, ...]:
+        return ("free", "pro", "enterprise")
+
+    @property
+    def execution_mode(self) -> str:
+        return "in_process"
+
+    async def execute(
+        self,
+        input: dict[str, Any],
+        context: ToolContext,
+    ) -> dict[str, Any]:
+        category = input.get("category", "")
+        content = input.get("content", "")
 
         if not category or not content:
-            return ToolResult(
-                success=False,
-                output="",
-                error="Both 'category' and 'content' are required.",
-            )
+            return {
+                "success": False,
+                "output": "",
+                "error": "Both 'category' and 'content' are required.",
+            }
 
-        return ToolResult(
-            success=True,
-            output=f"Memory saved: [{category}] {content}",
-            metadata={"category": category, "content": content},
-        )
+        return {
+            "success": True,
+            "output": f"Memory saved: [{category}] {content}",
+            "category": category,
+            "content": content,
+        }
