@@ -94,6 +94,15 @@ class KnowledgeSource(Base):
 
     ingestion_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    ingestion_error_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    """Structured machine-readable code for the failure mode. Canonical
+    values in ``app.models.knowledge_source_errors.IngestionErrorCode``.
+    Part of the cross-repo contract — the frontend keys badge
+    rendering on this column. ``ingestion_error`` text survives for
+    ops debugging but is NOT part of the contract."""
+
     ingested_by: Mapped[str] = mapped_column(Text, nullable=False)
     """User id of the team member who initiated the ingest."""
 

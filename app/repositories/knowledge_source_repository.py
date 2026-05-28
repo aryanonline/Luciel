@@ -166,6 +166,7 @@ class KnowledgeSourceRepository:
         admin_id: str,
         status: str,
         error: str | None = None,
+        error_code: str | None = None,
         autocommit: bool = False,
     ) -> KnowledgeSource:
         """Move a source through its ingestion lifecycle.
@@ -176,8 +177,11 @@ class KnowledgeSourceRepository:
         enforces the enum domain.
 
         On ``status='failed'`` the caller is expected to pass
-        ``error`` so the failure surfaces in the admin UI. On any
-        non-failed status, ``error`` is cleared (a retry that
+        ``error`` so the failure surfaces in the admin UI, and
+        optionally ``error_code`` (canonical values in
+        ``app.models.knowledge_source_errors.IngestionErrorCode``)
+        for the machine-readable cross-repo contract. On any
+        non-failed status both fields are cleared (a retry that
         succeeds wipes the prior failure note).
         """
         if status not in _VALID_STATUSES:
@@ -195,6 +199,7 @@ class KnowledgeSourceRepository:
             )
         row.ingestion_status = status
         row.ingestion_error = error if status == "failed" else None
+        row.ingestion_error_code = error_code if status == "failed" else None
         row.updated_at = datetime.now(tz=timezone.utc)
         if autocommit:
             self.db.commit()

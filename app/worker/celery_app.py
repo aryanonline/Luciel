@@ -197,8 +197,8 @@ celery_app = Celery(
         # latency does not starve chat-path memory_extraction (which
         # runs on luciel-memory-tasks with worker_prefetch=1).
         "app.worker.tasks.embed_source",
-        # Arc 11 Step 7 -- website crawl stub (Arc-14 fills in the
-        # real fetcher). Same queue as embed_source.
+        # Arc 11 Step 7 -- website crawl stub (deferred-feature; the
+        # real fetcher fills in later). Same queue as embed_source.
         "app.worker.tasks.crawl_website",
     ],
 )
