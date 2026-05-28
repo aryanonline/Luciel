@@ -33,12 +33,46 @@ from __future__ import annotations
 
 import logging
 
+from typing import Literal
+
 from fastapi import HTTPException, Request, status
 
 logger = logging.getLogger(__name__)
 
 PLATFORM_ADMIN = "platform_admin"
 ADMIN = "admin"
+
+# ---------------------------------------------------------------------
+# Arc 11 Step 7 — canonical role names for the Knowledge subsystem
+# role matrix per Vision §5.2 + Architecture §3.2.2.
+#
+# The ScopeAssignment.role column is a free-form String(100) by design
+# (Step 24.5b doctrine: "A future step may promote this to an enum once
+# we see real-world role taxonomy stabilize."). Arc 11 codifies four
+# canonical role values for knowledge-base actions; they are advisory
+# strings stored as-is on scope_assignments.role.
+# ---------------------------------------------------------------------
+ROLE_ADMIN_OWNER = "admin_owner"
+ROLE_ADMIN_MANAGER = "admin_manager"
+ROLE_INSTANCE_OPERATOR = "instance_operator"
+ROLE_READ_ONLY_VIEWER = "read_only_viewer"
+
+ALL_KNOWLEDGE_ROLES = frozenset({
+    ROLE_ADMIN_OWNER,
+    ROLE_ADMIN_MANAGER,
+    ROLE_INSTANCE_OPERATOR,
+    ROLE_READ_ONLY_VIEWER,
+})
+
+# Role-action matrix per Architecture §3.2.2 / ARC11_PLAN.md §0.6.
+# list/view → owner + manager + operator (operator scoped)
+# edit/delete → owner + manager only
+_KNOWLEDGE_ACTION_ROLES: dict[str, frozenset[str]] = {
+    "list":   frozenset({ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER, ROLE_INSTANCE_OPERATOR}),
+    "view":   frozenset({ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER, ROLE_INSTANCE_OPERATOR}),
+    "edit":   frozenset({ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER}),
+    "delete": frozenset({ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER}),
+}
 
 
 class ScopePolicy:
@@ -206,6 +240,200 @@ class ScopePolicy:
         ``instance.admin_id`` directly.
         """
         cls.enforce_admin_owns_instance(request, instance)
+
+    # ------------------------------------------------------------------
+    # Arc 11 Step 7 — Knowledge role matrix (Architecture §3.2.2).
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _resolve_role_on_instance(
+        cls,
+        request: Request,
+        instance,
+    ) -> str | None:
+        """Look up the caller's role on a specific Instance.
+
+        Resolution order:
+
+          1. Platform admin: returns ``None`` (caller is unscoped; the
+             outer ``enforce_role_on_instance`` short-circuits on
+             platform_admin before this is called).
+          2. ``request.state.role`` — populated by future auth middleware
+             when a session has a single explicit role binding (e.g.,
+             ``admin_owner`` API keys, or a cookie session that
+             pre-resolved the role at auth time). Trusted because the
+             middleware verified the role against scope_assignments.
+          3. Fall back to the existing scope_assignments row for
+             (actor_user_id, admin_id) where ``ended_at IS NULL`` AND
+             ``active = TRUE``. The session knows ``actor_user_id``
+             (Step 24.5b) so the lookup is keyed on that.
+
+        Returns the canonical role string (see ``ROLE_*`` constants) or
+        ``None`` when no active assignment exists for this caller in
+        this Admin scope. ``None`` always denies; the gate is fail-
+        closed by construction.
+
+        Implementation note: the lookup queries scope_assignments
+        directly with a small SELECT rather than going through a
+        repository, because (a) the repository layer has not yet
+        materialised a ``get_active_role`` method, and (b) the query
+        is hot — every knowledge route fires it once — so the inline
+        ``select(...)`` is intentional. If this query grows beyond a
+        single predicate or needs caching, lift it into
+        ``ScopeAssignmentRepository`` at that time.
+        """
+        if cls.is_platform_admin(request):
+            return None  # bypass — caller handles platform_admin
+
+        # Trust auth-middleware-populated role first.
+        explicit = getattr(request.state, "role", None)
+        if isinstance(explicit, str) and explicit:
+            return explicit
+
+        # Fall back to scope_assignments. Defer DB session resolution
+        # until we know we need it — most platform_admin paths skip
+        # this entirely.
+        actor_user_id = getattr(request.state, "actor_user_id", None)
+        target_admin_id = getattr(instance, "admin_id", None)
+        if actor_user_id is None or target_admin_id is None:
+            return None  # no actor or no target → deny
+
+        try:
+            # Lazy imports keep policy import-light for non-route
+            # callers (services, tests that don't need a DB).
+            from sqlalchemy import select
+
+            from app.db.session import SessionLocal
+            from app.models.scope_assignment import ScopeAssignment
+        except Exception:  # pragma: no cover — defensive
+            logger.exception("Could not import scope_assignments lookup deps")
+            return None
+
+        db = SessionLocal()
+        try:
+            stmt = (
+                select(ScopeAssignment.role)
+                .where(
+                    ScopeAssignment.user_id == actor_user_id,
+                    ScopeAssignment.admin_id == target_admin_id,
+                    ScopeAssignment.active.is_(True),
+                    ScopeAssignment.ended_at.is_(None),
+                )
+                .limit(1)
+            )
+            row = db.execute(stmt).first()
+            return row[0] if row else None
+        finally:
+            db.close()
+
+    @classmethod
+    def enforce_role_on_instance(
+        cls,
+        request: Request,
+        instance,
+        *,
+        allowed_roles: set[str] | frozenset[str],
+    ) -> None:
+        """Verify the caller holds one of ``allowed_roles`` for this
+        Instance's Admin.
+
+        Three gates in order:
+
+          1. ``platform_admin`` bypasses everything (operator role).
+          2. ``instance_operator`` is scoped: the operator's assigned
+             instance_id (set by auth middleware as
+             ``request.state.luciel_instance_id``) must match the
+             target instance's id. A manager / owner is not so
+             constrained — they hold scope at the Admin level.
+          3. The caller's resolved role must be in ``allowed_roles``.
+
+        Raises 403 with a stable detail message on any failure.
+        """
+        # 1. Platform-admin bypass.
+        if cls.is_platform_admin(request):
+            return
+
+        # 2. Cross-Admin guard first — must own the Instance before
+        #    role-gating means anything. Belt-and-suspenders to the
+        #    existing ``enforce_admin_owns_instance`` callers, but
+        #    safe to run twice.
+        cls.enforce_admin_owns_instance(request, instance)
+
+        # 3. Look up the role.
+        role = cls._resolve_role_on_instance(request, instance)
+        if role is None:
+            logger.warning(
+                "Role denial: caller has no active scope assignment for "
+                "admin=%s instance=%s",
+                getattr(instance, "admin_id", None),
+                getattr(instance, "id", None),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Caller has no active scope assignment for this Admin"
+                ),
+            )
+
+        # 4. Operator-instance scoping. instance_operator is the only
+        #    role bound at the Instance level; the other three roles
+        #    hold scope at the Admin level and see every Instance
+        #    under it.
+        if role == ROLE_INSTANCE_OPERATOR:
+            caller_instance_id = getattr(
+                request.state, "luciel_instance_id", None,
+            )
+            target_instance_id = getattr(instance, "id", None)
+            if (
+                caller_instance_id is None
+                or caller_instance_id != target_instance_id
+            ):
+                logger.warning(
+                    "Role denial: instance_operator caller bound to "
+                    "instance=%s tried instance=%s",
+                    caller_instance_id, target_instance_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        "instance_operator scope does not include this Instance"
+                    ),
+                )
+
+        # 5. Final role check.
+        if role not in allowed_roles:
+            logger.warning(
+                "Role denial: caller role=%s not in allowed=%s",
+                role, sorted(allowed_roles),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Role {role!r} is not permitted for this action"
+                ),
+            )
+
+    @classmethod
+    def require_knowledge_role(
+        cls,
+        request: Request,
+        instance,
+        action: Literal["list", "view", "edit", "delete"],
+    ) -> None:
+        """Convenience wrapper for ``enforce_role_on_instance`` that
+        maps a knowledge action to its allowed-role set per
+        Architecture §3.2.2. See ``_KNOWLEDGE_ACTION_ROLES`` above for
+        the canonical matrix."""
+        if action not in _KNOWLEDGE_ACTION_ROLES:
+            raise ValueError(
+                f"Unknown knowledge action {action!r}; expected one of "
+                f"{sorted(_KNOWLEDGE_ACTION_ROLES.keys())}"
+            )
+        cls.enforce_role_on_instance(
+            request,
+            instance,
+            allowed_roles=_KNOWLEDGE_ACTION_ROLES[action],
+        )
 
     # ------------------------------------------------------------------
     # Action-class enforcement (Step 29.y gap-fix C3) — unchanged.

@@ -135,6 +135,22 @@ class TierEntitlement:
     # to decide which sources to LRU-archive at the downgrade boundary.
     knowledge_bytes_cap: int | None
 
+    # Axis 8c -- Per-file knowledge byte cap (Arc 11 Step 7).
+    # Vision §3.3 / ARC11_PLAN.md §0.4: each individual upload is also
+    # capped, separately from the per-Admin total. Enforced at the API
+    # boundary; over-cap uploads return 413 with the structured payload
+    # in ARC11_PLAN.md §0.4 carrying ``scope: "per_file"``.
+    #   Free       :  10 MB
+    #   Pro        :  50 MB
+    #   Enterprise : 500 MB
+    knowledge_per_file_bytes_cap: int
+
+    # Axis 8d -- Website crawl ingestion enabled (Arc 11 Step 7).
+    # Vision §3.3 lists website crawl as a Pro/Enterprise feature; the
+    # /crawl route returns 403 ``feature_not_available_on_tier`` for
+    # Free per ARC11_PLAN.md §3.6.
+    knowledge_website_crawl_enabled: bool
+
     # Axis 9 -- SSO
     sso_enabled: bool
 
@@ -189,6 +205,9 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         instance_count_cap=1,
         # Arc 10: 100 MB per Vision §7 tier matrix.
         knowledge_bytes_cap=100 * 1024 * 1024,
+        # Arc 11 Step 7: 10 MB per-file cap; no crawl on Free.
+        knowledge_per_file_bytes_cap=10 * 1024 * 1024,
+        knowledge_website_crawl_enabled=False,
         model_tier_default="base",
         composition_enabled=False,
         max_composition_depth=0,
@@ -220,6 +239,9 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         instance_count_cap=10,
         # Arc 10: 5 GB per Vision §7 tier matrix.
         knowledge_bytes_cap=5 * 1024 * 1024 * 1024,
+        # Arc 11 Step 7: 50 MB per-file cap; crawl enabled.
+        knowledge_per_file_bytes_cap=50 * 1024 * 1024,
+        knowledge_website_crawl_enabled=True,
         model_tier_default="mid",
         composition_enabled=True,
         max_composition_depth=2,
@@ -248,6 +270,9 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
     TIER_ENTERPRISE: TierEntitlement(
         # Arc 10: unlimited per Vision §7 tier matrix.
         knowledge_bytes_cap=None,
+        # Arc 11 Step 7: 500 MB per-file cap; crawl enabled.
+        knowledge_per_file_bytes_cap=500 * 1024 * 1024,
+        knowledge_website_crawl_enabled=True,
         # 2026-05-24 Arc 7 doctrine pivot: Enterprise is now FLAT-recurring
         # symmetric with Pro (monthly $2,800 CAD or annual $24,000 CAD,
         # self-serve via Stripe Checkout). Metering RETIRED -- abuse-prevention

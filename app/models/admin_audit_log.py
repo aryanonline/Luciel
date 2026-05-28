@@ -103,6 +103,21 @@ ACTION_INSTANCE_DEACTIVATED = "instance_deactivated"
 ACTION_KNOWLEDGE_SOFT_DELETED = "knowledge_soft_deleted"
 ACTION_KNOWLEDGE_HARD_DELETED = "knowledge_hard_deleted"
 
+# Arc 11 Step 7 -- admin knowledge-base routes
+# (/admin/instances/{instance_id}/knowledge/*). Distinct from the
+# pre-Arc-11 ACTION_KNOWLEDGE_* actions above (which are emitted by
+# the legacy /admin/knowledge/ingest path and stay in place until
+# Arc 14 retires it). The new actions are emitted by the routes in
+# app/api/v1/admin_knowledge.py — one per CRUD verb plus the
+# affected-questions read and the crawl enqueue.
+ACTION_KNOWLEDGE_SOURCE_CREATED = "knowledge_source_created"
+ACTION_KNOWLEDGE_SOURCE_LISTED = "knowledge_source_listed"
+ACTION_KNOWLEDGE_SOURCE_VIEWED = "knowledge_source_viewed"
+ACTION_KNOWLEDGE_SOURCE_UPDATED = "knowledge_source_updated"
+ACTION_KNOWLEDGE_SOURCE_DELETED = "knowledge_source_deleted"
+ACTION_KNOWLEDGE_AFFECTED_QUESTIONS_VIEWED = "knowledge_affected_questions_viewed"
+ACTION_KNOWLEDGE_CRAWL_ENQUEUED = "knowledge_crawl_enqueued"
+
 # Step 28 C8 (P3-O): durable record for memory extractor save-time failures.
 # The chat turn must NOT fail when memory persistence fails (fail-open
 # contract), but fail-open is not the same as fail-silent. Every save-time
@@ -466,6 +481,14 @@ ALLOWED_ACTIONS = (
     # first-class audit events.
     ACTION_ACCOUNT_CLOSURE_INITIATED,
     ACTION_ACCOUNT_REACTIVATED,
+    # Arc 11 Step 7 -- admin knowledge-base routes.
+    ACTION_KNOWLEDGE_SOURCE_CREATED,
+    ACTION_KNOWLEDGE_SOURCE_LISTED,
+    ACTION_KNOWLEDGE_SOURCE_VIEWED,
+    ACTION_KNOWLEDGE_SOURCE_UPDATED,
+    ACTION_KNOWLEDGE_SOURCE_DELETED,
+    ACTION_KNOWLEDGE_AFFECTED_QUESTIONS_VIEWED,
+    ACTION_KNOWLEDGE_CRAWL_ENQUEUED,
 )
 
 
@@ -547,6 +570,14 @@ RESOURCE_USER_INVITE = "user_invite"
 RESOURCE_EMAIL_SUPPRESSION = "email_suppression"
 RESOURCE_EMAIL_SEND_EVENT = "email_send_event"
 
+# Arc 11 Step 7 -- knowledge_sources row. Distinct from RESOURCE_KNOWLEDGE
+# ("knowledge_embedding"), which the legacy /admin/knowledge/ingest path
+# still uses; RESOURCE_KNOWLEDGE_SOURCE identifies the parent row in the
+# new knowledge_sources table introduced in Arc 11 Step 1.
+# resource_pk = knowledge_sources.id.
+# resource_natural_id = knowledge_sources.source_uuid (string form).
+RESOURCE_KNOWLEDGE_SOURCE = "knowledge_source"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -576,6 +607,8 @@ ALLOWED_RESOURCE_TYPES = (
     # Arc 5 B5 -- V2 Admin / Instance.
     RESOURCE_ADMIN,
     RESOURCE_INSTANCE,
+    # Arc 11 Step 7 -- knowledge_sources row.
+    RESOURCE_KNOWLEDGE_SOURCE,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
