@@ -66,6 +66,11 @@ from app.policy.action_classification import (
     ActionClassificationGate,
     ActionTier,
 )
+from app.tools.authorization import (
+    AuthorizationDecision,
+    DefaultDenyToolAuthorizer,
+    ToolAuthorizer,
+)
 from app.tools.base import LucielTool, ToolContext, ToolResult
 from app.tools.registry import ToolRegistry
 from app.tools.schema import SchemaValidationError, validate_schema
@@ -101,7 +106,19 @@ class ToolBroker:
         self,
         registry: ToolRegistry,
         classifier: ActionClassifier | None = None,
+        *,
+        authorizer: ToolAuthorizer | None = None,
     ) -> None:
+        """Construct the broker.
+
+        ``authorizer`` is the Arc 12 WU2 default-deny gate (see
+        ``app.tools.authorization``). If None, the broker constructs
+        a ``DefaultDenyToolAuthorizer`` that reads
+        ``instance_tool_authorizations`` via ``context.session``. The
+        signature is kept stable for Arc 14 — the agentic loop will
+        either inject an enriched authoriser (cycle detection +
+        fan-out budget) or wrap the default one.
+        """
         self.registry = registry
         if classifier is None:
             # Lazy-import settings so this module stays importable
@@ -111,6 +128,12 @@ class ToolBroker:
 
             classifier = ActionClassificationGate.from_settings(settings)
         self._classifier: ActionClassifier = classifier
+        # Arc 12 WU2 — default-deny authorisation gate. Constructed
+        # eagerly so the broker fails closed even if a caller forgets
+        # to inject one.
+        self._authorizer: ToolAuthorizer = (
+            authorizer or DefaultDenyToolAuthorizer()
+        )
 
     # ------------------------------------------------------------------
     # Public sync entrypoint (chat_service + legacy callers)
@@ -211,6 +234,40 @@ class ToolBroker:
                     "tier": ActionTier.APPROVAL_REQUIRED.value,
                     "tier_reason": "unknown_tool",
                     "classifier": getattr(self._classifier, "name", ""),
+                },
+            )
+
+        # Arc 12 WU2 — default-deny authorisation gate. Runs BEFORE
+        # the action-classification gate and BEFORE tool.execute().
+        # An absent / revoked / disabled authorisation row refuses
+        # the call with a structured tool-error; the classifier is
+        # never consulted, and tool.execute() is never invoked. This
+        # is the load-bearing security gate Arc 14's agentic loop
+        # will compose its cycle / fan-out checks on top of —
+        # ``ToolAuthorizer.authorize(tool, context)`` is the stable
+        # interface.
+        auth_decision = self._authorizer.authorize(tool, ctx)
+        if not auth_decision.allowed:
+            logger.info(
+                "Tool dispatch refused by authoriser. tool=%s "
+                "admin=%s instance=%s reason=%s",
+                tool_name, ctx.admin_id, ctx.instance_id,
+                auth_decision.reason,
+            )
+            return ToolResult(
+                success=False,
+                output="",
+                error=auth_decision.message,
+                metadata={
+                    "tier": ActionTier.APPROVAL_REQUIRED.value,
+                    "tier_reason": auth_decision.reason,
+                    "classifier": getattr(self._classifier, "name", ""),
+                    "authorization": "denied",
+                    "authorization_reason": auth_decision.reason,
+                    "authorization_failure_kind": (
+                        auth_decision.failure_kind
+                    ),
+                    "tool_name": tool_name,
                 },
             )
 
