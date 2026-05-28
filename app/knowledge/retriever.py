@@ -1,23 +1,44 @@
 """
-Knowledge retriever (Step 25b, File 11).
+Knowledge retriever (Step 25b, File 11 — Arc 11 Step 3 update).
 
 Retrieves relevant knowledge from the vector database for a user query
-in a specific (tenant, domain, luciel_instance) context.
+in a specific (admin, domain, luciel_instance) context.
 
-Step 25b rewrite:
-    - Primary filter dimension is luciel_instance_id (Step 24.5 split).
-    - agent_id remains accepted for legacy rows (pre-Step-24.5) so chat
-      against the legacy path keeps returning those chunks during the
-      transition window.
-    - Upward inheritance is delegated to KnowledgeRepository.search_similar.
-    - Active-only (superseded_at IS NULL) is enforced at the repository
-      layer, not here.
-    - Never raises: any failure returns [] so chat is never blocked on
-      retrieval.
+Step 25b → Arc 11 Step 3:
+    - Primary filter dimension stays ``luciel_instance_id`` (Step 24.5).
+    - ``agent_id`` remains accepted for legacy rows (pre-Step-24.5).
+    - Upward inheritance is delegated to
+      ``KnowledgeRepository.search_similar``.
+    - Active-only (``superseded_at IS NULL``), lifecycle-clean
+      (``soft_deleted_at IS NULL``,
+      ``pending_downgrade_archived_at IS NULL``) and
+      ingestion-ready (parent ``KnowledgeSource.ingestion_status =
+      'ready'``) filters are all enforced at the repository layer.
+      Architecture v1 §3.2 retrieval flow step 1.
+    - Never raises: any failure returns ``[]`` so chat is never
+      blocked on retrieval.
+
+Two retrieval surfaces (Arc 11 Step 3):
+    * ``retrieve(...)`` — unchanged public shape; returns a
+      ``list[str]`` of pre-formatted knowledge strings for direct
+      injection into the chat prompt-assembly pipeline. This is what
+      every existing call site uses; behaviour is preserved.
+    * ``retrieve_with_sources(...)`` — new richer surface returning a
+      ``list[RetrievedChunk]`` that carries both the formatted
+      string and the chunk's ``source_identifier`` (``int`` for
+      Arc-11-shape chunks, ``str`` for legacy chunks). Used by:
+        - Arc 11 Step 5 (trace instrumentation: populate
+          ``traces.source_ids_used``).
+        - Arc 11 Step 8 (orchestrator Retrieve step).
+      Both call sites need the source identifier; neither needs the
+      full ``KnowledgeSource`` row, so we surface the identifier
+      alone rather than the whole ORM object.
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Sequence
 
 from app.knowledge.embedder import embed_single
 from app.repositories.knowledge_repository import KnowledgeRepository
@@ -25,11 +46,42 @@ from app.repositories.knowledge_repository import KnowledgeRepository
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class RetrievedChunk:
+    """One chunk returned by the retriever, with the metadata that
+    downstream code (orchestrator + trace instrumentation) needs.
+
+    ``source_identifier`` is the value Step 5 records in
+    ``traces.source_ids_used``. It is typed ``int | str``:
+        - ``int`` when the chunk has a parent ``knowledge_sources``
+          row (Arc 11 shape) — the row's primary key.
+        - ``str`` when the chunk is a legacy row with no FK — the
+          stringy ``source_id``.
+        - ``None`` when neither is set (extremely-pre-Arc-11 chunks
+          that were ingested without any source identifier at all).
+    """
+
+    content: str
+    knowledge_type: str
+    title: str | None
+    distance: float | None
+    chunk_id: int
+    source_identifier: int | str | None
+    formatted: str
+    """Pre-formatted ``[<type>] <title>: <content>`` string used by
+    the existing chat path. Pre-computed so callers that just want
+    the strings don't need to know the format."""
+
+
 class KnowledgeRetriever:
-    """Thin wrapper over embedder + KnowledgeRepository.search_similar."""
+    """Thin wrapper over embedder + ``KnowledgeRepository.search_similar``."""
 
     def __init__(self, repository: KnowledgeRepository) -> None:
         self.repository = repository
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def retrieve(
         self,
@@ -42,15 +94,44 @@ class KnowledgeRetriever:
         knowledge_type: str | None = None,
         limit: int = 5,
     ) -> list[str]:
-        """Retrieve knowledge strings for a query.
+        """Retrieve knowledge strings for a query — unchanged shape.
 
         Returns a list of human-readable strings formatted as
-        `[<knowledge_type>] <title>: tent>` (or without title when
-        absent) for direct injection into the prompt-assembly pipeline
-        in ChatService.
+        ``[<knowledge_type>] <title>: <content>`` (or without title
+        when absent) for direct injection into the prompt-assembly
+        pipeline in ChatService.
 
-        Never raises. On any failure, returns [] and logs a warning —
-        chat must always be answerable even when retrieval fails.
+        Never raises. On any failure, returns ``[]`` and logs a
+        warning — chat must always be answerable even when retrieval
+        fails.
+        """
+        chunks = self.retrieve_with_sources(
+            query=query,
+            admin_id=admin_id,
+            domain_id=domain_id,
+            luciel_instance_id=luciel_instance_id,
+            agent_id=agent_id,
+            knowledge_type=knowledge_type,
+            limit=limit,
+        )
+        return [c.formatted for c in chunks]
+
+    def retrieve_with_sources(
+        self,
+        *,
+        query: str,
+        admin_id: str | None = None,
+        domain_id: str | None = None,
+        luciel_instance_id: int | None = None,
+        agent_id: str | None = None,
+        knowledge_type: str | None = None,
+        limit: int = 5,
+    ) -> list[RetrievedChunk]:
+        """Richer surface used by Arc 11 Step 5 (trace instrumentation)
+        and Step 8 (orchestrator Retrieve step).
+
+        Same filtering semantics as ``retrieve``. Returns one
+        ``RetrievedChunk`` per row, in the same order. Never raises.
         """
         if not query or not query.strip():
             return []
@@ -70,20 +151,47 @@ class KnowledgeRetriever:
             logger.warning("Knowledge retrieval failed: %s", exc)
             return []
 
-        knowledge_strings: list[str] = []
+        out: list[RetrievedChunk] = []
         for r in results:
-            k_type = r["knowledge_type"]
             content = r["content"]
+            k_type = r["knowledge_type"]
             title = r.get("title") or ""
             if title:
-                knowledge_strings.append(f"[{k_type}] {title}: {content}")
+                formatted = f"[{k_type}] {title}: {content}"
             else:
-                knowledge_strings.append(f"[{k_type}] {content}")
+                formatted = f"[{k_type}] {content}"
+
+            # Prefer the source-row PK (Arc 11 shape) over the legacy
+            # stringy id. Falls back to the stringy id when the chunk
+            # has no FK. ``None`` only for pre-Step-25b chunks that
+            # never carried a source identifier at all.
+            source_record_id = r.get("source_record_id")
+            legacy_string = r.get("source_id")
+            if source_record_id is not None:
+                ident: int | str | None = int(source_record_id)
+            elif legacy_string:
+                ident = legacy_string
+            else:
+                ident = None
+
+            out.append(
+                RetrievedChunk(
+                    content=content,
+                    knowledge_type=k_type,
+                    title=title or None,
+                    distance=r.get("distance"),
+                    chunk_id=r["id"],
+                    source_identifier=ident,
+                    formatted=formatted,
+                )
+            )
 
         logger.info(
             "Retrieved %d knowledge chunks for tenant=%s domain=%s "
             "instance=%s agent=%s",
-            len(knowledge_strings),
-            admin_id, domain_id, luciel_instance_id, agent_id,
+            len(out), admin_id, domain_id, luciel_instance_id, agent_id,
         )
-        return knowledge_strings
+        return out
+
+
+__all__: Sequence[str] = ("KnowledgeRetriever", "RetrievedChunk")

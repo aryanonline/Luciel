@@ -758,14 +758,85 @@ class DataExportService:
         *,
         admin_id: str,
     ) -> None:
-        """Knowledge bundle \u2014 Arc 10 Option-2 (chunks only).
+        """Knowledge bundle.
 
-        See module docstring for why we ship chunks-only in Arc 10.
-        Arc 11 will add the originals next to the chunks; no
-        restructure required.
+        Arc 10 shipped chunks-only and synthesised the per-source
+        manifest by grouping chunks by their legacy stringy
+        ``source_id``. Arc 11 Step 1 introduced the
+        ``knowledge_sources`` table that holds provenance directly;
+        Step 3 (this update) reads the manifest from that table
+        when it exists and falls back to the chunk-grouping path
+        for legacy chunks whose ``source_fk`` is NULL.
+
+        Bundle layout is unchanged:
+          * ``knowledge_sources/manifest.json``
+          * ``knowledge_sources/chunks/<key>__v<version>.jsonl``
+        where ``<key>`` is the source-row PK for Arc-11-shape
+        sources and the legacy stringy id otherwise.
         """
-        # Per-source manifest aggregation.
-        manifest_rows = self.db.execute(
+        # ---------------------------------------------------------
+        # 1. Arc-11-shape manifest entries \u2014 drawn from
+        #    ``knowledge_sources`` directly.
+        # ---------------------------------------------------------
+        ks_rows = self.db.execute(
+            sql_text(
+                """
+                SELECT s.id            AS source_pk,
+                       s.source_uuid   AS source_uuid,
+                       s.filename      AS source_filename,
+                       s.source_type   AS source_type,
+                       s.source_version AS source_version,
+                       s.ingested_by   AS ingested_by,
+                       s.ingested_at   AS ingested_at,
+                       s.size_bytes    AS size_bytes,
+                       s.ingestion_status AS ingestion_status,
+                       s.soft_deleted_at IS NOT NULL AS is_soft_deleted,
+                       s.pending_downgrade_archived_at IS NOT NULL
+                                       AS archived_on_downgrade,
+                       (SELECT COUNT(*)
+                          FROM knowledge_chunks c
+                         WHERE c.source_fk = s.id
+                           AND c.superseded_at IS NULL
+                           AND c.soft_deleted_at IS NULL) AS chunk_count
+                  FROM knowledge_sources s
+                 WHERE s.admin_id = :aid
+                   AND s.soft_deleted_at IS NULL
+              ORDER BY s.ingested_at ASC
+                """
+            ),
+            {"aid": admin_id},
+        )
+        manifest: list[dict] = []
+        # ``per_source`` rows are (key, version, is_legacy_string) so
+        # the chunk-file loop below can dispatch the right query.
+        per_source: list[tuple[str | int, int, bool]] = []
+        for r in ks_rows:
+            manifest.append({
+                # Arc-11 entries surface BOTH the new pk and the
+                # legacy stringy form (``src-<pk>``) so consumers
+                # mid-cutover can resolve either.
+                "source_pk": int(r.source_pk),
+                "source_uuid": str(r.source_uuid),
+                "source_id": f"src-{int(r.source_pk)}",
+                "source_filename": r.source_filename,
+                "source_type": r.source_type,
+                "source_version": int(r.source_version),
+                "ingested_by": r.ingested_by,
+                "ingested_at": _iso(r.ingested_at),
+                "size_bytes": int(r.size_bytes or 0),
+                "chunk_count": int(r.chunk_count or 0),
+                "ingestion_status": r.ingestion_status,
+                "originals_retained": False,
+                "archived_on_downgrade": bool(r.archived_on_downgrade),
+            })
+            per_source.append((int(r.source_pk), int(r.source_version), False))
+
+        # ---------------------------------------------------------
+        # 2. Legacy-shape manifest entries \u2014 chunks with NULL
+        #    ``source_fk``, grouped by their stringy ``source_id``.
+        #    These are pre-Arc-11 rows; Step 11 retires this branch.
+        # ---------------------------------------------------------
+        legacy_rows = self.db.execute(
             sql_text(
                 """
                 SELECT source_id,
@@ -774,9 +845,12 @@ class DataExportService:
                        MAX(source_version) AS source_version,
                        MAX(ingested_by) AS ingested_by,
                        MIN(created_at) AS ingested_at,
-                       COUNT(*) AS chunk_count
+                       COUNT(*) AS chunk_count,
+                       BOOL_OR(pending_downgrade_archived_at IS NOT NULL)
+                           AS archived_on_downgrade
                   FROM knowledge_chunks
                  WHERE admin_id = :aid
+                   AND source_fk IS NULL
                    AND superseded_at IS NULL
                    AND soft_deleted_at IS NULL
                    AND source_id IS NOT NULL
@@ -786,40 +860,23 @@ class DataExportService:
             ),
             {"aid": admin_id},
         )
-        manifest = []
-        per_source: list[tuple[str, int]] = []
-        for r in manifest_rows:
+        for r in legacy_rows:
             manifest.append({
+                "source_pk": None,
+                "source_uuid": None,
                 "source_id": r[0],
                 "source_filename": r[1],
                 "source_type": r[2],
-                "source_version": r[3],
+                "source_version": int(r[3] or 1),
                 "ingested_by": r[4],
                 "ingested_at": _iso(r[5]),
-                "chunk_count": int(r[6]),
+                "size_bytes": None,
+                "chunk_count": int(r[6] or 0),
+                "ingestion_status": "ready",  # implied for legacy
                 "originals_retained": False,
-                "archived_on_downgrade": False,  # filled in below
+                "archived_on_downgrade": bool(r[7]),
             })
-            per_source.append((r[0], int(r[3])))
-
-        # Mark sources whose chunks are downgrade-archived. We do
-        # this with a separate query so the main aggregation stays
-        # simple, and we update the manifest entries in place.
-        archived_rows = self.db.execute(
-            sql_text(
-                """
-                SELECT DISTINCT source_id
-                  FROM knowledge_chunks
-                 WHERE admin_id = :aid
-                   AND pending_downgrade_archived_at IS NOT NULL
-                """
-            ),
-            {"aid": admin_id},
-        )
-        archived_ids = {row[0] for row in archived_rows}
-        for m in manifest:
-            if m["source_id"] in archived_ids:
-                m["archived_on_downgrade"] = True
+            per_source.append((r[0], int(r[3] or 1), True))
 
         self._add_text_entry(
             tar,
@@ -827,23 +884,46 @@ class DataExportService:
             json.dumps(manifest, default=str, indent=2),
         )
 
-        # Per-source chunk files.
-        for source_id, source_version in per_source:
-            chunk_rows = self.db.execute(
-                sql_text(
-                    """
-                    SELECT id, title, content, knowledge_type, created_at
-                      FROM knowledge_chunks
-                     WHERE admin_id = :aid
-                       AND source_id = :sid
-                       AND source_version = :sv
-                       AND superseded_at IS NULL
-                       AND soft_deleted_at IS NULL
-                  ORDER BY id ASC
-                    """
-                ),
-                {"aid": admin_id, "sid": source_id, "sv": source_version},
-            )
+        # ---------------------------------------------------------
+        # 3. Per-source chunk files.
+        # ---------------------------------------------------------
+        for key, source_version, is_legacy in per_source:
+            if is_legacy:
+                chunk_rows = self.db.execute(
+                    sql_text(
+                        """
+                        SELECT id, title, content, knowledge_type, created_at
+                          FROM knowledge_chunks
+                         WHERE admin_id = :aid
+                           AND source_fk IS NULL
+                           AND source_id = :sid
+                           AND source_version = :sv
+                           AND superseded_at IS NULL
+                           AND soft_deleted_at IS NULL
+                      ORDER BY id ASC
+                        """
+                    ),
+                    {"aid": admin_id, "sid": key, "sv": source_version},
+                )
+                file_key = key
+            else:
+                chunk_rows = self.db.execute(
+                    sql_text(
+                        """
+                        SELECT id, title, content, knowledge_type, created_at
+                          FROM knowledge_chunks
+                         WHERE admin_id = :aid
+                           AND source_fk = :fk
+                           AND source_version = :sv
+                           AND superseded_at IS NULL
+                           AND soft_deleted_at IS NULL
+                      ORDER BY id ASC
+                        """
+                    ),
+                    {"aid": admin_id, "fk": key, "sv": source_version},
+                )
+                file_key = f"src-{key}"
+
             lines = []
             for cr in chunk_rows:
                 lines.append(json.dumps({
@@ -856,7 +936,7 @@ class DataExportService:
             self._add_text_entry(
                 tar,
                 f"knowledge_sources/chunks/"
-                f"{source_id}__v{source_version}.jsonl",
+                f"{file_key}__v{source_version}.jsonl",
                 "\n".join(lines) + ("\n" if lines else ""),
             )
 
