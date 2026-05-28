@@ -86,51 +86,13 @@ class TenantConfigRead(BaseModel):
 # Any test or script that still references these names must be deleted
 # or rewritten to operate at the Admin or Instance layer.
 
-# --- Agent Config ---
-
-class AgentConfigCreate(BaseModel):
-    admin_id: str
-    agent_id: str
-    display_name: str
-    description: str | None = None
-    system_prompt_additions: str | None = None
-    escalation_contact: str | None = None
-    allowed_domains: list[str] | None = None
-    policy_overrides: dict | None = None
-    preferred_provider: str | None = None
-    created_by: str | None = None
-
-
-class AgentConfigUpdate(BaseModel):
-    display_name: str | None = None
-    description: str | None = None
-    system_prompt_additions: str | None = None
-    escalation_contact: str | None = None
-    allowed_domains: list[str] | None = None
-    policy_overrides: dict | None = None
-    preferred_provider: str | None = None
-    active: bool | None = None       # <-- ADD THIS
-    updated_by: str | None = None
-
-
-class AgentConfigRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    admin_id: str
-    agent_id: str
-    display_name: str
-    description: str | None
-    system_prompt_additions: str | None
-    escalation_contact: str | None
-    allowed_domains: list | None
-    policy_overrides: dict | None
-    preferred_provider: str | None
-    active: bool
-    created_by: str | None
-    updated_by: str | None
-    created_at: datetime
-    updated_at: datetime
+# --- Agent Config: REMOVED (Arc 10.5) ---
+#
+# Anchored to Vision v1 §3 (five configuration pillars; no Agent layer).
+# The underlying agent_configs table was DROPPED before Arc 10. The
+# AgentConfigCreate / AgentConfigUpdate / AgentConfigRead schemas had
+# zero live consumers (the imports in app/api/v1/admin.py were dead
+# imports; no route consumed them). Removed in Arc 10.5.
 
 
 # --- Knowledge Ingestion ---

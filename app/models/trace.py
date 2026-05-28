@@ -61,11 +61,17 @@ class Trace(Base, TimestampMixin):
     escalated: Mapped[bool] = mapped_column(default=False, nullable=False)
     policy_flags: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
-    # --- Config references ---
-    tenant_config_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    domain_config_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    agent_config_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    """Which agent config was active. Enables per-agent audit."""
+    # --- Config references: ALL REMOVED (Arc 10.5) ---
+    # Anchored to Vision v1 §3 (five configuration pillars on the
+    # Instance row; no Domain or Agent layer) and Architecture v1
+    # §3.2 (Instance subsystem). The legacy
+    # TenantConfig -> DomainConfig -> AgentConfig chain was
+    # eliminated before Arc 10; the underlying tables were DROPPED.
+    # traces.{tenant,domain,agent}_config_id were dead pointers that
+    # never received content in V2. The arc10_5_drop_dead_config_id
+    # _columns migration drops all three; the Mapped attributes are
+    # removed here. The free-text traces.domain_id / traces.agent_id
+    # columns are KEPT (historical pre-V2 forensic content).
 
     # Arc 9.1 Phase A (2026-05-25): NOT NULL.
     # Pre-Arc 9.1 doctrine: NULL = legacy/unbound. That doctrine created

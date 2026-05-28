@@ -91,9 +91,6 @@ class LucielContext:
 
     # Trace metadata.
     luciel_instance_id: int | None = None
-    tenant_config_id: int | None = None
-    domain_config_id: int | None = None
-    agent_config_id: int | None = None
 
 
 class ChatService:
@@ -179,7 +176,6 @@ class ChatService:
             ctx.tenant_prompt = getattr(
                 tenant_config, "system_prompt_additions", None
             )
-            ctx.tenant_config_id = tenant_config.id
 
         # --- Legacy domain config ---
         # Arc 5 Path A eliminated the Domain layer; ConfigRepository no
@@ -191,15 +187,15 @@ class ChatService:
         # the prompt content.
         domain_config = None
 
-        # --- Legacy agent config ---
-        if agent_id:
-            agent_config = self.config_repository.get_agent_config(admin_id, agent_id)
-            if agent_config:
-                ctx.agent_prompt = agent_config.system_prompt_additions
-                ctx.agent_config_id = agent_config.id
-                ctx.assistant_name = agent_config.display_name or "Luciel"
-                if agent_config.preferred_provider:
-                    ctx.preferred_provider = agent_config.preferred_provider
+        # --- Legacy agent config: REMOVED (Arc 10.5) ---
+        # Anchored to Vision v1 §3 (no Agent layer) and Architecture
+        # v1 §3.2 (Instance is the V2 config carrier). The
+        # agent_configs table was DROPPED before Arc 10; this block
+        # always returned None and any consumer reading
+        # ctx.agent_config_id / ctx.agent_prompt was reading None.
+        # The Instance overrides below (system_prompt_additions on
+        # the Instance row) carry all per-Luciel prompt content in
+        # V2.
 
         # Legacy allowed_tools fallback (domain-level).
         ctx.allowed_tools = self._resolve_allowed_tools(domain_config)
@@ -544,9 +540,8 @@ class ChatService:
                 escalated=decision.escalated,
                 policy_flags=decision.flags if decision.flags else None,
                 memories_extracted=memories_extracted,
-                tenant_config_id=ctx.tenant_config_id,
-                domain_config_id=ctx.domain_config_id,
-                agent_config_id=ctx.agent_config_id,
+
+
                 luciel_instance_id=ctx.luciel_instance_id,  # Step 24.5 File 15
             )
         except Exception as exc:
@@ -745,7 +740,7 @@ class ChatService:
                     memories_extracted=0,
                     tenant_config_id=ctx.tenant_config_id,
                     domain_config_id=ctx.domain_config_id,
-                    agent_config_id=ctx.agent_config_id,
+    
                     luciel_instance_id=ctx.luciel_instance_id,
                 )
             except Exception as exc:

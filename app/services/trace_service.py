@@ -43,9 +43,6 @@ class TraceService:
         escalated: bool = False,
         policy_flags: list[str] | None = None,
         memories_extracted: int = 0,
-        tenant_config_id: int | None = None,
-        domain_config_id: int | None = None,
-        agent_config_id: int | None = None,
         luciel_instance_id: int | None = None,   # Step 24.5 File 15
     ) -> str:
         """
@@ -72,9 +69,6 @@ class TraceService:
             escalated=escalated,
             policy_flags=policy_flags,
             memories_extracted=memories_extracted,
-            tenant_config_id=tenant_config_id,
-            domain_config_id=domain_config_id,
-            agent_config_id=agent_config_id,
             luciel_instance_id=luciel_instance_id,   # Step 24.5 File 15
         )
 

@@ -1,4 +1,3 @@
-from app.models.agent_config import AgentConfig
 from app.models.api_key import ApiKey
 from app.models.knowledge import KnowledgeEmbedding
 from app.models.memory import MemoryItem
@@ -47,7 +46,6 @@ from app.models.instance import Instance  # noqa: F401
 # directly (see app/models/admin.py and app/models/instance.py).
 
 __all__ = [
-    "AgentConfig",
     "ApiKey",
     "DeletionLog",
     "SessionModel",

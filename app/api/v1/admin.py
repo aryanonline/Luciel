@@ -80,9 +80,6 @@ from app.middleware.rate_limit import (
     get_tier_rate_limit_for_key,
 )
 from app.schemas.admin import (
-    AgentConfigCreate,
-    AgentConfigRead,
-    AgentConfigUpdate,
     KnowledgeIngestRequest,
     KnowledgeIngestResponse,
     TenantConfigCreate,
@@ -984,6 +981,7 @@ from app.schemas.invite import (
     UserInviteResendResponse,
     UserInviteRevokeResponse,
 )
+from app.schemas.team_member import TeamMemberRead
 from app.services import invite_service
 from app.services.invite_service import (
     DuplicatePendingInviteError,
@@ -1180,6 +1178,77 @@ def list_invites_route(
     repo = UserInviteRepository(db)
     invites = repo.list_for_tenant(admin_id=admin_id, statuses=statuses)
     return [UserInviteRead.model_validate(i) for i in invites]
+
+
+@router.get(
+    "/team-members",
+    response_model=list[TeamMemberRead],
+)
+def list_team_members_route(
+    request: Request,
+    db: DbSession,
+    active_only: bool = Query(default=True),
+) -> list[TeamMemberRead]:
+    """List active team members under the cookied user's Admin.
+
+    Anchored to Vision v1 §6.2 (Team Member lifecycle) and
+    Architecture v1 §3.7.2 (role scope assignment is the single
+    source of truth for team-member binding).
+
+    The Dashboard Team tab consumes this to show the founder who
+    currently has scope on their Admin. Auth follows the same
+    cookied-actor pattern as ``GET /admin/invites``: the cookied
+    User's active ScopeAssignment is resolved to ``(admin_id,
+    domain_id)`` and the listing is scoped to that admin_id.
+
+    Replaces the legacy ``GET /admin/agents`` frontend endpoint,
+    which referenced the deleted ``agents`` table and would have
+    crashed in production on any real call.
+    """
+    from app.models.user import User
+    from app.repositories.scope_assignment_repository import (
+        ScopeAssignmentRepository,
+    )
+
+    _user, admin_id, _domain_id = _resolve_invite_actor(
+        request=request, db=db
+    )
+
+    sar = ScopeAssignmentRepository(db)
+    assignments = sar.list_for_tenant(
+        admin_id=admin_id, active_only=active_only,
+    )
+    # Bulk-fetch the User rows for these assignments.
+    user_ids = list({a.user_id for a in assignments})
+    users_by_id = {
+        u.id: u
+        for u in db.query(User).filter(User.id.in_(user_ids)).all()
+    } if user_ids else {}
+
+    out: list[TeamMemberRead] = []
+    for a in assignments:
+        user = users_by_id.get(a.user_id)
+        if user is None:
+            # Defensive: the FK guarantees presence, but if the
+            # synthetic-orphan cleanup removed the row, skip rather
+            # than 500.
+            logger.warning(
+                "list_team_members: assignment %s references missing "
+                "user %s; skipping.", a.id, a.user_id,
+            )
+            continue
+        out.append(TeamMemberRead(
+            scope_assignment_id=a.id,
+            role=a.role,
+            domain_id=a.domain_id,
+            started_at=a.started_at,
+            active=a.active,
+            user_id=user.id,
+            email=user.email,
+            display_name=user.display_name,
+            user_active=user.active,
+        ))
+    return out
 
 
 @router.post(

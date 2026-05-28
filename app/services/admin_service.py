@@ -1,15 +1,20 @@
 """
 Admin service.
 
-Arc 5 Path A (V2 collapse): Domain layer ELIMINATED per the
-aggressive-cleanup amendment. V2 hierarchy is Admin → Instance → Lead;
-there is no DomainConfig surface anymore. The legacy AgentConfig table
-still exists (dropped at Revision C); methods that touch it remain so
-cascade teardown of legacy rows works during the transition.
+Anchored to Vision v1 §3 (five configuration pillars: channels, tools,
+knowledge, escalation, personality) and Architecture v1 §3.6 (lifecycle
+subsystem). V2 hierarchy is Admin -> Instance -> Lead; no Domain or
+Agent layer.
 
-Handles business logic for admin (formerly tenant) and legacy agent
-config management. Keeps route handlers thin by centralizing validation
-and persistence.
+Arc 10.5 cleanup: removed all orphaned Agent / AgentConfig / Domain
+surfaces (model, schemas, repository methods, service methods,
+route imports). The underlying tables (agents, agent_configs,
+domain_configs) were DROPPED before Arc 10; the orphan CRUD methods
+were live code-paths that would crash on any real call.
+
+Handles business logic for Admin (the V2 entity) and the per-Admin
+cascade lifecycle. Keeps route handlers thin by centralizing
+validation and persistence.
 """
 
 from __future__ import annotations
@@ -20,7 +25,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.admin import Admin
-from app.models.agent_config import AgentConfig
 
 # V2: TenantConfig is an alias for Admin (kept for source compatibility
 # during the transition; deleted with aliases shim at C2).
@@ -107,169 +111,31 @@ class AdminService:
     # If any legacy script or test still references these names, it must
     # be rewritten to operate at the Admin or Instance layer.
 
-    # --- Agent Config (legacy table — dropped at Revision C) ---
-
-    def create_agent_config(self, **kwargs) -> AgentConfig:
-        config = AgentConfig(**kwargs)
-        self.db.add(config)
-        self.db.commit()
-        self.db.refresh(config)
-        logger.info(
-            "Created agent config: %s/%s", config.admin_id, config.agent_id
-        )
-        return config
-
-    def get_agent_config(self, tenant_id: str, agent_id: str) -> AgentConfig | None:
-        stmt = select(AgentConfig).where(
-            AgentConfig.tenant_id == tenant_id,
-            AgentConfig.agent_id == agent_id,
-        )
-        return self.db.scalars(stmt).first()
-
-    def update_agent_config(
-        self, admin_id: str, agent_id: str, **kwargs
-    ) -> AgentConfig | None:
-        config = self.get_agent_config(admin_id, agent_id)
-        if not config:
-            return None
-        for key, value in kwargs.items():
-            if value is not None and hasattr(config, key):
-                setattr(config, key, value)
-        self.db.commit()
-        self.db.refresh(config)
-        logger.info("Updated agent config: %s/%s", admin_id, agent_id)
-        return config
-
-    def list_agent_configs(self, tenant_id: str | None = None) -> list[AgentConfig]:
-        stmt = select(AgentConfig).order_by(AgentConfig.created_at.desc())
-        if admin_id:
-            stmt = stmt.where(AgentConfig.tenant_id == tenant_id)
-        return list(self.db.scalars(stmt).all())
-    
-    # validate_domain_active / list_agent_configs_by_domain: REMOVED at
-    # Arc 5 Path A. V2 has no Domain layer, so domain-scoped validation
-    # and listing are no longer meaningful. AgentConfig is itself legacy
-    # and dropped at Revision C; new code uses InstanceService instead.
-    def list_agent_configs_by_domain(
-        self, admin_id: str, domain_id: str,
-    ) -> list:
-        """V2 no-op stub. Returns []. Domain layer is gone."""
-        logger.info(
-            "list_agent_configs_by_domain: V2 no-op stub tenant_id=%s domain_id=%s",
-            admin_id,
-            domain_id,
-        )
-        return []
-
-    def deactivate_domain(
-        self,
-        admin_id: str,
-        domain_id: str,
-        *,
-        audit_ctx=None,
-        luciel_instance_service=None,
-        updated_by: str | None = None,
-    ) -> bool:
-        """Arc 5 Path A — V2 no-op stub. The Domain layer was eliminated
-        per the aggressive-cleanup amendment; the /admin/domains/*
-        routes that called this method were deleted at B3. Method
-        survives only so any straggler caller in scripts/tests
-        compiles; returns False (treated as "not found").
-        """
-        logger.info(
-            "AdminService.deactivate_domain: Arc 5 Path A V2 no-op "
-            "stub admin_id=%s domain_id=%s (V2 has no Domain layer).",
-            admin_id,
-            domain_id,
-        )
-        return False
-
-    def deactivate_agent(
-        self,
-        admin_id: str,
-        agent_id: str,
-        *,
-        audit_ctx=None,                    # Step 24.5
-        luciel_instance_service=None,      # Step 24.5
-        updated_by: str | None = None,
-    ) -> bool:
-        """Soft-deactivate a legacy AgentConfig row.
-
-        Step 24.5: if luciel_instance_service is provided, also cascade-
-        deactivate every agent-scoped LucielInstance owned by this agent.
-        (The new-table Agent row, if it exists, is handled by a separate
-        route — POST /admin/agents/{tenant}/{agent}/deactivate in File 10.
-        This legacy path only touches agent_configs and optionally the
-        agent-scoped Luciels that reference the same agent_id.)
-
-        audit_ctx / luciel_instance_service are optional for legacy callers.
-        """
-        from app.models.admin_audit_log import (
-            ACTION_DEACTIVATE,
-            RESOURCE_AGENT,
-        )
-        from app.repositories.admin_audit_repository import AdminAuditRepository
-
-        agent = self.get_agent_config(admin_id, agent_id)
-        if not agent:
-            return False
-
-        was_active = bool(agent.active)
-
-        try:
-            agent.active = False
-            if updated_by is not None:
-                agent.updated_by = updated_by
-
-            if audit_ctx is not None and was_active:
-                AdminAuditRepository(self.db).record(
-                    ctx=audit_ctx,
-                    admin_id=admin_id,
-                    action=ACTION_DEACTIVATE,
-                    resource_type=RESOURCE_AGENT,
-                    resource_pk=agent.id,
-                    resource_natural_id=agent_id,
-                    domain_id=getattr(agent, "domain_id", None),
-                    agent_id=agent_id,
-                    before={"active": True},
-                    after={"active": False},
-                    autocommit=False,
-                )
-
-            # Memory cascade: soft-deactivate agent-scoped memory_items.
-            # Same audit-ctx-required contract as the leaf method.
-            # autocommit=False -- this method commits the whole transaction.
-            if audit_ctx is not None:
-                self.bulk_soft_deactivate_memory_items_for_agent(
-                    admin_id=admin_id,
-                    agent_id=agent_id,
-                    audit_ctx=audit_ctx,
-                    updated_by=updated_by,
-                    autocommit=False,
-                )
-
-            # Step 24.5 LucielInstance cascade (optional).
-            if (
-                luciel_instance_service is not None
-                and audit_ctx is not None
-                and getattr(agent, "domain_id", None) is not None
-            ):
-                luciel_instance_service.cascade_on_agent_deactivate(
-                    audit_ctx=audit_ctx,
-                    admin_id=admin_id,
-                    domain_id=agent.domain_id,
-                    agent_id=agent_id,
-                    updated_by=updated_by,
-                )
-
-            self.db.commit()
-            self.db.refresh(agent)
-        except Exception:
-            self.db.rollback()
-            raise
-
-        return True
-
+    # --- Agent / AgentConfig / Domain surfaces: REMOVED (Arc 10.5) ---
+    #
+    # Anchored to Vision v1 §3 (five configuration pillars: channels,
+    # tools, knowledge, escalation, personality -- no Agent layer) and
+    # Architecture v1 §3.6.1 (canonical 10-layer deactivation cascade --
+    # no agent / agent_configs layers).
+    #
+    # The V2 hierarchy is Admin -> Instance -> Lead. The Agent and
+    # Domain layers were eliminated at Arc 5 Path A; the underlying
+    # tables (agents, agent_configs, domain_configs) were DROPPED at
+    # arc5_c_admin_instance_subtractive. Every method that operated on
+    # those tables crashed at runtime if reached. Arc 10 Gap 7 removed
+    # the cascade references to them; Arc 10.5 removes the orphaned
+    # CRUD surfaces:
+    #
+    #   create_agent_config / get_agent_config / update_agent_config /
+    #   list_agent_configs / list_agent_configs_by_domain (V2 no-op stub)
+    #   deactivate_agent / deactivate_domain (V2 no-op stub)
+    #   bulk_soft_deactivate_memory_items_for_agent
+    #
+    # Memory cascade for agent-scoped rows was a no-op in practice
+    # (no agent_id is ever set on memory_items in V2 since the Agent
+    # layer is gone; MemoryItem.agent_id is a legacy nullable column).
+    # The admin-scoped + instance-scoped memory cascades remain in
+    # deactivate_tenant_with_cascade.
 
     def bulk_soft_deactivate_memory_items_for_tenant(
         self,
@@ -368,110 +234,6 @@ class AdminService:
                 note=(
                     f"Cascade memory_items deactivation from tenant "
                     f"{admin_id} deactivation (PIPEDA P5)"
-                ),
-                autocommit=False,
-            )
-
-            if autocommit:
-                self.db.commit()
-        except Exception:
-            self.db.rollback()
-            raise
-
-        return count
-
-
-    def bulk_soft_deactivate_memory_items_for_agent(
-        self,
-        admin_id: str,
-        agent_id: str,
-        *,
-        audit_ctx,
-        updated_by: str | None = None,
-        autocommit: bool = True,
-    ) -> int:
-        """Soft-deactivate every active memory_items row for a single agent.
-
-        Called from deactivate_agent (cascade) when an agent is
-        deactivated standalone (not as part of a tenant or domain
-        cascade). Memory rows scoped to this agent under this tenant
-        flip to active=False.
-
-        Returns count deactivated. Always emits one
-        ACTION_CASCADE_DEACTIVATE audit row even when count == 0.
-        Breakdown by luciel_instance_id is captured in after_json
-        for forensic granularity.
-
-        audit_ctx is REQUIRED.
-        """
-        from sqlalchemy import func
-        from app.models.memory import MemoryItem
-        from app.repositories.admin_audit_repository import AdminAuditRepository
-        from app.models.admin_audit_log import (
-            ACTION_CASCADE_DEACTIVATE,
-            RESOURCE_MEMORY,
-        )
-
-        if audit_ctx is None:
-            raise ValueError(
-                "bulk_soft_deactivate_memory_items_for_agent requires audit_ctx"
-            )
-
-        try:
-            breakdown_rows = (
-                self.db.query(
-                    MemoryItem.luciel_instance_id,
-                    func.count().label("row_count"),
-                )
-                .filter(
-                    MemoryItem.admin_id == admin_id,
-                    MemoryItem.agent_id == agent_id,
-                    MemoryItem.active.is_(True),
-                )
-                .group_by(MemoryItem.luciel_instance_id)
-                .all()
-            )
-            breakdown = [
-                {
-                    "luciel_instance_id": luciel_instance_id,
-                    "count": row_count,
-                }
-                for (luciel_instance_id, row_count) in breakdown_rows
-            ]
-
-            count = (
-                self.db.query(MemoryItem)
-                .filter(
-                    MemoryItem.admin_id == admin_id,
-                    MemoryItem.agent_id == agent_id,
-                    MemoryItem.active.is_(True),
-                )
-                .update(
-                    {"active": False},
-                    synchronize_session=False,
-                )
-            )
-
-            AdminAuditRepository(self.db).record(
-                ctx=audit_ctx,
-                admin_id=admin_id,
-                action=ACTION_CASCADE_DEACTIVATE,
-                resource_type=RESOURCE_MEMORY,
-                resource_pk=None,
-                resource_natural_id=None,
-                agent_id=agent_id,
-                after={
-                    "count": count,
-                    "scope": "agent",
-                    "admin_id": admin_id,
-                    "agent_id": agent_id,
-                    "breakdown": breakdown,
-                    "trigger": "agent_deactivate_cascade",
-                    "updated_by": updated_by,
-                },
-                note=(
-                    f"Cascade memory_items deactivation from agent "
-                    f"{admin_id}/{agent_id} deactivation (PIPEDA P5)"
                 ),
                 autocommit=False,
             )
@@ -1312,15 +1074,17 @@ class AdminService:
            4. identity_claims   WHERE admin_id=:tid
            5. memory_items      WHERE admin_id=:tid
            6. api_keys          WHERE admin_id=:tid
-           7. luciel_instances  WHERE admin_id=:tid (legacy, may be 0)
-           8. agents            WHERE admin_id=:tid (legacy, may be 0)
-           9. agent_configs     WHERE tenant_id=:tid (legacy)
-          10. domain_configs    REMOVED at Arc 5 Path A (no-op, kept
-              in row-counts map at 0 for audit-row schema stability)
-          11. admins            TOMBSTONE (Arc 10): UPDATE with
+           7. instances         WHERE admin_id=:tid
+              (V2 table; was renamed from luciel_instances at
+              Arc 9.2 PR #99)
+           8. agents / agent_configs / domain_configs: REMOVED
+              (Arc 10.5). Underlying tables dropped before Arc 10;
+              row-counts map carries them as 0 for audit-row schema
+              stability only.
+           9. admins            TOMBSTONE: UPDATE with
               hard_deleted_at=now() + PII redaction. NOT a DELETE.
               Vision §6.5 minimal-compliance-record posture.
-          12. AdminAuditLog row recording the purge (action=
+          10. AdminAuditLog row recording the purge (action=
               ACTION_TENANT_HARD_PURGED) with per-table row-count map.
 
         Subscriptions are intentionally NOT purged -- they carry
@@ -1454,25 +1218,26 @@ class AdminService:
             "DELETE FROM api_keys WHERE admin_id = :tid"
         )
 
-        # 7. luciel_instances
-        row_counts["luciel_instances"] = _delete(
-            "DELETE FROM luciel_instances WHERE admin_id = :tid"
+        # 7. instances (V2 table; was renamed from luciel_instances
+        # at Arc 9.2 PR #99 -- the pre-Arc-10.5 code targeted the
+        # pre-rename name, which crashed UndefinedTable on every
+        # hard-delete attempt).
+        row_counts["instances"] = _delete(
+            "DELETE FROM instances WHERE admin_id = :tid"
         )
 
-        # 8. agents (new-table, Step 24.5)
-        row_counts["agents"] = _delete(
-            "DELETE FROM agents WHERE admin_id = :tid"
-        )
-
-        # 9. agent_configs (legacy)
-        row_counts["agent_configs"] = _delete(
-            "DELETE FROM agent_configs WHERE tenant_id = :tid"
-        )
-
-        # 10. domain_configs: REMOVED at Arc 5 Path A (V2 has no Domain
-        # layer). The domain_configs table is dropped at Revision C; this
-        # cascade no longer touches it. Row count preserved as 0 for
-        # audit-row schema stability.
+        # 8. agents / agent_configs / domain_configs: ALL REMOVED.
+        # Anchored to Vision v1 §3 (no Agent layer) and the V2 hierarchy
+        # Admin -> Instance -> Lead. The underlying tables were DROPPED
+        # before Arc 10. The pre-Arc-10.5 code issued DELETE FROM
+        # against the dropped tables, which made the entire hard-delete
+        # cascade crash on every Customer Journey §8 "after 30 days"
+        # run — the audit-chain row was never written, the admin row
+        # was never tombstoned, and the next retention worker tick
+        # would re-attempt the same crash. Row counts preserved as 0
+        # for audit-row schema stability.
+        row_counts["agents"] = 0
+        row_counts["agent_configs"] = 0
         row_counts["domain_configs"] = 0
 
         # 11. admins — TOMBSTONE, not DELETE (Arc 10).
