@@ -1226,35 +1226,14 @@ class AdminService:
             "DELETE FROM instances WHERE admin_id = :tid"
         )
 
-        # 8. agents / agent_configs / domain_configs: ALL REMOVED.
-        # Anchored to Vision v1 §3 (no Agent layer) and the V2 hierarchy
-        # Admin -> Instance -> Lead. The underlying tables were DROPPED
-        # before Arc 10. The pre-Arc-10.5 code issued DELETE FROM
-        # against the dropped tables, which made the entire hard-delete
-        # cascade crash on every Customer Journey §8 "after 30 days"
-        # run — the audit-chain row was never written, the admin row
-        # was never tombstoned, and the next retention worker tick
-        # would re-attempt the same crash. Row counts preserved as 0
-        # for audit-row schema stability.
-        row_counts["agents"] = 0
-        row_counts["agent_configs"] = 0
-        row_counts["domain_configs"] = 0
-
-        # 11. admins — TOMBSTONE, not DELETE (Arc 10).
+        # 8. admins — TOMBSTONE, not DELETE.
         #
-        # Vision §6.5: "GDPR-style hard delete of all customer data;
-        # Audit log + minimal compliance record retained per legal
-        # requirements." The tombstone IS the minimal compliance record:
-        # the row persists so the audit chain's resource_natural_id
-        # references stay walkable, but every PII column is redacted.
-        #
-        # Arc 10 also REMOVES the tenant_configs fallback that this
-        # cascade had pre-arc5_c. The Arc 10 migration's drift-
-        # reconciliation step backfilled tenant_configs.deactivated_at
-        # into admins.deactivated_at, so the post-arc5_c shape is now
-        # complete and the legacy table is no longer queried by code
-        # (the table itself remains; a future cleanup migration may
-        # drop it).
+        # Anchored to Vision v1 §6.5: "GDPR-style hard delete of all
+        # customer data; Audit log + minimal compliance record retained
+        # per legal requirements." The tombstone IS the minimal
+        # compliance record: the row persists so the audit chain's
+        # resource_natural_id references stay walkable, but every PII
+        # column is redacted.
         #
         # PII columns redacted:
         #   - name             → '[REDACTED]'
@@ -1286,26 +1265,17 @@ class AdminService:
             {"tid": admin_id},
         )
         row_counts["admins_tombstoned"] = int(res.rowcount or 0)
-        # Backwards-compat key for tests still asserting the old key.
-        # Future Arc 10 follow-up: tests are updated and this dual
-        # write is dropped.
-        row_counts["admins"] = row_counts["admins_tombstoned"]
-        # tenant_configs fallback removed (drift entry D-arc10-admins-
-        # deactivated-at-missing-from-rename-2026-05-27). Key preserved
-        # at 0 for audit-row schema stability.
-        row_counts["tenant_configs"] = 0
 
-        # 12. Audit row -- write to AdminAuditLog with full row-count
-        # manifest. The audit row uses the resource_natural_id field
-        # to preserve admin_id as a searchable string AFTER the
-        # tenant_configs row itself is gone; the row_hash chain stays
-        # walkable because AdminAuditLog rows are never FK'd to
-        # tenant_configs.
-        # Note: audit row is written through AuditContext.system()
-        # because this is a background-task action with no HTTP caller.
-        # The system() factory tags actor_permissions=('system',) and
-        # actor_tenant_id=SYSTEM_ACTOR_TENANT so retention rows are
-        # distinguishable from worker-task rows (which use ('worker',)).
+        # 9. Audit row -- record to AdminAuditLog with the full
+        # row-count manifest. The audit row carries the admin_id as
+        # ``resource_natural_id`` so the chain stays searchable by
+        # admin_id after the tombstone redacts the ``name`` column.
+        # The audit chain is never FK'd to admins itself; tombstoning
+        # the parent does not orphan the audit row.
+        #
+        # AuditContext.system() tags actor_permissions=('system',)
+        # and actor_label='retention_worker' so retention rows are
+        # distinguishable from worker-task rows on forensic reads.
         from app.repositories.admin_audit_repository import AuditContext
 
         system_ctx = AuditContext.system(label="retention_worker")

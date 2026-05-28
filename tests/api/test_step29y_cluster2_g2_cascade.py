@@ -2,7 +2,7 @@
 
 Static-analysis (AST + bytes) tests for findings_phase1g.md G-2:
 
-The route POST /admin/forensics/luciel_instances_step29c/{instance_id}
+The route POST /admin/forensics/instances_step29c/{instance_id}
 /toggle_active must, when transitioning a luciel_instance from
 active=True to active=False, cascade-deactivate every memory_items
 row scoped to that instance under the same tenant. Pre-29.y the

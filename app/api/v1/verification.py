@@ -53,12 +53,27 @@ router = APIRouter(prefix="/admin/verification", tags=["verification"])
 # tenant_col_candidates: first column that exists on the table is used to
 # scope the count. If none match, table is flagged "no_tenant_scope" and
 # skipped for enforcement (still observed).
+# Anchored to Architecture v1 §3.6 (lifecycle subsystem; admin
+# deactivation -> 30-day grace -> hard delete) and §3.7.5 (RLS
+# minimization: customer-data tables are the audit surface). The
+# V2 hierarchy is Admin -> Instance -> Lead; the probe list reflects
+# only the live customer-data tables under Admin scope. Dropped
+# legacy tables (``tenant_configs``, ``domain_configs``, ``agents``,
+# ``agent_configs``) were removed from this list in the Arc 11
+# readiness pass; the rename ``luciel_instances -> instances`` is
+# reflected.
+#
+# The admins row is the first probe entry below, scoped by ``id``
+# (the admin's primary key) rather than ``admin_id`` (which doesn't
+# exist on this table). After teardown the row stays as a tombstone
+# with active=False per Architecture v1 §3.6.5 (minimal compliance
+# record posture).
 _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
-    ("tenant_configs",       "active", "tenant_inactive_exactly_one", ["admin_id"]),
-    ("domain_configs",       "active", 0,                              ["admin_id"]),
-    ("agents",               "active", 0,                              ["admin_id"]),
-    # Arc 5 Path A — V2: luciel_instances is being collapsed to ``instances`` (admin_id). The legacy column ``scope_owner_tenant_id`` is dropped at Revision C; until then this probe accepts both columns as a transitional fallback.
-    ("luciel_instances",     "active", 0,                              ["admin_id"]),
+    # admins: exactly 1 row for the audited admin_id, inactive after
+    # deactivation. Anchored to Architecture v1 §3.6.2 step 6 (closure
+    # initiation stamps closure_initiated_at and flips active=False).
+    ("admins",               "active", "tenant_inactive_exactly_one", ["id"]),
+    ("instances",            "active", 0,                              ["admin_id"]),
     ("api_keys",             "active", 0,                              ["admin_id"]),
     ("sessions",             None,     "*",                            ["admin_id"]),
     ("messages",             None,     "*",                            ["admin_id"]),
@@ -69,8 +84,6 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
     ("retention_policies",   None,     "*",                            ["admin_id"]),
     ("deletion_logs",        None,     "*",                            ["admin_id"]),
     ("admin_audit_logs",     None,     "*",                            ["admin_id"]),
-    # agent_configs: REMOVED (Arc 10.5). Table dropped before Arc 10
-    # per Vision v1 §3 (no Agent layer).
 
     # Step 24.5b additions:
     # - users: tenant-agnostic identity rows. No admin_id column on the

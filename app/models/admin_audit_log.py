@@ -113,7 +113,7 @@ ACTION_EXTRACTOR_SAVE_FAIL = "extractor_save_fail"
 
 # Step 29 Commit C.5: forensic toggle of luciel_instances.active via
 # the platform_admin POST endpoint at
-#   /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}/toggle_active
+#   /api/v1/admin/forensics/instances_step29c/{instance_id}/toggle_active
 # This is intentionally distinct from ACTION_DEACTIVATE / ACTION_REACTIVATE
 # (which are the operational deactivate/reactivate verbs used across
 # tenants, api_keys, memory items, scope assignments, etc., disambiguated
