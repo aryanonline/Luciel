@@ -35,6 +35,19 @@ from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# True when the script is running from a real repo checkout (with
+# tests/ and cfn/ adjacent to the script). False when the script has
+# been dropped into a stripped runtime image (e.g. the production ECS
+# container, which carries app/ + scripts/ but not tests/ or cfn/).
+# Repo-only checks (templates, cross-repo contract, test counts) SKIP
+# rather than FAIL when this is False, since they verify the source
+# tree rather than the running system.
+REPO_CHECKOUT = (
+    (REPO_ROOT / "tests").is_dir()
+    and (REPO_ROOT / "cfn").is_dir()
+    and (REPO_ROOT / "alembic.ini").is_file()
+)
+
 
 # ---------------------------------------------------------------------
 # Result types
@@ -497,6 +510,22 @@ def section_4_infrastructure() -> list[CheckResult]:
     section = "4. Infrastructure templates"
     out: list[CheckResult] = []
 
+    if not REPO_CHECKOUT:
+        # Running from a runtime image without cfn/. The IaC templates
+        # are source-tree artifacts; skip rather than report FAIL.
+        return [
+            _skip(
+                section,
+                "cfn_template_present",
+                "repo-only check (no cfn/ adjacent to script)",
+            ),
+            _skip(
+                section,
+                "task_def_knowledge_bucket_env",
+                "repo-only check (no td-worker-rev34-arc11.json adjacent to script)",
+            ),
+        ]
+
     cfn_path = REPO_ROOT / "cfn" / "knowledge-bucket.yaml"
     td_path = REPO_ROOT / "td-worker-rev34-arc11.json"
 
@@ -610,8 +639,17 @@ def section_4_infrastructure() -> list[CheckResult]:
 
 def section_5_cross_repo_contract() -> list[CheckResult]:
     section = "5. Cross-repo contract"
+    if not REPO_CHECKOUT:
+        return [
+            _skip(
+                section,
+                "frontend_backend_arc14_substring",
+                "repo-only check (no tests/ adjacent to script)",
+            )
+        ]
     # Defer to the unittest module via pytest — cheapest reliable
     # way to run the same checks the test suite uses.
+
     proc = subprocess.run(
         [
             sys.executable, "-m", "pytest",
@@ -656,6 +694,14 @@ def section_5_cross_repo_contract() -> list[CheckResult]:
 
 def section_6_test_counts() -> list[CheckResult]:
     section = "6. Test counts"
+    if not REPO_CHECKOUT:
+        return [
+            _skip(
+                section,
+                "test_count_minimum",
+                "repo-only check (no tests/ adjacent to script)",
+            )
+        ]
     out: list[CheckResult] = []
 
     # Non-DB suite count.
