@@ -194,4 +194,59 @@ class KnowledgeRetriever:
         return out
 
 
-__all__: Sequence[str] = ("KnowledgeRetriever", "RetrievedChunk")
+def collect_source_pks(chunks: Sequence[RetrievedChunk]) -> list[int]:
+    """Reduce a list of ``RetrievedChunk`` to the ``int`` source PKs
+    they carry, de-duplicated, preserving relevance-rank order.
+
+    Used by Arc 11 Step 5 (trace instrumentation) to populate
+    ``traces.source_ids_used`` (a ``BIGINT[]``). Three cases for
+    ``RetrievedChunk.source_identifier``:
+
+      * ``int``  — modern chunk with a ``knowledge_sources`` row.
+                  Included.
+      * ``str``  — legacy chunk whose only source identifier is the
+                  free-form ``source_id`` string. **Excluded**: the
+                  ``traces.source_ids_used`` column is ``BIGINT[]``
+                  so a string would be a type error, and the
+                  Architecture §3.2.2 delete-confirm modal preview
+                  is only meaningful for knowledge_sources rows
+                  anyway (legacy stringless rows are not deletable
+                  through the new UI).
+      * ``None`` — neither populated. Excluded.
+
+    De-duplication preserves *insertion* order so the first chunk
+    that contributed a source PK ranks higher than later chunks
+    that re-used the same source. This is the relevance-rank
+    ordering the retriever already returned chunks in (sort by
+    cosine distance ascending) — preserving it gives Architecture
+    §5.1's "what sources actually contributed" semantics for free.
+
+    Pure function: no I/O, no side effects. Step 8's orchestrator
+    invokes it between ``retrieve_with_sources(...)`` and
+    ``TraceService.record_trace(...)``. Step 6 (Celery embed-worker
+    smoke probe) and Step 7 (``POST /internal/v1/retrieve``) will
+    also call it.
+    """
+    seen: set[int] = set()
+    out: list[int] = []
+    for chunk in chunks:
+        ident = chunk.source_identifier
+        if not isinstance(ident, int):
+            # Catches both ``str`` and ``None``. Booleans are
+            # technically ``isinstance(True, int)`` in Python, but
+            # ``source_identifier`` can never be a bool given the
+            # retriever populates it from a DB column / dict get;
+            # not worth a defensive check.
+            continue
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(ident)
+    return out
+
+
+__all__: Sequence[str] = (
+    "KnowledgeRetriever",
+    "RetrievedChunk",
+    "collect_source_pks",
+)

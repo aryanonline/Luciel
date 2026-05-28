@@ -6,6 +6,10 @@ without reaching into ``app.knowledge.retriever`` directly.
 """
 from __future__ import annotations
 
-from app.knowledge.retriever import KnowledgeRetriever, RetrievedChunk
+from app.knowledge.retriever import (
+    KnowledgeRetriever,
+    RetrievedChunk,
+    collect_source_pks,
+)
 
-__all__ = ["KnowledgeRetriever", "RetrievedChunk"]
+__all__ = ["KnowledgeRetriever", "RetrievedChunk", "collect_source_pks"]
