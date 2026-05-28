@@ -75,6 +75,9 @@ def test_no_callsite_references_max_composition_depth() -> None:
     allowed_basenames = {
         "entitlements.py",
         "test_arc12_wu1_entitlements.py",
+        # Arc 12 WU2 asserts the column drop in its migration-shape
+        # test — mentioning the name is the assertion's substance.
+        "test_arc12_wu2_authorization.py",
     }
 
     offenders: list[str] = []

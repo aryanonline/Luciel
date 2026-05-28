@@ -743,10 +743,17 @@ def broker():
     import os
 
     os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+    from app.tools.authorization import _AlwaysAllowAuthorizer
     from app.tools.broker import ToolBroker
     from app.tools.registry import ToolRegistry
 
-    return ToolBroker(ToolRegistry())
+    # Arc 12 WU2 — these tests exercise the classification gate; the
+    # default-deny authorisation gate is exercised separately. Inject
+    # an always-allow authoriser so the classification gate is what
+    # we observe.
+    return ToolBroker(
+        ToolRegistry(), authorizer=_AlwaysAllowAuthorizer()
+    )
 
 
 def test_broker_executes_routine_tool_and_stamps_tier(broker) -> None:
@@ -849,9 +856,11 @@ def test_broker_refuses_undeclared_tier_tool_without_executing() -> None:
             executed.append(dict(input))
             return {"success": True, "output": "SHOULD NOT BE REACHED"}
 
+    from app.tools.authorization import _AlwaysAllowAuthorizer
+
     registry = ToolRegistry()
     registry.register(_UndeclaredTool())
-    broker = ToolBroker(registry)
+    broker = ToolBroker(registry, authorizer=_AlwaysAllowAuthorizer())
 
     result = broker.execute_tool(
         "undeclared_test_tool", {"arbitrary": "payload"}
@@ -923,9 +932,15 @@ def test_broker_with_null_classifier_executes_undeclared_tool() -> None:
             executed.append(True)
             return {"success": True, "output": "ran"}
 
+    from app.tools.authorization import _AlwaysAllowAuthorizer
+
     registry = ToolRegistry()
     registry.register(_UndeclaredTool())
-    broker = ToolBroker(registry, classifier=NullActionClassifier())
+    broker = ToolBroker(
+        registry,
+        classifier=NullActionClassifier(),
+        authorizer=_AlwaysAllowAuthorizer(),
+    )
 
     result = broker.execute_tool("null_clf_test_tool", {})
     assert executed == [True]

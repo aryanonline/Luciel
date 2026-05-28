@@ -205,9 +205,11 @@ def test_broker_validates_input_schema_before_execute() -> None:
             executed.append(True)
             return {"success": True, "output": "ran"}
 
+    from app.tools.authorization import _AlwaysAllowAuthorizer
+
     registry = ToolRegistry()
     registry.register(_StrictInputTool())
-    broker = ToolBroker(registry)
+    broker = ToolBroker(registry, authorizer=_AlwaysAllowAuthorizer())
 
     result = broker.execute_tool("strict_input", {"not_recipient": "x"})
     assert executed == [], (
@@ -267,9 +269,11 @@ def test_broker_validates_output_schema_after_execute() -> None:
             # Missing the schema-required ``must_be_present`` key.
             return {"success": True, "output": "ran"}
 
+    from app.tools.authorization import _AlwaysAllowAuthorizer
+
     registry = ToolRegistry()
     registry.register(_BadOutputTool())
-    broker = ToolBroker(registry)
+    broker = ToolBroker(registry, authorizer=_AlwaysAllowAuthorizer())
 
     result = broker.execute_tool("bad_output", {})
     assert result.success is False
