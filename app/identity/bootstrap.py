@@ -134,7 +134,9 @@ class IdentitySnapshot:
 
         Picks the scope whose admin_id matches canonical_tenant_id;
         if multiple match (shouldn't happen in steady state), prefers
-        ``role='owner'``.
+        the ``admin_owner`` role. Returns the role's ``.value``
+        string (Cleanup C promoted the column to the ``scope_role``
+        PG enum).
         """
         if not self.canonical_tenant_id:
             return ""
@@ -144,8 +146,13 @@ class IdentitySnapshot:
         ]
         if not on_canonical:
             return ""
-        owners = [s for s in on_canonical if s.role == "owner"]
-        return (owners[0] if owners else on_canonical[0]).role
+        owners = [
+            s for s in on_canonical
+            if getattr(s.role, "value", s.role) == "admin_owner"
+            or s.role == "admin_owner"
+        ]
+        chosen = (owners[0] if owners else on_canonical[0]).role
+        return getattr(chosen, "value", chosen) or ""
 
 
 # ---------------------------------------------------------------------

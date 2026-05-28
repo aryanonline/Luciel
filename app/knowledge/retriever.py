@@ -4,9 +4,10 @@ Knowledge retriever — post-Cleanup-B.
 Retrieves relevant knowledge from the vector database for a user query
 in a specific (admin, domain, luciel_instance) context.
 
-Post-Cleanup-B contract:
+Post-Cleanup-C contract:
     - Primary filter dimension stays ``luciel_instance_id`` (Step 24.5).
-    - ``agent_id`` remains accepted for legacy rows (pre-Step-24.5).
+    - The legacy ``agent_id`` parameter and its read-compat fan-out
+      are gone (Cleanup C — column dropped, zero production rows).
     - Upward inheritance is delegated to
       ``KnowledgeRepository.search_similar``.
     - Active-only (``superseded_at IS NULL``), lifecycle-clean
@@ -84,7 +85,6 @@ class KnowledgeRetriever:
         admin_id: str | None = None,
         domain_id: str | None = None,
         luciel_instance_id: int | None = None,
-        agent_id: str | None = None,
         knowledge_type: str | None = None,
         limit: int = 5,
     ) -> list[str]:
@@ -104,7 +104,6 @@ class KnowledgeRetriever:
             admin_id=admin_id,
             domain_id=domain_id,
             luciel_instance_id=luciel_instance_id,
-            agent_id=agent_id,
             knowledge_type=knowledge_type,
             limit=limit,
         )
@@ -117,7 +116,6 @@ class KnowledgeRetriever:
         admin_id: str | None = None,
         domain_id: str | None = None,
         luciel_instance_id: int | None = None,
-        agent_id: str | None = None,
         knowledge_type: str | None = None,
         limit: int = 5,
     ) -> list[RetrievedChunk]:
@@ -137,7 +135,6 @@ class KnowledgeRetriever:
                 admin_id=admin_id,
                 domain_id=domain_id,
                 luciel_instance_id=luciel_instance_id,
-                agent_id=agent_id,
                 knowledge_type=knowledge_type,
                 limit=limit,
             )
@@ -174,8 +171,8 @@ class KnowledgeRetriever:
 
         logger.info(
             "Retrieved %d knowledge chunks for tenant=%s domain=%s "
-            "instance=%s agent=%s",
-            len(out), admin_id, domain_id, luciel_instance_id, agent_id,
+            "instance=%s",
+            len(out), admin_id, domain_id, luciel_instance_id,
         )
         return out
 

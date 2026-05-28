@@ -68,9 +68,12 @@ _INSTANCE_SLUG_PRIMARY = "primary"
 # Audit / created_by label.
 _CREATED_BY = "tier_provisioning"
 
-# Role string on the owner-side ScopeAssignment minted at self-serve
-# checkout. Buyer becomes "owner" of their own Admin.
-_OWNER_ROLE = "owner"
+# Role on the owner-side ScopeAssignment minted at self-serve
+# checkout. Buyer becomes ``admin_owner`` of their own Admin per the
+# canonical ``ScopeRole`` taxonomy (Arc 11 Cleanup C promoted
+# scope_assignments.role to a Postgres enum).
+from app.models.scope_assignment import ScopeRole as _ScopeRole
+_OWNER_ROLE = _ScopeRole.ADMIN_OWNER
 
 # Arc 6 Commit 8 (2026-05-23) -- Domain-collapse sentinel.
 #

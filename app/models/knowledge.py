@@ -17,8 +17,10 @@ Post-Cleanup-B (Arc 11 closeout):
 Stores vector-indexed knowledge chunks. Each chunk belongs to
 exactly one ``KnowledgeSource`` (the FK is mandatory) and inherits
 its admin / instance / soft-delete posture from the source row.
-The legacy ``agent_id`` column is preserved here for read-side
-compatibility with pre-Step-24.5 rows; Cleanup C removes it.
+
+Cleanup C removed the legacy pre-Step-24.5 ``agent_id`` column;
+no read-side compat branches remain in the repository, retriever,
+or ingestion modules.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ class KnowledgeChunk(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
-    # ---- Scope triple (legacy + new) ----
+    # ---- Scope pair ----
     admin_id: Mapped[str | None] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -46,8 +48,6 @@ class KnowledgeChunk(Base, TimestampMixin):
         index=True,
     )
     domain_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
-    agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
-    """Legacy (pre-Step-24.5). Cleanup C removes this column."""
 
     # ---- Step 25b: Instance binding (Arc 5 Revision C re-pointed) ----
     luciel_instance_id: Mapped[int] = mapped_column(

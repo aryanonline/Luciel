@@ -638,11 +638,13 @@ def _is_owner_seat(row: ScopeAssignment) -> bool:
     """True iff this ScopeAssignment row is the owner seat.
 
     Owner-seat protection: a downgrade can never archive the admin's
-    own owner row. The literal ``"owner"`` is the role string used by
-    ``TierProvisioningService._ensure_owner_scope_assignment`` and the
-    webhook's owner-seat lookup.
+    own owner row. Cleanup C promoted the role column to the
+    ``scope_role`` PG enum; the canonical owner value is
+    ``ScopeRole.ADMIN_OWNER``.
     """
-    return getattr(row, "role", None) == "owner"
+    from app.models.scope_assignment import ScopeRole
+    role = getattr(row, "role", None)
+    return role == ScopeRole.ADMIN_OWNER or role == "admin_owner"
 
 
 def _lru_select(rows: list, n: int) -> list:

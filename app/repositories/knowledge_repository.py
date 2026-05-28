@@ -60,7 +60,6 @@ class KnowledgeRepository:
         embeddings: Sequence[Sequence[float]],
         admin_id: str | None,
         domain_id: str | None,
-        agent_id: str | None,
         luciel_instance_id: int,
         knowledge_type: str,
         title: str | None,
@@ -91,7 +90,6 @@ class KnowledgeRepository:
             row = KnowledgeChunk(
                 admin_id=admin_id,
                 domain_id=domain_id,
-                agent_id=agent_id,
                 luciel_instance_id=luciel_instance_id,
                 content=text,
                 title=title,
@@ -237,7 +235,6 @@ class KnowledgeRepository:
         admin_id: str | None,
         domain_id: str | None,
         luciel_instance_id: int | None = None,
-        agent_id: str | None = None,
         knowledge_type: str | None = None,
         limit: int = 5,
     ) -> list[dict]:
@@ -248,7 +245,6 @@ class KnowledgeRepository:
           - luciel_instance_id IS NULL AND admin_id+domain_id match  (domain-shared)
           - luciel_instance_id IS NULL AND domain_id IS NULL AND admin_id match (tenant-shared)
           - admin_id IS NULL AND domain_id IS NULL  (global)
-          - Legacy compat: agent_id match (pre-Step-24.5 rows)
 
         Active-only (``superseded_at IS NULL``). Excludes lifecycle
         flagged rows: ``soft_deleted_at IS NULL`` and
@@ -261,6 +257,10 @@ class KnowledgeRepository:
         still apply: only chunks whose parent source is
         ``ingestion_status='ready'`` AND not soft-deleted AND not
         downgrade-archived are returned.
+
+        Post-Cleanup-C: the legacy ``agent_id`` fan-out is removed
+        (column dropped). The pre-Step-24.5 read-compat branch had
+        zero production rows.
 
         Orders by cosine distance ascending (<=>).
 
@@ -300,14 +300,6 @@ class KnowledgeRepository:
                 KnowledgeChunk.domain_id.is_(None),
             )
         )
-        if agent_id is not None:
-            clauses.append(
-                and_(
-                    KnowledgeChunk.luciel_instance_id.is_(None),
-                    KnowledgeChunk.admin_id == admin_id,
-                    KnowledgeChunk.agent_id == agent_id,
-                )
-            )
 
         from sqlalchemy import literal_column
         from sqlalchemy.orm import aliased

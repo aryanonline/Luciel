@@ -80,7 +80,7 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     # 1a. alembic heads is single and points at the latest Arc 11
     # migration (Cleanup A's data_category rename is the post-Step-4
     # head once the no-deferrals closeout lands).
-    expected_head = "arc11_cleanup_b_drop_legacy_source_columns"
+    expected_head = "arc11_cleanup_c_scope_assignment_role_enum"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],
@@ -229,6 +229,72 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
             )
                 # break would skip remaining cols; the noise tells us
                 # if many are missing at once.
+
+        # Cleanup C: agent_id column dropped from knowledge_chunks.
+        kc_cols = set(KnowledgeChunk.__table__.columns.keys())
+        if "agent_id" not in kc_cols:
+            out.append(
+                _pass(
+                    section,
+                    "knowledge_chunks_agent_id_dropped",
+                    "agent_id column gone (Cleanup C)",
+                )
+            )
+        else:
+            out.append(
+                _fail(
+                    section,
+                    "knowledge_chunks_agent_id_dropped",
+                    "agent_id column still present on knowledge_chunks",
+                )
+            )
+
+        # Cleanup C: scope_assignments.role promoted to PG enum.
+        from sqlalchemy import Enum as _SAEnum
+
+        from app.models.scope_assignment import ScopeAssignment, ScopeRole
+        role_col = ScopeAssignment.__table__.columns["role"]
+        if isinstance(role_col.type, _SAEnum) and role_col.type.name == "scope_role":
+            out.append(
+                _pass(
+                    section,
+                    "scope_assignments_role_is_pg_enum",
+                    "role column uses scope_role PG enum (Cleanup C)",
+                )
+            )
+        else:
+            out.append(
+                _fail(
+                    section,
+                    "scope_assignments_role_is_pg_enum",
+                    f"role column is {role_col.type!r}, expected "
+                    f"Enum(name='scope_role')",
+                )
+            )
+
+        # Cleanup C: the four canonical enum members are present.
+        expected_members = {
+            "admin_owner", "admin_manager",
+            "instance_operator", "read_only_viewer",
+        }
+        actual_members = {m.value for m in ScopeRole}
+        if actual_members == expected_members:
+            out.append(
+                _pass(
+                    section,
+                    "scope_role_canonical_values",
+                    f"ScopeRole values match canonical four",
+                )
+            )
+        else:
+            out.append(
+                _fail(
+                    section,
+                    "scope_role_canonical_values",
+                    f"ScopeRole values drift: expected={expected_members} "
+                    f"actual={actual_members}",
+                )
+            )
 
     except Exception as exc:  # noqa: BLE001
         out.append(

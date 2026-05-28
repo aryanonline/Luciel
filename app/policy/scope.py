@@ -43,21 +43,23 @@ PLATFORM_ADMIN = "platform_admin"
 ADMIN = "admin"
 
 # ---------------------------------------------------------------------
-# Arc 11 Step 7 — canonical role names for the Knowledge subsystem
-# role matrix per Vision §5.2 + Architecture §3.2.2.
+# Arc 11 — canonical role names for the Knowledge subsystem role
+# matrix per Vision §5.2 + Architecture §3.2.2.
 #
-# The ScopeAssignment.role column is a free-form String(100) by design
-# (Step 24.5b doctrine: "A future step may promote this to an enum once
-# we see real-world role taxonomy stabilize."). Arc 11 codifies four
-# canonical role values for knowledge-base actions; they are advisory
-# strings stored as-is on scope_assignments.role.
+# Cleanup C promoted ``ScopeAssignment.role`` from a free-form
+# String(100) to a Postgres ENUM (``scope_role``). The four canonical
+# names below reference the ``ScopeRole`` Python enum directly; the
+# matrix sets use enum members so a stray string can't silently
+# match.
 # ---------------------------------------------------------------------
-ROLE_ADMIN_OWNER = "admin_owner"
-ROLE_ADMIN_MANAGER = "admin_manager"
-ROLE_INSTANCE_OPERATOR = "instance_operator"
-ROLE_READ_ONLY_VIEWER = "read_only_viewer"
+from app.models.scope_assignment import ScopeRole
 
-ALL_KNOWLEDGE_ROLES = frozenset({
+ROLE_ADMIN_OWNER = ScopeRole.ADMIN_OWNER
+ROLE_ADMIN_MANAGER = ScopeRole.ADMIN_MANAGER
+ROLE_INSTANCE_OPERATOR = ScopeRole.INSTANCE_OPERATOR
+ROLE_READ_ONLY_VIEWER = ScopeRole.READ_ONLY_VIEWER
+
+ALL_KNOWLEDGE_ROLES: frozenset[ScopeRole] = frozenset({
     ROLE_ADMIN_OWNER,
     ROLE_ADMIN_MANAGER,
     ROLE_INSTANCE_OPERATOR,
@@ -67,7 +69,7 @@ ALL_KNOWLEDGE_ROLES = frozenset({
 # Role-action matrix per Architecture §3.2.2 / ARC11_PLAN.md §0.6.
 # list/view → owner + manager + operator (operator scoped)
 # edit/delete → owner + manager only
-_KNOWLEDGE_ACTION_ROLES: dict[str, frozenset[str]] = {
+_KNOWLEDGE_ACTION_ROLES: dict[str, frozenset[ScopeRole]] = {
     "list":   frozenset({ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER, ROLE_INSTANCE_OPERATOR}),
     "view":   frozenset({ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER, ROLE_INSTANCE_OPERATOR}),
     "edit":   frozenset({ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER}),
@@ -250,7 +252,7 @@ class ScopePolicy:
         cls,
         request: Request,
         instance,
-    ) -> str | None:
+    ) -> ScopeRole | None:
         """Look up the caller's role on a specific Instance.
 
         Resolution order:
@@ -258,49 +260,51 @@ class ScopePolicy:
           1. Platform admin: returns ``None`` (caller is unscoped; the
              outer ``enforce_role_on_instance`` short-circuits on
              platform_admin before this is called).
-          2. ``request.state.role`` — populated by future auth middleware
-             when a session has a single explicit role binding (e.g.,
-             ``admin_owner`` API keys, or a cookie session that
-             pre-resolved the role at auth time). Trusted because the
-             middleware verified the role against scope_assignments.
-          3. Fall back to the existing scope_assignments row for
-             (actor_user_id, admin_id) where ``ended_at IS NULL`` AND
-             ``active = TRUE``. The session knows ``actor_user_id``
-             (Step 24.5b) so the lookup is keyed on that.
+          2. ``request.state.scope_assignments`` — populated by the
+             auth middleware (Cleanup C item #8). The middleware
+             fetches the caller's active scope_assignments for the
+             bound admin once per request; this method then picks the
+             row whose ``admin_id`` matches the target instance.
+          3. ``request.state.role`` — a pre-resolved single-role
+             binding (e.g., ``admin_owner`` API keys whose role is
+             known at key-mint time). Coerced to ``ScopeRole`` if a
+             plain string was set.
+          4. Fall back to a one-shot ``scope_assignments`` SELECT.
+             Used by test contexts where middleware is mocked.
 
-        Returns the canonical role string (see ``ROLE_*`` constants) or
-        ``None`` when no active assignment exists for this caller in
-        this Admin scope. ``None`` always denies; the gate is fail-
-        closed by construction.
-
-        Implementation note: the lookup queries scope_assignments
-        directly with a small SELECT rather than going through a
-        repository, because (a) the repository layer has not yet
-        materialised a ``get_active_role`` method, and (b) the query
-        is hot — every knowledge route fires it once — so the inline
-        ``select(...)`` is intentional. If this query grows beyond a
-        single predicate or needs caching, lift it into
-        ``ScopeAssignmentRepository`` at that time.
+        Returns the canonical ``ScopeRole`` or ``None`` when no
+        active assignment exists for this caller in this Admin scope.
+        ``None`` always denies; the gate is fail-closed by
+        construction.
         """
         if cls.is_platform_admin(request):
             return None  # bypass — caller handles platform_admin
 
-        # Trust auth-middleware-populated role first.
-        explicit = getattr(request.state, "role", None)
-        if isinstance(explicit, str) and explicit:
-            return explicit
-
-        # Fall back to scope_assignments. Defer DB session resolution
-        # until we know we need it — most platform_admin paths skip
-        # this entirely.
-        actor_user_id = getattr(request.state, "actor_user_id", None)
         target_admin_id = getattr(instance, "admin_id", None)
+
+        # 2. Prefer middleware-populated scope_assignments list.
+        assignments = getattr(request.state, "scope_assignments", None)
+        if assignments:
+            for sa_row in assignments:
+                if (
+                    getattr(sa_row, "admin_id", None) == target_admin_id
+                    and getattr(sa_row, "active", False)
+                    and getattr(sa_row, "ended_at", None) is None
+                ):
+                    return cls._coerce_role(sa_row.role)
+
+        # 3. Pre-resolved single role.
+        explicit = getattr(request.state, "role", None)
+        if explicit:
+            return cls._coerce_role(explicit)
+
+        # 4. Fall back to a per-request DB lookup (test contexts
+        #    without middleware).
+        actor_user_id = getattr(request.state, "actor_user_id", None)
         if actor_user_id is None or target_admin_id is None:
             return None  # no actor or no target → deny
 
         try:
-            # Lazy imports keep policy import-light for non-route
-            # callers (services, tests that don't need a DB).
             from sqlalchemy import select
 
             from app.db.session import SessionLocal
@@ -322,9 +326,29 @@ class ScopePolicy:
                 .limit(1)
             )
             row = db.execute(stmt).first()
-            return row[0] if row else None
+            return cls._coerce_role(row[0]) if row else None
         finally:
             db.close()
+
+    @staticmethod
+    def _coerce_role(value) -> ScopeRole | None:
+        """Best-effort coercion to ``ScopeRole``.
+
+        Cleanup C made the DB column a Postgres enum, which
+        SQLAlchemy materialises as a ``ScopeRole`` member already.
+        But pre-Cleanup-C test fixtures, middleware that stamps the
+        role as a string, and the ``request.state.role`` fast-path
+        may still hand us a plain string — coerce defensively.
+        Unknown strings deny by returning ``None``.
+        """
+        if isinstance(value, ScopeRole):
+            return value
+        if isinstance(value, str):
+            try:
+                return ScopeRole(value)
+            except ValueError:
+                return None
+        return None
 
     @classmethod
     def enforce_role_on_instance(

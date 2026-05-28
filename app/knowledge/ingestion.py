@@ -279,7 +279,6 @@ class IngestionService:
                 embeddings=embeddings,
                 admin_id=admin_id,
                 domain_id=None,
-                agent_id=None,
                 luciel_instance_id=luciel_instance_id,
                 knowledge_type=knowledge_type,
                 title=title,

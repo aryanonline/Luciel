@@ -478,7 +478,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
                     admin_id=self.admin_b,
                     domain_id=None,
                     luciel_instance_id=self.instance_b,
-                    agent_id=None,
+
                     knowledge_type=None,
                     limit=10,
                 )
@@ -538,7 +538,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
                     admin_id=self.admin_a,
                     domain_id=None,
                     luciel_instance_id=self.instance_a,
-                    agent_id=None,
+
                     knowledge_type=None,
                     limit=10,
                 )
