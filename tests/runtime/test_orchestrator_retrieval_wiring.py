@@ -410,16 +410,19 @@ class TestW7TraceServiceDi(unittest.TestCase):
 
 class TestW8CollectSourcePks(unittest.TestCase):
 
-    def test_w8_mixed_identifiers_dedupe_and_filter(self):
+    def test_w8_dedupe_preserves_insertion_order(self):
+        """Post-Cleanup-B every RetrievedChunk.source_identifier is
+        an int (the source_id FK is NOT NULL). The orchestrator
+        wiring just dedupes + preserves insertion order."""
         trace = _StubTraceService()
         orch = LucielOrchestrator(trace_service=trace)
 
         chunks = [
             _chunk(10, chunk_id=1),
-            _chunk("legacy-string", chunk_id=2),
-            _chunk(None, chunk_id=3),
+            _chunk(10, chunk_id=2),  # dup
+            _chunk(20, chunk_id=3),
             _chunk(10, chunk_id=4),  # dup
-            _chunk(20, chunk_id=5),
+            _chunk(30, chunk_id=5),
         ]
 
         with patch(
@@ -430,9 +433,8 @@ class TestW8CollectSourcePks(unittest.TestCase):
         ):
             resp = orch.run(_request(instance_id=42))
 
-        # Strings + None dropped; dup deduped; insertion order preserved.
-        self.assertEqual(resp.source_ids_used, [10, 20])
-        self.assertEqual(trace.calls[0]["source_ids_used"], [10, 20])
+        self.assertEqual(resp.source_ids_used, [10, 20, 30])
+        self.assertEqual(trace.calls[0]["source_ids_used"], [10, 20, 30])
 
 
 # ---------------------------------------------------------------------

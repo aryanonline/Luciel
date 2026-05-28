@@ -95,25 +95,9 @@ class TenantConfigRead(BaseModel):
 # imports; no route consumed them). Removed in Arc 10.5.
 
 
-# --- Knowledge Ingestion ---
-
-class KnowledgeIngestRequest(BaseModel):
-    content: str
-    knowledge_type: str
-    admin_id: str | None = None
-    domain_id: str | None = None
-    agent_id: str | None = None
-    title: str | None = None
-    source: str | None = None
-    created_by: str | None = None
-    max_chunk_size: int = 800
-    replace_existing: bool = False
-
-
-class KnowledgeIngestResponse(BaseModel):
-    chunks_stored: int
-    knowledge_type: str
-    admin_id: str | None
-    domain_id: str | None
-    agent_id: str | None = None
-    source: str | None
+# Cleanup B closeout: ``KnowledgeIngestRequest`` and
+# ``KnowledgeIngestResponse`` were the request/response schemas for
+# the legacy ``POST /admin/knowledge/ingest`` route. The route and
+# its schemas were deleted along with the legacy single-table-model
+# code path. Step 7's ``app/api/v1/admin_knowledge.py`` router is
+# the only knowledge ingest surface from Cleanup B forward.

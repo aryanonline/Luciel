@@ -98,15 +98,15 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
                         """
                         INSERT INTO knowledge_chunks
                             (admin_id, luciel_instance_id, content,
-                             knowledge_type, source_id, source_fk,
+                             knowledge_type, source_id,
                              source_version, embedding)
                         VALUES
-                            (%s, %s, %s, 'luciel_knowledge', %s, %s, 1,
+                            (%s, %s, %s, 'luciel_knowledge', %s, 1,
                              %s::vector)
                         """,
                         (
                             aid, inst_id, f"chunk-{aid}-{i}",
-                            f"src-{src_pk}", src_pk, vec,
+                            src_pk, vec,
                         ),
                     )
             cur.execute("RESET app.admin_id")

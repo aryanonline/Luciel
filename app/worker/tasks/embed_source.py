@@ -60,8 +60,8 @@ Idempotency
 A task fired against a source already in ``ready`` state is a
 no-op. This makes DLQ redrive and at-least-once delivery safe.
 Sources in ``processing`` state are re-driven (the chunks-with-
-matching-source_fk are deleted first via a tight chunk wipe so we
-don't accumulate duplicates across retries — see
+matching-``source_id`` are deleted first via a tight chunk wipe so
+we don't accumulate duplicates across retries — see
 ``_clear_existing_chunks_for_source``).
 
 PII discipline
@@ -213,7 +213,7 @@ def _download_bytes(s3_key: str, bucket: str) -> bytes:
 def _clear_existing_chunks_for_source(
     db, *, admin_id: str, source_pk: int,
 ) -> int:
-    """Hard-delete any chunks already linked to this ``source_fk``
+    """Hard-delete any chunks already linked to this ``source_id``
     before re-running the pipeline. Used when a retry / DLQ redrive
     fires against a source that was mid-processing.
 
@@ -229,11 +229,11 @@ def _clear_existing_chunks_for_source(
         sql_text(
             """
             DELETE FROM knowledge_chunks
-             WHERE source_fk = :fk
+             WHERE source_id = :sid
                AND admin_id = :aid
             """
         ),
-        {"fk": source_pk, "aid": admin_id},
+        {"sid": source_pk, "aid": admin_id},
     )
     return result.rowcount or 0
 
@@ -292,9 +292,9 @@ def embed_source(
       3. Marks the row ``processing``.
       4. Downloads bytes from S3 via ``source.s3_key``.
       5. Parses + chunks + embeds + persists chunks with
-         ``source_fk = source_pk``. The legacy stringy ``source_id``
-         column is now written ``NULL`` (Cleanup A of the Arc 11
-         closeout). Cleanup B drops the column entirely.
+         ``source_id = source_pk`` (post-Cleanup-B: the INTEGER FK
+         is the sole source binding; the legacy stringy ``source_id``
+         column + free-text ``source`` column are gone).
       6. Marks the row ``ready``.
 
     Any exception in steps 4-5 flips the row to ``failed`` (with a
@@ -469,15 +469,10 @@ def embed_source(
                 luciel_instance_id=instance_id,
                 knowledge_type="luciel_knowledge",
                 title=source.filename,
-                source=source.filename,
-                # Cleanup A: legacy source_id string set to NULL
-                # going forward; Cleanup B drops the column. Reads
-                # that used to group by the stringy key now route
-                # through ``source_fk`` (data_export_service +
-                # downgrade_archive_service already branch on
-                # ``source_fk IS NULL`` for the legacy fallback).
-                source_id=None,
-                source_fk=source_pk,
+                # Post-Cleanup-B: ``source_id`` is the INTEGER FK
+                # (NOT NULL). Legacy stringy ``source_id`` and
+                # free-text ``source`` columns are gone.
+                source_id=source_pk,
                 source_version=source.source_version or 1,
                 source_filename=source.filename,
                 source_type=source_type,

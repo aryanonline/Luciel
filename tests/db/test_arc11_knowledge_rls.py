@@ -209,10 +209,10 @@ class TestArc11KnowledgeRls(unittest.TestCase):
                     """
                     INSERT INTO knowledge_chunks
                         (admin_id, luciel_instance_id, content,
-                         knowledge_type, source_id, source_fk,
+                         knowledge_type, source_id,
                          source_version, embedding)
                     VALUES
-                        (%s, %s, %s, 'luciel_knowledge', %s, %s, 1,
+                        (%s, %s, %s, 'luciel_knowledge', %s, 1,
                          %s::vector)
                     RETURNING id
                     """,
@@ -220,7 +220,6 @@ class TestArc11KnowledgeRls(unittest.TestCase):
                         cls.admin_a,
                         cls.instance_a,
                         f"chunk content {i}",
-                        f"src-{cls.source_a_id}",
                         cls.source_a_id,
                         vec_lit,
                     ),

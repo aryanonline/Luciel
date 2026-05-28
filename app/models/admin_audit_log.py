@@ -3,7 +3,7 @@ AdminAuditLog — durable, per-tenant audit trail for admin mutations.
 
 Step 24.5 (File 6.5a). Every admin-layer create / update / deactivate
 across Agent, LucielInstance, DomainConfig, TenantConfig, ApiKey, and
-(from Step 25 onward) KnowledgeEmbedding writes exactly one row here,
+(from Step 25 onward) KnowledgeChunk writes exactly one row here,
 inside the same DB transaction as the mutation itself.
 
 Why a dedicated table (vs. reusing Trace or CloudWatch logs):

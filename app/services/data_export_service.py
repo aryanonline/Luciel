@@ -760,24 +760,16 @@ class DataExportService:
     ) -> None:
         """Knowledge bundle.
 
-        Arc 10 shipped chunks-only and synthesised the per-source
-        manifest by grouping chunks by their legacy stringy
-        ``source_id``. Arc 11 Step 1 introduced the
-        ``knowledge_sources`` table that holds provenance directly;
-        Step 3 (this update) reads the manifest from that table
-        when it exists and falls back to the chunk-grouping path
-        for legacy chunks whose ``source_fk`` is NULL.
+        Post-Cleanup-B: manifest entries are drawn directly from
+        ``knowledge_sources``; the pre-Cleanup-B legacy fallback for
+        FK-less chunks is gone with the legacy columns \u2014 every chunk
+        now has a non-NULL INTEGER source FK pointing at a
+        ``knowledge_sources`` row.
 
         Bundle layout is unchanged:
           * ``knowledge_sources/manifest.json``
-          * ``knowledge_sources/chunks/<key>__v<version>.jsonl``
-        where ``<key>`` is the source-row PK for Arc-11-shape
-        sources and the legacy stringy id otherwise.
+          * ``knowledge_sources/chunks/src-<pk>__v<version>.jsonl``
         """
-        # ---------------------------------------------------------
-        # 1. Arc-11-shape manifest entries \u2014 drawn from
-        #    ``knowledge_sources`` directly.
-        # ---------------------------------------------------------
         ks_rows = self.db.execute(
             sql_text(
                 """
@@ -795,7 +787,7 @@ class DataExportService:
                                        AS archived_on_downgrade,
                        (SELECT COUNT(*)
                           FROM knowledge_chunks c
-                         WHERE c.source_fk = s.id
+                         WHERE c.source_id = s.id
                            AND c.superseded_at IS NULL
                            AND c.soft_deleted_at IS NULL) AS chunk_count
                   FROM knowledge_sources s
@@ -807,16 +799,14 @@ class DataExportService:
             {"aid": admin_id},
         )
         manifest: list[dict] = []
-        # ``per_source`` rows are (key, version, is_legacy_string) so
-        # the chunk-file loop below can dispatch the right query.
-        per_source: list[tuple[str | int, int, bool]] = []
+        per_source: list[tuple[int, int]] = []
         for r in ks_rows:
             manifest.append({
-                # Arc-11 entries surface BOTH the new pk and the
-                # legacy stringy form (``src-<pk>``) so consumers
-                # mid-cutover can resolve either.
                 "source_pk": int(r.source_pk),
                 "source_uuid": str(r.source_uuid),
+                # Stable stringy id (``src-<pk>``) preserved in the
+                # export envelope for downstream consumers that still
+                # key on a string; the DB column is gone.
                 "source_id": f"src-{int(r.source_pk)}",
                 "source_filename": r.source_filename,
                 "source_type": r.source_type,
@@ -829,54 +819,7 @@ class DataExportService:
                 "originals_retained": False,
                 "archived_on_downgrade": bool(r.archived_on_downgrade),
             })
-            per_source.append((int(r.source_pk), int(r.source_version), False))
-
-        # ---------------------------------------------------------
-        # 2. Legacy-shape manifest entries \u2014 chunks with NULL
-        #    ``source_fk``, grouped by their stringy ``source_id``.
-        #    These are pre-Arc-11 rows; Step 11 retires this branch.
-        # ---------------------------------------------------------
-        legacy_rows = self.db.execute(
-            sql_text(
-                """
-                SELECT source_id,
-                       MAX(source_filename) AS source_filename,
-                       MAX(source_type) AS source_type,
-                       MAX(source_version) AS source_version,
-                       MAX(ingested_by) AS ingested_by,
-                       MIN(created_at) AS ingested_at,
-                       COUNT(*) AS chunk_count,
-                       BOOL_OR(pending_downgrade_archived_at IS NOT NULL)
-                           AS archived_on_downgrade
-                  FROM knowledge_chunks
-                 WHERE admin_id = :aid
-                   AND source_fk IS NULL
-                   AND superseded_at IS NULL
-                   AND soft_deleted_at IS NULL
-                   AND source_id IS NOT NULL
-              GROUP BY source_id
-              ORDER BY MIN(created_at) ASC
-                """
-            ),
-            {"aid": admin_id},
-        )
-        for r in legacy_rows:
-            manifest.append({
-                "source_pk": None,
-                "source_uuid": None,
-                "source_id": r[0],
-                "source_filename": r[1],
-                "source_type": r[2],
-                "source_version": int(r[3] or 1),
-                "ingested_by": r[4],
-                "ingested_at": _iso(r[5]),
-                "size_bytes": None,
-                "chunk_count": int(r[6] or 0),
-                "ingestion_status": "ready",  # implied for legacy
-                "originals_retained": False,
-                "archived_on_downgrade": bool(r[7]),
-            })
-            per_source.append((r[0], int(r[3] or 1), True))
+            per_source.append((int(r.source_pk), int(r.source_version)))
 
         self._add_text_entry(
             tar,
@@ -884,45 +827,24 @@ class DataExportService:
             json.dumps(manifest, default=str, indent=2),
         )
 
-        # ---------------------------------------------------------
-        # 3. Per-source chunk files.
-        # ---------------------------------------------------------
-        for key, source_version, is_legacy in per_source:
-            if is_legacy:
-                chunk_rows = self.db.execute(
-                    sql_text(
-                        """
-                        SELECT id, title, content, knowledge_type, created_at
-                          FROM knowledge_chunks
-                         WHERE admin_id = :aid
-                           AND source_fk IS NULL
-                           AND source_id = :sid
-                           AND source_version = :sv
-                           AND superseded_at IS NULL
-                           AND soft_deleted_at IS NULL
-                      ORDER BY id ASC
-                        """
-                    ),
-                    {"aid": admin_id, "sid": key, "sv": source_version},
-                )
-                file_key = key
-            else:
-                chunk_rows = self.db.execute(
-                    sql_text(
-                        """
-                        SELECT id, title, content, knowledge_type, created_at
-                          FROM knowledge_chunks
-                         WHERE admin_id = :aid
-                           AND source_fk = :fk
-                           AND source_version = :sv
-                           AND superseded_at IS NULL
-                           AND soft_deleted_at IS NULL
-                      ORDER BY id ASC
-                        """
-                    ),
-                    {"aid": admin_id, "fk": key, "sv": source_version},
-                )
-                file_key = f"src-{key}"
+        # Per-source chunk files.
+        for source_pk, source_version in per_source:
+            chunk_rows = self.db.execute(
+                sql_text(
+                    """
+                    SELECT id, title, content, knowledge_type, created_at
+                      FROM knowledge_chunks
+                     WHERE admin_id = :aid
+                       AND source_id = :sid
+                       AND source_version = :sv
+                       AND superseded_at IS NULL
+                       AND soft_deleted_at IS NULL
+                  ORDER BY id ASC
+                    """
+                ),
+                {"aid": admin_id, "sid": source_pk, "sv": source_version},
+            )
+            file_key = f"src-{source_pk}"
 
             lines = []
             for cr in chunk_rows:

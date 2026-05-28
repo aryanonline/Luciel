@@ -60,7 +60,7 @@ from sqlalchemy.orm import Session
 from app.models.admin_widget_domain import AdminWidgetDomain
 from app.models.api_key import ApiKey
 from app.models.instance import Instance
-from app.models.knowledge import KnowledgeEmbedding  # Arc 10: AXIS_KNOWLEDGE
+from app.models.knowledge import KnowledgeChunk  # Arc 10: AXIS_KNOWLEDGE
 from app.models.scope_assignment import EndReason, ScopeAssignment
 from app.policy.entitlements import (
     TIER_ENTERPRISE,
@@ -144,11 +144,11 @@ AXIS_EMBED_KEYS = "embed_keys"
 AXIS_CNAMES = "cnames"
 AXIS_SEATS = "seats"
 # Arc 10: knowledge axis. Unlike the count-of-rows axes above,
-# AXIS_KNOWLEDGE is a sum-of-bytes axis whose unit is source_id
-# (a group of chunks sharing the same source_id). LRU selection
-# picks oldest sources by their newest chunk's updated_at, and
-# archives whole sources until total bytes <= cap. All chunks
-# sharing a source_id archive together.
+# AXIS_KNOWLEDGE is a sum-of-bytes axis whose unit is the INTEGER
+# source_id FK (a group of chunks sharing the same source FK).
+# LRU selection picks oldest sources by their newest chunk's
+# updated_at, and archives whole sources until total bytes <= cap.
+# All chunks sharing a source FK archive together.
 AXIS_KNOWLEDGE = "knowledge"
 ALL_AXES: tuple[str, ...] = (
     AXIS_INSTANCES, AXIS_EMBED_KEYS, AXIS_CNAMES, AXIS_SEATS,
@@ -340,19 +340,11 @@ class DowngradeArchiveService:
     ) -> AxisOverflow:
         """Compute the knowledge axis overflow for one admin.
 
-        Unit-of-archive is a *source group*. Arc 11 Step 3 widens
-        the grouping key:
-          * For chunks with ``source_fk IS NOT NULL`` (Arc 11 shape),
-            group by the FK. The selected id is the integer source PK.
-          * For chunks with ``source_fk IS NULL`` (legacy), group by
-            the stringy ``source_id``.
-
-        The grouping key is materialised as
-        ``COALESCE('fk:' || source_fk::text, 'sid:' || source_id)``
-        so a Pro→Free downgrade boundary that straddles old and new
-        chunks selects bucket-by-bucket without double-counting.
-        ``_apply_axis`` dispatches on the prefix to pick the right
-        UPDATE clause.
+        Unit-of-archive is a *source group*. Post-Cleanup-B every
+        chunk carries a non-NULL INTEGER ``source_id`` FK to
+        ``knowledge_sources.id``, so the bucket key is the FK
+        directly (the pre-Cleanup-B prefixed key that disambiguated
+        FK-vs-legacy-string is gone with the legacy columns).
 
         Per-source size approximated by ``SUM(LENGTH(content))`` over
         active chunks of that source.
@@ -366,41 +358,23 @@ class DowngradeArchiveService:
         selected sources) is <= cap.
 
         Returns ``AxisOverflow`` whose ``archived_ids`` field is a
-        list of prefixed string keys. ``_apply_axis`` parses them.
+        list of integer source PKs. ``_apply_axis`` consumes them.
         """
-        from sqlalchemy import Text, case, cast, func, literal, select as sa_select
-
-        # Build the prefixed bucket key as part of the SELECT so
-        # GROUP BY and the result column agree. ``cast(.., Text)`` is
-        # the cross-dialect way to spell ``source_fk::text``.
-        bucket_key = case(
-            (
-                KnowledgeEmbedding.source_fk.is_not(None),
-                literal("fk:") + cast(KnowledgeEmbedding.source_fk, Text),
-            ),
-            else_=literal("sid:") + KnowledgeEmbedding.source_id,
-        ).label("bucket")
+        from sqlalchemy import func, select as sa_select
 
         per_source_stmt = (
             sa_select(
-                bucket_key,
-                func.sum(func.length(KnowledgeEmbedding.content)).label("bytes"),
-                func.max(KnowledgeEmbedding.updated_at).label("recency"),
+                KnowledgeChunk.source_id.label("bucket"),
+                func.sum(func.length(KnowledgeChunk.content)).label("bytes"),
+                func.max(KnowledgeChunk.updated_at).label("recency"),
             )
             .where(
-                KnowledgeEmbedding.admin_id == admin_id,
-                # A chunk must carry SOME source identifier to be
-                # archive-eligible. Unidentified chunks are floating
-                # rows from the very-pre-Step-25b era; ignore them.
-                or_(
-                    KnowledgeEmbedding.source_fk.is_not(None),
-                    KnowledgeEmbedding.source_id.is_not(None),
-                ),
-                KnowledgeEmbedding.superseded_at.is_(None),
-                KnowledgeEmbedding.soft_deleted_at.is_(None),
-                KnowledgeEmbedding.pending_downgrade_archived_at.is_(None),
+                KnowledgeChunk.admin_id == admin_id,
+                KnowledgeChunk.superseded_at.is_(None),
+                KnowledgeChunk.soft_deleted_at.is_(None),
+                KnowledgeChunk.pending_downgrade_archived_at.is_(None),
             )
-            .group_by(bucket_key)
+            .group_by(KnowledgeChunk.source_id)
         )
         rows = list(self.db.execute(per_source_stmt).all())
 
@@ -420,12 +394,12 @@ class DowngradeArchiveService:
         rows.sort(key=lambda r: (r.recency or datetime.min, r.bucket))
 
         # Greedy: archive sources oldest-first until we are under cap.
-        archived_source_ids: list[str | int] = []
+        archived_source_ids: list[int] = []
         bytes_remaining = current_bytes
         for r in rows:
             if bytes_remaining <= cap_bytes:
                 break
-            archived_source_ids.append(r.bucket)
+            archived_source_ids.append(int(r.bucket))
             bytes_remaining -= int(r.bytes or 0)
 
         return AxisOverflow(
@@ -554,74 +528,37 @@ class DowngradeArchiveService:
             return
 
         if axis == AXIS_KNOWLEDGE:
-            # Arc 11 Step 3: archive_ids are now prefixed bucket keys
-            # produced by ``_compute_knowledge_axis``:
-            #   * ``"fk:<n>"``  -> chunks where source_fk = <n>
-            #   * ``"sid:<s>"`` -> legacy chunks where source_id = <s>
-            #
-            # We dispatch on the prefix so Arc-11-shape sources and
-            # legacy-shape sources both archive correctly when a Pro
-            # downgrade straddles the cutover. "All chunks sharing
-            # the same source archive together" still holds — the
-            # bucket key is the source identity.
-            for bucket in ids_list:
-                if isinstance(bucket, str) and bucket.startswith("fk:"):
-                    fk = int(bucket[3:])
-                    self.db.execute(
-                        sql_text(
-                            """
-                            UPDATE knowledge_chunks
-                               SET pending_downgrade_archived_at = :ts
-                             WHERE admin_id = :aid
-                               AND source_fk = :fk
-                               AND superseded_at IS NULL
-                               AND soft_deleted_at IS NULL
-                               AND pending_downgrade_archived_at IS NULL
-                            """
-                        ),
-                        {"ts": archived_at, "aid": admin_id, "fk": fk},
-                    )
-                    # Mirror the stamp onto the parent source row so
-                    # the source's own lifecycle column is consistent
-                    # with its chunks. The downgrade-archive worker is
-                    # the only writer of this column on the source
-                    # row; idempotent (already-stamped rows are no-ops).
-                    self.db.execute(
-                        sql_text(
-                            """
-                            UPDATE knowledge_sources
-                               SET pending_downgrade_archived_at = :ts
-                             WHERE id = :fk
-                               AND admin_id = :aid
-                               AND pending_downgrade_archived_at IS NULL
-                            """
-                        ),
-                        {"ts": archived_at, "aid": admin_id, "fk": fk},
-                    )
-                else:
-                    # Legacy path: bare or sid:-prefixed string.
-                    sid = (
-                        bucket[4:] if (
-                            isinstance(bucket, str)
-                            and bucket.startswith("sid:")
-                        )
-                        else bucket
-                    )
-                    self.db.execute(
-                        sql_text(
-                            """
-                            UPDATE knowledge_chunks
-                               SET pending_downgrade_archived_at = :ts
-                             WHERE admin_id = :aid
-                               AND source_fk IS NULL
-                               AND source_id = :sid
-                               AND superseded_at IS NULL
-                               AND soft_deleted_at IS NULL
-                               AND pending_downgrade_archived_at IS NULL
-                            """
-                        ),
-                        {"ts": archived_at, "aid": admin_id, "sid": sid},
-                    )
+            # Post-Cleanup-B: archive_ids are integer source PKs.
+            # All chunks sharing the same FK archive together; the
+            # parent source row gets a mirrored stamp so its own
+            # lifecycle column stays consistent with its chunks.
+            for source_pk in ids_list:
+                self.db.execute(
+                    sql_text(
+                        """
+                        UPDATE knowledge_chunks
+                           SET pending_downgrade_archived_at = :ts
+                         WHERE admin_id = :aid
+                           AND source_id = :sid
+                           AND superseded_at IS NULL
+                           AND soft_deleted_at IS NULL
+                           AND pending_downgrade_archived_at IS NULL
+                        """
+                    ),
+                    {"ts": archived_at, "aid": admin_id, "sid": int(source_pk)},
+                )
+                self.db.execute(
+                    sql_text(
+                        """
+                        UPDATE knowledge_sources
+                           SET pending_downgrade_archived_at = :ts
+                         WHERE id = :sid
+                           AND admin_id = :aid
+                           AND pending_downgrade_archived_at IS NULL
+                        """
+                    ),
+                    {"ts": archived_at, "aid": admin_id, "sid": int(source_pk)},
+                )
             return
 
         if axis == AXIS_SEATS:

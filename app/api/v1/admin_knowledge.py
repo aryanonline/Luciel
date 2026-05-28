@@ -21,14 +21,14 @@ Layered defenses applied to every admin route
   L4   ``admin_audit_log`` row appended on every list/view/edit/
        delete via the existing ``AdminAuditRepository.record`` chain.
 
-Legacy /admin/knowledge/ingest is UNTOUCHED
--------------------------------------------
+Legacy ingest route — GONE
+--------------------------
 
-The pre-Arc-11 ingestion route stays in place (see
-``app/api/v1/admin.py:ingest_knowledge``). It uses the one-table
-``KnowledgeEmbedding`` shape via the alias in ``app/models/knowledge.py``.
-Arc 14 retires it. Step 7 introduces the new routes alongside; both
-coexist during the cutover.
+The pre-Arc-11 ``POST /admin/knowledge/ingest`` route and its
+companion instance-scoped legacy routes were deleted in Cleanup B
+of the Arc 11 closeout. This module is now the sole knowledge ingest
+surface. The ``KnowledgeEmbedding = KnowledgeChunk`` alias is also
+gone from ``app/models/knowledge.py``.
 """
 from __future__ import annotations
 
@@ -371,7 +371,7 @@ def _chunk_count_for(source_pk: int, db) -> int:
         db.execute(
             select(func.count(KnowledgeChunk.id))
             .where(
-                KnowledgeChunk.source_fk == source_pk,
+                KnowledgeChunk.source_id == source_pk,
                 KnowledgeChunk.soft_deleted_at.is_(None),
                 KnowledgeChunk.superseded_at.is_(None),
             )
@@ -686,7 +686,7 @@ def preview_chunks(
     rows = db.execute(
         select(KnowledgeChunk.id, KnowledgeChunk.content)
         .where(
-            KnowledgeChunk.source_fk == source_id,
+            KnowledgeChunk.source_id == source_id,
             KnowledgeChunk.admin_id == instance.admin_id,
             KnowledgeChunk.soft_deleted_at.is_(None),
             KnowledgeChunk.superseded_at.is_(None),
@@ -844,8 +844,8 @@ def delete_source(
             detail=f"Knowledge source {source_id} not found",
         )
 
-    chunks_soft_deleted = chunk_repo.soft_delete_chunks_for_source_fk(
-        source_fk=source_id, admin_id=instance.admin_id,
+    chunks_soft_deleted = chunk_repo.soft_delete_chunks_for_source_id(
+        source_id=source_id, admin_id=instance.admin_id,
     )
 
     audit_repo.record(

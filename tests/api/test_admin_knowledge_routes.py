@@ -29,9 +29,9 @@ Contracts guarded here:
        Vision §3.3 values (10/50/500 MB; False/True/True for crawl).
   R10  Every admin route emits an ``audit_repo.record(...)`` call
        (audit-log discipline at the route boundary).
-  R11  The legacy /admin/knowledge/ingest route is UNTOUCHED — its
-       file path + decorator are still present (proof we did not
-       deprecate it).
+  R11  The legacy /admin/knowledge/ingest route has been REMOVED in
+       Cleanup B of the Arc 11 closeout — neither the decorator nor
+       the handler name remains in admin.py.
   R12  PII discipline: the crawl route does NOT log payload.url
        (Step 6's discipline propagates).
   R13  The internal retrieve route requires platform_admin.
@@ -459,20 +459,20 @@ class TestEntitlements(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------
-# R11 — Legacy route untouched
+# R11 — Legacy route removed (Cleanup B)
 # ---------------------------------------------------------------------
 
 
-class TestLegacyRouteUntouched(unittest.TestCase):
+class TestLegacyRouteRemoved(unittest.TestCase):
 
-    def test_r11_legacy_ingest_route_still_in_admin_module(self):
+    def test_r11_legacy_ingest_route_removed_from_admin_module(self):
         admin_src = (
             Path(__file__).resolve().parents[2]
             / "app" / "api" / "v1" / "admin.py"
         ).read_text(encoding="utf-8")
-        # The legacy route's path + handler name.
-        self.assertIn('@router.post("/knowledge/ingest"', admin_src)
-        self.assertIn("def ingest_knowledge(", admin_src)
+        # The legacy route's path + handler name are GONE.
+        self.assertNotIn('@router.post("/knowledge/ingest"', admin_src)
+        self.assertNotIn("def ingest_knowledge(", admin_src)
 
 
 # ---------------------------------------------------------------------

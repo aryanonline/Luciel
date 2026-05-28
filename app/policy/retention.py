@@ -36,7 +36,7 @@ from app.models.session import SessionModel  # noqa: F401 — kept for migration
 from app.models.message import MessageModel  # noqa: F401
 from app.models.memory import MemoryItem  # noqa: F401
 from app.models.trace import Trace  # noqa: F401
-from app.models.knowledge import KnowledgeEmbedding  # noqa: F401
+from app.models.knowledge import KnowledgeChunk  # noqa: F401
 from app.repositories.retention_repository import RetentionRepository
 
 logger = logging.getLogger(__name__)

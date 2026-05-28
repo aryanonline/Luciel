@@ -133,16 +133,15 @@ class TestArc11HnswPerf(unittest.TestCase):
                     """
                     INSERT INTO knowledge_chunks
                         (admin_id, luciel_instance_id, content,
-                         knowledge_type, source_id, source_fk,
+                         knowledge_type, source_id,
                          source_version, embedding)
                     VALUES
-                        (%s, %s, %s, 'luciel_knowledge', %s, %s, 1, %s::vector)
+                        (%s, %s, %s, 'luciel_knowledge', %s, 1, %s::vector)
                     """,
                     (
                         cls.admin_id,
                         cls.instance_id,
                         f"row-{i}",
-                        f"src-{cls.source_id}",
                         cls.source_id,
                         _vector_literal(vec),
                     ),

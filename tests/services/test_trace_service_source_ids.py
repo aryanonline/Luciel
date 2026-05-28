@@ -31,12 +31,17 @@ from app.services.trace_service import TraceService
 
 
 def _chunk(
-    source_identifier: int | str | None,
+    source_identifier: int,
     *,
     chunk_id: int = 1,
     distance: float = 0.0,
 ) -> RetrievedChunk:
-    """Build a minimal ``RetrievedChunk`` for the helper tests."""
+    """Build a minimal ``RetrievedChunk`` for the helper tests.
+
+    Post-Cleanup-B: ``source_identifier`` is int-only; the legacy
+    ``str | None`` cases (which the helper used to filter out) are
+    impossible because the chunk-side ``source_id`` FK is NOT NULL.
+    """
     return RetrievedChunk(
         content="content",
         knowledge_type="luciel_knowledge",
@@ -71,14 +76,6 @@ class TestCollectSourcePks(unittest.TestCase):
     def test_empty_input_returns_empty_list(self):
         self.assertEqual(collect_source_pks([]), [])
 
-    def test_filters_out_strings(self):
-        out = collect_source_pks([_chunk("legacy-id")])
-        self.assertEqual(out, [])
-
-    def test_filters_out_none(self):
-        out = collect_source_pks([_chunk(None)])
-        self.assertEqual(out, [])
-
     def test_keeps_int_ids(self):
         out = collect_source_pks([_chunk(42), _chunk(7)])
         self.assertEqual(out, [42, 7])
@@ -96,18 +93,16 @@ class TestCollectSourcePks(unittest.TestCase):
         ]
         self.assertEqual(collect_source_pks(chunks), [42, 99, 7])
 
-    def test_mixed_int_string_none_preserves_insertion_order_of_ints(self):
-        """The brief's headline case: a real retriever output is a
-        mix of all three. Strings and Nones are dropped; ints keep
-        their first-seen order."""
+    def test_dedupes_with_repeats_preserves_insertion_order(self):
+        """Post-Cleanup-B every source_identifier is an int (the
+        ``knowledge_sources.id`` FK is NOT NULL). The helper's only
+        responsibility is dedupe + insertion-order preservation."""
         chunks = [
             _chunk(10, chunk_id=1),
-            _chunk("legacy", chunk_id=2),
-            _chunk(None, chunk_id=3),
+            _chunk(10, chunk_id=2),
+            _chunk(20, chunk_id=3),
             _chunk(10, chunk_id=4),
-            _chunk(20, chunk_id=5),
-            _chunk("legacy", chunk_id=6),
-            _chunk(30, chunk_id=7),
+            _chunk(30, chunk_id=5),
         ]
         self.assertEqual(collect_source_pks(chunks), [10, 20, 30])
 

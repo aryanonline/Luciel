@@ -80,7 +80,7 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     # 1a. alembic heads is single and points at the latest Arc 11
     # migration (Cleanup A's data_category rename is the post-Step-4
     # head once the no-deferrals closeout lands).
-    expected_head = "arc11_cleanup_a_data_category_rename"
+    expected_head = "arc11_cleanup_b_drop_legacy_source_columns"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],
@@ -135,7 +135,7 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
 
     # 1b. Model metadata: knowledge_sources + knowledge_chunks exist;
     #     traces.source_ids_used column exists; legacy class alias is
-    #     intact.
+    #     GONE (Cleanup B closeout).
     try:
         # Force a stable DATABASE_URL so settings instantiation works
         # without polluting the operator's env.
@@ -143,8 +143,9 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
             "DATABASE_URL", "postgresql+psycopg://x:x@localhost/x"
         )
         os.environ.setdefault("MODERATION_PROVIDER", "null")
+        import app.models.knowledge as _km
         from app.models.base import Base
-        from app.models.knowledge import KnowledgeChunk, KnowledgeEmbedding
+        from app.models.knowledge import KnowledgeChunk
         from app.models.knowledge_source import KnowledgeSource
         from app.models.trace import Trace
 
@@ -192,20 +193,21 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
                 )
             )
 
-        if KnowledgeEmbedding is KnowledgeChunk:
+        if not hasattr(_km, "KnowledgeEmbedding"):
             out.append(
                 _pass(
                     section,
-                    "legacy_alias_preserved",
-                    "KnowledgeEmbedding is KnowledgeChunk",
+                    "legacy_alias_removed",
+                    "KnowledgeEmbedding alias dropped (Cleanup B)",
                 )
             )
         else:
             out.append(
                 _fail(
                     section,
-                    "legacy_alias_preserved",
-                    "alias broken — call sites would break",
+                    "legacy_alias_removed",
+                    "KnowledgeEmbedding alias still present — "
+                    "Cleanup B requires it to be removed",
                 )
             )
 

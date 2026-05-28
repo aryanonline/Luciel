@@ -215,7 +215,7 @@ class KnowledgeSourceRepository:
         Idempotent: a second call within the same window is a no-op
         (the existing stamp is preserved). The chunk-side cascade
         — stamping ``soft_deleted_at`` on every chunk with this
-        ``source_fk`` — lives in ``IngestionService`` / the API
+        ``source_id`` FK — lives in ``IngestionService`` / the API
         handler so the chunks' lifecycle column keeps moving with
         the worker that already owns it (Arc 10 soft-delete worker).
         """

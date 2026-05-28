@@ -4,9 +4,10 @@ One row per uploaded / pasted / crawled knowledge source. Replaces the
 implicit "source = rows-grouped-by-string-source_id on
 knowledge_embeddings" representation that predated Arc 11 (see the
 note in app/models/knowledge.py). Provenance and lifecycle live here;
-chunks live on the ``knowledge_chunks`` table (renamed from
-``knowledge_embeddings`` in Arc 11 Step 2) and FK back via
-``source_fk``.
+chunks live on the ``knowledge_chunks`` table and FK back via
+``KnowledgeChunk.source_id`` (an INTEGER FK to
+``knowledge_sources.id``; renamed from the additive ``source_fk``
+column in Cleanup B).
 
 Anchored to:
   * Architecture v1 §3.2 (Knowledge Subsystem — two-table model).
@@ -141,17 +142,17 @@ class KnowledgeSource(Base):
     )
 
     # ---- Relationships ----
-    # ``back_populates="source_record"`` because the KnowledgeChunk
-    # side already has a legacy free-text ``source`` string column; the
-    # relationship lives under ``source_record`` until the legacy
-    # column is dropped in Arc 11 Step 11. ``KnowledgeChunk`` is the
-    # Arc-11-Step-2 rename of ``KnowledgeEmbedding``; the latter
-    # remains as a module-level alias so existing imports still work.
+    # Cleanup B closeout: the chunk-side FK column is now plain
+    # ``source_id`` (the legacy stringy ``source_id`` column and the
+    # orthogonal free-text ``source`` column were both dropped), and
+    # the relationship reclaims the natural ``source`` name (was
+    # ``source_record`` to avoid the collision with the dropped
+    # free-text column).
     chunks: Mapped[list["KnowledgeChunk"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "KnowledgeChunk",
-        back_populates="source_record",
+        back_populates="source",
         lazy="select",
-        foreign_keys="KnowledgeChunk.source_fk",
+        foreign_keys="KnowledgeChunk.source_id",
     )
 
     # ---- Indexes / constraints — mirror the migration. ----

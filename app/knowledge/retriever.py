@@ -1,10 +1,10 @@
 """
-Knowledge retriever (Step 25b, File 11 — Arc 11 Step 3 update).
+Knowledge retriever — post-Cleanup-B.
 
 Retrieves relevant knowledge from the vector database for a user query
 in a specific (admin, domain, luciel_instance) context.
 
-Step 25b → Arc 11 Step 3:
+Post-Cleanup-B contract:
     - Primary filter dimension stays ``luciel_instance_id`` (Step 24.5).
     - ``agent_id`` remains accepted for legacy rows (pre-Step-24.5).
     - Upward inheritance is delegated to
@@ -18,21 +18,17 @@ Step 25b → Arc 11 Step 3:
     - Never raises: any failure returns ``[]`` so chat is never
       blocked on retrieval.
 
-Two retrieval surfaces (Arc 11 Step 3):
+Two retrieval surfaces:
     * ``retrieve(...)`` — unchanged public shape; returns a
       ``list[str]`` of pre-formatted knowledge strings for direct
       injection into the chat prompt-assembly pipeline. This is what
       every existing call site uses; behaviour is preserved.
-    * ``retrieve_with_sources(...)`` — new richer surface returning a
+    * ``retrieve_with_sources(...)`` — richer surface returning a
       ``list[RetrievedChunk]`` that carries both the formatted
-      string and the chunk's ``source_identifier`` (``int`` for
-      Arc-11-shape chunks, ``str`` for legacy chunks). Used by:
-        - Arc 11 Step 5 (trace instrumentation: populate
-          ``traces.source_ids_used``).
-        - Arc 11 Step 8 (orchestrator Retrieve step).
-      Both call sites need the source identifier; neither needs the
-      full ``KnowledgeSource`` row, so we surface the identifier
-      alone rather than the whole ORM object.
+      string and the chunk's ``source_identifier`` (always ``int``
+      post-Cleanup-B — the INTEGER FK to ``knowledge_sources.id``).
+      Used by trace instrumentation and the orchestrator Retrieve
+      step.
 """
 from __future__ import annotations
 
@@ -52,13 +48,11 @@ class RetrievedChunk:
     downstream code (orchestrator + trace instrumentation) needs.
 
     ``source_identifier`` is the value Step 5 records in
-    ``traces.source_ids_used``. It is typed ``int | str``:
-        - ``int`` when the chunk has a parent ``knowledge_sources``
-          row (Arc 11 shape) — the row's primary key.
-        - ``str`` when the chunk is a legacy row with no FK — the
-          stringy ``source_id``.
-        - ``None`` when neither is set (extremely-pre-Arc-11 chunks
-          that were ingested without any source identifier at all).
+    ``traces.source_ids_used``. Post-Cleanup-B it is always an
+    ``int`` — the ``knowledge_sources.id`` FK, which is NOT NULL on
+    every chunk row. The pre-Cleanup-B ``str`` (legacy stringy
+    ``source_id``) and ``None`` (no source identifier at all) cases
+    are gone with the columns that backed them.
     """
 
     content: str
@@ -66,7 +60,7 @@ class RetrievedChunk:
     title: str | None
     distance: float | None
     chunk_id: int
-    source_identifier: int | str | None
+    source_identifier: int
     formatted: str
     """Pre-formatted ``[<type>] <title>: <content>`` string used by
     the existing chat path. Pre-computed so callers that just want
@@ -127,8 +121,8 @@ class KnowledgeRetriever:
         knowledge_type: str | None = None,
         limit: int = 5,
     ) -> list[RetrievedChunk]:
-        """Richer surface used by Arc 11 Step 5 (trace instrumentation)
-        and Step 8 (orchestrator Retrieve step).
+        """Richer surface used by Step 5 (trace instrumentation) and
+        Step 8 (orchestrator Retrieve step).
 
         Same filtering semantics as ``retrieve``. Returns one
         ``RetrievedChunk`` per row, in the same order. Never raises.
@@ -161,18 +155,10 @@ class KnowledgeRetriever:
             else:
                 formatted = f"[{k_type}] {content}"
 
-            # Prefer the source-row PK (Arc 11 shape) over the legacy
-            # stringy id. Falls back to the stringy id when the chunk
-            # has no FK. ``None`` only for pre-Step-25b chunks that
-            # never carried a source identifier at all.
-            source_record_id = r.get("source_record_id")
-            legacy_string = r.get("source_id")
-            if source_record_id is not None:
-                ident: int | str | None = int(source_record_id)
-            elif legacy_string:
-                ident = legacy_string
-            else:
-                ident = None
+            # Post-Cleanup-B: ``source_id`` is the INTEGER FK and is
+            # NOT NULL on every chunk row. The repository's
+            # search_similar returns it directly.
+            ident = int(r["source_id"])
 
             out.append(
                 RetrievedChunk(
@@ -195,49 +181,26 @@ class KnowledgeRetriever:
 
 
 def collect_source_pks(chunks: Sequence[RetrievedChunk]) -> list[int]:
-    """Reduce a list of ``RetrievedChunk`` to the ``int`` source PKs
-    they carry, de-duplicated, preserving relevance-rank order.
+    """Reduce a list of ``RetrievedChunk`` to the source PKs they
+    carry, de-duplicated, preserving relevance-rank order.
 
-    Used by Arc 11 Step 5 (trace instrumentation) to populate
-    ``traces.source_ids_used`` (a ``BIGINT[]``). Three cases for
-    ``RetrievedChunk.source_identifier``:
-
-      * ``int``  — modern chunk with a ``knowledge_sources`` row.
-                  Included.
-      * ``str``  — legacy chunk whose only source identifier is the
-                  free-form ``source_id`` string. **Excluded**: the
-                  ``traces.source_ids_used`` column is ``BIGINT[]``
-                  so a string would be a type error, and the
-                  Architecture §3.2.2 delete-confirm modal preview
-                  is only meaningful for knowledge_sources rows
-                  anyway (legacy stringless rows are not deletable
-                  through the new UI).
-      * ``None`` — neither populated. Excluded.
+    Used by trace instrumentation to populate
+    ``traces.source_ids_used`` (a ``BIGINT[]``). Post-Cleanup-B
+    every ``RetrievedChunk.source_identifier`` is an ``int`` (the
+    ``knowledge_sources.id`` FK), so the pre-Cleanup-B
+    isinstance-filter for ``str`` / ``None`` legacy chunks is gone.
 
     De-duplication preserves *insertion* order so the first chunk
     that contributed a source PK ranks higher than later chunks
-    that re-used the same source. This is the relevance-rank
-    ordering the retriever already returned chunks in (sort by
-    cosine distance ascending) — preserving it gives Architecture
-    §5.1's "what sources actually contributed" semantics for free.
+    that re-used the same source — relevance-rank order the
+    retriever already returned chunks in (cosine distance asc).
 
-    Pure function: no I/O, no side effects. Step 8's orchestrator
-    invokes it between ``retrieve_with_sources(...)`` and
-    ``TraceService.record_trace(...)``. Step 6 (Celery embed-worker
-    smoke probe) and Step 7 (``POST /internal/v1/retrieve``) will
-    also call it.
+    Pure function: no I/O, no side effects.
     """
     seen: set[int] = set()
     out: list[int] = []
     for chunk in chunks:
         ident = chunk.source_identifier
-        if not isinstance(ident, int):
-            # Catches both ``str`` and ``None``. Booleans are
-            # technically ``isinstance(True, int)`` in Python, but
-            # ``source_identifier`` can never be a bool given the
-            # retriever populates it from a DB column / dict get;
-            # not worth a defensive check.
-            continue
         if ident in seen:
             continue
         seen.add(ident)
