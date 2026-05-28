@@ -84,13 +84,16 @@ def _rename_policies(old_prefix: str, new_prefix: str) -> None:
             new_name TEXT;
         BEGIN
             FOR r IN
-                SELECT polname
+                -- pg_policies exposes the policy name as ``policyname``
+                -- (the underlying pg_policy catalog column is ``polname``;
+                -- the view renames it). Use the view's column name here.
+                SELECT policyname
                   FROM pg_policies
                  WHERE schemaname = 'public'
                    AND tablename  = 'knowledge_chunks'
-                   AND polname LIKE '{old_prefix}%'
+                   AND policyname LIKE '{old_prefix}%'
             LOOP
-                old_name := r.polname;
+                old_name := r.policyname;
                 new_name := '{new_prefix}'
                           || substring(old_name FROM length('{old_prefix}') + 1);
                 EXECUTE format(
