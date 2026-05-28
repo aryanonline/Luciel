@@ -13,14 +13,17 @@ registry, broker, schema validator, and authorisation gate can all
 reason about this tool; ``execute()`` performs NO side effect and
 returns a structured "not yet available" dict.
 
-Arc anchor: best guess is Arc 14 — the admin-side property source
-configuration UI + retrieval naturally pairs with the agentic loop
-work. This may be reassigned by the founder; flagged in the WU3
-final report.
+Arc anchor: UNASSIGNED. The canonical documents (Architecture §3.3.2)
+name the data source as "MLS or admin-uploaded CSV" but do NOT assign
+an owning arc to that property-source infrastructure. This is a
+document gap flagged for founder review in the Arc 12 closeout — it is
+NOT confidently an Arc 14 deliverable. Do not treat the anchor as
+settled until the founder assigns one.
 """
 
-# TODO(ARC14): replace this interim body once an admin-configured
-# property source (CSV / MLS connector) lands.
+# TODO(ARC-UNASSIGNED): replace this interim body once the founder
+# assigns an owning arc for the admin-configured property source
+# (CSV upload / MLS connector). Flagged in the Arc 12 closeout gap list.
 
 from __future__ import annotations
 
@@ -102,9 +105,10 @@ class LookupPropertyTool(LucielTool):
             "output": (
                 "lookup_property is registered but no admin-configured "
                 "property source (CSV / MLS connector) exists yet "
-                "(owning arc: ARC14). No results were returned."
+                "(owning arc unassigned in the canonical documents — "
+                "founder review). No results were returned."
             ),
             "results": [],
             "not_yet_available": True,
-            "owning_arc": "ARC14",
+            "owning_arc": "UNASSIGNED",
         }

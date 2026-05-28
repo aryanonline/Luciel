@@ -13,9 +13,13 @@ this same arc. Until WU6 lands, push_to_crm declares its full
 §3.3.1 contract but ``execute()`` performs NO side effect — it
 returns a structured "not yet available" dict.
 
-Arc anchor: Arc 12 WU6 (the BYO webhook subprocess sandbox).
-Flagged for founder review in case a dedicated CRM adapter is
-preferred over the BYO path.
+Arc anchor (partial): Architecture §3.3.2 names three CRM paths —
+"HubSpot, Salesforce, custom webhook." The custom-webhook path can
+ride Arc 12 WU6's BYO outbound mechanism (anchor: ARC12_WU6). The
+native HubSpot/Salesforce connector paths have NO owning arc assigned
+in the canonical documents — that is a document gap flagged for
+founder review in the Arc 12 closeout. Do not treat native-CRM
+support as scheduled until the founder assigns an arc.
 """
 
 # TODO(ARC12_WU6): replace this interim body with a dispatch through
