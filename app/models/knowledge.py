@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -118,6 +118,36 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     )
     """Set when a newer version of this source_id is ingested. NULL = active.
     Retrieval (File 11) filters on superseded_at IS NULL."""
+
+    # Arc 11 Step 1 (arc11_a_knowledge_sources_schema) — additive FK to
+    # the new knowledge_sources table. Nullable for the duration of the
+    # Arc 11 cutover; ingestion (Step 3) starts populating it, and
+    # Step 11 drops the legacy string source_id above, renames this
+    # column to source_id, and makes it NOT NULL. Until then, the
+    # legacy string source_id and source_fk coexist.
+    source_fk: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "knowledge_sources.id",
+            ondelete="CASCADE",
+            name="fk_knowledge_embeddings_source_fk",
+        ),
+        nullable=True,
+        index=True,
+    )
+    # NOTE: The relationship is named ``source_record`` rather than
+    # ``source`` because this class already exposes a legacy ``source``
+    # column (a free-form string reference; see above). Step 11 of
+    # Arc 11 drops the legacy string ``source_id`` and renames
+    # ``source_fk`` → ``source_id``. The legacy free-text ``source``
+    # string is orthogonal and stays. To keep the relationship name
+    # collision-free across the cutover, we call it ``source_record``.
+    source_record: Mapped["KnowledgeSource | None"] = relationship(  # type: ignore[name-defined]  # noqa: F821
+        "KnowledgeSource",
+        back_populates="chunks",
+        lazy="select",
+        foreign_keys="KnowledgeEmbedding.source_fk",
+    )
 
     # Arc 10 (Alembic arc10_lifecycle_subsystem) — two lifecycle flags
     # distinct from superseded_at:

@@ -1,5 +1,6 @@
 from app.models.api_key import ApiKey
 from app.models.knowledge import KnowledgeEmbedding
+from app.models.knowledge_source import KnowledgeSource  # noqa: F401  (Arc 11 Step 1)
 from app.models.memory import MemoryItem
 from app.models.message import MessageModel
 from app.models.session import SessionModel
@@ -55,6 +56,7 @@ __all__ = [
     "RetentionPolicy",
     "Trace",
     "KnowledgeEmbedding",
+    "KnowledgeSource",
     "AdminAuditLog",
     "User",
     "ScopeAssignment",
