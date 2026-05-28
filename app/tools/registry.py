@@ -22,8 +22,26 @@ table.
 from __future__ import annotations
 
 from app.tools.base import LucielTool
+from app.tools.implementations.book_appointment_tool import (
+    BookAppointmentTool,
+)
+from app.tools.implementations.bring_your_own_webhook_tool import (
+    BringYourOwnWebhookTool,
+)
+from app.tools.implementations.call_sibling_luciel_tool import (
+    CallSiblingLucielTool,
+)
 from app.tools.implementations.escalate_tool import EscalateTool
+from app.tools.implementations.lookup_property_tool import (
+    LookupPropertyTool,
+)
+from app.tools.implementations.push_to_crm_tool import PushToCrmTool
 from app.tools.implementations.save_memory_tool import SaveMemoryTool
+from app.tools.implementations.schedule_callback_tool import (
+    ScheduleCallbackTool,
+)
+from app.tools.implementations.send_email_tool import SendEmailTool
+from app.tools.implementations.send_sms_tool import SendSmsTool
 from app.tools.implementations.session_summary_tool import SessionSummaryTool
 
 
@@ -37,11 +55,32 @@ class ToolRegistry:
     def _register_defaults(self) -> None:
         """Register the built-in tools.
 
-        The three "cognition" tools (save_memory, session_summary,
-        escalate_to_human) are still registered here at WU1; WU7
-        evicts them when the cognition module subsumes their
-        behaviour.
+        Two groups today:
+
+        * **v1 catalog** (Arc 12 WU3, §3.3.2): the 8 configurable
+          tools every Pro/Enterprise instance can opt into via the
+          per-instance authorisation table (WU2). These are the
+          steady-state catalog; some carry interim execute() bodies
+          per the 00_MASTER "interim-body rule" (see each tool's
+          module docstring for the owning arc).
+
+        * **Cognition** (escalate / save_memory / session_summary):
+          interim — these still live in the registry at WU3 but get
+          evicted to the always-on cognition module in WU7 per
+          founder ruling 4. Cognition is non-tier-gated and runs
+          directly from chat_service after WU7, NOT via the broker.
         """
+        # v1 catalog (WU3)
+        self.register(BookAppointmentTool())
+        self.register(SendEmailTool())
+        self.register(SendSmsTool())
+        self.register(LookupPropertyTool())
+        self.register(ScheduleCallbackTool())
+        self.register(PushToCrmTool())
+        self.register(CallSiblingLucielTool())
+        self.register(BringYourOwnWebhookTool())
+
+        # Cognition (interim — evicted in WU7).
         self.register(SaveMemoryTool())
         self.register(SessionSummaryTool())
         self.register(EscalateTool())
