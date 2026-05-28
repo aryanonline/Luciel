@@ -14,14 +14,14 @@
 #   admin key into the runner -- a multi-minute job per push. The
 #   pillar suite is run instead via 'python -m app.verification' in
 #   the luciel-verify ECS task definition against the production-or-
-#   staging backend, which is the verify gate of record (see
-#   docs/CANONICAL_RECAP.md section 4.4 "Step 29 verification doctrine").
+#   staging backend, which is the verify gate of record (anchor:
+#   Architecture v1 §6 operational maturity / verify gate contract).
 #
-#   Arc 9 doctrine D7.3 (added with PR #78): this workflow is the
-#   required check on the 'main' branch protection rule. No PR merges
-#   to main with a red CI run, full stop. The procedure for landing a
-#   doctrinal exception is documented in .github/branch-protection.md
-#   under "Admin merge procedure" and requires explicit recording in
+#   Per Architecture v1 §6 (operational maturity — CI gate contract):
+#   this workflow is the required check on the 'main' branch
+#   protection rule. No PR merges to main with a red CI run, full
+#   stop. Branch protection enforces this gate at the GitHub repo
+#   level. Any admin-merge override requires explicit recording in
 #   the PR description.
 #
 #   Seven test references that were stale on main between Arc 7 and

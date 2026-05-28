@@ -9,7 +9,7 @@ transcription hazard documented in:
   - drift D-ecs-service-name-asymmetry-with-td-family-2026-05-05
   - CANONICAL_RECAP v3.0 Section 15 ("Phase 3 closure sweep")
   - this script's sister runbook section
-    (docs/runbooks/operator-patterns.md "AWS CLI naming hygiene")
+    (Architecture v1 §6 — operator patterns / AWS CLI naming hygiene)
 
 Convention (canonical, do not deviate):
 

@@ -5,7 +5,7 @@
     "expansion_date": "2026-05-23",
     "expansion_anchor": "Arc 6 Commit 2 — Stripe Live wipe + Commit 4 — Stripe mint + SSM put",
     "scope_protocol_drift": "D-prod-credential-scope-expansion-protocol-2026-05-23",
-    "canonical_runbook": "docs/runbooks/aws-sandbox-credential-posture.md §3-bis + §8 (entries land in same commit)",
+    "canonical_anchor": "Architecture v1 §6 (operational maturity — IAM scope expansion contract)",
     "policy_arn": "arn:aws:iam::729005488042:policy/LucielSandboxStripeScope",
     "policy_shape": "customer-managed (AWS::IAM::ManagedPolicy)",
     "policy_size_chars": 646,

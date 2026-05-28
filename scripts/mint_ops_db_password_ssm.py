@@ -26,7 +26,7 @@ ALTER ROLE call, then discarded.
 
 Usage (production, after Commit 7's migration has been applied to prod
 RDS via the luciel-migrate ECS one-shot task -- see
-docs/runbooks/step-28-commit-8-luciel-worker-sg.md):
+Architecture v1 §6 — operational maturity / worker SG contract):
 
     python -m scripts.mint_ops_db_password_ssm \\
         --admin-db-url "postgresql://<su>:<pw>@<host>:5432/<db>?sslmode=require" \\
@@ -92,7 +92,7 @@ stable, repeatedly-used SSM path).
 Cross-references:
   - Migration that creates the role: alembic/versions/
     arc9_c6_1_luciel_ops_role.py (Arc 9 C6.1)
-  - Operator runbook for prod execution: docs/runbooks/
+  - Operator anchor for prod execution: Architecture v1 §6
     step-28-commit-8-luciel-worker-sg.md
 """
 
@@ -335,7 +335,7 @@ def _redact_dsn_in_message(msg: str) -> str:
 
     Incident reference: 2026-05-03 mint dry-run leaked admin DSN to
     CloudWatch via psycopg ProgrammingError on `+psycopg` driver
-    prefix. See docs/recaps/2026-05-03-mint-incident.md.
+    prefix. See Architecture v1 §6 (mint architecture).
     """
     return _DSN_REDACT_RE.sub("<DSN-REDACTED>", msg)
 

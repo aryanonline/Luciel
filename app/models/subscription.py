@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 # Tier constants — V2 SHAPE (Arc 5 B8, 2026-05-23).
 #
 # The v1 4-tier surface (TIER_INDIVIDUAL/TEAM/COMPANY) was DELETED at
-# Arc 5 Commit 17 (B8) per docs/DRIFTS.md
+# Arc 5 Commit 17 (B8) 
 # D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23. The V2
 # canonical shape is Free / Pro / Enterprise (lowercase wire strings).
 #

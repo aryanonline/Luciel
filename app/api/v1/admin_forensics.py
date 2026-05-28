@@ -102,7 +102,7 @@ These endpoints do NOT write admin_audit_log rows on call. Rationale:
 
 If a future compliance requirement ever demands read-auditing, that
 should be a uniform repo-wide change, not a one-off for this module.
-The decision is recorded in `docs/CANONICAL_RECAP.md` Section 4.4
+The decision is recorded in the Architecture document in the Space
 (Step 29 commit order) so future readers can find the rationale.
 
 Producer-side exemption cross-reference
@@ -115,8 +115,8 @@ verification pillar may act as a direct Celery producer or service-
 layer caller WHEN AND ONLY WHEN the assertion under test is a
 property of the producer-side path itself (latency, idempotency,
 worker response to a payload shape that the HTTP API contract does
-not permit). See `docs/STEP_29_AUDIT.md` Section 6 and
-`docs/CANONICAL_RECAP.md` Section 15 for the full rule.
+not permit). See the audit doctrine and
+the Architecture document in the Space for the full rule.
 
 Authored: Aryan Singh <aryans.www@gmail.com>, Step 29 Commit C.1.
 """

@@ -1,11 +1,10 @@
 """Instance ORM model — V2 unit replacing LucielInstance + Agent (Arc 5 B1).
 
 Mirrors the ``instances`` table created at Revision A
-(``alembic/versions/arc5_a_admin_instance_additive.py``). Replaces the
-legacy ``LucielInstance`` (``app/models/luciel_instance.py``) and the
-legacy ``Agent`` (``app/models/agent.py``) — both deleted in the same B1
-commit per the aggressive-cleanup amendment
-(``docs/DRIFTS.md`` ``D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23``).
+(``alembic/versions/arc5_a_admin_instance_additive.py``). The Instance
+entity is the V2 config carrier per Architecture v1 §3.2 (Instance
+subsystem) — it replaces the V1 LucielInstance + Agent split and
+holds the five configuration pillars per Vision v1 §3.
 
 Schema anchors
 --------------

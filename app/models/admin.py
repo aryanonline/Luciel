@@ -1,10 +1,9 @@
 """Admin ORM model — V2 billing entity and permissions root (Arc 5 B1).
 
 Mirrors the ``admins`` table created at Revision A
-(``alembic/versions/arc5_a_admin_instance_additive.py``). Replaces the
-legacy ``TenantConfig`` (``app/models/tenant.py``) which is deleted in
-the same B1 commit per the aggressive-cleanup amendment
-(``docs/DRIFTS.md`` ``D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23``).
+(``alembic/versions/arc5_a_admin_instance_additive.py``). The Admin
+entity is the V2 billing root per Architecture v1 §3.2 (Instance
+subsystem).
 
 Schema anchors
 --------------

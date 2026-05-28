@@ -8,7 +8,6 @@ Entrypoint (ECS task-def command):
     celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
 
 Security & Invariant Contract:
-    docs/runbooks/step-27b-security-contract.md
 
 The FastAPI web process imports only `enqueue_*` helpers from
 `app.memory.service`. It never imports Celery directly. Celery imports

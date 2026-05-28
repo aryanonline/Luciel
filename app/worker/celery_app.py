@@ -123,7 +123,7 @@ def _stop_heartbeat(sender=None, **kwargs):  # noqa: ARG001
 # source of truth defined in `app.core.config`. CELERY_BROKER_URL is
 # kept as a direct env read because it is broker-selection state
 # (sqs:// vs redis://...) that does NOT belong in `Settings.redis_url`.
-# See `docs/architecture/broker-and-limiter.md` for the full split.
+# See (see the Architecture document in the Space)for the full split.
 #
 # Two supported broker modes:
 #   1. SQS (prod):  CELERY_BROKER_URL=sqs://  + AWS creds via task role
@@ -136,7 +136,7 @@ def _stop_heartbeat(sender=None, **kwargs):  # noqa: ARG001
 # our prod async-extraction workload anyway (already provisioned in Phase 1
 # of the Step 27b deploy runbook). ElastiCache Redis IS used in prod, but
 # only as the rate-limit storage backend (see app/middleware/rate_limit.py
-# and docs/architecture/broker-and-limiter.md).
+# and (see the Architecture document in the Space)).
 BROKER_URL: str = os.environ.get(
     "CELERY_BROKER_URL",
     settings.redis_url,
@@ -351,7 +351,7 @@ install_audit_chain_event()
 # What this guard does NOT do.
 #   It does not explain why the prior task drifted. It is a defensive
 #   eager-init, not a root-cause fix. The investigation is documented
-#   in docs/CANONICAL_RECAP.md (recap v3.5) as open verify-debt:
+#   in the Architecture document in the Space (open verify-debt):
 #   "Producer-pool transport_options drift on aged uvicorn tasks --
 #   mechanism unknown; warmup guard added; if drift recurs the
 #   warning log below will fire on the next probe call."

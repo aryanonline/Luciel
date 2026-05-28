@@ -64,7 +64,7 @@ per Admin maps to one override entity per Admin.
 
 The drift opened by this judgment is recorded as
 ``D-admin-tier-overrides-shape-preflight-stale-2026-05-23`` in
-``docs/DRIFTS.md`` (resolved-on-arrival — the preflight prose is
+the Arc 5 preflight (resolved-on-arrival — the preflight prose is
 truthified in the same commit window).
 
 **Tier CHECK constraint is PERMISSIVE during the migration window.**

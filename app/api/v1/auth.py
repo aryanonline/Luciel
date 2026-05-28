@@ -25,12 +25,10 @@ Cookie semantics are identical to the magic-link path -- ``mint_session_token``
 middleware already understands ({sub, scope: "session", iat, exp}); the
 middleware does not care which surface minted the cookie.
 
-Full architecture: see docs/ARCHITECTURE.md §3.2.13 (Billing surface --
+Full architecture: see Vision v1 §3 and Architecture v1 §3.2 (Billing surface --
 Step 30a.3 password sub-surface).
-Roadmap row: docs/CANONICAL_RECAP.md §12 Step 30a.3 (closing tag
+Roadmap row: Architecture v1 (V2 closure flow)
 ``step-30a-3-password-auth-mandatory-at-signup-complete``).
-Drift closure: docs/DRIFTS.md §3
-``D-magic-link-only-auth-no-password-fallback-2026-05-16``.
 """
 from __future__ import annotations
 

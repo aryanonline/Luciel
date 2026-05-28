@@ -954,8 +954,8 @@ def create_luciel_instance(
 # The Step 30a.1 _invite_teammate helper that previously sat here was
 # deleted in Step 30a.5 along with the schema field and the deprecated
 # email-send block above. The first-class invite path is POST
-# /admin/invites (Step 30a.4) -- see docs/designs/step-30a-5-company-
-# self-serve.md §8 for the removal rationale and migration notes.
+# /admin/invites (Step 30a.4) -- see Architecture v1 §3.2 (Instance
+# subsystem / Team Member invite path) for the canonical contract.
 # invite_service.create_invite() now carries the User + Agent +
 # ScopeAssignment provisioning logic that _invite_teammate used to
 # duplicate (see app/services/invite_service.py line 308+).

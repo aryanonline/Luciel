@@ -3,7 +3,7 @@
 This directory holds one harness per closed roadmap step. Each
 harness exercises the **shipped production code paths** for that
 step against the **literal success criteria** for that step's row
-in `docs/CANONICAL_RECAP.md` §12.
+in Architecture v1 §6 (operational maturity — E2E test contract).
 
 Why this exists
 ---------------
@@ -55,7 +55,7 @@ script is green.
 How to write a new harness when closing a step
 ----------------------------------------------
 
-1. Open `docs/CANONICAL_RECAP.md` §12 and find the row for the
+1. Open Architecture v1 §6 (operational maturity) and find the row for the
    step you are closing. The cell labelled "How we'll know we're
    successful" is your assertion list.
 2. Copy `step_30c_live_e2e.py` as a template (it documents the

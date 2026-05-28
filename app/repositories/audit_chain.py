@@ -266,7 +266,7 @@ def install_audit_chain_event() -> None:
     from app.main module-import time; an ad-hoc heredoc in the prod-ops
     container on 2026-05-08 imported SessionLocal without app.main and
     wrote audit row 3445 with NULL hashes. Backfilled by hand; full
-    detail in docs/postmortems/2026-05-08-platform-admin-consolidation.md.
+    detail in the relevant postmortem (now removed; see git history).
 
     Pure-SQL inserts that bypass the ORM entirely (none in current code,
     but possible in future scripts) would NOT get hashes -- Pillar 23
