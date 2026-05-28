@@ -129,6 +129,7 @@ class KnowledgeSourceRead(BaseModel):
     origin_url: str | None
     ingestion_status: str
     ingestion_error: str | None
+    ingestion_error_code: str | None = None
     ingested_by: str
     ingested_at: datetime
     last_viewed_at: datetime | None
@@ -390,6 +391,7 @@ def _serialise_source(s: KnowledgeSource, *, chunk_count: int) -> KnowledgeSourc
         origin_url=s.origin_url,
         ingestion_status=s.ingestion_status,
         ingestion_error=s.ingestion_error,
+        ingestion_error_code=s.ingestion_error_code,
         ingested_by=s.ingested_by,
         ingested_at=s.ingested_at,
         last_viewed_at=s.last_viewed_at,
@@ -922,7 +924,7 @@ def affected_questions(
 
 
 # =====================================================================
-# 4.7 POST /crawl — website crawl (Pro/Enterprise only; Arc-14 stub)
+# 4.7 POST /crawl — website crawl (Pro/Enterprise only; deferred-feature stub)
 # =====================================================================
 
 
@@ -964,7 +966,7 @@ def start_crawl(
 
     # Create a knowledge_sources row at 'pending' with source_type='crawl'
     # and the origin URL. The crawl_website stub task flips it to
-    # 'failed' with the Arc-14 deferred-feature error.
+    # 'failed' with the CRAWL_NOT_YET_AVAILABLE deferred-feature code.
     source_uuid = uuid.uuid4()
     source_repo = KnowledgeSourceRepository(db)
     ingested_by = (
