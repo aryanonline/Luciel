@@ -453,6 +453,19 @@ ALLOWED_ACTIONS = (
     # (partial-state bug). Closing here so the move-to-cold path is fully
     # transactional end-to-end.
     ACTION_AUDIT_LOG_TIER_ARCHIVED,
+    # Arc 10 Gap 7 closure: both ClosureService.initiate_closure and
+    # ReactivationService.complete_reactivation declare their action
+    # constants in this module but were never wired into ALLOWED_ACTIONS.
+    # The constants were defined; the membership wiring was forgotten.
+    # Net effect: ClosureService.initiate_closure crashed with
+    # ValueError on every close attempt, and ReactivationService would
+    # have done the same on every reactivation attempt. Anchored to
+    # Architecture v1 §3.6.2 (Account Closure Flow) which lists "Record
+    # closure-initiation timestamp on the admin" as step 6 and the
+    # 30-day grace reactivation as the recoverable path; both are
+    # first-class audit events.
+    ACTION_ACCOUNT_CLOSURE_INITIATED,
+    ACTION_ACCOUNT_REACTIVATED,
 )
 
 
@@ -659,10 +672,23 @@ class AdminAuditLog(Base, TimestampMixin):
     agent_id: Mapped[str | None] = mapped_column(
         String(100), nullable=True, index=True
     )
-    # Arc 9.1 Phase A (2026-05-25): NOT NULL. See arc9_1_a_tenant_isolation_seal.
-    luciel_instance_id: Mapped[int] = mapped_column(
-        Integer, nullable=False, index=True,
-        comment="PK of the luciel_instances row. Arc 9.1: required.",
+    # Arc 10 Gap 7 (2026-05-27): loosened back to nullable. The Arc
+    # 9.1 Phase A tenant-isolation seal applied NOT NULL too
+    # broadly. Per Architecture v1 §3.7.3 (Wall 3), the non-null
+    # instance_id rule applies to customer-data tables; per §5.3
+    # the admin audit log is a distinct concept (append-only audit
+    # chain, separate DB role). §3.6.2 also requires admin-scoped
+    # audit emissions (team-member invalidation, embed-key revocation)
+    # which by their nature have no single instance scope. NULL here
+    # means "this audit row records an admin-scoped op spanning all
+    # instances"; non-NULL still means "scoped to this instance".
+    luciel_instance_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True,
+        comment=(
+            "PK of the instances row this audit row is scoped to. "
+            "NULL = admin-scoped op (cascade, team-member ops, etc.) "
+            "spanning all of the admin's instances."
+        ),
     )
 
     # -----------------------------------------------------------------

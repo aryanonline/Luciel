@@ -45,7 +45,7 @@ CANONICAL_CASCADE_LAYERS: tuple[tuple[int, str], ...] = (
     (2, "identity_claims"),
     (3, "memory_items"),
     (4, "api_keys"),
-    (5, "luciel_instances"),
+    (5, "instances"),
     (6, "scope_assignments"),
     (7, "user_invites"),
     (8, "sessions"),
@@ -232,3 +232,58 @@ def test_cascade_does_not_query_dropped_agent_configs_table():
                 f"cascade body references dropped agent_configs surface: "
                 f"{m.group(0)!r} on line {line.strip()!r}"
             )
+
+
+# ---------------------------------------------------------------------
+# Arc 10 Gap 7 closure: the instances cascade layer must call through
+# InstanceService.cascade_on_admin_deactivate, NOT bypass to the
+# repository's old (renamed-away) deactivate_all_for_tenant method.
+#
+# Anchored to Architecture v1 \u00a73.6.2 step 3 ("All instances deactivated
+# cascade per 3.6.1") -- the cascade invocation is what the doctrine
+# names; mismatched method names are a production bug, not a stylistic
+# choice. Surfaced live when ClosureService.initiate_closure crashed
+# with AttributeError on the first close attempt against the local
+# Postgres baseline.
+# ---------------------------------------------------------------------
+
+def test_cascade_calls_instance_service_cascade_hook():
+    """Layer 5 must call InstanceService.cascade_on_admin_deactivate.
+
+    Two forbidden shapes:
+      1. ``.repo.deactivate_all_for_tenant(...)`` (renamed away in
+         Arc 9.2 PR #101 \u2014 tenant_id collapsed to admin_id).
+      2. ``.repo.deactivate_all_for_admin(...)`` directly (bypasses
+         the service-layer audit emission policy).
+
+    The only correct shape is
+    ``luciel_instance_service.cascade_on_admin_deactivate(...)``.
+    """
+    src = _service_src()
+    # Must call the cascade hook.
+    assert (
+        "luciel_instance_service.cascade_on_admin_deactivate(" in src
+    ), (
+        "Layer 5 must invoke "
+        "luciel_instance_service.cascade_on_admin_deactivate(...) per "
+        "Architecture v1 \u00a73.6.2 step 3."
+    )
+    # Must NOT call the renamed-away repo method on the instance
+    # repository specifically. We scope the check to the cascade body
+    # so other methods on the module that legitimately retain a
+    # _for_tenant name (e.g. bulk_soft_deactivate_memory_items_for_
+    # tenant) don't trip the assertion.
+    start = src.find("def deactivate_tenant_with_cascade(")
+    assert start >= 0
+    next_def = src.find("\n    def ", start + 1)
+    cascade_body = src[start:next_def if next_def > 0 else len(src)]
+    assert ".repo.deactivate_all_for_tenant" not in cascade_body, (
+        "Cascade body must not reference repo.deactivate_all_for_tenant -- "
+        "that method was renamed to deactivate_all_for_admin in Arc 9.2 "
+        "PR #101 (tenant_id -> admin_id collapse)."
+    )
+    # Must NOT bypass the service to the repo for this layer.
+    assert "luciel_instance_service.repo.deactivate_all_for_admin" not in src, (
+        "Cascade must not bypass InstanceService to call the repo "
+        "directly; the service hook emits the per-instance audit rows."
+    )
