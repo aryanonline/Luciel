@@ -1,39 +1,37 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Arc 11 Step 6 — knowledge S3 bucket (luciel-knowledge-prod-ca-central-1)
-  and the IAM managed policy granting the backend (luciel-ecs-web-role)
-  and worker (luciel-ecs-worker-role) tasks GetObject / PutObject /
-  DeleteObject on the bucket. Region ca-central-1, account 729005488042.
+  Arc 11 — knowledge S3 bucket (luciel-knowledge-prod-ca-central-1)
+  + IAM managed policy for backend/worker task roles. AES256,
+  versioning suspended, all-public-access blocked, no CORS, lifecycle
+  for incomplete uploads + noncurrent versions. Bucket lives in
+  ca-central-1. Architecture v1 §3.2 + §4.
 
-  Bucket posture:
-    * SSE-S3 (AES256) — Architecture v1 §4.2: AWS-managed KMS at v1.
-    * Versioning Suspended. The knowledge_sources.source_version column
-      already provides version semantics at the row level; S3
-      versioning would just duplicate that and grow cost.
-    * BlockPublicAccess: all four flags true. Uploads go through the
-      backend API (presigned URLs or direct PUT through FastAPI); the
-      browser never talks to S3 directly in v1, so CORS stays
-      disabled.
-    * Lifecycle: abort incomplete multipart uploads after 7 days;
-      expire noncurrent versions / delete markers after 30 days.
-      Objects themselves are NOT auto-expired — the soft-delete
-      worker deletes them through the API path so audit + cascade
-      stay in sync.
-
-  Cutover plan:
-    Once Arc 11 ships, deploy with:
-
-        aws cloudformation deploy \
-            --template-file cfn/knowledge-bucket.yaml \
-            --stack-name luciel-knowledge-bucket \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --region ca-central-1
-
-    Stack creates the bucket + the managed policy and attaches the
-    policy to the two task roles. CAPABILITY_NAMED_IAM is required
-    because the policy has an explicit ``ManagedPolicyName``. The
-    template is NOT deployed from this PR; Step 11 (close audit)
-    runs the deploy with founder approval.
+# Bucket posture (CFN ignores comments, but they document the
+# architectural intent that the Description block can't carry under
+# CloudFormation's 1024-char limit):
+#
+#  * SSE-S3 (AES256) — Architecture v1 §4.2: AWS-managed KMS at v1.
+#  * Versioning Suspended. The knowledge_sources.source_version column
+#    already provides version semantics at the row level; S3 versioning
+#    would just duplicate that and grow cost.
+#  * BlockPublicAccess: all four flags true. Uploads go through the
+#    backend API (presigned URLs or direct PUT through FastAPI); the
+#    browser never talks to S3 directly in v1, so CORS stays disabled.
+#  * Lifecycle: abort incomplete multipart uploads after 7 days;
+#    expire noncurrent versions / delete markers after 30 days.
+#    Objects themselves are NOT auto-expired — the soft-delete worker
+#    deletes them through the API path so audit + cascade stay in sync.
+#
+# Cutover deploy:
+#   aws cloudformation deploy \
+#     --template-file cfn/knowledge-bucket.yaml \
+#     --stack-name luciel-knowledge-bucket \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --region ca-central-1
+#
+# Stack creates the bucket + the managed policy and attaches the policy
+# to the two task roles. CAPABILITY_NAMED_IAM is required because the
+# policy has an explicit ManagedPolicyName.
 
 Parameters:
   BucketName:
@@ -143,10 +141,10 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: luciel-knowledge-bucket-access
-      Description: >
-        Arc 11 Step 6 — read / write / delete on the knowledge S3
-        bucket. Attached to luciel-ecs-web-role (backend) and
-        luciel-ecs-worker-role (worker). No ListBucket grant — every
+      Description: >-
+        Arc 11 - read/write/delete on the knowledge S3 bucket.
+        Attached to luciel-ecs-web-role (backend) and
+        luciel-ecs-worker-role (worker). No ListBucket grant - every
         operation is keyed on a known object path (s3_key stored on
         the knowledge_sources row); a List grant would let a
         compromised role enumerate other admins' object keys.
@@ -170,6 +168,69 @@ Resources:
               - s3:AbortMultipartUpload
             Resource:
               - !Sub "arn:aws:s3:::${BucketName}/*"
+
+  # ---------------------------------------------------------------------
+  # SQS queues for the embed-worker Celery pipeline.
+  # The DLQ MUST be declared before the main queue so the RedrivePolicy
+  # can resolve its ARN via !GetAtt at template-resolution time.
+  # ---------------------------------------------------------------------
+  KnowledgeDlqQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: luciel-knowledge-dlq
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+
+  KnowledgeTasksQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: luciel-knowledge-tasks
+      MessageRetentionPeriod: 345600
+      VisibilityTimeout: 30
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt KnowledgeDlqQueue.Arn
+        maxReceiveCount: 3
+
+  # ---------------------------------------------------------------------
+  # IAM managed policy that grants the existing backend + worker task
+  # roles read/send/receive on the knowledge queues. This replaces the
+  # ad-hoc inline-policy patches the live deploy applied via
+  # put-role-policy; attaching a managed policy keeps the role-policy
+  # graph reviewable in one place.
+  # ---------------------------------------------------------------------
+  KnowledgeSqsAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: luciel-knowledge-sqs-access
+      Description: >-
+        Arc 11 - SQS access on the knowledge-tasks + knowledge-dlq
+        queues. Backend gets enqueue + read-attrs; worker gets the
+        full ReceiveMessage/DeleteMessage/ChangeMessageVisibility set.
+      Roles:
+        - !Ref BackendTaskRoleName
+        - !Ref WorkerTaskRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: KnowledgeQueueReadAttrs
+            Effect: Allow
+            Action:
+              - sqs:GetQueueUrl
+              - sqs:GetQueueAttributes
+            Resource:
+              - !GetAtt KnowledgeTasksQueue.Arn
+              - !GetAtt KnowledgeDlqQueue.Arn
+          - Sid: KnowledgeQueueDispatch
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:ChangeMessageVisibility
+            Resource:
+              - !GetAtt KnowledgeTasksQueue.Arn
+              - !GetAtt KnowledgeDlqQueue.Arn
 
 Outputs:
 
