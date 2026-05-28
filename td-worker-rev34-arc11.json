@@ -1,123 +1,109 @@
 {
-    "_comment_arc11_step6": [
-        "Arc 11 Step 6 — adds the knowledge ingest pipeline to the worker.",
-        "Diff vs td-worker-rev33.json:",
-        "  1. `command` now includes both queues via `-Q luciel-memory-tasks,luciel-knowledge-tasks`",
-        "     so this worker drains both the chat-path memory_extraction queue and the new",
-        "     embed_source queue. Concurrency stays at 2 — embed work is CPU-bound on the chunk",
-        "     embed step; ECS autoscaling adds replicas if backlog grows.",
-        "  2. New env var KNOWLEDGE_S3_BUCKET sourced from SSM parameter",
-        "     /luciel/production/knowledge_s3_bucket (stamped at the same Step 11 deploy that",
-        "     creates the bucket via cfn/knowledge-bucket.yaml).",
-        "  3. CFN stack luciel-knowledge-bucket attaches the KnowledgeBucketAccessPolicy",
-        "     managed policy to luciel-ecs-worker-role; no task-def IAM change needed here.",
-        "Not deployed by this PR. Step 11 (close audit) registers + flips the service."
-    ],
-    "containerDefinitions": [
+  "containerDefinitions": [
+    {
+      "name": "luciel-worker",
+      "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend:main-8789601",
+      "cpu": 0,
+      "portMappings": [],
+      "essential": true,
+      "command": [
+        "celery",
+        "-A",
+        "app.worker.celery_app",
+        "worker",
+        "--beat",
+        "--loglevel=info",
+        "-Q",
+        "luciel-memory-tasks,luciel-knowledge-tasks",
+        "--concurrency=2",
+        "--without-gossip",
+        "--without-mingle",
+        "--without-heartbeat"
+      ],
+      "environment": [
         {
-            "name": "luciel-worker",
-            "image": "729005488042.dkr.ecr.ca-central-1.amazonaws.com/luciel-backend@sha256:b4c145eb3f876f30fec947e7d58080c570eabf5ddce587815eb28d98214c4dff",
-            "cpu": 0,
-            "portMappings": [],
-            "essential": true,
-            "command": [
-                "celery",
-                "-A",
-                "app.worker.celery_app",
-                "worker",
-                "--beat",
-                "--loglevel=info",
-                "-Q",
-                "luciel-memory-tasks,luciel-knowledge-tasks",
-                "--concurrency=2",
-                "--without-gossip",
-                "--without-mingle",
-                "--without-heartbeat"
-            ],
-            "environment": [
-                {
-                    "name": "MEMORY_EXTRACTION_ASYNC",
-                    "value": "true"
-                },
-                {
-                    "name": "CELERY_BROKER_URL",
-                    "value": "sqs://"
-                },
-                {
-                    "name": "AWS_REGION",
-                    "value": "ca-central-1"
-                }
-            ],
-            "mountPoints": [],
-            "volumesFrom": [],
-            "secrets": [
-                {
-                    "name": "ANTHROPIC_API_KEY",
-                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/anthropic-api-key"
-                },
-                {
-                    "name": "DATABASE_URL",
-                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url"
-                },
-                {
-                    "name": "OPENAI_API_KEY",
-                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/openai-api-key"
-                },
-                {
-                    "name": "REDIS_URL",
-                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/REDIS_URL"
-                },
-                {
-                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/jwt_signing_keys_json",
-                    "name": "JWT_SIGNING_KEYS_JSON"
-                },
-                {
-                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/jwt_active_kid",
-                    "name": "JWT_ACTIVE_KID"
-                },
-                {
-                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/jwt_grace_kid",
-                    "name": "JWT_GRACE_KID"
-                },
-                {
-                    "name": "KNOWLEDGE_S3_BUCKET",
-                    "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/knowledge_s3_bucket"
-                }
-            ],
-            "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                    "awslogs-group": "/ecs/luciel-worker",
-                    "awslogs-region": "ca-central-1",
-                    "awslogs-stream-prefix": "worker"
-                }
-            },
-            "healthCheck": {
-                "command": [
-                    "CMD-SHELL",
-                    "python3 /app/scripts/healthcheck_worker.py"
-                ],
-                "interval": 30,
-                "timeout": 15,
-                "retries": 3,
-                "startPeriod": 60
-            },
-            "systemControls": []
+          "name": "MEMORY_EXTRACTION_ASYNC",
+          "value": "true"
+        },
+        {
+          "name": "CELERY_BROKER_URL",
+          "value": "sqs://"
+        },
+        {
+          "name": "AWS_REGION",
+          "value": "ca-central-1"
         }
-    ],
-    "family": "luciel-worker",
-    "taskRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-worker-role",
-    "executionRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-execution-role",
-    "networkMode": "awsvpc",
-    "volumes": [],
-    "placementConstraints": [],
-    "runtimePlatform": {
-        "cpuArchitecture": "X86_64",
-        "operatingSystemFamily": "LINUX"
-    },
-    "requiresCompatibilities": [
-        "FARGATE"
-    ],
-    "cpu": "512",
-    "memory": "1024"
+      ],
+      "mountPoints": [],
+      "volumesFrom": [],
+      "secrets": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/anthropic-api-key"
+        },
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/worker_database_url"
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/openai-api-key"
+        },
+        {
+          "name": "REDIS_URL",
+          "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/REDIS_URL"
+        },
+        {
+          "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/jwt_signing_keys_json",
+          "name": "JWT_SIGNING_KEYS_JSON"
+        },
+        {
+          "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/jwt_active_kid",
+          "name": "JWT_ACTIVE_KID"
+        },
+        {
+          "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/jwt_grace_kid",
+          "name": "JWT_GRACE_KID"
+        },
+        {
+          "name": "KNOWLEDGE_S3_BUCKET",
+          "valueFrom": "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/knowledge_s3_bucket"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/luciel-worker",
+          "awslogs-region": "ca-central-1",
+          "awslogs-stream-prefix": "worker"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python3 /app/scripts/healthcheck_worker.py"
+        ],
+        "interval": 30,
+        "timeout": 15,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "systemControls": []
+    }
+  ],
+  "family": "luciel-worker",
+  "taskRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-worker-role",
+  "executionRoleArn": "arn:aws:iam::729005488042:role/luciel-ecs-execution-role",
+  "networkMode": "awsvpc",
+  "volumes": [],
+  "placementConstraints": [],
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "512",
+  "memory": "1024"
 }
