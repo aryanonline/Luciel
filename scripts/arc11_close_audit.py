@@ -321,14 +321,28 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
 
 
 def _section_1c_rls_live(section: str) -> CheckResult:
-    """Count policies on knowledge_sources via pg_policies."""
-    url = os.environ.get("LUCIEL_LIVE_POSTGRES_URL")
+    """Count policies on knowledge_sources via pg_policies.
+
+    Accepts either a native libpq URL (``postgresql://...``) or a
+    SQLAlchemy URL (``postgresql+psycopg://...``). The ``+driver``
+    suffix is stripped before handing the URL to psycopg, which only
+    understands the native form.
+    """
+    url = os.environ.get("LUCIEL_LIVE_POSTGRES_URL") or os.environ.get(
+        "DATABASE_URL"
+    )
     if not url:
         return _skip(
             section,
             "rls_policies_on_knowledge_sources",
-            "set LUCIEL_LIVE_POSTGRES_URL to enable live RLS check",
+            "set LUCIEL_LIVE_POSTGRES_URL (or DATABASE_URL) to enable "
+            "live RLS check",
         )
+    # Normalize SQLAlchemy-style URLs (postgresql+psycopg://...) into
+    # the libpq form psycopg.connect expects.
+    if "+" in url.split("://", 1)[0]:
+        scheme, rest = url.split("://", 1)
+        url = scheme.split("+", 1)[0] + "://" + rest
     try:
         import psycopg
 
