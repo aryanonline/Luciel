@@ -75,8 +75,17 @@ DATA_CATEGORY_MAP: dict[str, dict] = {
         },
         "tenant_scope": ("direct", "admin_id"),
     },
+    # Arc 11 Step 2: the underlying table was renamed from
+    # ``knowledge_embeddings`` to ``knowledge_chunks``. The
+    # ``data_category`` KEY here intentionally stays as
+    # ``"knowledge_embeddings"`` because it is the stable identifier
+    # written into ``retention_policies.data_category`` rows in
+    # production; renaming the key would orphan those policies. Only
+    # the ``"table"`` value — which is what ``_batched_delete`` /
+    # ``_batched_anonymize`` interpolate into raw SQL — moves to the
+    # new table name.
     "knowledge_embeddings": {
-        "table": "knowledge_embeddings",
+        "table": "knowledge_chunks",
         "date_col": "created_at",
         "anon_cols": {},
         "tenant_scope": ("direct", "admin_id"),

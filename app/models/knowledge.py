@@ -1,5 +1,14 @@
 """
-Knowledge embeddings model.
+Knowledge chunks model.
+
+Arc 11 Step 2 (arc11_b_rename_embeddings_to_chunks): the table this
+class binds to was renamed from ``knowledge_embeddings`` to
+``knowledge_chunks`` per Architecture v1 §3.2 (two-table model:
+provenance on ``knowledge_sources``, vectors here). The class was
+renamed ``KnowledgeEmbedding`` -> ``KnowledgeChunk`` at the same time.
+A backwards-compat alias ``KnowledgeEmbedding = KnowledgeChunk`` at
+the bottom of this file keeps every existing import site working
+unchanged; Step 3 migrates callers off the alias.
 
 Stores vector-indexed knowledge chunks for domain knowledge,
 tenant documents, role instructions, and Luciel-instance-specific knowledge.
@@ -18,9 +27,11 @@ PATCHED (Step 25b):
     - source_id / source_version / source_filename / source_type / ingested_by:
       versioning + audit columns. Enables "replace by source_id" workflow.
     - superseded_at: soft-supersede column. is_active = (superseded_at IS NULL).
-    - Composite index ix_knowledge_embeddings_scope_source on
+    - Composite index ix_knowledge_chunks_scope_source on
       (tenant_id, domain_id, luciel_instance_id, source_id) for fast
       replace_by_source_id lookups in the repository (File 8).
+      (Renamed from ix_knowledge_embeddings_scope_source in Arc 11
+      Step 2 along with the table rename.)
 """
 
 from __future__ import annotations
@@ -34,8 +45,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin
 from pgvector.sqlalchemy import Vector
 
-class KnowledgeEmbedding(Base, TimestampMixin):
-    __tablename__ = "knowledge_embeddings"
+class KnowledgeChunk(Base, TimestampMixin):
+    __tablename__ = "knowledge_chunks"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
@@ -59,7 +70,7 @@ class KnowledgeEmbedding(Base, TimestampMixin):
         ForeignKey(
             "instances.id",
             ondelete="SET NULL",
-            name="fk_knowledge_embeddings_luciel_instance_id",
+            name="fk_knowledge_chunks_luciel_instance_id",
         ),
         index=True,
         nullable=False,
@@ -72,7 +83,7 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     luciel_instance: Mapped["Instance | None"] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "Instance",
         lazy="select",
-        foreign_keys="KnowledgeEmbedding.luciel_instance_id",
+        foreign_keys="KnowledgeChunk.luciel_instance_id",
         viewonly=True,
     )
 
@@ -130,7 +141,7 @@ class KnowledgeEmbedding(Base, TimestampMixin):
         ForeignKey(
             "knowledge_sources.id",
             ondelete="CASCADE",
-            name="fk_knowledge_embeddings_source_fk",
+            name="fk_knowledge_chunks_source_fk",
         ),
         nullable=True,
         index=True,
@@ -146,7 +157,7 @@ class KnowledgeEmbedding(Base, TimestampMixin):
         "KnowledgeSource",
         back_populates="chunks",
         lazy="select",
-        foreign_keys="KnowledgeEmbedding.source_fk",
+        foreign_keys="KnowledgeChunk.source_fk",
     )
 
     # Arc 10 (Alembic arc10_lifecycle_subsystem) — two lifecycle flags
@@ -197,7 +208,7 @@ class KnowledgeEmbedding(Base, TimestampMixin):
         # Declared in the File 2 Alembic migration with the same name; we
         # mirror it here so SQLAlchemy's metadata matches the DB.
         Index(
-            "ix_knowledge_embeddings_scope_source",
+            "ix_knowledge_chunks_scope_source",
             "admin_id", "domain_id", "luciel_instance_id", "source_id",
         ),
     )
@@ -214,5 +225,14 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     @is_active.expression  # type: ignore[no-redef]
     def is_active(cls):  # noqa: N805  (SQLAlchemy hybrid_property convention)
         """SQL-side expression so repository code can do
-        `.filter(KnowledgeEmbedding.is_active)`."""
+        `.filter(KnowledgeChunk.is_active)` (or, through the alias,
+        `.filter(KnowledgeEmbedding.is_active)` — same class)."""
         return cls.superseded_at.is_(None)
+
+
+# Arc 11 Step 2 backwards-compat alias — removed in Arc 11 Step 11
+# when the legacy name has no callers. Keeps Step 3's refactor
+# incremental: importers writing ``from app.models.knowledge import
+# KnowledgeEmbedding`` and ``from app.models import KnowledgeEmbedding``
+# keep working unchanged until Step 3 migrates them file-by-file.
+KnowledgeEmbedding = KnowledgeChunk

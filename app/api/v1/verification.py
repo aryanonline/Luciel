@@ -80,7 +80,8 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
     ("traces",               None,     "*",                            ["admin_id"]),
     ("memory_items",         "active", 0,                              ["admin_id"]),
     ("user_consents",        None,     "*",                            ["admin_id"]),
-    ("knowledge_embeddings", None,     "*",                            ["admin_id"]),
+    # Arc 11 Step 2: table renamed knowledge_embeddings -> knowledge_chunks.
+    ("knowledge_chunks",     None,     "*",                            ["admin_id"]),
     ("retention_policies",   None,     "*",                            ["admin_id"]),
     ("deletion_logs",        None,     "*",                            ["admin_id"]),
     ("admin_audit_logs",     None,     "*",                            ["admin_id"]),

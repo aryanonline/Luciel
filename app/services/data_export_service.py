@@ -775,7 +775,7 @@ class DataExportService:
                        MAX(ingested_by) AS ingested_by,
                        MIN(created_at) AS ingested_at,
                        COUNT(*) AS chunk_count
-                  FROM knowledge_embeddings
+                  FROM knowledge_chunks
                  WHERE admin_id = :aid
                    AND superseded_at IS NULL
                    AND soft_deleted_at IS NULL
@@ -809,7 +809,7 @@ class DataExportService:
             sql_text(
                 """
                 SELECT DISTINCT source_id
-                  FROM knowledge_embeddings
+                  FROM knowledge_chunks
                  WHERE admin_id = :aid
                    AND pending_downgrade_archived_at IS NOT NULL
                 """
@@ -833,7 +833,7 @@ class DataExportService:
                 sql_text(
                     """
                     SELECT id, title, content, knowledge_type, created_at
-                      FROM knowledge_embeddings
+                      FROM knowledge_chunks
                      WHERE admin_id = :aid
                        AND source_id = :sid
                        AND source_version = :sv

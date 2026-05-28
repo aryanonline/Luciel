@@ -1,5 +1,8 @@
 from app.models.api_key import ApiKey
-from app.models.knowledge import KnowledgeEmbedding
+from app.models.knowledge import (  # noqa: F401  (Arc 11 Step 2 rename)
+    KnowledgeChunk,
+    KnowledgeEmbedding,
+)
 from app.models.knowledge_source import KnowledgeSource  # noqa: F401  (Arc 11 Step 1)
 from app.models.memory import MemoryItem
 from app.models.message import MessageModel
@@ -55,6 +58,9 @@ __all__ = [
     "MemoryItem",
     "RetentionPolicy",
     "Trace",
+    "KnowledgeChunk",
+    # Arc 11 Step 2: backwards-compat alias of KnowledgeChunk. Removed
+    # in Step 11 when no callers remain.
     "KnowledgeEmbedding",
     "KnowledgeSource",
     "AdminAuditLog",

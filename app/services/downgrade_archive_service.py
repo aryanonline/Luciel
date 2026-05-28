@@ -533,10 +533,13 @@ class DowngradeArchiveService:
             # what the "all chunks sharing a source_id archive
             # together" invariant requires.
             for source_id in ids_list:
+                # Arc 11 Step 2: table renamed knowledge_embeddings ->
+                # knowledge_chunks. Raw SQL does not benefit from the
+                # ORM alias so the literal table name is updated here.
                 self.db.execute(
                     sql_text(
                         """
-                        UPDATE knowledge_embeddings
+                        UPDATE knowledge_chunks
                            SET pending_downgrade_archived_at = :ts
                          WHERE admin_id = :aid
                            AND source_id = :sid
