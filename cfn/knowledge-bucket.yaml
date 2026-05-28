@@ -169,6 +169,69 @@ Resources:
             Resource:
               - !Sub "arn:aws:s3:::${BucketName}/*"
 
+  # ---------------------------------------------------------------------
+  # SQS queues for the embed-worker Celery pipeline.
+  # The DLQ MUST be declared before the main queue so the RedrivePolicy
+  # can resolve its ARN via !GetAtt at template-resolution time.
+  # ---------------------------------------------------------------------
+  KnowledgeDlqQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: luciel-knowledge-dlq
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+
+  KnowledgeTasksQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: luciel-knowledge-tasks
+      MessageRetentionPeriod: 345600
+      VisibilityTimeout: 30
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt KnowledgeDlqQueue.Arn
+        maxReceiveCount: 3
+
+  # ---------------------------------------------------------------------
+  # IAM managed policy that grants the existing backend + worker task
+  # roles read/send/receive on the knowledge queues. This replaces the
+  # ad-hoc inline-policy patches the live deploy applied via
+  # put-role-policy; attaching a managed policy keeps the role-policy
+  # graph reviewable in one place.
+  # ---------------------------------------------------------------------
+  KnowledgeSqsAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: luciel-knowledge-sqs-access
+      Description: >-
+        Arc 11 - SQS access on the knowledge-tasks + knowledge-dlq
+        queues. Backend gets enqueue + read-attrs; worker gets the
+        full ReceiveMessage/DeleteMessage/ChangeMessageVisibility set.
+      Roles:
+        - !Ref BackendTaskRoleName
+        - !Ref WorkerTaskRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: KnowledgeQueueReadAttrs
+            Effect: Allow
+            Action:
+              - sqs:GetQueueUrl
+              - sqs:GetQueueAttributes
+            Resource:
+              - !GetAtt KnowledgeTasksQueue.Arn
+              - !GetAtt KnowledgeDlqQueue.Arn
+          - Sid: KnowledgeQueueDispatch
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:ChangeMessageVisibility
+            Resource:
+              - !GetAtt KnowledgeTasksQueue.Arn
+              - !GetAtt KnowledgeDlqQueue.Arn
+
 Outputs:
 
   KnowledgeBucketName:
