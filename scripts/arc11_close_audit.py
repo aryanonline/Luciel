@@ -93,7 +93,10 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     # 1a. alembic heads is single and points at the latest Arc 11
     # migration (Cleanup A's data_category rename is the post-Step-4
     # head once the no-deferrals closeout lands).
-    expected_head = "arc11_cleanup_c_user_invites_role_enum"
+    # Arc 11 Closeout PR-A appended ``arc11_closeout_a_instance_lifecycle``
+    # on top of Cleanup C's user-invites-role-enum head. The new head is
+    # the single end of the migration chain.
+    expected_head = "arc11_closeout_a_instance_lifecycle"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],
@@ -789,7 +792,138 @@ def run_all(*, live: bool) -> list[CheckResult]:
     results.extend(section_4_infrastructure())
     results.extend(section_5_cross_repo_contract())
     results.extend(section_6_test_counts())
+    results.extend(section_7_instance_lifecycle(live=live))
     return results
+
+
+# ---------------------------------------------------------------------
+# Section 7 — Arc 11 Closeout PR-A: instance lifecycle
+# ---------------------------------------------------------------------
+
+
+def section_7_instance_lifecycle(*, live: bool) -> list[CheckResult]:
+    """Arc 11 Closeout PR-A — Pause/Resume/Delete/Restore + retention."""
+    section = "7. Instance lifecycle"
+    out: list[CheckResult] = []
+
+    # 7a. Live check: PG enum ``instance_status`` exists.
+    if live:
+        out.append(_section_7a_instance_status_enum_live(section))
+    else:
+        out.append(
+            _skip(
+                section,
+                "instance_status_pg_enum_exists",
+                "live DB required; re-run with --live to verify "
+                "pg_type contains the instance_status enum",
+            )
+        )
+
+    # 7b. Static check: all four lifecycle routes registered in admin.py.
+    out.append(_section_7b_instance_lifecycle_routes_present(section))
+
+    return out
+
+
+def _section_7a_instance_status_enum_live(section: str) -> CheckResult:
+    """Verify the ``instance_status`` PG enum exists with three members.
+
+    Mirrors the shape of ``_section_1c_rls_live`` -- accepts either
+    libpq or SQLAlchemy URLs and degrades to FAIL with a clear message
+    on connection or query errors.
+    """
+    url = os.environ.get("LUCIEL_LIVE_POSTGRES_URL") or os.environ.get(
+        "DATABASE_URL"
+    )
+    if not url:
+        return _skip(
+            section,
+            "instance_status_pg_enum_exists",
+            "set LUCIEL_LIVE_POSTGRES_URL (or DATABASE_URL) to enable "
+            "live enum check",
+        )
+    if "+" in url.split("://", 1)[0]:
+        scheme, rest = url.split("://", 1)
+        url = scheme.split("+", 1)[0] + "://" + rest
+    try:
+        import psycopg
+
+        with psycopg.connect(url, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT enumlabel
+                      FROM pg_enum e
+                      JOIN pg_type t ON e.enumtypid = t.oid
+                     WHERE t.typname = 'instance_status'
+                     ORDER BY e.enumsortorder
+                    """
+                )
+                labels = [row[0] for row in cur.fetchall()]
+        if labels == ["active", "paused", "deleted"]:
+            return _pass(
+                section,
+                "instance_status_pg_enum_exists",
+                "enum members: " + ", ".join(labels),
+            )
+        if not labels:
+            return _fail(
+                section,
+                "instance_status_pg_enum_exists",
+                "pg_type has no 'instance_status' enum -- migration "
+                "arc11_closeout_a_instance_lifecycle has not been "
+                "applied",
+            )
+        return _fail(
+            section,
+            "instance_status_pg_enum_exists",
+            f"expected members ['active','paused','deleted']; got {labels}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _fail(
+            section,
+            "instance_status_pg_enum_exists",
+            f"live check failed: {type(exc).__name__}: {exc}",
+        )
+
+
+def _section_7b_instance_lifecycle_routes_present(section: str) -> CheckResult:
+    """Static check: the four lifecycle routes are registered in admin.py.
+
+    Reads ``app/api/v1/admin.py`` and asserts the decorators for
+    /pause, /resume, /restore, and the DELETE route on /instances/{pk}
+    are all present. Pure text assertion -- the deeper behavioural
+    contract is covered by tests/api/test_instance_lifecycle_arc11_closeout.py.
+    """
+    admin_path = REPO_ROOT / "app" / "api" / "v1" / "admin.py"
+    if not admin_path.exists():
+        return _fail(
+            section,
+            "instance_lifecycle_routes_present",
+            f"admin.py not found at {admin_path}",
+        )
+    src = admin_path.read_text(encoding="utf-8")
+
+    required = [
+        ('"/instances/{pk}/pause"', "POST /instances/{pk}/pause"),
+        ('"/instances/{pk}/resume"', "POST /instances/{pk}/resume"),
+        ('"/instances/{pk}/restore"', "POST /instances/{pk}/restore"),
+        # The DELETE route shares the path with GET/PATCH so we look
+        # for the function symbol that signals the soft-delete semantics.
+        ("def delete_luciel_instance", "DELETE /instances/{pk}"),
+    ]
+    missing = [label for token, label in required if token not in src]
+    if missing:
+        return _fail(
+            section,
+            "instance_lifecycle_routes_present",
+            f"missing route(s): {', '.join(missing)}",
+        )
+    return _pass(
+        section,
+        "instance_lifecycle_routes_present",
+        "all four lifecycle routes registered",
+    )
 
 
 def _render_table(results: list[CheckResult]) -> str:

@@ -70,7 +70,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import get_chat_service, get_session_service
+from app.api.deps import DbSession, get_chat_service, get_session_service
 from app.api.widget_deps import (
     cors_response_headers,
     require_embed_key,
@@ -81,6 +81,8 @@ from app.middleware.rate_limit import (
     get_embed_key_rate_limit_for_key,
     limiter,
 )
+from app.models.instance import Instance
+from app.models.instance_status import InstanceStatus
 from app.policy.moderation import ModerationGate
 from app.schemas.chat import ChatWidgetRequest
 from app.services.chat_service import ChatService
@@ -148,6 +150,7 @@ def widget_preflight(request: Request) -> Response:
 def widget_chat_stream(
     request: Request,
     payload: ChatWidgetRequest,
+    db: DbSession,
     chat_service: Annotated[ChatService, Depends(get_chat_service)],
     session_service: Annotated[SessionService, Depends(get_session_service)],
     widget_config: Annotated[dict, Depends(require_embed_key)],
@@ -237,6 +240,30 @@ def widget_chat_stream(
         # uniquely groupable per Instance — i.e. no cross-Instance
         # bleed via sessions.domain_id.
         domain_id = f"instance-{luciel_instance_id}"
+
+    # Arc 11 Closeout PR-A — instance lifecycle gating per Customer
+    # Journey §4.5 Phase 8 ("Pause my Luciel" → widget renders an empty
+    # <div>"). Return 204 No Content when the instance is not in the
+    # 'active' state; the embed JS bundle interprets 204 as "render
+    # nothing, no error chrome". An X-Luciel-Instance-Status header
+    # carries the canonical state so a developer inspecting Network
+    # tab can immediately see why the widget went silent.
+    instance_row = (
+        db.query(Instance).filter(Instance.id == luciel_instance_id).first()
+    )
+    if instance_row is None or instance_row.instance_status != InstanceStatus.ACTIVE:
+        status_value = (
+            instance_row.instance_status.value
+            if instance_row is not None
+            else "missing"
+        )
+        return Response(
+            status_code=204,
+            headers={
+                "X-Luciel-Instance-Status": status_value,
+                **cors_response_headers(request, widget_config),
+            },
+        )
 
     # Step 31 sub-branch 1: emission 1 of 3 -- request entry.
     #

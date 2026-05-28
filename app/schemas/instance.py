@@ -16,6 +16,7 @@ valid.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -111,6 +112,20 @@ class InstanceRead(BaseModel):
 
     active: bool
     system_prompt_additions: str | None = None
+
+    # Arc 11 Closeout PR-A — instance lifecycle status per Customer
+    # Journey §4.5 Phase 8 + Architecture §3.6.1. Source of truth for
+    # the three-affordance lifecycle (Pause / Delete / Restore); the
+    # legacy ``active`` boolean is a deprecated mirror.
+    instance_status: Literal["active", "paused", "deleted"] = "active"
+    soft_deleted_at: datetime | None = None
+
+    # Arc 11 Closeout PR-A — populated ONLY on the response of
+    # POST /admin/instances/{pk}/restore, per Vision §6.4 Reactivation
+    # ("embed keys re-minted (new keys, old keys stay revoked)"). The
+    # raw key is returned once and never persisted to SSM; the admin
+    # must paste it into their site. All other reads carry None.
+    new_embed_key: str | None = None
 
     created_at: datetime
     updated_at: datetime

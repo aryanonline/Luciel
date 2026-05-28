@@ -35,6 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.instance import Instance
+from app.models.instance_status import InstanceStatus
 from app.repositories.admin_audit_repository import AuditContext
 from app.repositories.instance_repository import InstanceRepository
 
@@ -59,6 +60,24 @@ class DuplicateInstanceError(InstanceServiceError):
 class InstanceNotFoundError(InstanceServiceError):
     """Raised when a target Instance can't be resolved. Route layer
     maps to 404."""
+
+
+class InstanceLifecycleConflictError(InstanceServiceError):
+    """Raised when a Pause/Resume/Delete/Restore transition is invalid
+    for the current ``instance_status``. Route layer maps to 409
+    Conflict. The ``current_status`` attribute lets the response carry
+    the canonical state value so frontends can re-render without a
+    re-fetch.
+    """
+
+    def __init__(self, message: str, *, current_status: str) -> None:
+        super().__init__(message)
+        self.current_status = current_status
+
+
+class InstanceRestoreGraceExpiredError(InstanceServiceError):
+    """Raised when /restore is called past the 30-day grace window.
+    Route layer maps to 410 Gone."""
 
 
 class TierScopeViolationError(InstanceServiceError):
@@ -189,22 +208,247 @@ class InstanceService:
     ) -> Instance:
         """Soft-deactivate one Instance by PK.
 
-        Authorization (the caller's Admin owns this Instance) is the
-        route layer's responsibility. This method only enforces
-        existence.
-
-        Raises InstanceNotFoundError -> 404 when no row exists.
+        Deprecated thin alias for :meth:`pause_instance`. Kept so any
+        internal callsite that has not yet migrated to the explicit
+        Pause/Delete vocabulary keeps compiling. New callers must
+        invoke :meth:`pause_instance` or
+        :meth:`delete_instance_with_grace`.
         """
-        instance = self.repo.deactivate_by_pk(
+        return self.pause_instance(
+            audit_ctx=audit_ctx,
+            pk=pk,
+            updated_by=updated_by,
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle (Arc 11 Closeout PR-A) — Pause / Resume / Delete / Restore
+    # ------------------------------------------------------------------
+
+    def pause_instance(
+        self,
+        *,
+        audit_ctx: AuditContext,
+        pk: int,
+        updated_by: str | None = None,
+    ) -> Instance:
+        """Pause an Instance (Customer Journey §4.5 Phase 8 "Pause").
+
+        Widget begins returning 204 (empty <div>); knowledge + sessions
+        are retained. Reactivatable instantly via /resume.
+
+        Raises:
+          InstanceNotFoundError -> 404 when no row exists.
+          InstanceLifecycleConflictError -> 409 when the row is in the
+            'deleted' state (Pause is not a valid transition out of
+            destructive-intent state — Restore first, then Pause).
+        """
+        instance = self.repo.pause_by_pk(
             pk,
             updated_by=updated_by,
             audit_ctx=audit_ctx,
         )
         if instance is None:
-            raise InstanceNotFoundError(
-                f"Instance pk={pk} not found."
+            raise InstanceNotFoundError(f"Instance pk={pk} not found.")
+        if instance.instance_status == InstanceStatus.DELETED:
+            raise InstanceLifecycleConflictError(
+                f"Instance pk={pk} is in the 'deleted' state; restore "
+                f"it before pausing.",
+                current_status=instance.instance_status.value,
             )
         return instance
+
+    def resume_instance(
+        self,
+        *,
+        audit_ctx: AuditContext,
+        pk: int,
+        updated_by: str | None = None,
+    ) -> Instance:
+        """Resume a paused Instance.
+
+        Raises:
+          InstanceNotFoundError -> 404 when no row exists.
+          InstanceLifecycleConflictError -> 409 when the row is in the
+            'deleted' state (Restore is the right verb, not Resume).
+        """
+        instance = self.repo.resume_by_pk(
+            pk,
+            updated_by=updated_by,
+            audit_ctx=audit_ctx,
+        )
+        if instance is None:
+            raise InstanceNotFoundError(f"Instance pk={pk} not found.")
+        if instance.instance_status == InstanceStatus.DELETED:
+            raise InstanceLifecycleConflictError(
+                f"Instance pk={pk} is in the 'deleted' state; use "
+                f"restore, not resume.",
+                current_status=instance.instance_status.value,
+            )
+        return instance
+
+    def delete_instance_with_grace(
+        self,
+        *,
+        audit_ctx: AuditContext,
+        pk: int,
+        updated_by: str | None = None,
+    ) -> Instance:
+        """Soft-delete an Instance (Customer Journey §4.5 Phase 8
+        "Delete"); opens the 30-day grace window per Architecture
+        §3.6.1.
+
+        The retention worker (``app.worker.tasks.instance_retention``)
+        hard-deletes the row + its knowledge / conversation cascade
+        after the grace window expires. Restorable within the window
+        via :meth:`restore_instance`.
+
+        Raises:
+          InstanceNotFoundError -> 404 when no row exists.
+        """
+        instance = self.repo.delete_by_pk(
+            pk,
+            updated_by=updated_by,
+            audit_ctx=audit_ctx,
+        )
+        if instance is None:
+            raise InstanceNotFoundError(f"Instance pk={pk} not found.")
+        return instance
+
+    def restore_instance(
+        self,
+        *,
+        audit_ctx: AuditContext,
+        pk: int,
+        updated_by: str | None = None,
+        api_key_service=None,
+    ) -> tuple[Instance, str | None]:
+        """Restore a soft-deleted Instance within the 30-day grace
+        window. Per Vision §6.4 Reactivation, embed keys are re-minted
+        (all existing embed keys for the instance are revoked, a new
+        embed key is issued).
+
+        Returns ``(instance, new_embed_key_raw)``. ``new_embed_key_raw``
+        is the one-time-readable raw key (never written to SSM, never
+        re-readable) — the route layer surfaces it on the response.
+
+        ``api_key_service`` is injected (not imported) to avoid a
+        circular import; pass ``ApiKeyService(db)`` when calling.
+        When ``None``, no key re-mint happens (only used by tests that
+        don't care about the key-rotation side-effect).
+
+        Raises:
+          InstanceNotFoundError -> 404 when no row exists.
+          InstanceLifecycleConflictError -> 409 when the row is not in
+            the 'deleted' state (already-live row — nothing to restore).
+          InstanceRestoreGraceExpiredError -> 410 when the grace window
+            has expired (the row will be hard-deleted by the next
+            retention worker pass, if it has not been already).
+        """
+        pre = self.repo.get_by_pk(pk)
+        if pre is None:
+            raise InstanceNotFoundError(f"Instance pk={pk} not found.")
+        if pre.instance_status != InstanceStatus.DELETED:
+            raise InstanceLifecycleConflictError(
+                f"Instance pk={pk} is not in the 'deleted' state; "
+                f"nothing to restore.",
+                current_status=pre.instance_status.value,
+            )
+
+        instance = self.repo.restore_by_pk(
+            pk,
+            updated_by=updated_by,
+            audit_ctx=audit_ctx,
+        )
+        if instance is None:
+            # The repo returned None for a deleted row -- the only path
+            # to that branch is grace-expired (the shape-invariant
+            # branch logs an error and is unreachable in practice).
+            raise InstanceRestoreGraceExpiredError(
+                f"Instance pk={pk} grace window has expired; restore "
+                f"is no longer possible."
+            )
+
+        new_embed_key_raw: str | None = None
+        if api_key_service is not None:
+            # Vision §6.4: re-mint embed keys on Restore. Revoke every
+            # active embed key bound to this instance, then mint one
+            # fresh embed key. The raw value is returned to the caller
+            # (route layer surfaces it on the response under
+            # ``new_embed_key`` — one-time read).
+            try:
+                from app.models.api_key import ApiKey
+
+                revoked_prefixes: list[str] = []
+                old_active = (
+                    self.db.query(ApiKey)
+                    .filter(
+                        ApiKey.luciel_instance_id == pk,
+                        ApiKey.key_kind == "embed",
+                        ApiKey.active.is_(True),
+                    )
+                    .all()
+                )
+                for ak in old_active:
+                    ak.active = False
+                    revoked_prefixes.append(ak.key_prefix)
+
+                # Pick a sensible "carrier" row to copy origins/widget
+                # config off of -- use the most recent revoked one if
+                # any exist; otherwise mint with no allowed_origins and
+                # the route layer can refuse to serve until the admin
+                # updates the new key's origins.
+                carrier = old_active[-1] if old_active else None
+                allowed_origins = (
+                    list(carrier.allowed_origins) if carrier and carrier.allowed_origins else None
+                )
+                rate_limit_per_minute = (
+                    carrier.rate_limit_per_minute if carrier else None
+                )
+                widget_config = (
+                    dict(carrier.widget_config) if carrier and carrier.widget_config else None
+                )
+
+                new_key, raw = api_key_service.create_key(
+                    admin_id=instance.admin_id,
+                    luciel_instance_id=instance.id,
+                    display_name=(
+                        f"{instance.instance_slug} (restored)"
+                    ),
+                    permissions=["chat"],
+                    key_kind="embed",
+                    allowed_origins=allowed_origins,
+                    rate_limit_per_minute=rate_limit_per_minute,
+                    widget_config=widget_config,
+                    auto_commit=True,
+                    audit_ctx=audit_ctx,
+                )
+                new_embed_key_raw = raw
+
+                # Persist the revocation flips committed by us (the
+                # create_key call above auto-committed; we now commit
+                # the revocations).
+                self.db.commit()
+                logger.info(
+                    "Instance restored with embed-key re-mint: pk=%s "
+                    "revoked_count=%d new_prefix=%s",
+                    pk,
+                    len(revoked_prefixes),
+                    new_key.key_prefix,
+                )
+            except Exception:
+                # Re-mint failure is logged but does not undo the
+                # restore -- the row is already live and the admin
+                # can re-issue a key manually. Honest fail-mode: the
+                # restore worked, the auto-mint did not.
+                logger.exception(
+                    "Embed-key re-mint failed during restore pk=%s; "
+                    "instance is live but no new key was issued.",
+                    pk,
+                )
+                self.db.rollback()
+                new_embed_key_raw = None
+
+        return instance, new_embed_key_raw
 
     # ------------------------------------------------------------------
     # Cascade hook — invoked when an Admin is deactivated

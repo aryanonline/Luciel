@@ -25,6 +25,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
@@ -36,6 +37,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
+from app.models.instance_status import InstanceStatus
 
 
 class Instance(Base):
@@ -93,6 +95,26 @@ class Instance(Base):
     # pending_downgrade_archived_at (downgrade-archived).
     soft_deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+    # Arc 11 Closeout PR-A — instance lifecycle status enum per
+    # Customer Journey §4.5 Phase 8 (Pause / Delete / Restore) and
+    # Architecture §3.6.1 (soft-delete grace window measured from
+    # soft_deleted_at). The PG enum ``instance_status`` is created by
+    # migration ``arc11_closeout_a_instance_lifecycle``. Replaces the
+    # legacy ``active`` boolean as the source of truth; ``active`` is
+    # kept as a deprecated mirror through Arc 11 and dropped in Arc 12.
+    instance_status: Mapped[InstanceStatus] = mapped_column(
+        SAEnum(
+            InstanceStatus,
+            name="instance_status",
+            values_callable=lambda x: [m.value for m in x],
+            create_type=False,
+            native_enum=True,
+        ),
+        nullable=False,
+        server_default=InstanceStatus.ACTIVE.value,
+        index=True,
     )
 
     __table_args__ = (

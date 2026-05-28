@@ -187,6 +187,8 @@ celery_app = Celery(
     include=[
         "app.worker.tasks.memory_extraction",
         "app.worker.tasks.retention",
+        # Arc 11 Closeout PR-A -- per-instance hard-purge worker.
+        "app.worker.tasks.instance_retention",
         # Arc 10 -- lifecycle subsystem tasks.
         "app.worker.tasks.data_export",
         "app.worker.tasks.audit_retention",
@@ -283,6 +285,16 @@ celery_app.conf.update(
                 # work never starves user-facing memory_extraction.
                 "queue": "luciel-memory-tasks",
             },
+        },
+        # Arc 11 Closeout PR-A -- instance-level retention. Mirrors the
+        # tenant-level sweep above but keys on instances.soft_deleted_at
+        # (Architecture §3.6.1) instead of admins.closure_initiated_at.
+        # Scheduled 30 minutes after the tenant sweep so the two beat
+        # tasks do not contend for the worker's prefetch slot.
+        "instance-retention-purge-nightly": {
+            "task": "app.worker.tasks.instance_retention.run_instance_retention_purge",
+            "schedule": crontab(hour=8, minute=30),
+            "options": {"queue": "luciel-memory-tasks"},
         },
         # Arc 10 -- audit-tier cold-archive nightly. Runs an hour
         # after retention-purge so the two beat tasks do not contend
