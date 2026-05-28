@@ -104,9 +104,19 @@ class TierEntitlement:
     # Axis 3 -- Model tier per Instance ("base" / "mid" / "top")
     model_tier_default: str
 
-    # Axis 4 -- Composition (Instance-to-Instance within an Admin)
+    # Axis 4 -- Composition (Instance-to-Instance within an Admin).
+    # ``max_composition_depth`` RETIRED at Arc 12 WU1 (2026-05-28):
+    # contradicted locked Decision #19 ("no depth limit, no edge cap
+    # on the customer-facing composition graph"). The field was also
+    # consumed nowhere -- removal is structural cleanup, not a
+    # behaviour change. ``composition_enabled`` remains as the
+    # §3.3.4 master switch (free=False, pro=True, enterprise=True);
+    # cycle detection + per-inbound fan-out budget (WU5) replace
+    # depth-bounding as the only runtime guardrails. The
+    # corresponding ``admin_tier_overrides.max_composition_depth_override``
+    # column stops being read by code post-WU1 (deferred drop with
+    # the Arc 12 schema sweep).
     composition_enabled: bool
-    max_composition_depth: int | None
     knowledge_share_grants_enabled: bool
 
     # Axis 5 -- API access
@@ -210,7 +220,6 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         knowledge_website_crawl_enabled=False,
         model_tier_default="base",
         composition_enabled=False,
-        max_composition_depth=0,
         knowledge_share_grants_enabled=False,
         api_enabled=True,  # escalates D-free-tier-captcha-missing to P1
         api_rate_limit_rpm=30,
@@ -244,7 +253,6 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         knowledge_website_crawl_enabled=True,
         model_tier_default="mid",
         composition_enabled=True,
-        max_composition_depth=2,
         knowledge_share_grants_enabled=False,
         api_enabled=True,
         api_rate_limit_rpm=300,
@@ -289,7 +297,6 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         instance_count_cap=None,  # unlimited (self-serve default; override per contract)
         model_tier_default="top",
         composition_enabled=True,
-        max_composition_depth=None,  # unlimited
         knowledge_share_grants_enabled=True,
         api_enabled=True,
         api_rate_limit_rpm=3000,  # 10x Pro; abuse ceiling (overrideable)
