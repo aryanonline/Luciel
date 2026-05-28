@@ -31,8 +31,8 @@ All routes return 501 when Stripe is not configured (empty
 ``stripe_secret_key`` etc.) for the routes that talk to Stripe. That keeps
 CI / dev environments boot-safe without needing the billing surface live.
 
-Full architecture: see docs/ARCHITECTURE.md §3.2.13 (Billing surface).
-Roadmap row: docs/CANONICAL_RECAP.md §12 Step 30a (closing tag
+Full architecture: see Vision v1 §3 and Architecture v1 §3.2 (Billing surface).
+Roadmap row: Architecture v1 (V2 closure flow)
 `step-30a-subscription-billing-complete`).
 """
 from __future__ import annotations

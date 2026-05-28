@@ -83,9 +83,7 @@
   Author: Aryan Singh
   Created: 2026-05-03 (P3-K)
   Cross-references:
-    - docs/recaps/2026-05-03-mint-incident.md  (incident drove this design)
-    - docs/PHASE_3_COMPLIANCE_BACKLOG.md  P3-K  (architecture)
-    - docs/CANONICAL_RECAP.md  Section 12 anchor 7  (locked decision)
+    - Architecture v1 §6 (operational maturity — assumed-role mint contract, locked decision)
     - scripts/mint_worker_db_password_ssm.py  (the hardened mint script)
 #>
 

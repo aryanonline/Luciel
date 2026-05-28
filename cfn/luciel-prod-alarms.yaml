@@ -6,9 +6,10 @@ Description: >
   alarms (audit-immutability tamper [High], GUC-leak guard [High],
   ops-role connect velocity [Medium], audit-write velocity [Medium]),
   plus PD SNS-HTTPS subscription resolved from SSM. Region
-  ca-central-1, account 729005488042. Full design notes in
-  docs/runbooks/arc9-c7-observability.md and the docs/runbooks/
-  step-28-phase-2-deploy.md.
+  ca-central-1, account 729005488042. Anchors: Architecture v1 §5.3
+  (audit chain immutability + observability) for the C7 metric
+  filter contract; Architecture v1 §6 (operational maturity) for
+  the Step 28 worker/RDS/SSM alarm pack.
 
 Parameters:
   AlertEmail:
@@ -74,8 +75,8 @@ Parameters:
       parameter overrides log, and is opaque to anyone who only has
       describe-stacks access. Rotating the URL is a put-parameter
       (creates a new SSM version) + update-stack bumping
-      PagerDutyServiceKeySsmVersion. See
-      docs/runbooks/arc9-c7-observability.md for the deploy order.
+      PagerDutyServiceKeySsmVersion. Deploy order anchored to
+      Architecture v1 §5.3 (observability ops contract).
 
   PagerDutyServiceKeySsmVersion:
     Type: String
@@ -398,8 +399,8 @@ Resources:
       # stack-update timestamp.
       #
       # If the parameter is empty at deploy time the stack fails;
-      # see docs/runbooks/arc9-c7-observability.md for the bootstrap
-      # sequence.
+      # bootstrap sequence anchored to Architecture v1 §5.3
+      # (observability ops contract).
       # NOTE: plain ``ssm`` resolver, not ``ssm-secure``. CFN does
       # not support ssm-secure on AWS::SNS::Subscription/Endpoint
       # (only RDS MasterUserPassword and a small allowlist of other

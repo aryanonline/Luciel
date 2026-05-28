@@ -5,7 +5,7 @@
 # Run this on your local PowerShell with luciel-admin IAM creds.
 # Each command is idempotent (--overwrite); re-run safe.
 #
-# Cross-ref: docs/DRIFTS.md §3 D-stripe-credentials-never-wired-to-prod-backend-2026-05-14
+# Cross-ref: Architecture v1 §3.2 (Stripe credential wiring contract)
 
 # Individual monthly ($30 CAD)
 aws ssm put-parameter `

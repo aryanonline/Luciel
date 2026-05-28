@@ -15,8 +15,8 @@ all encode the same string and MUST stay in lockstep:
      into ``Luciel/Backend/OpsRoleConnectCount``, which powers the
      Medium-severity ``luciel-ops-role-connect-velocity`` alarm.
 
-  3. ``docs/runbook/arc9_c7_observability.md`` -- the ops doc lists
-     the exact substring on-call should grep for when triaging a
+  3. Architecture v1 §5.3 (Audit chain immutability + observability)
+     anchors the substring on-call should grep for when triaging a
      velocity alarm.
 
 If the literal string emitted by (1) drifts out of sync with the

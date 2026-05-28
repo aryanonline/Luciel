@@ -10,7 +10,7 @@ where the allowlist first earns its keep:
 * **Pro / Enterprise** Admins manage their allowlists from the admin
   console; Pro is rate-capped to a small N, Enterprise is uncapped (the
   numeric cap is the in-app §14 entitlement matrix's call, not the
-  schema's — see ``docs/CANONICAL_RECAP.md`` §14).
+  schema's — anchored to Architecture v1 §3.2 (Instance subsystem)).
 
 FK shape — locked decision (recorded in
 ``arc6-out/D-arc6-admin-widget-domains-design-decisions.md``):

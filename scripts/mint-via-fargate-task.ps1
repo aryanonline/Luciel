@@ -11,8 +11,8 @@
   could `psycopg.connect(admin_dsn)` from their laptop, which is
   incompatible with the production VPC posture (RDS in private subnet,
   no public ingress, no bastion, no VPN). See
-  `docs/recaps/2026-05-04-mint-architectural-boundary-pause.md` for the
-  full forensic narrative and `docs/PHASE_3_COMPLIANCE_BACKLOG.md` P3-S
+  Architecture v1 §6 (operational maturity — mint architectural
+  boundary contract) for the
   for the architectural decision.
 
   Architectural shape (Pattern N variant):
@@ -77,7 +77,7 @@
   used by `luciel-backend-service`), not RDS DB subnets -- RDS subnets
   have no SSM VPC endpoint and the task will fail with
   ResourceInitializationError. Default values are the production
-  application subnets canonicalised in `docs/CANONICAL_RECAP.md`.
+  application subnets canonicalised in Architecture v1 §6.
   Verify before override:
       aws ecs describe-services --cluster luciel-cluster `
           --services luciel-backend-service `
@@ -154,10 +154,7 @@
   Supersedes: scripts/mint-with-assumed-role.ps1 (kept on disk for
   reference; do NOT invoke for prod mint -- it cannot reach RDS).
   Cross-references:
-    - docs/recaps/2026-05-04-mint-architectural-boundary-pause.md
-    - docs/PHASE_3_COMPLIANCE_BACKLOG.md  P3-S
-    - docs/runbooks/operator-patterns.md  Pattern N
-    - docs/runbooks/step-28-phase-2-deploy.md  section 4.0.6 (Pattern N mint architecture)
+    - Architecture v1 §6 (operational maturity — mint architectural boundary, Pattern N mint architecture)
     - infra/iam/luciel-ecs-mint-role-trust-policy.json
     - infra/iam/luciel-ecs-mint-role-permission-policy.json
     - mint-td-rev1.json  (task-def registration source)

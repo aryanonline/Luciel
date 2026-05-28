@@ -30,7 +30,8 @@ inspect ``app.routes`` directly + validate the Pydantic schema +
 construct snapshots in-memory.
 
 D-DOC-1: route contract lives in code; this is the pinning file. The
-human-readable description is in docs/identity_bootstrap.md.
+human-readable description anchors to Architecture v1 §3.2 (identity
+bootstrap surface on the Instance subsystem).
 """
 from __future__ import annotations
 

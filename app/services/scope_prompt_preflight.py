@@ -18,7 +18,7 @@ compiles. The ``check`` method returns immediately. The exception
 class is preserved for tests that assert on it.
 
 Step 30d was the original deliverable; Step 30d itself is preserved in
-``docs/arcs/`` history. The guardrail was retired at Arc 5 Path A
+the legacy V1 history. The guardrail was retired at Arc 5 Path A
 because the V2 issuance path already gates on Admin + Instance
 existence at the route layer.
 """

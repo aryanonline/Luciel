@@ -4,10 +4,7 @@ The v1 4-tier surface (TIER_INDIVIDUAL/TEAM/COMPANY, Entitlement /
 Dimension dataclasses, _individual_set/_team_set/_company_set factories,
 ENTITLEMENTS_BY_TIER map, get_entitlement/is_enforced lookups) was
 DELETED outright at Arc 5 Commit 17 (B8) per the aggressive-cleanup
-amendment (docs/DRIFTS.md
-D-arc5-aggressive-cleanup-doctrine-amendment-2026-05-23).
-
-The v2 surface below is the sole entitlement-resolution path in the
+amendment The v2 surface below is the sole entitlement-resolution path in the
 post-Arc-5 platform:
 
 * TIER_FREE / TIER_PRO / TIER_ENTERPRISE — the three tiers (Option A,

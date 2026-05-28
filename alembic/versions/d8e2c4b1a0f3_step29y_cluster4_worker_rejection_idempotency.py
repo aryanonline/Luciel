@@ -60,7 +60,7 @@ control and would violate a naive partial UNIQUE constraint if it
 were applied across the full table.
 
 The correct disposition is documented under DISC-2026-003 in
-``docs/DISCLOSURES.md`` (drift token
+the Arc 9 worker-rejection idempotency drift token
 ``D-audit-verification-harness-retry-duplicates-2026-05-07`` and
 the redesign drift token
 ``D-cluster4-e2-rework-as-forward-only-2026-05-07``) and follows

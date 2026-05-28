@@ -1,6 +1,6 @@
 """
 Step 30c — Live end-to-end harness against the success criteria
-in docs/CANONICAL_RECAP.md §12 (row "30c").
+in Architecture v1 (row "30c").
 
 This is NOT a unit test. It is a live exercise of the SHIPPED code
 paths — real ToolBroker, real ToolRegistry, real shipped

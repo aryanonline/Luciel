@@ -308,7 +308,7 @@ try {
 # the session worker's uid (always root), NOT the container's main process uid.
 # The canonical diagnostic is `ps -eo pid,user,uid,gid,comm` and reading the
 # PID 1 / application-process row. See ~~D-worker-runs-as-root-in-container-2026-05-22~~
-# closure diagnostic-correction note in docs/DRIFTS.md.
+# closure diagnostic-correction (Arc 8 hardening).
 Write-Host "    (b) ECS Exec 'ps -eo' on worker task -- expect PID 1: celery user=luciel uid=10001" -ForegroundColor Gray
 $WorkerTaskArn = aws ecs list-tasks `
     --cluster $Cluster `

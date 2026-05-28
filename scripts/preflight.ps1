@@ -38,7 +38,7 @@
     do non-async-related work (e.g. UI tweaks, docs, schema review)
     without celery+redis running. They are NOT a way to bypass the
     gate when a verification run is intended to cover the async path.
-    The runbook at `docs/runbooks/operator-patterns.md` codifies which
+    Architecture v1 §6 (operator patterns) codifies which
     workflows require Gate 6 + Gate 7 strict mode.
 
 .PARAMETER ExpectedAccount

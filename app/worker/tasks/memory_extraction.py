@@ -3,7 +3,7 @@ Async memory extraction task (Step 27b).
 
 Moves MemoryService.extract_and_save off the chat request path.
 
-Contract reference: docs/runbooks/step-27b-security-contract.md
+Contract reference:
 
 Payload (opaque ids only; NO user content):
     session_id            int

@@ -14,7 +14,7 @@ Description: >
 
   Region: ca-central-1
   Account: 729005488042
-  Reference: docs/runbooks/step-28-phase-2-deploy.md sect 8
+  Reference: Architecture v1 §6 (operational maturity — verify task role contract)
 
 Resources:
   LucielEcsVerifyRole:
