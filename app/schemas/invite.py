@@ -14,6 +14,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from app.models.scope_assignment import ScopeRole
 from app.models.user_invite import InviteStatus
 
 
@@ -62,15 +63,14 @@ class UserInviteCreate(BaseModel):
             "into. Defaults to the cookied user's active domain when omitted."
         ),
     )
-    role: str = Field(
-        default="teammate",
-        min_length=2,
-        max_length=100,
+    role: ScopeRole = Field(
+        default=ScopeRole.INSTANCE_OPERATOR,
         description=(
-            "Role label within the (Admin, Instance) scope. v1 defaults to "
-            "'teammate'; Arc 5 V2 names: 'admin_user' (was 'tenant_admin') and "
-            "'instance_lead' (was 'department_lead'). Freeform string — no "
-            "enum guard at v1."
+            "Role within the (Admin, Instance) scope. Arc 11 Cleanup C "
+            "locked this field to the canonical four-role taxonomy "
+            "(admin_owner, admin_manager, instance_operator, "
+            "read_only_viewer) from Architecture §3.2.2. Pro-tier invites "
+            "default to ``instance_operator`` per Customer Journey §10.3."
         ),
     )
 

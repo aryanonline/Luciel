@@ -84,6 +84,20 @@ class EndReason(str, enum.Enum):
     DOWNGRADE_OVERFLOW_ARCHIVE = "DOWNGRADE_OVERFLOW_ARCHIVE"
 
 
+class ScopeRole(str, enum.Enum):
+    """Canonical role taxonomy for the knowledge subsystem.
+
+    Arc 11 Cleanup C promoted this from a free-form ``VARCHAR(100)``
+    to a PostgreSQL enum (``scope_role``). The four values are the
+    role matrix codified in Architecture §3.2.2 / ARC11_PLAN.md §0.6.
+    """
+
+    ADMIN_OWNER = "admin_owner"
+    ADMIN_MANAGER = "admin_manager"
+    INSTANCE_OPERATOR = "instance_operator"
+    READ_ONLY_VIEWER = "read_only_viewer"
+
+
 class ScopeAssignment(Base, TimestampMixin):
     """Durable record of a User holding a role within a (tenant, domain) scope."""
 
@@ -121,11 +135,22 @@ class ScopeAssignment(Base, TimestampMixin):
         nullable=False,
     )
 
-    # Role label within the (tenant, domain) scope. Free-form string for now
-    # (e.g. "listings_agent", "team_lead", "broker_of_record"). A future step
-    # may promote this to an enum once we see real-world role taxonomy stabilize.
-    role: Mapped[str] = mapped_column(
-        String(100),
+    # Role label within the (tenant, domain) scope. Arc 11 Cleanup C
+    # promoted this from a free-form ``String(100)`` to a Postgres
+    # ENUM with the four canonical values (see ``ScopeRole`` above).
+    role: Mapped[ScopeRole] = mapped_column(
+        SAEnum(
+            ScopeRole,
+            name="scope_role",
+            native_enum=True,
+            create_constraint=True,
+            validate_strings=True,
+            # The DDL is owned by the alembic migration
+            # ``arc11_cleanup_c_scope_assignment_role_enum``; don't
+            # let SQLAlchemy try to CREATE/DROP the type on
+            # metadata.create_all().
+            create_type=False,
+        ),
         nullable=False,
     )
 

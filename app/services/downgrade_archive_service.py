@@ -54,13 +54,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import select, text as sql_text
+from sqlalchemy import or_, select, text as sql_text
 from sqlalchemy.orm import Session
 
 from app.models.admin_widget_domain import AdminWidgetDomain
 from app.models.api_key import ApiKey
 from app.models.instance import Instance
-from app.models.knowledge import KnowledgeEmbedding  # Arc 10: AXIS_KNOWLEDGE
+from app.models.knowledge import KnowledgeChunk  # Arc 10: AXIS_KNOWLEDGE
 from app.models.scope_assignment import EndReason, ScopeAssignment
 from app.policy.entitlements import (
     TIER_ENTERPRISE,
@@ -144,11 +144,11 @@ AXIS_EMBED_KEYS = "embed_keys"
 AXIS_CNAMES = "cnames"
 AXIS_SEATS = "seats"
 # Arc 10: knowledge axis. Unlike the count-of-rows axes above,
-# AXIS_KNOWLEDGE is a sum-of-bytes axis whose unit is source_id
-# (a group of chunks sharing the same source_id). LRU selection
-# picks oldest sources by their newest chunk's updated_at, and
-# archives whole sources until total bytes <= cap. All chunks
-# sharing a source_id archive together.
+# AXIS_KNOWLEDGE is a sum-of-bytes axis whose unit is the INTEGER
+# source_id FK (a group of chunks sharing the same source FK).
+# LRU selection picks oldest sources by their newest chunk's
+# updated_at, and archives whole sources until total bytes <= cap.
+# All chunks sharing a source FK archive together.
 AXIS_KNOWLEDGE = "knowledge"
 ALL_AXES: tuple[str, ...] = (
     AXIS_INSTANCES, AXIS_EMBED_KEYS, AXIS_CNAMES, AXIS_SEATS,
@@ -340,40 +340,41 @@ class DowngradeArchiveService:
     ) -> AxisOverflow:
         """Compute the knowledge axis overflow for one admin.
 
-        Unit-of-archive is source_id (a group of chunks sharing
-        the same source_id). Per-source size approximated by
-        SUM(LENGTH(content)) over active chunks of that source.
+        Unit-of-archive is a *source group*. Post-Cleanup-B every
+        chunk carries a non-NULL INTEGER ``source_id`` FK to
+        ``knowledge_sources.id``, so the bucket key is the FK
+        directly (the pre-Cleanup-B prefixed key that disambiguated
+        FK-vs-legacy-string is gone with the legacy columns).
+
+        Per-source size approximated by ``SUM(LENGTH(content))`` over
+        active chunks of that source.
 
         LRU sort: oldest source first, where "age" is the source's
-        most-recent chunk's updated_at. A source that has been
+        most-recent chunk's ``updated_at``. A source that has been
         recently re-ingested or edited counts as recently-used.
 
         Selection rule: take sources in LRU order, accumulate their
         bytes, stop when total active bytes (after archiving the
         selected sources) is <= cap.
 
-        Returns AxisOverflow whose archived_ids field is a list of
-        source_id strings (not row ids). _apply_axis dispatches on
-        axis name and reads source_ids accordingly.
+        Returns ``AxisOverflow`` whose ``archived_ids`` field is a
+        list of integer source PKs. ``_apply_axis`` consumes them.
         """
         from sqlalchemy import func, select as sa_select
 
-        # Per-source aggregation: source_id, total bytes, most-recent
-        # updated_at.
         per_source_stmt = (
             sa_select(
-                KnowledgeEmbedding.source_id,
-                func.sum(func.length(KnowledgeEmbedding.content)).label("bytes"),
-                func.max(KnowledgeEmbedding.updated_at).label("recency"),
+                KnowledgeChunk.source_id.label("bucket"),
+                func.sum(func.length(KnowledgeChunk.content)).label("bytes"),
+                func.max(KnowledgeChunk.updated_at).label("recency"),
             )
             .where(
-                KnowledgeEmbedding.admin_id == admin_id,
-                KnowledgeEmbedding.source_id.is_not(None),
-                KnowledgeEmbedding.superseded_at.is_(None),
-                KnowledgeEmbedding.soft_deleted_at.is_(None),
-                KnowledgeEmbedding.pending_downgrade_archived_at.is_(None),
+                KnowledgeChunk.admin_id == admin_id,
+                KnowledgeChunk.superseded_at.is_(None),
+                KnowledgeChunk.soft_deleted_at.is_(None),
+                KnowledgeChunk.pending_downgrade_archived_at.is_(None),
             )
-            .group_by(KnowledgeEmbedding.source_id)
+            .group_by(KnowledgeChunk.source_id)
         )
         rows = list(self.db.execute(per_source_stmt).all())
 
@@ -388,17 +389,17 @@ class DowngradeArchiveService:
             )
 
         # LRU sort by recency ascending (oldest first), tiebreak by
-        # source_id so two sources with identical recency archive in
+        # bucket so two sources with identical recency archive in
         # deterministic order.
-        rows.sort(key=lambda r: (r.recency or datetime.min, r.source_id))
+        rows.sort(key=lambda r: (r.recency or datetime.min, r.bucket))
 
         # Greedy: archive sources oldest-first until we are under cap.
-        archived_source_ids: list[str | int] = []
+        archived_source_ids: list[int] = []
         bytes_remaining = current_bytes
         for r in rows:
             if bytes_remaining <= cap_bytes:
                 break
-            archived_source_ids.append(r.source_id)
+            archived_source_ids.append(int(r.bucket))
             bytes_remaining -= int(r.bytes or 0)
 
         return AxisOverflow(
@@ -527,16 +528,15 @@ class DowngradeArchiveService:
             return
 
         if axis == AXIS_KNOWLEDGE:
-            # archive_ids here are source_id values (strings), not
-            # row PKs. Stamp every active chunk sharing one of these
-            # source_ids in a single UPDATE per source -- this is
-            # what the "all chunks sharing a source_id archive
-            # together" invariant requires.
-            for source_id in ids_list:
+            # Post-Cleanup-B: archive_ids are integer source PKs.
+            # All chunks sharing the same FK archive together; the
+            # parent source row gets a mirrored stamp so its own
+            # lifecycle column stays consistent with its chunks.
+            for source_pk in ids_list:
                 self.db.execute(
                     sql_text(
                         """
-                        UPDATE knowledge_embeddings
+                        UPDATE knowledge_chunks
                            SET pending_downgrade_archived_at = :ts
                          WHERE admin_id = :aid
                            AND source_id = :sid
@@ -545,7 +545,19 @@ class DowngradeArchiveService:
                            AND pending_downgrade_archived_at IS NULL
                         """
                     ),
-                    {"ts": archived_at, "aid": admin_id, "sid": source_id},
+                    {"ts": archived_at, "aid": admin_id, "sid": int(source_pk)},
+                )
+                self.db.execute(
+                    sql_text(
+                        """
+                        UPDATE knowledge_sources
+                           SET pending_downgrade_archived_at = :ts
+                         WHERE id = :sid
+                           AND admin_id = :aid
+                           AND pending_downgrade_archived_at IS NULL
+                        """
+                    ),
+                    {"ts": archived_at, "aid": admin_id, "sid": int(source_pk)},
                 )
             return
 
@@ -626,11 +638,13 @@ def _is_owner_seat(row: ScopeAssignment) -> bool:
     """True iff this ScopeAssignment row is the owner seat.
 
     Owner-seat protection: a downgrade can never archive the admin's
-    own owner row. The literal ``"owner"`` is the role string used by
-    ``TierProvisioningService._ensure_owner_scope_assignment`` and the
-    webhook's owner-seat lookup.
+    own owner row. Cleanup C promoted the role column to the
+    ``scope_role`` PG enum; the canonical owner value is
+    ``ScopeRole.ADMIN_OWNER``.
     """
-    return getattr(row, "role", None) == "owner"
+    from app.models.scope_assignment import ScopeRole
+    role = getattr(row, "role", None)
+    return role == ScopeRole.ADMIN_OWNER or role == "admin_owner"
 
 
 def _lru_select(rows: list, n: int) -> list:

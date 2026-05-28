@@ -452,9 +452,10 @@ class SubscriptionStatusResponse(BaseModel):
     active_role: str | None = Field(
         default=None,
         description="Role on the cookied user's active ScopeAssignment. "
-                    "Common values: 'owner', 'tenant_admin', "
-                    "'department_lead', 'teammate'. Used by the "
-                    "frontend to gate org-building UI surfaces.",
+                    "Canonical values (Arc 11 Cleanup C, Architecture §3.2.2): "
+                    "'admin_owner', 'admin_manager', 'instance_operator', "
+                    "'read_only_viewer'. Used by the frontend to gate "
+                    "org-building UI surfaces.",
     )
 
 

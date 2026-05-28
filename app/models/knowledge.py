@@ -1,45 +1,46 @@
 """
-Knowledge embeddings model.
+Knowledge chunks model.
 
-Stores vector-indexed knowledge chunks for domain knowledge,
-tenant documents, role instructions, and Luciel-instance-specific knowledge.
+Post-Cleanup-B (Arc 11 closeout):
+    * Table is ``knowledge_chunks`` (renamed from
+      ``knowledge_embeddings`` in Arc 11 Step 2).
+    * Class is ``KnowledgeChunk``. The Step-2 backwards-compat alias
+      ``KnowledgeEmbedding = KnowledgeChunk`` has been removed —
+      every caller now references ``KnowledgeChunk`` directly.
+    * ``source_id`` is now an INTEGER FK to ``knowledge_sources.id``,
+      NOT NULL. The legacy stringy ``source_id`` String column and
+      the orthogonal free-text ``source`` String column are both
+      dropped (Cleanup B alembic migration). The relationship that
+      lived under ``source_record`` (Step-2 collision-avoidance
+      name) is renamed to ``source``.
 
-Scoping rules (legacy tenant/domain/agent triple retained for reads of
-pre-Step-25b rows; new writes bind to luciel_instance_id):
+Stores vector-indexed knowledge chunks. Each chunk belongs to
+exactly one ``KnowledgeSource`` (the FK is mandatory) and inherits
+its admin / instance / soft-delete posture from the source row.
 
-    - domain_knowledge:   domain_id set, tenant_id NULL   -> shared across all tenants in this domain.
-    - tenant_document:    tenant_id set                   -> private to this tenant.
-    - role_instruction:   tenant_id + domain_id set       -> private to this tenant/role.
-    - agent_knowledge:    tenant_id + agent_id set        -> LEGACY: private to this agent (pre-Step-24.5).
-    - luciel_knowledge:   tenant_id + luciel_instance_id  -> Step 25b: knowledge attached to a specific Luciel.
-
-PATCHED (Step 25b):
-    - luciel_instance_id FK to luciel_instances.id (ON DELETE SET NULL — preserves history).
-    - source_id / source_version / source_filename / source_type / ingested_by:
-      versioning + audit columns. Enables "replace by source_id" workflow.
-    - superseded_at: soft-supersede column. is_active = (superseded_at IS NULL).
-    - Composite index ix_knowledge_embeddings_scope_source on
-      (tenant_id, domain_id, luciel_instance_id, source_id) for fast
-      replace_by_source_id lookups in the repository (File 8).
+Cleanup C removed the legacy pre-Step-24.5 ``agent_id`` column;
+no read-side compat branches remain in the repository, retriever,
+or ingestion modules.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
 from pgvector.sqlalchemy import Vector
 
-class KnowledgeEmbedding(Base, TimestampMixin):
-    __tablename__ = "knowledge_embeddings"
+
+class KnowledgeChunk(Base, TimestampMixin):
+    __tablename__ = "knowledge_chunks"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
-    # ---- Scope triple (legacy + new) ----
+    # ---- Scope pair ----
     admin_id: Mapped[str | None] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
@@ -47,32 +48,24 @@ class KnowledgeEmbedding(Base, TimestampMixin):
         index=True,
     )
     domain_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
-    agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
-    """Legacy (pre-Step-24.5). New writes use luciel_instance_id instead."""
 
     # ---- Step 25b: Instance binding (Arc 5 Revision C re-pointed) ----
-    # Arc 9.1 Phase A (2026-05-25): NOT NULL. See arc9_1_a_tenant_isolation_seal.
-    # Pre-Arc-9.1 doctrine permitted NULL for legacy/shared rows; this was
-    # the P3 leak surface (204 NULL rows visible across tenants).
     luciel_instance_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey(
             "instances.id",
             ondelete="SET NULL",
-            name="fk_knowledge_embeddings_luciel_instance_id",
+            name="fk_knowledge_chunks_luciel_instance_id",
         ),
         index=True,
         nullable=False,
     )
     """The Luciel instance this chunk belongs to. Required."""
 
-    # Arc 5 Revision C — luciel_instance_id now FKs directly to instances.id;
-    # the relationship resolves through the natural FK (no longer via the
-    # legacy_luciel_instance_id back-pointer, which was dropped at Revision C).
     luciel_instance: Mapped["Instance | None"] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "Instance",
         lazy="select",
-        foreign_keys="KnowledgeEmbedding.luciel_instance_id",
+        foreign_keys="KnowledgeChunk.luciel_instance_id",
         viewonly=True,
     )
 
@@ -87,21 +80,38 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     """What kind of knowledge this is: domain_knowledge | tenant_document |
     role_instruction | agent_knowledge | luciel_knowledge."""
 
-    source: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    """Optional source reference (e.g., filename, URL, document ID).
-    Free-form, human-readable. For machine-level "find all chunks for this
-    upload" semantics, use source_id instead."""
+    # ---- Source binding (Cleanup B — single-FK shape) ----
+    # ``source_id`` is now the BIGINT FK to ``knowledge_sources.id``,
+    # NOT NULL. Pre-Cleanup-B the column had two names:
+    #   * a legacy String(100) ``source_id`` (chunk-side grouping key)
+    #   * an additive BIGINT ``source_fk`` introduced in Arc 11 Step 1
+    # Cleanup B's migration drops the legacy String and renames
+    # ``source_fk`` → ``source_id``. The relationship reclaims its
+    # natural name ``source`` (was ``source_record`` to avoid the
+    # collision with the now-dropped free-text ``source`` String
+    # column).
+    source_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "knowledge_sources.id",
+            ondelete="CASCADE",
+            name="fk_knowledge_chunks_source_id",
+        ),
+        nullable=False,
+        index=True,
+    )
+    source: Mapped["KnowledgeSource"] = relationship(  # type: ignore[name-defined]  # noqa: F821
+        "KnowledgeSource",
+        back_populates="chunks",
+        lazy="select",
+        foreign_keys="KnowledgeChunk.source_id",
+    )
 
-    # ---- Step 25b: versioning + audit ----
-    source_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
-    """Stable per-upload identifier. All chunks derived from the same ingest
-    call share one source_id, so replace_by_source_id can find and supersede
-    them atomically. NULL for legacy rows."""
-
+    # ---- Versioning + provenance audit ----
     source_version: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="1"
     )
-    """Bumped each time this source_id is re-ingested. New version's rows
+    """Bumped each time this source is re-ingested. New version's rows
     are inserted; old version's rows get superseded_at set."""
 
     source_filename: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -116,28 +126,22 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     superseded_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    """Set when a newer version of this source_id is ingested. NULL = active.
-    Retrieval (File 11) filters on superseded_at IS NULL."""
+    """Set when a newer version of this source is ingested. NULL = active.
+    Retrieval (KnowledgeRepository.search_similar) filters on
+    superseded_at IS NULL."""
 
-    # Arc 10 (Alembic arc10_lifecycle_subsystem) — two lifecycle flags
-    # distinct from superseded_at:
-    #
-    # soft_deleted_at: set when the parent instance is deactivated and
-    # this chunk enters the 30-day soft-delete window per Vision §6.1.
-    # The Arc 10 soft-delete worker physically removes chunks whose
-    # soft_deleted_at is older than 30 days. Retrieval (Arc 11 will
-    # update its filter) must exclude soft_deleted_at IS NOT NULL.
+    # ---- Arc 10 lifecycle flags ----
+    # soft_deleted_at: set when the parent instance is deactivated
+    # and this chunk enters the 30-day soft-delete window
+    # (Vision §6.1). The soft-delete worker physically removes
+    # chunks whose soft_deleted_at is older than 30 days. Retrieval
+    # excludes soft_deleted_at IS NOT NULL.
     #
     # pending_downgrade_archived_at: set when DowngradeArchiveService
     # archives this chunk's source at a Pro→Free boundary. All chunks
-    # sharing a source_id archive together (LRU at the source level).
-    # Recoverable on re-upgrade per Customer Journey Phase 8 Pro
-    # ("archived (not deleted) until he upgrades again"). Retrieval
-    # must exclude pending_downgrade_archived_at IS NOT NULL.
-    #
-    # No knowledge_sources table exists today; the "source" is rows-
-    # grouped-by-source_id on this table. The downgrade-archive 5th
-    # axis (AXIS_KNOWLEDGE) operates via GROUP BY source_id.
+    # sharing a source archive together (LRU at the source level).
+    # Recoverable on re-upgrade. Retrieval excludes
+    # pending_downgrade_archived_at IS NOT NULL.
     soft_deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -147,15 +151,11 @@ class KnowledgeEmbedding(Base, TimestampMixin):
 
     # ---- Audit ----
     created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    """--- Audit ---"""
-    
+
     # ---- Vector embedding (pgvector) ----
-    # Declared here (Step 25b, File 11 fix) so SQLAlchemy actually
-    # persists the column on INSERT. The DB column was already created
-    # manually via raw SQL (pre-Step-25b); no Alembic migration needed.
-    # DO NOT run `alembic revision --autogenerate` against this table —
-    # autogenerate still mis-handles vector(1536) dim arg on some
-    # SQLAlchemy/pgvector combinations.
+    # Declared here so SQLAlchemy persists the column on INSERT. The
+    # DB column was created manually via raw SQL (pre-Step-25b); no
+    # alembic migration. Do NOT run autogenerate against this table.
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(1536), nullable=True
     )
@@ -163,17 +163,15 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     # ---- Indexes ----
     __table_args__ = (
         Index("ix_knowledge_scope", "admin_id", "domain_id", "knowledge_type"),
-        # Step 25b: composite for fast "find chunks for source" lookups.
-        # Declared in the File 2 Alembic migration with the same name; we
-        # mirror it here so SQLAlchemy's metadata matches the DB.
+        # Composite for fast "find chunks for source" lookups. Cleanup
+        # B drops the legacy ix_knowledge_chunks_scope_source (which
+        # referenced the old String source_id column) and replaces
+        # it with the equivalent on the new FK column.
         Index(
-            "ix_knowledge_embeddings_scope_source",
+            "ix_knowledge_chunks_scope_source",
             "admin_id", "domain_id", "luciel_instance_id", "source_id",
         ),
     )
-    # NOTE: `embedding` column is pgvector vector(1536), added manually via
-    # SQL outside Alembic. Do not declare it here — SQLAlchemy core does not
-    # know the `vector` type, and autogenerate would try to drop it.
 
     # ---- Convenience ----
     @hybrid_property
@@ -184,5 +182,5 @@ class KnowledgeEmbedding(Base, TimestampMixin):
     @is_active.expression  # type: ignore[no-redef]
     def is_active(cls):  # noqa: N805  (SQLAlchemy hybrid_property convention)
         """SQL-side expression so repository code can do
-        `.filter(KnowledgeEmbedding.is_active)`."""
+        ``.filter(KnowledgeChunk.is_active)``."""
         return cls.superseded_at.is_(None)

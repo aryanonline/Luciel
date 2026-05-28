@@ -41,7 +41,10 @@ PLATFORM_DEFAULTS = [
                    "Aggregated metrics are preserved separately.",
     },
     {
-        "data_category": "knowledge_embeddings",
+        # Cleanup A: renamed from "knowledge_embeddings" to
+        # "knowledge_chunks". Paired alembic migration updates
+        # persisted rows.
+        "data_category": "knowledge_chunks",
         "retention_days": 0,
         "action": "delete",
         "purpose": "Domain knowledge, not end-user PII. No automatic purge. "

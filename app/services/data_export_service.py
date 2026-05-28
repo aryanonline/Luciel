@@ -758,68 +758,68 @@ class DataExportService:
         *,
         admin_id: str,
     ) -> None:
-        """Knowledge bundle \u2014 Arc 10 Option-2 (chunks only).
+        """Knowledge bundle.
 
-        See module docstring for why we ship chunks-only in Arc 10.
-        Arc 11 will add the originals next to the chunks; no
-        restructure required.
+        Post-Cleanup-B: manifest entries are drawn directly from
+        ``knowledge_sources``; the pre-Cleanup-B legacy fallback for
+        FK-less chunks is gone with the legacy columns \u2014 every chunk
+        now has a non-NULL INTEGER source FK pointing at a
+        ``knowledge_sources`` row.
+
+        Bundle layout is unchanged:
+          * ``knowledge_sources/manifest.json``
+          * ``knowledge_sources/chunks/src-<pk>__v<version>.jsonl``
         """
-        # Per-source manifest aggregation.
-        manifest_rows = self.db.execute(
+        ks_rows = self.db.execute(
             sql_text(
                 """
-                SELECT source_id,
-                       MAX(source_filename) AS source_filename,
-                       MAX(source_type) AS source_type,
-                       MAX(source_version) AS source_version,
-                       MAX(ingested_by) AS ingested_by,
-                       MIN(created_at) AS ingested_at,
-                       COUNT(*) AS chunk_count
-                  FROM knowledge_embeddings
-                 WHERE admin_id = :aid
-                   AND superseded_at IS NULL
-                   AND soft_deleted_at IS NULL
-                   AND source_id IS NOT NULL
-              GROUP BY source_id
-              ORDER BY MIN(created_at) ASC
+                SELECT s.id            AS source_pk,
+                       s.source_uuid   AS source_uuid,
+                       s.filename      AS source_filename,
+                       s.source_type   AS source_type,
+                       s.source_version AS source_version,
+                       s.ingested_by   AS ingested_by,
+                       s.ingested_at   AS ingested_at,
+                       s.size_bytes    AS size_bytes,
+                       s.ingestion_status AS ingestion_status,
+                       s.soft_deleted_at IS NOT NULL AS is_soft_deleted,
+                       s.pending_downgrade_archived_at IS NOT NULL
+                                       AS archived_on_downgrade,
+                       (SELECT COUNT(*)
+                          FROM knowledge_chunks c
+                         WHERE c.source_id = s.id
+                           AND c.superseded_at IS NULL
+                           AND c.soft_deleted_at IS NULL) AS chunk_count
+                  FROM knowledge_sources s
+                 WHERE s.admin_id = :aid
+                   AND s.soft_deleted_at IS NULL
+              ORDER BY s.ingested_at ASC
                 """
             ),
             {"aid": admin_id},
         )
-        manifest = []
-        per_source: list[tuple[str, int]] = []
-        for r in manifest_rows:
+        manifest: list[dict] = []
+        per_source: list[tuple[int, int]] = []
+        for r in ks_rows:
             manifest.append({
-                "source_id": r[0],
-                "source_filename": r[1],
-                "source_type": r[2],
-                "source_version": r[3],
-                "ingested_by": r[4],
-                "ingested_at": _iso(r[5]),
-                "chunk_count": int(r[6]),
+                "source_pk": int(r.source_pk),
+                "source_uuid": str(r.source_uuid),
+                # Stable stringy id (``src-<pk>``) preserved in the
+                # export envelope for downstream consumers that still
+                # key on a string; the DB column is gone.
+                "source_id": f"src-{int(r.source_pk)}",
+                "source_filename": r.source_filename,
+                "source_type": r.source_type,
+                "source_version": int(r.source_version),
+                "ingested_by": r.ingested_by,
+                "ingested_at": _iso(r.ingested_at),
+                "size_bytes": int(r.size_bytes or 0),
+                "chunk_count": int(r.chunk_count or 0),
+                "ingestion_status": r.ingestion_status,
                 "originals_retained": False,
-                "archived_on_downgrade": False,  # filled in below
+                "archived_on_downgrade": bool(r.archived_on_downgrade),
             })
-            per_source.append((r[0], int(r[3])))
-
-        # Mark sources whose chunks are downgrade-archived. We do
-        # this with a separate query so the main aggregation stays
-        # simple, and we update the manifest entries in place.
-        archived_rows = self.db.execute(
-            sql_text(
-                """
-                SELECT DISTINCT source_id
-                  FROM knowledge_embeddings
-                 WHERE admin_id = :aid
-                   AND pending_downgrade_archived_at IS NOT NULL
-                """
-            ),
-            {"aid": admin_id},
-        )
-        archived_ids = {row[0] for row in archived_rows}
-        for m in manifest:
-            if m["source_id"] in archived_ids:
-                m["archived_on_downgrade"] = True
+            per_source.append((int(r.source_pk), int(r.source_version)))
 
         self._add_text_entry(
             tar,
@@ -828,12 +828,12 @@ class DataExportService:
         )
 
         # Per-source chunk files.
-        for source_id, source_version in per_source:
+        for source_pk, source_version in per_source:
             chunk_rows = self.db.execute(
                 sql_text(
                     """
                     SELECT id, title, content, knowledge_type, created_at
-                      FROM knowledge_embeddings
+                      FROM knowledge_chunks
                      WHERE admin_id = :aid
                        AND source_id = :sid
                        AND source_version = :sv
@@ -842,8 +842,10 @@ class DataExportService:
                   ORDER BY id ASC
                     """
                 ),
-                {"aid": admin_id, "sid": source_id, "sv": source_version},
+                {"aid": admin_id, "sid": source_pk, "sv": source_version},
             )
+            file_key = f"src-{source_pk}"
+
             lines = []
             for cr in chunk_rows:
                 lines.append(json.dumps({
@@ -856,7 +858,7 @@ class DataExportService:
             self._add_text_entry(
                 tar,
                 f"knowledge_sources/chunks/"
-                f"{source_id}__v{source_version}.jsonl",
+                f"{file_key}__v{source_version}.jsonl",
                 "\n".join(lines) + ("\n" if lines else ""),
             )
 

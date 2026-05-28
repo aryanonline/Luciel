@@ -1,9 +1,29 @@
 """
 Trace service.
 
-Creates and stores trace records for each chat turn.
-Includes tenant/domain/agent config references and
-the actual memories that were used.
+Creates and stores trace records for each chat turn (Architecture
+v1 §5.1 — Observability).
+
+Includes tenant/domain/agent config references and the actual
+memories that were used.
+
+Arc 11 Step 5 update — ``source_ids_used``:
+    Each trace now carries the list of ``knowledge_sources.id``
+    rows whose chunks contributed to this turn's retrieval. This
+    backs the Architecture v1 §3.2.2 delete-confirm modal preview
+    ("a preview of what customer questions referenced this source
+    recently, drawn from the trace store"). The column itself is
+    a ``BIGINT[]`` with a GIN index (Arc 11 Step 1 schema;
+    ``ix_traces_source_ids_used``), so the read path
+    (``TraceRepository.list_recent_traces_using_source``, used by
+    the Step 7 ``GET /sources/{id}/affected-questions`` endpoint)
+    can do a fast ``@>`` containment lookup per source.
+
+The orchestrator (Step 8) computes the list by calling
+``app.knowledge.retriever.collect_source_pks(chunks)`` between
+the retrieve step and the trace write. The legacy ``memories_used``
+column is unrelated — memories are conversation-history items;
+sources are knowledge-base sources. They stay independent.
 
 PATCHED: Added agent_id and agent_config_id parameters.
 """
@@ -44,9 +64,19 @@ class TraceService:
         policy_flags: list[str] | None = None,
         memories_extracted: int = 0,
         luciel_instance_id: int | None = None,   # Step 24.5 File 15
+        source_ids_used: list[int] | None = None,  # Arc 11 Step 5
     ) -> str:
-        """
-        Create and persist a trace record.
+        """Create and persist a trace record.
+
+        Arc 11 Step 5: ``source_ids_used`` is an optional list of
+        ``knowledge_sources.id`` rows that contributed chunks to
+        this turn. ``None`` is normalised to ``[]`` to match the
+        DB ``server_default '{}'``. The orchestrator (Step 8)
+        builds the list by passing the chunks
+        ``KnowledgeRetriever.retrieve_with_sources(...)`` returned
+        through ``app.knowledge.retriever.collect_source_pks``,
+        which dedupes and filters out string / None identifiers.
+
         Returns the trace_id for reference.
         """
         trace_id = str(uuid.uuid4())
@@ -70,6 +100,13 @@ class TraceService:
             policy_flags=policy_flags,
             memories_extracted=memories_extracted,
             luciel_instance_id=luciel_instance_id,   # Step 24.5 File 15
+            # Arc 11 Step 5 — Architecture v1 §5.1. ``None`` becomes
+            # ``[]`` so the ORM write matches the column's
+            # ``NOT NULL DEFAULT '{}'`` shape; a stored ``[]`` is
+            # also what the §3.2.2 modal preview expects to see for
+            # any trace that fired before the orchestrator wiring
+            # in Step 8.
+            source_ids_used=list(source_ids_used) if source_ids_used else [],
         )
 
         try:

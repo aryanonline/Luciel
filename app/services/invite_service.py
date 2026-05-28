@@ -76,7 +76,7 @@ from app.models.admin_audit_log import (
 # Arc 5 Path A: Agent table REMOVED. Invite redemption mints a
 # ScopeAssignment binding the new user to the Admin (tenant). No Agent
 # row is created.
-from app.models.scope_assignment import ScopeAssignment
+from app.models.scope_assignment import ScopeAssignment, ScopeRole
 from app.models.user import User
 from app.models.user_invite import InviteStatus, UserInvite
 from app.repositories.admin_audit_repository import (
@@ -188,15 +188,17 @@ _DEFAULT_MAX_PENDING_INVITES = 100
 # See CANONICAL_RECAP §12 Step 30a.6 row + §14 Entitlement matrix row 3
 # and DRIFTS `D-tier-semantics-realignment-2026-05-20`.
 
-# V2 tier-aware invite-role allow-sets (Arc 5 B8 rename):
+# Arc 11 Cleanup C tier-aware invite-role allow-sets:
 #   Free       → seats=1, no invites allowed
-#   Pro        → seats=25, only 'teammate' role allowed
-#   Enterprise → unlimited seats, any role string permissive
-# Mirrors CANONICAL_RECAP §14 V2 entitlement matrix seat-cap axis.
-_PRO_ALLOWED_INVITE_ROLES:  frozenset[str] = frozenset({"teammate"})
-_FREE_ALLOWED_INVITE_ROLES: frozenset[str] = frozenset()  # seats=1
-# Enterprise tier accepts any role string -- future role-label
-# additions don't require this constant to grow.
+#   Pro        → instance_operator only (Customer Journey §10.3:
+#                Marcus's 12 agents get instance_operator scope)
+#   Enterprise → any of the four locked roles (custom-role authoring
+#                lands in Arc 12b)
+# The legacy ``teammate`` string was retired in Arc 11 Cleanup C —
+# the role taxonomy is now the canonical four from Architecture §3.2.2.
+_PRO_ALLOWED_INVITE_ROLES:  frozenset[ScopeRole] = frozenset({ScopeRole.INSTANCE_OPERATOR})
+_FREE_ALLOWED_INVITE_ROLES: frozenset[ScopeRole] = frozenset()  # seats=1
+_ENTERPRISE_ALLOWED_INVITE_ROLES: frozenset[ScopeRole] = frozenset(ScopeRole)
 
 
 def _resolve_max_pending_invites(*, admin_id: str, db: Session) -> int:
@@ -224,7 +226,7 @@ def _resolve_max_pending_invites(*, admin_id: str, db: Session) -> int:
 
 
 def _check_role_allowed_for_tier(
-    *, admin_id: str, role: str, db: Session
+    *, admin_id: str, role: ScopeRole, db: Session
 ) -> None:
     """Raise ``InviteRoleNotAllowedForTierError`` if role is not allowed.
 
@@ -325,7 +327,7 @@ def create_invite(
     inviter_user_id: uuid.UUID,
     inviter_email: str,
     invited_email: str,
-    role: str = "teammate",
+    role: ScopeRole = ScopeRole.INSTANCE_OPERATOR,
     audit_ctx: AuditContext,
 ) -> tuple[UserInvite, str]:
     """Mint a UserInvite + 24h set_password JWT, send the invite email.

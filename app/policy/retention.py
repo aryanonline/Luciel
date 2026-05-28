@@ -36,7 +36,7 @@ from app.models.session import SessionModel  # noqa: F401 — kept for migration
 from app.models.message import MessageModel  # noqa: F401
 from app.models.memory import MemoryItem  # noqa: F401
 from app.models.trace import Trace  # noqa: F401
-from app.models.knowledge import KnowledgeEmbedding  # noqa: F401
+from app.models.knowledge import KnowledgeChunk  # noqa: F401
 from app.repositories.retention_repository import RetentionRepository
 
 logger = logging.getLogger(__name__)
@@ -75,8 +75,16 @@ DATA_CATEGORY_MAP: dict[str, dict] = {
         },
         "tenant_scope": ("direct", "admin_id"),
     },
-    "knowledge_embeddings": {
-        "table": "knowledge_embeddings",
+    # Cleanup A (Arc 11 closeout): the data_category KEY is now
+    # ``"knowledge_chunks"``, matching the post-Arc-11 table name.
+    # The paired alembic migration
+    # ``arc11_cleanup_a_data_category_rename`` updates any persisted
+    # ``retention_policies.data_category`` rows from the legacy
+    # ``"knowledge_embeddings"`` value to the new one (0 rows in
+    # production per ARC11_PLAN.md §12; the migration is correctness
+    # insurance for any data loaded between plan-write and merge).
+    "knowledge_chunks": {
+        "table": "knowledge_chunks",
         "date_col": "created_at",
         "anon_cols": {},
         "tenant_scope": ("direct", "admin_id"),

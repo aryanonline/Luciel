@@ -160,6 +160,16 @@ if BROKER_URL.startswith("sqs://"):
             "luciel-memory-dlq": {
                 "url": f"https://sqs.{os.environ.get('AWS_REGION', 'ca-central-1')}.amazonaws.com/729005488042/luciel-memory-dlq",
             },
+            # Arc 11 Step 6 -- knowledge ingest pipeline. Step 11
+            # close-audit verifies the matching SQS queues exist;
+            # Step 7 enqueues via embed_source.apply_async(
+            # queue="luciel-knowledge-tasks", kwargs=...).
+            "luciel-knowledge-tasks": {
+                "url": f"https://sqs.{os.environ.get('AWS_REGION', 'ca-central-1')}.amazonaws.com/729005488042/luciel-knowledge-tasks",
+            },
+            "luciel-knowledge-dlq": {
+                "url": f"https://sqs.{os.environ.get('AWS_REGION', 'ca-central-1')}.amazonaws.com/729005488042/luciel-knowledge-dlq",
+            },
         },
         "polling_interval": 1.0,  # seconds between SQS long-poll batches
     })
@@ -180,6 +190,14 @@ celery_app = Celery(
         # Arc 10 -- lifecycle subsystem tasks.
         "app.worker.tasks.data_export",
         "app.worker.tasks.audit_retention",
+        # Arc 11 Step 6 -- knowledge embed pipeline. Routed to its
+        # own queue ``luciel-knowledge-tasks`` so chunk-embedding
+        # latency does not starve chat-path memory_extraction (which
+        # runs on luciel-memory-tasks with worker_prefetch=1).
+        "app.worker.tasks.embed_source",
+        # Arc 11 Step 7 -- website crawl stub (Arc-14 fills in the
+        # real fetcher). Same queue as embed_source.
+        "app.worker.tasks.crawl_website",
     ],
 )
 

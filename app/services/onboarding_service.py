@@ -52,13 +52,17 @@ from app.services.api_key_service import ApiKeyService
 
 logger = logging.getLogger(__name__)
 
-# PIPEDA-compliant default retention categories
+# PIPEDA-compliant default retention categories. Cleanup A renamed
+# the knowledge data_category from "knowledge_embeddings" (legacy)
+# to "knowledge_chunks"; the paired alembic migration
+# ``arc11_cleanup_a_data_category_rename`` updates any persisted
+# rows.
 DEFAULT_RETENTION_CATEGORIES = [
     "sessions",
     "messages",
     "memory_items",
     "traces",
-    "knowledge_embeddings",
+    "knowledge_chunks",
 ]
 
 
@@ -189,13 +193,14 @@ class OnboardingService:
             # only as a label inside the audit-row payload below.
             domain = None
 
-            # 3. Create default retention policies
+            # 3. Create default retention policies. Cleanup A renamed
+            # the knowledge data_category to "knowledge_chunks".
             retention_map = {
                 "sessions": retention_days_sessions,
                 "messages": retention_days_messages,
                 "memory_items": retention_days_memory_items,
                 "traces": retention_days_traces,
-                "knowledge_embeddings": retention_days_knowledge,
+                "knowledge_chunks": retention_days_knowledge,
             }
             retention_policies = []
             for category, days in retention_map.items():

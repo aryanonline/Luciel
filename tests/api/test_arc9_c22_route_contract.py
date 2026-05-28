@@ -196,7 +196,7 @@ class TestIdentitySnapshotZeroState:
             id=uuid.uuid4(),
             user_id=uuid.uuid4(),
             admin_id="free-abc",
-            role="owner",
+            role="admin_owner",
             active=True,
         )
         snap = IdentitySnapshot(
@@ -208,16 +208,18 @@ class TestIdentitySnapshotZeroState:
         assert snap.has_scope is False
 
     def test_snapshot_canonical_role_prefers_owner(self):
+        """Post-Cleanup-C the canonical owner role is ``admin_owner``
+        from the ``scope_role`` PG enum."""
         from app.identity.bootstrap import IdentitySnapshot
         from app.models.scope_assignment import ScopeAssignment
         u = uuid.uuid4()
         owner = ScopeAssignment(
             id=uuid.uuid4(), user_id=u, admin_id="t1",
-            role="owner", active=True,
+            role="admin_owner", active=True,
         )
         member = ScopeAssignment(
             id=uuid.uuid4(), user_id=u, admin_id="t1",
-            role="member", active=True,
+            role="admin_manager", active=True,
         )
         snap = IdentitySnapshot(
             user_id=u,
@@ -226,4 +228,4 @@ class TestIdentitySnapshotZeroState:
             active_scopes=[member, owner],  # owner second on purpose
         )
         assert snap.has_scope is True
-        assert snap.canonical_role == "owner"
+        assert snap.canonical_role == "admin_owner"

@@ -1,40 +1,50 @@
 """
-Knowledge repository (Step 25b, File 8).
+Knowledge repository — post-Cleanup-B.
 
-Scope-aware CRUD over knowledge_embeddings.
+Scope-aware CRUD over the ``knowledge_chunks`` table. After
+Cleanup B's legacy-column drops, the chunk table has a single
+source binding: an INTEGER FK column named ``source_id``
+referencing ``knowledge_sources.id`` (NOT NULL). The pre-Cleanup
+String ``source_id`` column and the orthogonal free-text
+``source`` column are both gone.
 
-Write discipline:
-    - Writes always carry the full scope (admin_id, domain_id,
-      luciel_instance_id) so retrieval inheritance works.
-    - source_id + source_version are atomic units of replace.
-    - Soft supersede: never UPDATE-in-place, never DELETE rows. Set
-      superseded_at, insert new version. Preserves audit trail.
+What that means for callers:
 
-Read discipline:
-    - list_for_luciel_instance reads instance-scoped chunks only.
-    - list_for_scope reads with upward inheritance
-      (instance -> domain -> tenant -> global) — what File 11's
-      retriever will use for retrieval-time union.
-    - Active-only filter (superseded_at IS NULL) on every read that
-      serves chat or admin-list; admins can opt into ?include_superseded=true
-      later if we need audit surface.
+  * ``add_chunks(... source_id: int)`` — the FK is mandatory.
+    Pre-Cleanup-A's optional stringy ``source_id`` + optional
+    ``source_fk`` pair collapse to a single required INTEGER FK.
+  * The chunk-side grouping methods that used to key on the
+    String ``source_id`` (``get_active_source``,
+    ``list_sources_for_instance``, ``supersede_source``,
+    ``latest_version_for_source``) are removed — their only
+    callers were the legacy admin routes that Cleanup B also
+    deleted.
+  * ``search_similar`` now INNER JOINs ``knowledge_sources`` (the
+    FK is NOT NULL, so the LEFT-join fallback for legacy chunks
+    is no longer needed). Filters on
+    ``ingestion_status = 'ready'`` and the source-side lifecycle
+    flags (Architecture v1 §3.2 retrieval flow step 1).
+  * ``soft_delete_chunks_for_source_id`` (renamed from
+    ``_for_source_fk``) is the cascade helper Step 7's
+    ``DELETE /sources/{id}`` route calls.
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Iterable, Sequence
+from typing import Sequence
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from app.models.knowledge import KnowledgeEmbedding
+from app.models.knowledge import KnowledgeChunk
 
 logger = logging.getLogger(__name__)
 
 
 class KnowledgeRepository:
-    """CRUD over knowledge_embeddings, scoped by LucielInstance + legacy triple."""
+    """CRUD over knowledge_chunks, scoped by LucielInstance + the
+    new INTEGER source_id FK to ``knowledge_sources``."""
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -50,24 +60,22 @@ class KnowledgeRepository:
         embeddings: Sequence[Sequence[float]],
         admin_id: str | None,
         domain_id: str | None,
-        agent_id: str | None,
-        luciel_instance_id: int | None,
+        luciel_instance_id: int,
         knowledge_type: str,
         title: str | None,
-        source: str | None,
-        source_id: str | None,
+        source_id: int,
         source_version: int,
         source_filename: str | None,
         source_type: str | None,
         ingested_by: str | None,
         created_by: str | None,
         autocommit: bool = True,
-    ) -> list[KnowledgeEmbedding]:
+    ) -> list[KnowledgeChunk]:
         """Bulk-insert chunks with matching embeddings.
 
-        `chunks` and `embeddings` must be the same length. Each chunk
-        becomes one knowledge_embeddings row. Returns the persisted
-        model instances (refreshed with DB-assigned id + timestamps).
+        ``chunks`` and ``embeddings`` must be the same length. Each
+        chunk becomes one ``knowledge_chunks`` row. ``source_id``
+        is the INTEGER FK to ``knowledge_sources.id`` (mandatory).
         """
         if len(chunks) != len(embeddings):
             raise ValueError(
@@ -77,17 +85,15 @@ class KnowledgeRepository:
         if not chunks:
             return []
 
-        rows: list[KnowledgeEmbedding] = []
+        rows: list[KnowledgeChunk] = []
         for text, emb in zip(chunks, embeddings):
-            row = KnowledgeEmbedding(
+            row = KnowledgeChunk(
                 admin_id=admin_id,
                 domain_id=domain_id,
-                agent_id=agent_id,
                 luciel_instance_id=luciel_instance_id,
                 content=text,
                 title=title,
                 knowledge_type=knowledge_type,
-                source=source,
                 source_id=source_id,
                 source_version=source_version,
                 source_filename=source_filename,
@@ -95,8 +101,7 @@ class KnowledgeRepository:
                 ingested_by=ingested_by,
                 created_by=created_by,
             )
-            # `embedding` column is pgvector; bind via raw attr set.
-            # SQLAlchemy doesn't type-check vector(1536).
+            # `embedding` is pgvector; bind via raw attr set.
             row.embedding = emb  # type: ignore[attr-defined]
             self.db.add(row)
             rows.append(row)
@@ -106,112 +111,22 @@ class KnowledgeRepository:
             for row in rows:
                 self.db.refresh(row)
         else:
-            self.db.flush()  # assign ids without committing
+            self.db.flush()
         return rows
 
     # ==============================================================
-    # READ — single source, single chunk
+    # READ — single chunk
     # ==============================================================
 
-    def get_active_source(
-        self,
-        *,
-        luciel_instance_id: int,
-        source_id: str,
-    ) -> list[KnowledgeEmbedding]:
-        """Return all active (non-superseded) chunks for one source_id
-        on one Luciel instance. Empty list if not found.
-        """
-        stmt = (
-            select(KnowledgeEmbedding)
-            .where(
-                KnowledgeEmbedding.luciel_instance_id == luciel_instance_id,
-                KnowledgeEmbedding.source_id == source_id,
-                KnowledgeEmbedding.superseded_at.is_(None),
-            )
-            .order_by(KnowledgeEmbedding.id.asc())
-        )
-        return list(self.db.execute(stmt).scalars().all())
-
-    def get_chunk(self, chunk_id: int) -> KnowledgeEmbedding | None:
+    def get_chunk(self, chunk_id: int) -> KnowledgeChunk | None:
         """Fetch a single chunk by primary key. No scope filter —
-        authorization happens at the route layer (File 10) before this
-        is called.
-        """
-        return self.db.get(KnowledgeEmbedding, chunk_id)
+        authorization happens at the route layer before this is
+        called."""
+        return self.db.get(KnowledgeChunk, chunk_id)
 
     # ==============================================================
-    # READ — lists
+    # READ — scope-wise (chunks for retriever's union inheritance)
     # ==============================================================
-
-    def list_sources_for_instance(
-        self,
-        *,
-        luciel_instance_id: int,
-        include_superseded: bool = False,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> tuple[list[dict], int]:
-        """List distinct sources on one instance, grouped by source_id.
-
-        Returns (items, total_count). Each item is a dict ready to
-        feed KnowledgeSourceRead — {luciel_instance_id, source_id,
-        source_version, source_filename, source_type, knowledge_type,
-        title, chunk_count, ingested_by, created_at, superseded_at}.
-        """
-        base_filter = [
-            KnowledgeEmbedding.luciel_instance_id == luciel_instance_id,
-        ]
-        if not include_superseded:
-            base_filter.append(KnowledgeEmbedding.superseded_at.is_(None))
-
-        # Aggregate per (source_id, source_version).
-        group_cols = (
-            KnowledgeEmbedding.luciel_instance_id,
-            KnowledgeEmbedding.source_id,
-            KnowledgeEmbedding.source_version,
-            KnowledgeEmbedding.source_filename,
-            KnowledgeEmbedding.source_type,
-            KnowledgeEmbedding.knowledge_type,
-            KnowledgeEmbedding.title,
-            KnowledgeEmbedding.ingested_by,
-        )
-        count_stmt = (
-            select(func.count(func.distinct(KnowledgeEmbedding.source_id)))
-            .where(*base_filter, KnowledgeEmbedding.source_id.is_not(None))
-        )
-        total = int(self.db.execute(count_stmt).scalar() or 0)
-
-        stmt = (
-            select(
-                *group_cols,
-                func.count(KnowledgeEmbedding.id).label("chunk_count"),
-                func.min(KnowledgeEmbedding.created_at).label("created_at"),
-                func.max(KnowledgeEmbedding.superseded_at).label("superseded_at"),
-            )
-            .where(*base_filter, KnowledgeEmbedding.source_id.is_not(None))
-            .group_by(*group_cols)
-            .order_by(func.min(KnowledgeEmbedding.created_at).desc())
-            .limit(limit)
-            .offset(offset)
-        )
-        items = [
-            {
-                "luciel_instance_id": row.luciel_instance_id,
-                "source_id": row.source_id,
-                "source_version": row.source_version,
-                "source_filename": row.source_filename,
-                "source_type": row.source_type,
-                "knowledge_type": row.knowledge_type,
-                "title": row.title,
-                "chunk_count": row.chunk_count,
-                "ingested_by": row.ingested_by,
-                "created_at": row.created_at,
-                "superseded_at": row.superseded_at,
-            }
-            for row in self.db.execute(stmt).all()
-        ]
-        return items, total
 
     def list_active_chunks_for_scope(
         self,
@@ -221,8 +136,8 @@ class KnowledgeRepository:
         luciel_instance_id: int | None,
         knowledge_type: str | None = None,
         limit: int = 1000,
-    ) -> list[KnowledgeEmbedding]:
-        """Upward-inheritance read used by File 11's retriever.
+    ) -> list[KnowledgeChunk]:
+        """Upward-inheritance read used by the retriever.
 
         Returns active chunks visible to this scope:
             - chunks bound to this luciel_instance_id  (instance-private)
@@ -232,30 +147,26 @@ class KnowledgeRepository:
               luciel_instance_id IS NULL  (tenant-shared)
             - chunks with all of (admin_id, domain_id, luciel_instance_id) NULL
               (global / domain_knowledge across all tenants for a domain)
-
-        Legacy rows (agent_id set, luciel_instance_id NULL) are read-
-        compatible via the same clauses — they travel with the scope
-        triple exactly as before, they just never update.
         """
         instance_clause = (
-            KnowledgeEmbedding.luciel_instance_id == luciel_instance_id
+            KnowledgeChunk.luciel_instance_id == luciel_instance_id
             if luciel_instance_id is not None
             else None
         )
         domain_clause = and_(
-            KnowledgeEmbedding.luciel_instance_id.is_(None),
-            KnowledgeEmbedding.admin_id == admin_id,
-            KnowledgeEmbedding.domain_id == domain_id,
+            KnowledgeChunk.luciel_instance_id.is_(None),
+            KnowledgeChunk.admin_id == admin_id,
+            KnowledgeChunk.domain_id == domain_id,
         ) if domain_id is not None else None
         tenant_clause = and_(
-            KnowledgeEmbedding.luciel_instance_id.is_(None),
-            KnowledgeEmbedding.domain_id.is_(None),
-            KnowledgeEmbedding.admin_id == admin_id,
+            KnowledgeChunk.luciel_instance_id.is_(None),
+            KnowledgeChunk.domain_id.is_(None),
+            KnowledgeChunk.admin_id == admin_id,
         ) if admin_id is not None else None
         global_clause = and_(
-            KnowledgeEmbedding.luciel_instance_id.is_(None),
-            KnowledgeEmbedding.admin_id.is_(None),
-            KnowledgeEmbedding.domain_id.is_(None),
+            KnowledgeChunk.luciel_instance_id.is_(None),
+            KnowledgeChunk.admin_id.is_(None),
+            KnowledgeChunk.domain_id.is_(None),
         )
 
         union_parts = [
@@ -266,71 +177,53 @@ class KnowledgeRepository:
             return []
 
         stmt = (
-            select(KnowledgeEmbedding)
+            select(KnowledgeChunk)
             .where(
                 or_(*union_parts),
-                KnowledgeEmbedding.superseded_at.is_(None),
+                KnowledgeChunk.superseded_at.is_(None),
             )
-            .order_by(KnowledgeEmbedding.id.asc())
+            .order_by(KnowledgeChunk.id.asc())
             .limit(limit)
         )
         if knowledge_type is not None:
-            stmt = stmt.where(KnowledgeEmbedding.knowledge_type == knowledge_type)
+            stmt = stmt.where(KnowledgeChunk.knowledge_type == knowledge_type)
         return list(self.db.execute(stmt).scalars().all())
 
     # ==============================================================
-    # REPLACE / DELETE — soft-supersede
+    # DELETE — soft-delete cascade
     # ==============================================================
 
-    def supersede_source(
+    def soft_delete_chunks_for_source_id(
         self,
         *,
-        luciel_instance_id: int,
-        source_id: str,
-        autocommit: bool = True,
+        source_id: int,
+        admin_id: str,
+        autocommit: bool = False,
     ) -> int:
-        """Mark every active chunk of (luciel_instance_id, source_id) as
-        superseded.
+        """Stamp ``soft_deleted_at`` on every active chunk whose
+        ``source_id`` matches. Mirrors the application-side cascade
+        from ``KnowledgeSourceRepository.soft_delete``. The API
+        handler for ``DELETE /sources/{id}`` calls both so the
+        source row and its chunks transition together.
 
-        Returns the number of rows flipped from active to superseded.
-        Idempotent: calling twice is safe (second call returns 0).
+        Returns the number of rows newly stamped (already-soft-
+        deleted rows are not double-counted; idempotent).
         """
         now = datetime.now(tz=timezone.utc)
-        stmt = (
-            select(KnowledgeEmbedding)
-            .where(
-                KnowledgeEmbedding.luciel_instance_id == luciel_instance_id,
-                KnowledgeEmbedding.source_id == source_id,
-                KnowledgeEmbedding.superseded_at.is_(None),
-            )
+        stmt = select(KnowledgeChunk).where(
+            KnowledgeChunk.source_id == source_id,
+            KnowledgeChunk.admin_id == admin_id,
+            KnowledgeChunk.soft_deleted_at.is_(None),
         )
         rows = list(self.db.execute(stmt).scalars().all())
         for row in rows:
-            row.superseded_at = now
+            row.soft_deleted_at = now
         if autocommit:
             self.db.commit()
         else:
             self.db.flush()
         return len(rows)
 
-    def latest_version_for_source(
-        self,
-        *,
-        luciel_instance_id: int,
-        source_id: str,
-    ) -> int:
-        """Return the highest source_version seen (active or superseded)
-        for this (instance, source_id). 0 if no rows exist.
-
-        File 9's ingest_file uses this to compute next_version = this + 1
-        when replace_existing=True.
-        """
-        stmt = select(func.max(KnowledgeEmbedding.source_version)).where(
-            KnowledgeEmbedding.luciel_instance_id == luciel_instance_id,
-            KnowledgeEmbedding.source_id == source_id,
-        )
-        result = self.db.execute(stmt).scalar()
-        return int(result or 0)
     # ==============================================================
     # READ — vector similarity (for retriever, chat path)
     # ==============================================================
@@ -342,7 +235,6 @@ class KnowledgeRepository:
         admin_id: str | None,
         domain_id: str | None,
         luciel_instance_id: int | None = None,
-        agent_id: str | None = None,  # legacy read-compat
         knowledge_type: str | None = None,
         limit: int = 5,
     ) -> list[dict]:
@@ -353,82 +245,103 @@ class KnowledgeRepository:
           - luciel_instance_id IS NULL AND admin_id+domain_id match  (domain-shared)
           - luciel_instance_id IS NULL AND domain_id IS NULL AND admin_id match (tenant-shared)
           - admin_id IS NULL AND domain_id IS NULL  (global)
-          - Legacy compat: agent_id match (pre-Step-24.5 rows)
 
-        Active-only (superseded_at IS NULL).
+        Active-only (``superseded_at IS NULL``). Excludes lifecycle
+        flagged rows: ``soft_deleted_at IS NULL`` and
+        ``pending_downgrade_archived_at IS NULL``.
+
+        Post-Cleanup-B: chunks now always have a non-NULL
+        ``source_id`` FK pointing at a ``knowledge_sources`` row.
+        The join is INNER (was LEFT OUTER pre-Cleanup-B to handle
+        legacy chunks with no FK). Source-side lifecycle gates
+        still apply: only chunks whose parent source is
+        ``ingestion_status='ready'`` AND not soft-deleted AND not
+        downgrade-archived are returned.
+
+        Post-Cleanup-C: the legacy ``agent_id`` fan-out is removed
+        (column dropped). The pre-Step-24.5 read-compat branch had
+        zero production rows.
+
         Orders by cosine distance ascending (<=>).
 
-        Returns a list of dicts: {id, content, title, knowledge_type,
-        luciel_instance_id, admin_id, domain_id, distance}.
+        Returns a list of dicts with the per-chunk fields the
+        retriever needs (id, content, title, knowledge_type, scope
+        triple, distance, source_id, source_record_id,
+        source_record_status). ``source_record_id`` and
+        ``source_id`` collapse to the same value post-Cleanup-B;
+        both are exposed so the retriever's RetrievedChunk
+        construction can stay shape-compatible.
         """
-        # Build visibility clauses — all require superseded_at IS NULL.
         clauses: list = []
         if luciel_instance_id is not None:
             clauses.append(
-                KnowledgeEmbedding.luciel_instance_id == luciel_instance_id
+                KnowledgeChunk.luciel_instance_id == luciel_instance_id
             )
         if domain_id is not None and admin_id is not None:
             clauses.append(
                 and_(
-                    KnowledgeEmbedding.luciel_instance_id.is_(None),
-                    KnowledgeEmbedding.admin_id == admin_id,
-                    KnowledgeEmbedding.domain_id == domain_id,
+                    KnowledgeChunk.luciel_instance_id.is_(None),
+                    KnowledgeChunk.admin_id == admin_id,
+                    KnowledgeChunk.domain_id == domain_id,
                 )
             )
         if admin_id is not None:
             clauses.append(
                 and_(
-                    KnowledgeEmbedding.luciel_instance_id.is_(None),
-                    KnowledgeEmbedding.domain_id.is_(None),
-                    KnowledgeEmbedding.admin_id == admin_id,
+                    KnowledgeChunk.luciel_instance_id.is_(None),
+                    KnowledgeChunk.domain_id.is_(None),
+                    KnowledgeChunk.admin_id == admin_id,
                 )
             )
-        # Global rows (no tenant).
         clauses.append(
             and_(
-                KnowledgeEmbedding.luciel_instance_id.is_(None),
-                KnowledgeEmbedding.admin_id.is_(None),
-                KnowledgeEmbedding.domain_id.is_(None),
+                KnowledgeChunk.luciel_instance_id.is_(None),
+                KnowledgeChunk.admin_id.is_(None),
+                KnowledgeChunk.domain_id.is_(None),
             )
         )
-        # Legacy agent-scoped rows.
-        if agent_id is not None:
-            clauses.append(
-                and_(
-                    KnowledgeEmbedding.luciel_instance_id.is_(None),
-                    KnowledgeEmbedding.admin_id == admin_id,
-                    KnowledgeEmbedding.agent_id == agent_id,
-                )
-            )
 
-        # Raw SQL for pgvector similarity — SQLAlchemy core does not
-        # know the `vector` type, so we bind parameters and pass the
-        # embedding as a literal string in pgvector's expected format.
-        from sqlalchemy import literal_column, text
+        from sqlalchemy import literal_column
+        from sqlalchemy.orm import aliased
+
+        from app.models.knowledge_source import KnowledgeSource
 
         emb_literal = "[" + ",".join(f"{float(x):.7f}" for x in query_embedding) + "]"
         distance_expr = literal_column(f"embedding <=> '{emb_literal}'::vector")
 
+        ks = aliased(KnowledgeSource)
+
         stmt = (
             select(
-                KnowledgeEmbedding.id,
-                KnowledgeEmbedding.content,
-                KnowledgeEmbedding.title,
-                KnowledgeEmbedding.knowledge_type,
-                KnowledgeEmbedding.luciel_instance_id,
-                KnowledgeEmbedding.admin_id,
-                KnowledgeEmbedding.domain_id,
+                KnowledgeChunk.id,
+                KnowledgeChunk.content,
+                KnowledgeChunk.title,
+                KnowledgeChunk.knowledge_type,
+                KnowledgeChunk.luciel_instance_id,
+                KnowledgeChunk.admin_id,
+                KnowledgeChunk.domain_id,
+                KnowledgeChunk.source_id,
+                ks.id.label("source_record_id"),
+                ks.ingestion_status.label("source_record_status"),
                 distance_expr.label("distance"),
             )
+            # INNER JOIN — source_id is NOT NULL post-Cleanup-B.
+            .join(ks, KnowledgeChunk.source_id == ks.id)
             .where(
                 or_(*clauses),
-                KnowledgeEmbedding.superseded_at.is_(None),
+                KnowledgeChunk.superseded_at.is_(None),
+                KnowledgeChunk.soft_deleted_at.is_(None),
+                KnowledgeChunk.pending_downgrade_archived_at.is_(None),
+                # Source-side lifecycle gates.
+                ks.ingestion_status == "ready",
+                ks.soft_deleted_at.is_(None),
+                ks.pending_downgrade_archived_at.is_(None),
             )
             .order_by(distance_expr.asc())
             .limit(limit)
         )
         if knowledge_type is not None:
-            stmt = stmt.where(KnowledgeEmbedding.knowledge_type == knowledge_type)
+            stmt = stmt.where(KnowledgeChunk.knowledge_type == knowledge_type)
 
         rows = self.db.execute(stmt).all()
         return [
@@ -441,6 +354,9 @@ class KnowledgeRepository:
                 "admin_id": r.admin_id,
                 "domain_id": r.domain_id,
                 "distance": float(r.distance) if r.distance is not None else None,
+                "source_id": r.source_id,
+                "source_record_id": r.source_record_id,
+                "source_record_status": r.source_record_status,
             }
             for r in rows
         ]

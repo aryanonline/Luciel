@@ -545,6 +545,27 @@ class Settings(BaseSettings):
     # rows. L3 + L2 together make that impossible.
     rls_tenant_context_enabled: bool = False
 
+    # Arc 11 Step 8 — knowledge retrieval feature flag.
+    #
+    # Master kill-switch for the ``LucielOrchestrator.run`` Retrieve
+    # step. When ``True``, the orchestrator calls
+    # ``KnowledgeRetriever.retrieve_with_sources(...)`` and threads
+    # the resulting source PKs through to ``TraceService.record_trace``
+    # (which writes them to ``traces.source_ids_used`` — the
+    # ``/affected-questions`` endpoint reads from there).
+    #
+    # Defaults closed: Arc 11 ships the WIRING, not the live retriever.
+    # Arc 14 owns the full agentic loop (PLAN/ACT/REFLECT, escalation
+    # judgment, tool dispatch) and is the right place to make
+    # retrieval the always-on hot path. Until then, retrieval is
+    # opt-in.
+    #
+    # Granularity: a single global bool. Per-``(admin_id, instance_id)``
+    # rollout was considered (see ARC11_PLAN.md §4) and deferred —
+    # Arc 14 may need it when tenant-by-tenant flips matter, but for
+    # v1 the surface is "on" or "off."
+    knowledge_retrieval_enabled: bool = False
+
     # Arc 9 C6.3 -- BYPASSRLS ops connection (Wall 1 escape hatch).
     #
     # The luciel_ops Postgres role created in Arc 9 C6.1 carries

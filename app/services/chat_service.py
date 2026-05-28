@@ -336,7 +336,6 @@ class ChatService:
             query=message,
             admin_id=admin_id,
             domain_id=domain_id,
-            agent_id=agent_id,
             luciel_instance_id=ctx.luciel_instance_id,
         )
 
@@ -606,7 +605,6 @@ class ChatService:
             query=message,
             admin_id=admin_id,
             domain_id=domain_id,
-            agent_id=agent_id,
             luciel_instance_id=ctx.luciel_instance_id,
         )
 

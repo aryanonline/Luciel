@@ -36,7 +36,9 @@ class RetentionPolicy(Base, TimestampMixin):
     )
     """
     Which data this policy applies to.
-    Valid values: sessions, messages, memory_items, traces, knowledge_embeddings
+    Valid values: sessions, messages, memory_items, traces, knowledge_chunks
+    (Cleanup A: renamed from "knowledge_embeddings" to match the
+    post-Arc-11 table name.)
     """
 
     retention_days: Mapped[int] = mapped_column(

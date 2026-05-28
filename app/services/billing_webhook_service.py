@@ -697,11 +697,12 @@ class BillingWebhookService:
         #    is buyer-influenceable only via the upgrade route, and
         #    that route derives admin_id from the cookied session.
         #    Here at the webhook we re-verify.
+        from app.models.scope_assignment import ScopeRole
         owner_row = self.db.execute(
             select(ScopeAssignment).where(
                 ScopeAssignment.admin_id == admin_id,
                 ScopeAssignment.user_id == user.id,
-                ScopeAssignment.role == "owner",
+                ScopeAssignment.role == ScopeRole.ADMIN_OWNER,
                 ScopeAssignment.active.is_(True),
             )
         ).scalars().first()

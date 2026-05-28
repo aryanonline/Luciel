@@ -13,7 +13,12 @@ VALID_CATEGORIES = {
     "messages",
     "memory_items",
     "traces",
-    "knowledge_embeddings",
+    # Cleanup A: renamed from "knowledge_embeddings" to
+    # "knowledge_chunks" to match the post-Arc-11 table name. Paired
+    # alembic migration ``arc11_cleanup_a_data_category_rename`` runs
+    # ``UPDATE retention_policies SET data_category='knowledge_chunks'
+    # WHERE data_category='knowledge_embeddings'``.
+    "knowledge_chunks",
 }
 
 VALID_ACTIONS = {"delete", "anonymize"}

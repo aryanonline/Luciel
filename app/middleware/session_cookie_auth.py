@@ -108,6 +108,40 @@ COOKIE_AUTH_PATHS: tuple[str, ...] = (
 COOKIE_PERMISSIONS: tuple[str, ...] = ("admin", "chat", "sessions")
 
 
+def _load_scope_assignments(db, *, user_id, admin_id: str | None) -> list:
+    """Fetch the active scope_assignments for ``user_id`` under
+    ``admin_id``. Used by the auth middleware to seed
+    ``request.state.scope_assignments`` so ScopePolicy doesn't have
+    to repeat the SELECT per request (Arc 11 Cleanup C item #8).
+
+    Returns a list (possibly empty). Swallows infra errors and
+    returns ``[]`` so an auth-time DB hiccup does not 500 the
+    request; ScopePolicy falls back to its per-request SELECT in
+    that case.
+    """
+    if user_id is None or admin_id is None:
+        return []
+    try:
+        from sqlalchemy import select
+
+        from app.models.scope_assignment import ScopeAssignment
+        rows = db.execute(
+            select(ScopeAssignment).where(
+                ScopeAssignment.user_id == user_id,
+                ScopeAssignment.admin_id == admin_id,
+                ScopeAssignment.active.is_(True),
+                ScopeAssignment.ended_at.is_(None),
+            )
+        ).scalars().all()
+        return list(rows)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "_load_scope_assignments: SELECT failed for user=%s admin=%s",
+            user_id, admin_id,
+        )
+        return []
+
+
 class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
     """Bridge the Step 30a session cookie into `request.state`.
 
@@ -301,6 +335,16 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
             request.state.actor_label = actor_label
             request.state.luciel_instance_id = luciel_instance_id
             request.state.actor_user_id = actor_user_id
+
+            # Arc 11 Cleanup C item #8 — pre-load this user's active
+            # scope_assignments so ScopePolicy.enforce_role_on_instance
+            # does not have to do a per-request SELECT. The full list
+            # is loaded (a user may hold different roles per Admin)
+            # and ScopePolicy picks the one whose admin_id matches the
+            # target instance.
+            request.state.scope_assignments = _load_scope_assignments(
+                db, user_id=user.id, admin_id=admin_id,
+            )
 
             request.state.key_kind = "cookie"
             request.state.allowed_origins = None

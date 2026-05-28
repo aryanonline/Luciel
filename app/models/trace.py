@@ -11,7 +11,8 @@ child Luciel configuration was active for each request.
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import BigInteger, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -88,4 +89,16 @@ class Trace(Base, TimestampMixin):
         ),
         nullable=False,
         index=True,
+    )
+
+    # Arc 11 Step 1 (arc11_a_knowledge_sources_schema) — knowledge_sources
+    # IDs that contributed chunks to this turn. Populated by the
+    # retriever in Arc 11 Step 5; until then stays empty. Queried by
+    # the delete-confirm modal (Architecture §3.2.2) to show the
+    # customer-question preview before a source is soft-deleted.
+    # GIN-indexed in the migration for fast @> lookups.
+    source_ids_used: Mapped[list[int]] = mapped_column(
+        ARRAY(BigInteger),
+        nullable=False,
+        server_default="{}",
     )
