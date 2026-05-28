@@ -51,7 +51,15 @@ from app.repositories.knowledge_source_repository import (
 logger = logging.getLogger(__name__)
 
 
-_ARC14_DEFERRED_ERROR = "crawl implementation deferred to Arc 14"
+# Cross-repo contract: this string is persisted to
+# ``knowledge_sources.ingestion_error`` and the frontend's
+# ``Luciel-Website/src/lib/knowledge.ts::isCrawlComingSoon`` greps
+# for the literal substring ``"Arc-14"`` (with a hyphen) to render
+# the "⏱ Coming soon" badge instead of a red "Failed" one. The
+# hyphenated spelling MUST stay in this string — Step 10's
+# cross-repo contract test (tests/integrity/test_arc11_cross_repo_
+# contract.py) fails if it disappears.
+_ARC14_DEFERRED_ERROR = "crawl implementation deferred to Arc-14"
 
 
 @shared_task(
