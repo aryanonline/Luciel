@@ -138,19 +138,20 @@ class TestListRecentTracesUsingSourceContract(unittest.TestCase):
         self.assertRegex(sql, r"ORDER\s+BY\s+traces\.created_at\s+DESC")
         self.assertRegex(sql, r"LIMIT\s+5")
 
-    def test_c4_sql_uses_bigint_array_literal(self):
-        """The ARRAY[..] target must be ``::BIGINT[]`` so Postgres
-        picks the GIN index plan on ``source_ids_used``. Without the
-        cast the planner has to coerce and may fall back to a seq
-        scan even though the index exists."""
+    def test_c4_sql_emits_array_containment_predicate(self):
+        """Cleanup A switched ``Trace.source_ids_used`` from
+        ``sqlalchemy.ARRAY`` to ``sqlalchemy.dialects.postgresql.ARRAY``
+        so the column's ``.contains()`` method compiles directly to
+        ``@> ARRAY[...]`` — no explicit ``::BIGINT[]`` cast needed,
+        because the column is already typed correctly at the
+        dialect layer. The GIN index ``ix_traces_source_ids_used``
+        is still picked on the ``@>`` operator.
+        """
         sql = self._build_sql()
-        # The cast spelling depends on dialect; against the
-        # Postgres dialect SQLAlchemy emits ``CAST(... AS BIGINT[])``
-        # for ``cast([x], ARRAY(BigInteger))``.
         self.assertRegex(
             sql,
-            r"CAST\s*\(\s*ARRAY\s*\[\s*7\s*\]\s+AS\s+BIGINT\s*\[\s*\]\s*\)",
-            f"Expected BIGINT[] cast in SQL; got:\n{sql}",
+            r"@>\s*ARRAY\s*\[\s*7\s*\]",
+            f"Expected '@> ARRAY[7]' containment predicate; got:\n{sql}",
         )
 
 

@@ -15,8 +15,7 @@ PATCHED:
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, cast, select
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.trace import Trace
@@ -128,22 +127,18 @@ class TraceRepository:
         the Journey §4.3 "Luciel hasn't drawn on this source in
         any customer conversations yet" copy.
         """
-        # Use the raw ``@>`` operator against a ``BIGINT[]`` cast so
-        # the GIN index from Arc 11 Step 1
-        # (``ix_traces_source_ids_used``) is picked. The model's
-        # ``source_ids_used`` is declared with the dialect-neutral
-        # ``ARRAY(BigInteger)`` type (Arc 11 Step 1), which does not
-        # expose ``.contains()`` at the SQL layer — issuing the
-        # operator directly keeps the repository code independent
-        # of the model's type-class choice and lets the Postgres
-        # planner see the ``::BIGINT[]`` cast it needs to index.
-        target_array = cast([int(source_id)], ARRAY(BigInteger))
+        # Cleanup A (Arc 11 closeout): ``Trace.source_ids_used`` is
+        # now declared with ``sqlalchemy.dialects.postgresql.ARRAY``,
+        # which exposes ``.contains()`` at the SQL layer. ``.contains``
+        # compiles to the same ``@>`` operator + ``BIGINT[]`` cast the
+        # workaround used to produce, so the GIN index from Arc 11
+        # Step 1 (``ix_traces_source_ids_used``) is still picked.
         stmt = (
             select(Trace)
             .where(
                 Trace.admin_id == admin_id,
                 Trace.luciel_instance_id == luciel_instance_id,
-                Trace.source_ids_used.op("@>")(target_array),
+                Trace.source_ids_used.contains([int(source_id)]),
             )
             .order_by(Trace.created_at.desc())
             .limit(limit)

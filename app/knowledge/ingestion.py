@@ -13,15 +13,17 @@ Orchestrates the full pipeline:
         -> KnowledgeRepository.add_chunks(source_fk=...) (Arc 11 Step 3)
         -> KnowledgeSourceRepository.mark_status('ready' | 'failed')
 
-Two-table cutover (Arc 11):
+Two-table cutover (Arc 11) — Cleanup A update:
     * When the caller supplies BOTH ``admin_id`` AND
       ``luciel_instance_id``, a row in ``knowledge_sources`` is
       created first. Every chunk row gets ``source_fk = source.id``.
-      The legacy stringy ``source_id`` column is *also* populated
-      (default ``f"src-{source.id}"`` when the caller does not pass
-      one of their own) so the legacy read paths
-      (data_export_service, downgrade_archive_service) keep working
-      until Step 11 retires them.
+      The legacy stringy ``source_id`` column is written as ``NULL``
+      going forward (Cleanup A). The legacy read paths
+      (``data_export_service``, ``downgrade_archive_service``)
+      already branch on ``source_fk IS NULL`` to decide between the
+      FK-keyed and the legacy stringy-id-keyed grouping, so
+      ``source_id=NULL`` correctly routes new chunks through the
+      FK branch. Cleanup B drops the legacy column entirely.
     * When ``admin_id`` or ``luciel_instance_id`` is None, the
       ingest predates the two-table model. The service writes
       chunks with ``source_fk=None`` and the caller-supplied (or
@@ -304,16 +306,17 @@ class IngestionService:
                 superseded=superseded,
             )
 
-        # 7b. If the caller did not supply a stringy source_id but we
-        # created a source row, synthesise one from the row's id so
-        # legacy reads (data_export, downgrade_archive) still find
-        # the chunks via their stringy key. ``src-<pk>`` is the
-        # canonical form; chosen over ``str(source_uuid)`` because
-        # downgrade_archive_service already sorts by source_id and
-        # numeric-suffix strings sort deterministically.
+        # 7b. Cleanup A: legacy source_id string set to NULL going
+        # forward; Cleanup B drops the column. The earlier behaviour
+        # was to synthesise ``f"src-{source_row.id}"`` so legacy
+        # reads (data_export, downgrade_archive) could still group
+        # by the stringy key. Those code paths now branch on
+        # ``source_fk IS NULL`` instead (Step 3 added the dual
+        # branching); the only effect of this change is that new
+        # chunks land with ``source_id=NULL`` and route through the
+        # FK-grouped branch. Caller-supplied ``source_id`` is still
+        # honoured for legacy code paths that pass one explicitly.
         effective_string_source_id = source_id
-        if effective_string_source_id is None and source_row is not None:
-            effective_string_source_id = f"src-{source_row.id}"
 
         # 8. Embed. Failures here flip the source row to 'failed' so
         # the admin UI surfaces the error before the exception

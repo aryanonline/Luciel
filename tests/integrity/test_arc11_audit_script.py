@@ -212,60 +212,13 @@ class TestAuditScriptEndToEnd(unittest.TestCase):
             self.assertIn("detail", entry)
 
 
-# ---------------------------------------------------------------------
-# Artifact directory presence
-# ---------------------------------------------------------------------
-
-
-class TestArc11ArtifactsPresent(unittest.TestCase):
-    """The _arc11/ directory must contain the five artifacts Step
-    10 produces. Drift here = artifact missing from the close-audit
-    deliverable."""
-
-    EXPECTED = (
-        "DECISIONS.md",
-        "CLEANUP_CANDIDATES.md",
-        "DRIFT_FROM_DOCTRINE.md",
-        "SECURITY_FOLLOWUPS.md",
-        "PRODUCTION_DEPLOY_CHECKLIST.md",
-    )
-
-    def test_arc11_dir_exists(self):
-        d = REPO_ROOT / "_arc11"
-        self.assertTrue(d.is_dir(), f"expected directory {d} to exist")
-
-    def test_all_five_artifacts_present_and_non_empty(self):
-        d = REPO_ROOT / "_arc11"
-        for name in self.EXPECTED:
-            path = d / name
-            self.assertTrue(path.exists(), f"missing artifact: {path}")
-            content = path.read_text(encoding="utf-8")
-            self.assertGreater(
-                len(content), 200,
-                f"artifact {name} looks like a stub (len={len(content)} bytes); "
-                f"populate it from the plan content.",
-            )
-
-    def test_security_followups_does_not_contain_key_value(self):
-        """The SECURITY_FOLLOWUPS doc must reference the key ID but
-        NEVER the secret value. Cheapest reliable check: no
-        `Secret`/`Token` style strings that look like raw AWS
-        secret keys (40-char base64-ish)."""
-        body = (
-            REPO_ROOT / "_arc11" / "SECURITY_FOLLOWUPS.md"
-        ).read_text(encoding="utf-8")
-        # AWS secret access keys are 40 chars, alphanumeric + '/+'.
-        # Search for any 40-char run of [A-Za-z0-9/+] preceded by an
-        # equals sign or whitespace — a very generous false-positive
-        # threshold but a real key would match this shape exactly.
-        import re
-
-        suspicious = re.findall(r"(?<=[=\s])[A-Za-z0-9/+]{40}(?=\b)", body)
-        self.assertEqual(
-            suspicious, [],
-            f"SECURITY_FOLLOWUPS.md may contain a leaked secret. "
-            f"40-char run(s) found: {suspicious}",
-        )
+# Cleanup A removed the _arc11/ directory; the founder's rule is
+# that "only source-of-truth documents are the business documents
+# in this space" — the close-audit artifacts (DECISIONS.md,
+# CLEANUP_CANDIDATES.md, DRIFT_FROM_DOCTRINE.md, SECURITY_FOLLOWUPS.md,
+# PRODUCTION_DEPLOY_CHECKLIST.md) now live outside the repo at
+# /home/user/workspace/arc11_audit/. The corresponding
+# TestArc11ArtifactsPresent test class is therefore removed.
 
 
 if __name__ == "__main__":  # pragma: no cover

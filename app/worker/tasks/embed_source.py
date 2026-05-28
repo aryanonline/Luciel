@@ -292,8 +292,9 @@ def embed_source(
       3. Marks the row ``processing``.
       4. Downloads bytes from S3 via ``source.s3_key``.
       5. Parses + chunks + embeds + persists chunks with
-         ``source_fk = source_pk`` and the legacy stringy
-         ``source_id = f"src-{source_pk}"`` (Step 3's dual-write).
+         ``source_fk = source_pk``. The legacy stringy ``source_id``
+         column is now written ``NULL`` (Cleanup A of the Arc 11
+         closeout). Cleanup B drops the column entirely.
       6. Marks the row ``ready``.
 
     Any exception in steps 4-5 flips the row to ``failed`` (with a
@@ -469,10 +470,13 @@ def embed_source(
                 knowledge_type="luciel_knowledge",
                 title=source.filename,
                 source=source.filename,
-                # Dual-write: Step 3's convention — populate both the
-                # FK and the legacy stringy id so legacy reads still
-                # find these chunks until Step 11.
-                source_id=f"src-{source_pk}",
+                # Cleanup A: legacy source_id string set to NULL
+                # going forward; Cleanup B drops the column. Reads
+                # that used to group by the stringy key now route
+                # through ``source_fk`` (data_export_service +
+                # downgrade_archive_service already branch on
+                # ``source_fk IS NULL`` for the legacy fallback).
+                source_id=None,
                 source_fk=source_pk,
                 source_version=source.source_version or 1,
                 source_filename=source.filename,

@@ -11,7 +11,8 @@ child Luciel configuration was active for each request.
 
 from __future__ import annotations
 
-from sqlalchemy import ARRAY, BigInteger, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import BigInteger, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin

@@ -77,8 +77,10 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     section = "1. Migrations & schema"
     out: list[CheckResult] = []
 
-    # 1a. alembic heads is single and points at Step 4's HNSW migration.
-    expected_head = "arc11_d3_hnsw_index_chunks"
+    # 1a. alembic heads is single and points at the latest Arc 11
+    # migration (Cleanup A's data_category rename is the post-Step-4
+    # head once the no-deferrals closeout lands).
+    expected_head = "arc11_cleanup_a_data_category_rename"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],
