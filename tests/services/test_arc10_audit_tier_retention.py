@@ -575,3 +575,123 @@ def test_cold_archive_hash_unchanged_by_instance_fix():
         "this change. The field belongs in the JSONL output, not "
         "in the hash input."
     )
+
+
+# ---------------------------------------------------------------------
+# Arc 10 Gap 7 close: admin_audit_logs.luciel_instance_id nullability.
+#
+# Anchored to Architecture v1 \u00a73.7.3 (Wall 3 applies to customer-data
+# tables, NOT to the admin audit log) and \u00a75.3 (admin audit log is a
+# distinct concept -- append-only chain with its own DB role). The
+# Arc 9.1 Phase A tenant-isolation seal swept admin_audit_logs into
+# the customer-data NOT NULL bucket too broadly; Arc 10 Gap 7 walks
+# that back. Architecture \u00a73.6.2 requires admin-scoped audit
+# emissions (cascade, team-member ops, embed-key revoke) which
+# cannot pick a single instance_id.
+# ---------------------------------------------------------------------
+
+GAP7_LOOSEN_MIGRATION_PATH = (
+    REPO_ROOT
+    / "alembic"
+    / "versions"
+    / "arc10_gap7_audit_loosen_instance_for_admin_scope.py"
+)
+
+
+def test_gap7_loosen_migration_exists():
+    assert GAP7_LOOSEN_MIGRATION_PATH.exists(), (
+        f"Missing migration at {GAP7_LOOSEN_MIGRATION_PATH}. "
+        "Without the loosening, ClosureService.initiate_closure "
+        "fails on the very first cascade audit emission because the "
+        "row's luciel_instance_id is NULL by design (admin-scoped op "
+        "spanning all instances per Architecture v1 \u00a73.6.2)."
+    )
+
+
+def test_gap7_loosen_migration_chains_off_gap6_sequence_grant():
+    src = GAP7_LOOSEN_MIGRATION_PATH.read_text(encoding="utf-8")
+    assert (
+        'down_revision = "arc10_gap6_archiver_sequence_grant"' in src
+    ), (
+        "Gap 7 loosen migration must chain off the last Gap 6 "
+        "migration so the audit-archiver fixes remain in the linear "
+        "history above this change."
+    )
+
+
+def test_gap7_loosen_migration_makes_column_nullable():
+    src = GAP7_LOOSEN_MIGRATION_PATH.read_text(encoding="utf-8")
+    assert "alter_column" in src and "nullable=True" in src, (
+        "Migration must ALTER COLUMN luciel_instance_id to nullable=True."
+    )
+    assert '"admin_audit_logs"' in src or "'admin_audit_logs'" in src, (
+        "Migration must target the admin_audit_logs table specifically."
+    )
+
+
+def test_gap7_loosen_migration_restores_null_disjunct_in_policy():
+    """The RLS policy must accept NULL luciel_instance_id rows (admin-
+    scoped audit emissions) AND still enforce equality for non-NULL
+    rows (instance-scoped audit emissions).
+    """
+    src = GAP7_LOOSEN_MIGRATION_PATH.read_text(encoding="utf-8")
+    assert "luciel_instance_id IS NULL" in src, (
+        "RLS policy must accept NULL luciel_instance_id rows -- "
+        "admin-scoped audit emissions have no instance binding."
+    )
+    assert "current_setting('app.instance_id', true)" in src, (
+        "RLS policy must still enforce equality for non-NULL rows."
+    )
+
+
+def test_audit_log_model_reflects_nullable_instance_id():
+    """The SQLAlchemy model must declare the column as nullable. A
+    drift between the model and the schema would silently re-introduce
+    the bug at the ORM layer even though the DB accepts NULL.
+    """
+    src = (
+        REPO_ROOT / "app" / "models" / "admin_audit_log.py"
+    ).read_text(encoding="utf-8")
+    # Walk to the luciel_instance_id column declaration.
+    idx = src.find("luciel_instance_id: Mapped")
+    assert idx >= 0, "luciel_instance_id column declaration not found"
+    # Take the next ~400 chars covering the mapped_column(...) call.
+    decl = src[idx:idx + 600]
+    assert "Mapped[int | None]" in decl or "Mapped[Optional[int]]" in decl, (
+        "luciel_instance_id must be typed as Mapped[int | None]."
+    )
+    assert "nullable=True" in decl, (
+        "luciel_instance_id mapped_column must declare nullable=True."
+    )
+
+
+def test_account_closure_initiated_is_in_allowed_actions():
+    """ACTION_ACCOUNT_CLOSURE_INITIATED must be wired into
+    ALLOWED_ACTIONS. ClosureService.initiate_closure emits this row
+    at the end of the close flow; without the membership wiring,
+    AdminAuditRepository.record() rejects it with ValueError and the
+    entire close flow crashes. Anchored to Architecture v1 \u00a73.6.2
+    step 6 (Record closure-initiation timestamp).
+    """
+    from app.models import admin_audit_log as m
+    assert hasattr(m, "ACTION_ACCOUNT_CLOSURE_INITIATED")
+    assert m.ACTION_ACCOUNT_CLOSURE_INITIATED in m.ALLOWED_ACTIONS, (
+        "ACTION_ACCOUNT_CLOSURE_INITIATED must be in ALLOWED_ACTIONS. "
+        "Without this, /account/close crashes ValueError on the final "
+        "audit emission \u2014 see ClosureService.initiate_closure."
+    )
+
+
+def test_account_reactivated_is_in_allowed_actions():
+    """ACTION_ACCOUNT_REACTIVATED must be wired into ALLOWED_ACTIONS.
+    ReactivationService.complete_reactivation emits this row when the
+    admin returns within the 30-day grace window. Anchored to
+    Architecture v1 \u00a73.6.2 (30-day grace reactivation).
+    """
+    from app.models import admin_audit_log as m
+    assert hasattr(m, "ACTION_ACCOUNT_REACTIVATED")
+    assert m.ACTION_ACCOUNT_REACTIVATED in m.ALLOWED_ACTIONS, (
+        "ACTION_ACCOUNT_REACTIVATED must be in ALLOWED_ACTIONS. "
+        "Without this, /account/reactivate/complete crashes ValueError "
+        "\u2014 see ReactivationService.complete_reactivation."
+    )

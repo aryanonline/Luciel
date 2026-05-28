@@ -655,7 +655,7 @@ class AdminService:
           2.  identity_claims           (Step 30a.2 -- soft-delete + ts)
           3.  memory_items              (broadest leaf below)
           4.  api_keys
-          5.  luciel_instances          (V2 instance layer)
+          5.  instances                 (V2 instance layer)
           6.  scope_assignments         (Step 30a.7 -- privilege revocation)
           7.  user_invites              (Step 30a.7 -- pending-invite revoke)
           8.  sessions                  (Step 30a.7 -- session-cookie revoke)
@@ -899,13 +899,27 @@ class AdminService:
                 autocommit=False,
             )
 
-            # --- 5. luciel_instances cascade (all scope levels) --------
-            # Repo method emits its own RESOURCE_LUCIEL_INSTANCE audit rows.
-            luciel_instance_service.repo.deactivate_all_for_tenant(
+            # --- 5. instances cascade ------------------------------
+            # Architecture v1 §3.6.2 step 3: "All instances deactivated
+            # cascade per 3.6.1" -- closure must invoke the per-instance
+            # deactivation cascade for every instance owned by the admin.
+            # The InstanceService exposes a cascade_on_admin_deactivate
+            # hook that does exactly this and emits the per-instance
+            # audit rows internally. Calling through the service (not
+            # bypassing to the repo) keeps the contract one-arrow-deep
+            # and respects the service-layer audit emission policy.
+            #
+            # The previous code reached past the service to call
+            # repo.deactivate_all_for_tenant -- a method that no longer
+            # exists (renamed to deactivate_all_for_admin in Arc 9.2
+            # PR #101 when tenant_id was collapsed to admin_id). The
+            # mismatch made the entire close path crash with
+            # AttributeError on the first call; this fix realigns the
+            # invocation with the InstanceService public API.
+            luciel_instance_service.cascade_on_admin_deactivate(
+                audit_ctx=audit_ctx,
                 admin_id=admin_id,
                 updated_by=updated_by,
-                audit_ctx=audit_ctx,
-                autocommit=False,
             )
 
             # NOTE (Arc 10 Gap 7): the pre-Arc-10 cascade had two

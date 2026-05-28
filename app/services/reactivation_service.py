@@ -387,26 +387,61 @@ class ReactivationService:
         return admin
 
     def _inverse_restore_table(self, *, table: str, admin_id: str) -> int:
-        """Flip active=true + deactivated_at=NULL for cascade-soft-
-
-        deleted rows of one table belonging to this admin. Returns the
+        """Flip active=true (and reset whichever soft-delete timestamp
+        column the table actually carries) for cascade-soft-deleted
+        rows of one table belonging to this admin. Returns the
         rowcount of rows touched.
 
-        Idempotent: rows already active=true (rare \u2014 maybe a partial
-        cascade) are touched without effect since the UPDATE sets to
-        their current state. Rows with pending_downgrade_archived_at
-        set are NOT touched, even if their active=false \u2014 those
-        belong to the downgrade-archive lifecycle, not the closure
-        lifecycle, and re-upgrade is the only restoration path for
-        them (founder lock A6).
+        Anchored to Architecture v1 §3.6 (lifecycle / closure / 30-day
+        grace). The doc expresses soft-delete in terms of an active
+        flag and a soft-delete timestamp without prescribing a uniform
+        column name. Different tables in this codebase have settled
+        on different names by historical accident:
 
-        We do an indirect check on pending_downgrade_archived_at via a
-        WHERE clause that is column-aware: tables that carry the
-        column get the extra predicate; tables that don't get the
-        plain restore. We discover column presence at runtime via the
-        information_schema check below \u2014 cheaper than maintaining a
-        manual list that drifts.
+          * ``conversations`` / ``identity_claims`` ->
+            ``deactivated_at``
+          * ``instances`` -> ``soft_deleted_at``
+          * ``api_keys`` / ``memory_items`` / ``sessions`` /
+            ``user_invites`` / ``scope_assignments`` -> no timestamp
+            column, just ``active``
+
+        The original implementation hard-coded
+        ``deactivated_at = NULL`` for every table, which made the
+        reactivate-complete leg crash with UndefinedColumn against
+        every table that does not carry that column. The inverse
+        cascade was therefore broken for the majority of the per-
+        admin tables; only the two with ``deactivated_at`` worked.
+
+        Fix: discover both the timestamp column and the
+        ``pending_downgrade_archived_at`` column at runtime via
+        information_schema, then build the UPDATE accordingly. Same
+        runtime-discovery pattern as the original pending-downgrade
+        check, extended to the timestamp column.
+
+        Idempotent: rows already active=true (rare; partial cascade)
+        are touched without effect since the UPDATE sets them to
+        their current state. Rows with
+        ``pending_downgrade_archived_at`` set are NOT touched even
+        if their active=false; those belong to the downgrade-archive
+        lifecycle and re-upgrade is the only restoration path
+        (founder lock A6).
         """
+        # Discover the soft-delete timestamp column (at most one).
+        ts_col = None
+        for candidate in ("deactivated_at", "soft_deleted_at"):
+            row = self.db.execute(
+                sql_text(
+                    """
+                    SELECT 1 FROM information_schema.columns
+                     WHERE table_name = :tbl AND column_name = :col
+                    """
+                ),
+                {"tbl": table, "col": candidate},
+            ).first()
+            if row is not None:
+                ts_col = candidate
+                break
+
         has_pending_col = self.db.execute(
             sql_text(
                 """
@@ -418,26 +453,19 @@ class ReactivationService:
             {"tbl": table},
         ).first() is not None
 
+        # SET clause: always reset active; reset the timestamp column
+        # only if it exists on this table.
+        set_clauses = ["active = true"]
+        if ts_col is not None:
+            set_clauses.append(f"{ts_col} = NULL")
+        set_sql = ", ".join(set_clauses)
+
+        # WHERE clause: always scope by admin_id + active=false; add the
+        # pending-downgrade carveout only where the column exists.
+        where = "admin_id = :aid AND active = false"
         if has_pending_col:
-            sql = sql_text(
-                f"""
-                UPDATE {table}
-                   SET active = true,
-                       deactivated_at = NULL
-                 WHERE admin_id = :aid
-                   AND active = false
-                   AND pending_downgrade_archived_at IS NULL
-                """
-            )
-        else:
-            sql = sql_text(
-                f"""
-                UPDATE {table}
-                   SET active = true,
-                       deactivated_at = NULL
-                 WHERE admin_id = :aid
-                   AND active = false
-                """
-            )
+            where += " AND pending_downgrade_archived_at IS NULL"
+
+        sql = sql_text(f"UPDATE {table} SET {set_sql} WHERE {where}")
         res = self.db.execute(sql, {"aid": admin_id})
         return int(res.rowcount or 0)
