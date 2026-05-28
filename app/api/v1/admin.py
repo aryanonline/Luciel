@@ -45,7 +45,9 @@ from app.schemas.instance import (
 )
 from app.services.instance_service import (
     DuplicateInstanceError,
+    InstanceLifecycleConflictError,
     InstanceNotFoundError,
+    InstanceRestoreGraceExpiredError,
     InstanceService,
     TierScopeViolationError,
 )
@@ -1337,53 +1339,239 @@ def update_luciel_instance(
     return LucielInstanceRead.model_validate(updated)
 
 
-@router.delete(
-    "/instances/{pk}",
-    response_model=LucielInstanceRead,
-)
-@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
-def deactivate_luciel_instance(
-    request: Request,
-    pk: int,
-    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
-    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-    db: DbSession,
-) -> LucielInstanceRead:
-    instance = service.get_by_pk(pk)
-    if instance is None:
-        raise HTTPException(status_code=404, detail=f"LucielInstance pk={pk} not found.")
-    ScopePolicy.enforce_luciel_instance_scope(request, instance)
+# ---------------------------------------------------------------------
+# Arc 11 Closeout PR-A — instance lifecycle routes.
+#
+# Customer Journey §4.5 Phase 8 mandates three distinct affordances on
+# the "Manage account" surface: Pause / Delete / Close. The Close
+# branch is the Arc 10 closure flow (already shipped). The Pause and
+# Delete branches are the four routes below, with Resume / Restore as
+# their respective reversals. Architecture §3.6.1 locks the 30-day
+# grace window to ``soft_deleted_at``; the retention worker reads it.
+# Vision §6.4 Reactivation re-mints embed keys on Restore.
+# ---------------------------------------------------------------------
 
-    # Memory cascade: soft-deactivate this instance's memory_items first.
-    # Wired at route level because InstanceService doesn't depend on
-    # AdminService (would be a circular import).
-    # autocommit=True is fine here -- service.deactivate_instance below
-    # opens its own transaction for the instance row + audit row.
-    #
-    # Arc 5 Path A — V2 collapsed: read instance.admin_id directly. The
-    # LucielInstance ORM model exposes the tenant column as
-    # admin_id (V2 Instance shape post-Arc-5 Path A).
-    # Pre-fix this line raised AttributeError before the cascade ever
-    # ran, so every DELETE returned 500 in prod even though Pillar 10
-    # zero-residue still passed thanks to the tenant-level cascade
-    # firing later in the verify teardown PATCH.
+
+def _lifecycle_cascade_memory_items(
+    *,
+    request: Request,
+    db,
+    admin_id: str,
+    pk: int,
+    audit_ctx: AuditContext,
+) -> None:
+    """Shared memory_items soft-deactivate cascade.
+
+    Wired at route level because InstanceService does not depend on
+    AdminService (would be a circular import). Same posture as the
+    pre-Arc-11-Closeout DELETE route; called from both /pause and
+    DELETE to keep memory cleanly cascaded.
+    """
     AdminService(db).bulk_soft_deactivate_memory_items_for_luciel_instance(
-        admin_id=instance.admin_id,
+        admin_id=admin_id,
         luciel_instance_id=pk,
         audit_ctx=audit_ctx,
         updated_by=getattr(request.state, "actor_label", None),
     )
 
 
+@router.post(
+    "/instances/{pk}/pause",
+    response_model=LucielInstanceRead,
+)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
+def pause_luciel_instance(
+    request: Request,
+    pk: int,
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+    db: DbSession,
+) -> LucielInstanceRead:
+    """Pause an instance (Customer Journey §4.5 Phase 8 "Pause my Luciel").
+
+    Widget begins returning 204 (empty <div>); knowledge + sessions are
+    retained; reactivatable instantly via /resume. Memory items are
+    soft-deactivated as a cascade so the widget surface goes fully
+    quiet (no half-state where the widget is paused but memory writes
+    keep landing).
+    """
+    instance = service.get_by_pk(pk)
+    if instance is None:
+        raise HTTPException(status_code=404, detail=f"Instance pk={pk} not found.")
+    ScopePolicy.enforce_luciel_instance_scope(request, instance)
+
+    _lifecycle_cascade_memory_items(
+        request=request,
+        db=db,
+        admin_id=instance.admin_id,
+        pk=pk,
+        audit_ctx=audit_ctx,
+    )
+
     try:
-        deactivated = service.deactivate_instance(
+        paused = service.pause_instance(
             audit_ctx=audit_ctx,
             pk=pk,
             updated_by=getattr(request.state, "actor_label", None),
         )
     except InstanceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return LucielInstanceRead.model_validate(deactivated)
+    except InstanceLifecycleConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "instance_lifecycle_conflict",
+                "message": str(exc),
+                "current_status": exc.current_status,
+            },
+        ) from exc
+    return LucielInstanceRead.model_validate(paused)
+
+
+@router.post(
+    "/instances/{pk}/resume",
+    response_model=LucielInstanceRead,
+)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
+def resume_luciel_instance(
+    request: Request,
+    pk: int,
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> LucielInstanceRead:
+    """Resume a paused instance.
+
+    Widget begins serving again. No key rotation (Pause was operational,
+    not destructive). 409 if the instance is in the 'deleted' state —
+    the right verb for that case is /restore.
+    """
+    instance = service.get_by_pk(pk)
+    if instance is None:
+        raise HTTPException(status_code=404, detail=f"Instance pk={pk} not found.")
+    ScopePolicy.enforce_luciel_instance_scope(request, instance)
+
+    try:
+        resumed = service.resume_instance(
+            audit_ctx=audit_ctx,
+            pk=pk,
+            updated_by=getattr(request.state, "actor_label", None),
+        )
+    except InstanceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InstanceLifecycleConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "instance_lifecycle_conflict",
+                "message": str(exc),
+                "current_status": exc.current_status,
+            },
+        ) from exc
+    return LucielInstanceRead.model_validate(resumed)
+
+
+@router.delete(
+    "/instances/{pk}",
+    response_model=LucielInstanceRead,
+)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
+def delete_luciel_instance(
+    request: Request,
+    pk: int,
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+    db: DbSession,
+) -> LucielInstanceRead:
+    """Soft-delete an instance (Customer Journey §4.5 Phase 8 "Delete
+    this instance"). Stamps ``soft_deleted_at`` and opens the 30-day
+    grace window per Architecture §3.6.1. The retention worker
+    (``app.worker.tasks.instance_retention``) hard-deletes the row +
+    its knowledge / conversations / leads / traces / api_keys cascade
+    once the window elapses. Restorable via POST /instances/{pk}/restore
+    within the window — keys are re-minted on restore per Vision §6.4.
+    """
+    instance = service.get_by_pk(pk)
+    if instance is None:
+        raise HTTPException(status_code=404, detail=f"Instance pk={pk} not found.")
+    ScopePolicy.enforce_luciel_instance_scope(request, instance)
+
+    _lifecycle_cascade_memory_items(
+        request=request,
+        db=db,
+        admin_id=instance.admin_id,
+        pk=pk,
+        audit_ctx=audit_ctx,
+    )
+
+    try:
+        deleted = service.delete_instance_with_grace(
+            audit_ctx=audit_ctx,
+            pk=pk,
+            updated_by=getattr(request.state, "actor_label", None),
+        )
+    except InstanceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return LucielInstanceRead.model_validate(deleted)
+
+
+@router.post(
+    "/instances/{pk}/restore",
+    response_model=LucielInstanceRead,
+)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
+def restore_luciel_instance(
+    request: Request,
+    pk: int,
+    service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+    db: DbSession,
+) -> LucielInstanceRead:
+    """Restore a soft-deleted instance within the 30-day grace window.
+
+    Per Vision §6.4 Reactivation: knowledge + conversations are
+    reactivated, embed keys are re-minted (new keys, old keys stay
+    revoked), capacity slot is consumed again. The new embed key is
+    surfaced on the response under ``new_embed_key`` -- one-time read,
+    never persisted to SSM (the admin must paste it into their site).
+    Returns 410 Gone if the grace window has expired.
+    """
+    instance = service.get_by_pk(pk)
+    if instance is None:
+        raise HTTPException(status_code=404, detail=f"Instance pk={pk} not found.")
+    ScopePolicy.enforce_luciel_instance_scope(request, instance)
+
+    api_key_service = ApiKeyService(db)
+    try:
+        restored, new_embed_key = service.restore_instance(
+            audit_ctx=audit_ctx,
+            pk=pk,
+            updated_by=getattr(request.state, "actor_label", None),
+            api_key_service=api_key_service,
+        )
+    except InstanceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InstanceLifecycleConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "instance_lifecycle_conflict",
+                "message": str(exc),
+                "current_status": exc.current_status,
+            },
+        ) from exc
+    except InstanceRestoreGraceExpiredError as exc:
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "instance_restore_grace_expired",
+                "message": str(exc),
+            },
+        ) from exc
+
+    payload = LucielInstanceRead.model_validate(restored)
+    if new_embed_key is not None:
+        payload = payload.model_copy(update={"new_embed_key": new_embed_key})
+    return payload
 
 
 

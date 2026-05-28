@@ -103,6 +103,40 @@ ACTION_INSTANCE_DEACTIVATED = "instance_deactivated"
 ACTION_KNOWLEDGE_SOFT_DELETED = "knowledge_soft_deleted"
 ACTION_KNOWLEDGE_HARD_DELETED = "knowledge_hard_deleted"
 
+# Arc 11 Closeout PR-A -- instance lifecycle verbs per Customer Journey
+# §4.5 Phase 8 (Pause / Delete / Restore as three distinct affordances).
+# Distinct from ACTION_DEACTIVATE / ACTION_REACTIVATE so a regulator
+# scanning the audit chain can answer "did the admin pause this or
+# delete this" at the verb level without inspecting the diff. The
+# verbs are advisory strings (no DB-side ENUM) per the same convention
+# as every other Arc 10 / Arc 11 lifecycle action above.
+#
+# ACTION_INSTANCE_PAUSED       -- operational quiet. Widget renders
+#                                 empty <div>; data retained; reactivat-
+#                                 able instantly via /resume.
+# ACTION_INSTANCE_RESUMED      -- exit Pause; widget begins serving
+#                                 again. No key rotation.
+# ACTION_INSTANCE_DELETED      -- destructive intent. soft_deleted_at
+#                                 stamped; 30-day grace window opens.
+#                                 Restorable via /restore.
+# ACTION_INSTANCE_RESTORED     -- exit Delete within the 30-day window.
+#                                 Per Vision §6.4 embed keys are re-
+#                                 minted (new keys, old keys stay
+#                                 revoked). The audit row's after_json
+#                                 carries both the revoked key prefixes
+#                                 and the new key prefix.
+# ACTION_INSTANCE_HARD_PURGED  -- retention worker hard-deleted an
+#                                 instance + its cascade (knowledge,
+#                                 conversations, leads, traces, api_keys)
+#                                 after the 30-day grace expired.
+#                                 Distinct from ACTION_TENANT_HARD_PURGED
+#                                 because the tenant survives.
+ACTION_INSTANCE_PAUSED = "instance_paused"
+ACTION_INSTANCE_RESUMED = "instance_resumed"
+ACTION_INSTANCE_DELETED = "instance_deleted"
+ACTION_INSTANCE_RESTORED = "instance_restored"
+ACTION_INSTANCE_HARD_PURGED = "instance_hard_purged"
+
 # Arc 11 Step 7 -- admin knowledge-base routes
 # (/admin/instances/{instance_id}/knowledge/*). Distinct from the
 # pre-Arc-11 ACTION_KNOWLEDGE_* actions above (which are emitted by
@@ -489,6 +523,12 @@ ALLOWED_ACTIONS = (
     ACTION_KNOWLEDGE_SOURCE_DELETED,
     ACTION_KNOWLEDGE_AFFECTED_QUESTIONS_VIEWED,
     ACTION_KNOWLEDGE_CRAWL_ENQUEUED,
+    # Arc 11 Closeout PR-A -- instance lifecycle verbs.
+    ACTION_INSTANCE_PAUSED,
+    ACTION_INSTANCE_RESUMED,
+    ACTION_INSTANCE_DELETED,
+    ACTION_INSTANCE_RESTORED,
+    ACTION_INSTANCE_HARD_PURGED,
 )
 
 

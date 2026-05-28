@@ -26,6 +26,8 @@ Domain-agnostic: no imports from app/domain/, no vertical branching.
 from __future__ import annotations
 
 import logging
+import warnings
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -33,10 +35,15 @@ from app.models.admin_audit_log import (
     ACTION_CASCADE_DEACTIVATE,
     ACTION_CREATE,
     ACTION_DEACTIVATE,
+    ACTION_INSTANCE_DELETED,
+    ACTION_INSTANCE_PAUSED,
+    ACTION_INSTANCE_RESTORED,
+    ACTION_INSTANCE_RESUMED,
     ACTION_UPDATE,
     RESOURCE_INSTANCE,
 )
 from app.models.instance import Instance
+from app.models.instance_status import InstanceStatus
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
@@ -44,6 +51,14 @@ from app.repositories.admin_audit_repository import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Arc 11 Closeout PR-A — restore-grace window per Architecture §3.6.1
+# ("soft-delete window measured from soft_deleted_at (locked)") and
+# Vision §6.4 Reactivation ("Admin clicks Reactivate within 30 days").
+# Single source of truth; the retention worker imports this constant
+# from here too so both ends of the lifecycle clock agree.
+INSTANCE_RESTORE_GRACE_DAYS = 30
 
 
 class InstanceRepository:
@@ -262,6 +277,281 @@ class InstanceRepository:
     # Deactivate (soft delete)
     # ------------------------------------------------------------------
 
+    def pause_by_pk(
+        self,
+        pk: int,
+        *,
+        updated_by: str | None = None,
+        audit_ctx: AuditContext | None = None,
+    ) -> Instance | None:
+        """Pause a specific Instance (Customer Journey §4.5 Phase 8).
+
+        Sets ``instance_status='paused'`` and ``active=False`` (the
+        legacy mirror). Writes an ``ACTION_INSTANCE_PAUSED`` audit row
+        in the same transaction. Returns ``None`` if not found; returns
+        the row unchanged with no audit emission if already ``deleted``
+        (operational pause is not a valid transition out of the
+        destructive-intent state — the route layer maps this to 409).
+        """
+        instance = self.get_by_pk(pk)
+        if instance is None:
+            return None
+        if instance.instance_status == InstanceStatus.DELETED:
+            # No-op signal — route layer maps this to 409. Caller can
+            # distinguish "already paused" (idempotent) from "deleted"
+            # (conflict) by reading instance.instance_status off the
+            # returned row.
+            return instance
+
+        before_status = instance.instance_status
+        was_active = bool(instance.active)
+        instance.instance_status = InstanceStatus.PAUSED
+        instance.active = False
+
+        if audit_ctx is not None and (
+            before_status != InstanceStatus.PAUSED or was_active
+        ):
+            AdminAuditRepository(self.db).record(
+                ctx=audit_ctx,
+                admin_id=instance.admin_id,
+                action=ACTION_INSTANCE_PAUSED,
+                resource_type=RESOURCE_INSTANCE,
+                resource_pk=instance.id,
+                resource_natural_id=instance.instance_slug,
+                luciel_instance_id=instance.id,
+                before={
+                    "instance_status": before_status.value,
+                    "active": was_active,
+                },
+                after={
+                    "instance_status": InstanceStatus.PAUSED.value,
+                    "active": False,
+                },
+                autocommit=False,
+            )
+
+        self.db.commit()
+        self.db.refresh(instance)
+        logger.info(
+            "Instance paused pk=%s admin_id=%s instance_slug=%s",
+            instance.id,
+            instance.admin_id,
+            instance.instance_slug,
+        )
+        return instance
+
+    def resume_by_pk(
+        self,
+        pk: int,
+        *,
+        updated_by: str | None = None,
+        audit_ctx: AuditContext | None = None,
+    ) -> Instance | None:
+        """Resume a paused Instance.
+
+        Sets ``instance_status='active'`` and ``active=True``. Writes
+        an ``ACTION_INSTANCE_RESUMED`` audit row. Returns ``None`` if
+        not found; returns the row unchanged with no audit emission
+        if already ``deleted`` (route layer maps to 409). Resuming an
+        already-active row is idempotent and emits no audit (matches
+        the no-diff convention in :meth:`update`).
+        """
+        instance = self.get_by_pk(pk)
+        if instance is None:
+            return None
+        if instance.instance_status == InstanceStatus.DELETED:
+            return instance
+
+        before_status = instance.instance_status
+        was_active = bool(instance.active)
+        instance.instance_status = InstanceStatus.ACTIVE
+        instance.active = True
+
+        if audit_ctx is not None and (
+            before_status != InstanceStatus.ACTIVE or not was_active
+        ):
+            AdminAuditRepository(self.db).record(
+                ctx=audit_ctx,
+                admin_id=instance.admin_id,
+                action=ACTION_INSTANCE_RESUMED,
+                resource_type=RESOURCE_INSTANCE,
+                resource_pk=instance.id,
+                resource_natural_id=instance.instance_slug,
+                luciel_instance_id=instance.id,
+                before={
+                    "instance_status": before_status.value,
+                    "active": was_active,
+                },
+                after={
+                    "instance_status": InstanceStatus.ACTIVE.value,
+                    "active": True,
+                },
+                autocommit=False,
+            )
+
+        self.db.commit()
+        self.db.refresh(instance)
+        logger.info(
+            "Instance resumed pk=%s admin_id=%s instance_slug=%s",
+            instance.id,
+            instance.admin_id,
+            instance.instance_slug,
+        )
+        return instance
+
+    def delete_by_pk(
+        self,
+        pk: int,
+        *,
+        updated_by: str | None = None,
+        audit_ctx: AuditContext | None = None,
+    ) -> Instance | None:
+        """Soft-delete an Instance — opens the 30-day grace window.
+
+        Sets ``instance_status='deleted'``, ``active=False``, and
+        stamps ``soft_deleted_at = now()``. Writes an
+        ``ACTION_INSTANCE_DELETED`` audit row.
+
+        Idempotent on an already-deleted row: returns the row without
+        re-stamping ``soft_deleted_at`` (the original delete moment is
+        the only honest grace-window start) and without emitting a
+        second audit row. Returns ``None`` if not found.
+        """
+        instance = self.get_by_pk(pk)
+        if instance is None:
+            return None
+        if instance.instance_status == InstanceStatus.DELETED:
+            # Idempotent — preserve the original soft_deleted_at clock.
+            return instance
+
+        before_status = instance.instance_status
+        was_active = bool(instance.active)
+        now = datetime.now(timezone.utc)
+
+        instance.instance_status = InstanceStatus.DELETED
+        instance.active = False
+        instance.soft_deleted_at = now
+
+        if audit_ctx is not None:
+            AdminAuditRepository(self.db).record(
+                ctx=audit_ctx,
+                admin_id=instance.admin_id,
+                action=ACTION_INSTANCE_DELETED,
+                resource_type=RESOURCE_INSTANCE,
+                resource_pk=instance.id,
+                resource_natural_id=instance.instance_slug,
+                luciel_instance_id=instance.id,
+                before={
+                    "instance_status": before_status.value,
+                    "active": was_active,
+                    "soft_deleted_at": None,
+                },
+                after={
+                    "instance_status": InstanceStatus.DELETED.value,
+                    "active": False,
+                    "soft_deleted_at": now.isoformat(),
+                    "grace_window_days": INSTANCE_RESTORE_GRACE_DAYS,
+                },
+                autocommit=False,
+            )
+
+        self.db.commit()
+        self.db.refresh(instance)
+        logger.info(
+            "Instance soft-deleted pk=%s admin_id=%s instance_slug=%s "
+            "soft_deleted_at=%s",
+            instance.id,
+            instance.admin_id,
+            instance.instance_slug,
+            now.isoformat(),
+        )
+        return instance
+
+    def restore_by_pk(
+        self,
+        pk: int,
+        *,
+        updated_by: str | None = None,
+        audit_ctx: AuditContext | None = None,
+    ) -> Instance | None:
+        """Restore a soft-deleted Instance within the grace window.
+
+        Sets ``instance_status='active'``, ``active=True``, clears
+        ``soft_deleted_at``. Writes an ``ACTION_INSTANCE_RESTORED``
+        audit row. Returns ``None`` if not found OR if the grace
+        window has expired (route layer maps the latter to 410 Gone).
+
+        Per Vision §6.4 Reactivation, the embed-key re-mint is NOT
+        performed here — that is the service layer's job, because it
+        spans two repositories (instance + api_keys) and the service
+        is the right place to coordinate them in a single transaction.
+        """
+        instance = self.get_by_pk(pk)
+        if instance is None:
+            return None
+        if instance.instance_status != InstanceStatus.DELETED:
+            # Not deleted -- restore is a no-op transition. The route
+            # layer treats this as 409 (not 410: the grace window is
+            # not the question; the row is already live).
+            return instance
+        if instance.soft_deleted_at is None:
+            # Shape invariant violated: deleted rows must carry a
+            # soft_deleted_at. Refuse to restore rather than guess.
+            logger.error(
+                "Instance restore refused: pk=%s is 'deleted' but "
+                "soft_deleted_at is NULL (shape invariant violation)",
+                instance.id,
+            )
+            return None
+
+        deleted_at = instance.soft_deleted_at
+        if deleted_at.tzinfo is None:
+            deleted_at = deleted_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - deleted_at > timedelta(
+            days=INSTANCE_RESTORE_GRACE_DAYS
+        ):
+            # Grace expired -- route layer maps to 410 Gone.
+            return None
+
+        before_status = instance.instance_status
+        before_soft_deleted_at = instance.soft_deleted_at
+
+        instance.instance_status = InstanceStatus.ACTIVE
+        instance.active = True
+        instance.soft_deleted_at = None
+
+        if audit_ctx is not None:
+            AdminAuditRepository(self.db).record(
+                ctx=audit_ctx,
+                admin_id=instance.admin_id,
+                action=ACTION_INSTANCE_RESTORED,
+                resource_type=RESOURCE_INSTANCE,
+                resource_pk=instance.id,
+                resource_natural_id=instance.instance_slug,
+                luciel_instance_id=instance.id,
+                before={
+                    "instance_status": before_status.value,
+                    "active": False,
+                    "soft_deleted_at": before_soft_deleted_at.isoformat(),
+                },
+                after={
+                    "instance_status": InstanceStatus.ACTIVE.value,
+                    "active": True,
+                    "soft_deleted_at": None,
+                },
+                autocommit=False,
+            )
+
+        self.db.commit()
+        self.db.refresh(instance)
+        logger.info(
+            "Instance restored pk=%s admin_id=%s instance_slug=%s",
+            instance.id,
+            instance.admin_id,
+            instance.instance_slug,
+        )
+        return instance
+
     def deactivate_by_pk(
         self,
         pk: int,
@@ -269,36 +559,25 @@ class InstanceRepository:
         updated_by: str | None = None,
         audit_ctx: AuditContext | None = None,
     ) -> Instance | None:
-        """Soft-deactivate a specific Instance. Returns ``None`` if not found."""
-        instance = self.get_by_pk(pk)
-        if instance is None:
-            return None
+        """Deprecated alias for :meth:`pause_by_pk`.
 
-        was_active = bool(instance.active)
-        instance.active = False
-
-        if audit_ctx is not None and was_active:
-            AdminAuditRepository(self.db).record(
-                ctx=audit_ctx,
-                admin_id=instance.admin_id,
-                action=ACTION_DEACTIVATE,
-                resource_type=RESOURCE_INSTANCE,
-                resource_pk=instance.id,
-                resource_natural_id=instance.instance_slug,
-                before={"active": True},
-                after={"active": False},
-                autocommit=False,
-            )
-
-        self.db.commit()
-        self.db.refresh(instance)
-        logger.info(
-            "Instance deactivated pk=%s admin_id=%s instance_slug=%s",
-            instance.id,
-            instance.admin_id,
-            instance.instance_slug,
+        Arc 11 Closeout PR-A renamed operational deactivation to Pause
+        per Customer Journey §4.5 Phase 8 (three distinct affordances:
+        Pause / Delete / Close). Existing internal callsites continue
+        to work; new code must call ``pause_by_pk`` directly. Slated
+        for removal in Arc 12 alongside the legacy ``active`` boolean.
+        """
+        warnings.warn(
+            "InstanceRepository.deactivate_by_pk is deprecated; "
+            "use pause_by_pk (or delete_by_pk for destructive intent).",
+            DeprecationWarning,
+            stacklevel=2,
         )
-        return instance
+        return self.pause_by_pk(
+            pk,
+            updated_by=updated_by,
+            audit_ctx=audit_ctx,
+        )
 
     def deactivate_all_for_admin(
         self,
@@ -340,7 +619,15 @@ class InstanceRepository:
                 Instance.active.is_(True),
             )
             .update(
-                {Instance.active: False},
+                {
+                    Instance.active: False,
+                    # Arc 11 Closeout PR-A — cascade-deactivate maps to
+                    # the Pause state (not Delete): the admin-level
+                    # cascade is operational (data retained), not
+                    # destructive. Closure (Arc 10) drives the
+                    # destructive-intent path for accounts.
+                    Instance.instance_status: InstanceStatus.PAUSED,
+                },
                 synchronize_session=False,
             )
         )
