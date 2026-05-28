@@ -16,8 +16,8 @@ departure); the two ApiKey reads (A1/A2) reuse C.1's
 reuse C.2's `memory_items_step29c?admin_id=&actor_user_id=`.
 C.5 (P11 F10 ORM-write migration) adds the first and only
 mutation in the C-series: a platform_admin POST at
-`/luciel_instances_step29c/{instance_id}/toggle_active` that
-forensically flips `luciel_instances.active` so P11's instance-
+`/instances_step29c/{instance_id}/toggle_active` that
+forensically flips `instances.active` so P11's instance-
 liveness Gate-4 assertion can be set up and torn down without
 direct ORM writes from inside the verify harness. The route
 emits an `ACTION_LUCIEL_INSTANCE_FORENSIC_TOGGLE` audit row
@@ -48,12 +48,12 @@ Routes
         &actor_label_like=<str>
         &actor_key_prefix=<str>         # exact 12-char handle (P13, C.3)
         &limit=<int=100>
-    GET /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}
+    GET /api/v1/admin/forensics/instances_step29c/{instance_id}
     GET /api/v1/admin/forensics/messages_step29c
         ?session_id=<str>               # P13 setup-message lookup
         &limit=<int=100>
     GET /api/v1/admin/forensics/users_step29c/{user_id}    # P14, C.4
-    POST /api/v1/admin/forensics/luciel_instances_step29c
+    POST /api/v1/admin/forensics/instances_step29c
          /{instance_id}/toggle_active                     # P11 F10, C.5
         body: {"active": <bool>}
 
@@ -146,7 +146,7 @@ from app.models.admin_audit_log import (
     RESOURCE_LUCIEL_INSTANCE,
 )
 from app.models.api_key import ApiKey
-from app.models.instance import Instance as LucielInstance
+from app.models.instance import Instance
 from app.models.memory import MemoryItem
 from app.models.message import MessageModel
 from app.models.user import User
@@ -286,7 +286,7 @@ class UserForensic(BaseModel):
     synthetic: bool
 
 
-class LucielInstanceForensic(BaseModel):
+class InstanceForensic(BaseModel):
     """Strict-projection of ``instances`` for forensic read (V2 shape).
 
     Arc 5 Path A — collapsed to the V2 (Admin → Instance) hierarchy.
@@ -303,7 +303,7 @@ class LucielInstanceForensic(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-class LucielInstanceToggleRequest(BaseModel):
+class InstanceToggleRequest(BaseModel):
     """Request body for the C.5 forensic toggle POST.
 
     A single field `active`. The route emits an audit row carrying
@@ -554,33 +554,33 @@ def list_admin_audit_logs_forensic_step29c(
 
 
 @router.get(
-    "/luciel_instances_step29c/{instance_id}",
-    response_model=LucielInstanceForensic,
+    "/instances_step29c/{instance_id}",
+    response_model=InstanceForensic,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_luciel_instance_forensic_step29c(
     request: Request,
     db: DbSession,
     instance_id: int,
-) -> LucielInstanceForensic:
+) -> InstanceForensic:
     """Forensic read of one luciel_instances row by integer id.
 
     platform_admin only. Step 29 Commit C.1. Backs P11 F10
-    lines 419 / 453's `db.get(LucielInstance, state.instance_agent)`.
-    Returns the strict LucielInstanceForensic projection. The
+    lines 419 / 453's `db.get(Instance, state.instance_agent)`.
+    Returns the strict InstanceForensic projection. The
     `active` boolean toggle is OUT of scope here -- it lands as an
     admin POST in Commit C.5 (P11 F10 ORM-write migration).
     404 if the row does not exist.
     """
     _require_platform_admin_step29c(request)
 
-    row = db.get(LucielInstance, instance_id)
+    row = db.get(Instance, instance_id)
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"luciel_instances row id={instance_id} not found.",
+            detail=f"instances row id={instance_id} not found.",
         )
-    return LucielInstanceForensic(
+    return InstanceForensic(
         id=row.id,
         instance_slug=row.instance_slug,
         admin_id=row.admin_id,
@@ -686,16 +686,16 @@ def list_messages_forensic_step29c(
 
 
 @router.post(
-    "/luciel_instances_step29c/{instance_id}/toggle_active",
-    response_model=LucielInstanceForensic,
+    "/instances_step29c/{instance_id}/toggle_active",
+    response_model=InstanceForensic,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def toggle_luciel_instance_active_step29c(
     request: Request,
     db: DbSession,
     instance_id: int,
-    payload: LucielInstanceToggleRequest,
-) -> LucielInstanceForensic:
+    payload: InstanceToggleRequest,
+) -> InstanceForensic:
     """Forensic toggle of one luciel_instances row's `active` flag.
 
     Step 29 Commit C.5 -- the first and only mutation in the C-series.
@@ -714,7 +714,7 @@ def toggle_luciel_instance_active_step29c(
     -----------------------------------
 
     The route writes the admin_audit_log row BEFORE mutating
-    `luciel_instances.active`. If the audit insert fails (constraint
+    `instances.active`. If the audit insert fails (constraint
     violation, permission denied, etc.), the function raises and the
     SQL UPDATE never executes. Both writes commit atomically in a
     single `db.commit()` so a commit-time failure rolls both back.
@@ -757,11 +757,11 @@ def toggle_luciel_instance_active_step29c(
     """
     _require_platform_admin_step29c(request)
 
-    inst = db.get(LucielInstance, instance_id)
+    inst = db.get(Instance, instance_id)
     if inst is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"luciel_instances row id={instance_id} not found.",
+            detail=f"instances row id={instance_id} not found.",
         )
 
     previous_active = bool(inst.active)
@@ -830,7 +830,7 @@ def toggle_luciel_instance_active_step29c(
     db.commit()
     db.refresh(inst)
 
-    return LucielInstanceForensic(
+    return InstanceForensic(
         id=inst.id,
         instance_slug=inst.instance_slug,
         admin_id=inst.admin_id,

@@ -3,10 +3,10 @@ Contract test for Step 29 Commits C.1, C.2, C.3, C.4, and C.5:
     GET /api/v1/admin/forensics/api_keys_step29c
     GET /api/v1/admin/forensics/memory_items_step29c
     GET /api/v1/admin/forensics/admin_audit_logs_step29c
-    GET /api/v1/admin/forensics/luciel_instances_step29c/{instance_id}
+    GET /api/v1/admin/forensics/instances_step29c/{instance_id}
     GET /api/v1/admin/forensics/messages_step29c               (C.3)
     GET /api/v1/admin/forensics/users_step29c/{user_id}        (C.4)
-    POST /api/v1/admin/forensics/luciel_instances_step29c
+    POST /api/v1/admin/forensics/instances_step29c
          /{instance_id}/toggle_active                          (C.5)
 
 C.2 EXTENDS:
@@ -196,11 +196,11 @@ _RESPONSE_MODEL_NAMES = (
     "MemoryItemsForensic",
     "AdminAuditLogForensic",
     "AdminAuditLogsForensic",
-    "LucielInstanceForensic",
+    "InstanceForensic",
     "MessageForensic",
     "MessagesForensic",
     "UserForensic",
-    "LucielInstanceToggleRequest",  # C.5 request body schema
+    "InstanceToggleRequest",  # C.5 request body schema
 )
 
 
