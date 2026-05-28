@@ -76,17 +76,88 @@ close-out).
   used to anchor the four Gap 7 close+reactivate bug fixes
   (PR #113).
 
-### Out-of-scope follow-ups (Arc 10.5)
+### Arc 10.5: orphaned surface cleanup — CLOSED 2026-05-27 21:34 EDT
 
-Orphaned `AgentConfig` CRUD surfaces remain reachable from
-non-closure routes (`AdminService.create_agent_config`,
-`get_agent_config`, `list_agent_configs`; `AgentConfig` model +
-schemas; `config_repository` legacy lookups;
-`verification.py` agent_configs entry). These reach a table
-(`agent_configs`) that was DROPPED before Arc 10. Closure path no
-longer touches them (Gap 7 prune, PR #111), but a separate audit
-pass needs to confirm no live caller before deletion. Tracked as
-**Arc 10.5: orphaned AgentConfig surface cleanup**.
+Founder directive (2026-05-27 21:08 EDT): "every part of the
+system must align with the business documents before continuing."
+Under that directive, the previously-deferred Arc 10.5 surface
+cleanup was brought in-scope and closed.
+
+**Anchored to:**
+- Vision v1 §3 (five configuration pillars; no Agent or Domain layer)
+- Vision v1 §6.2 (Team Member lifecycle)
+- Vision v1 §6.5 (GDPR-style hard delete)
+- Architecture v1 §3.2 (Instance is the V2 config carrier)
+- Architecture v1 §3.6.1 (10-layer cascade)
+- Architecture v1 §3.7.2 (scope_assignments = SoT for team-member binding)
+- Customer Journey v1 §2 (Marcus team-member tier; Dashboard Team tab)
+- Customer Journey v1 §8 (closure -> 30-day grace -> hard delete)
+
+**Three production bugs surfaced during the cleanup audit; all
+three fixed in PR #115 + #11.**
+
+1. **`/api/v1/admin/agents` frontend→backend mismatch.** Dashboard
+   Team tab called \`listAgents()\` -> \`GET /admin/agents\`. The
+   backend route does not exist; the \`agents\` table was DROPPED
+   before Arc 10. The Team tab in Customer Journey v1 §2 would have
+   404'd on first visit. **Fix:** new backend route
+   \`GET /api/v1/admin/team-members\` sourced from
+   \`ScopeAssignmentRepository\` (the doctrinally correct V2 source
+   per Architecture §3.7.2); frontend switched to
+   \`listTeamMembers()\` and renders user email + role.
+
+2. **Hard-delete cascade crashed on dropped tables.**
+   \`AdminService.hard_delete_tenant_after_retention\` (the
+   Customer Journey §8 "after 30 days" worker) issued
+   \`DELETE FROM\` against three tables that were dropped or
+   renamed before Arc 10:
+     - \`agents\` (dropped at Arc 5 Path A)
+     - \`agent_configs\` (dropped same migration)
+     - \`luciel_instances\` (renamed to \`instances\` at Arc 9.2)
+   Every retention worker tick past day 30 would have crashed
+   \`UndefinedTable\`, leaving the admin un-tombstoned and the
+   audit-chain row never written. Vision §6.5 GDPR hard-delete
+   was structurally broken. **Fix:** drop the dead-table DELETEs;
+   rename \`luciel_instances\` -> \`instances\`.
+
+3. **\`traces\` carried dead config-id columns.**
+   \`traces.tenant_config_id\`, \`domain_config_id\`,
+   \`agent_config_id\` pointed at the dropped config tables. No
+   FK, no V2 consumer. **Fix:** alembic migration
+   \`arc10_5_drop_dead_config_id_columns\` drops the three
+   columns; model + service + chat-service no longer reference
+   them.
+
+**Orphaned surfaces removed (PR #115):**
+- \`app/models/agent_config.py\` deleted
+- \`AgentConfigCreate / Update / Read\` schemas removed
+- \`AdminService.create_agent_config / get_agent_config /
+  update_agent_config / list_agent_configs /
+  list_agent_configs_by_domain / deactivate_agent /
+  deactivate_domain / bulk_soft_deactivate_memory_items_for_agent\`
+  removed
+- \`ConfigRepository.get_agent_config\` removed
+- \`chat_service\` legacy-agent-config lookup block removed
+- \`trace_service\` config_id parameters removed
+- \`verification.py\` \`agent_configs\` entry removed
+- Stale grant-matrix comment in \`db/session.py\` corrected
+
+**E2E verification:**
+- Backend full suite: 1432 passed / 0 failed (was 1428 / 0)
+- Frontend Vitest: 99 passed
+- Gap 7 in-cluster Stripe close+reactivate E2E against prod RDS:
+  exit 0 (after backend deploy of \`main-8286640\`)
+- Frontend Amplify build #44: SUCCEED
+- \`GET /api/v1/admin/team-members\` smoke-test against
+  \`api.vantagemind.ai\`: 401 (auth required — route registered)
+
+**Label-only follow-up (not blocking):** URL path
+\`/api/v1/admin/tenants\` is a stale slug. Wire contract is
+preserved by \`TenantConfigRead\` back-compat aliases (post-rename
+field names are correct on the JSON wire). Renaming the URL slug
+would touch \`ci/e2e/run_widget_e2e.sh\` and any platform-admin
+scripts. Tracked but not gated on for system alignment because
+no consumer is broken; the divergence is cosmetic.
 
 ### Original re-open rationale (historical)
 
