@@ -1,0 +1,197 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Arc 11 Step 6 — knowledge S3 bucket (luciel-knowledge-prod-ca-central-1)
+  and the IAM managed policy granting the backend (luciel-ecs-web-role)
+  and worker (luciel-ecs-worker-role) tasks GetObject / PutObject /
+  DeleteObject on the bucket. Region ca-central-1, account 729005488042.
+
+  Bucket posture:
+    * SSE-S3 (AES256) — Architecture v1 §4.2: AWS-managed KMS at v1.
+    * Versioning Suspended. The knowledge_sources.source_version column
+      already provides version semantics at the row level; S3
+      versioning would just duplicate that and grow cost.
+    * BlockPublicAccess: all four flags true. Uploads go through the
+      backend API (presigned URLs or direct PUT through FastAPI); the
+      browser never talks to S3 directly in v1, so CORS stays
+      disabled.
+    * Lifecycle: abort incomplete multipart uploads after 7 days;
+      expire noncurrent versions / delete markers after 30 days.
+      Objects themselves are NOT auto-expired — the soft-delete
+      worker deletes them through the API path so audit + cascade
+      stay in sync.
+
+  Cutover plan:
+    Once Arc 11 ships, deploy with:
+
+        aws cloudformation deploy \
+            --template-file cfn/knowledge-bucket.yaml \
+            --stack-name luciel-knowledge-bucket \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region ca-central-1
+
+    Stack creates the bucket + the managed policy and attaches the
+    policy to the two task roles. CAPABILITY_NAMED_IAM is required
+    because the policy has an explicit ``ManagedPolicyName``. The
+    template is NOT deployed from this PR; Step 11 (close audit)
+    runs the deploy with founder approval.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: luciel-knowledge-prod-ca-central-1
+    Description: >
+      S3 bucket name. Matches ARC11_PLAN.md §12 verification entry.
+      The matching SSM parameter (/luciel/production/knowledge_s3_bucket)
+      is stamped by the same Step 11 deploy script that runs this
+      stack — backend + worker task-defs read that param at boot.
+
+  BackendTaskRoleName:
+    Type: String
+    Default: luciel-ecs-web-role
+    Description: >
+      Existing ECS task role for the backend (luciel-backend-service).
+      Created in an earlier arc; we only attach a managed policy here.
+
+  WorkerTaskRoleName:
+    Type: String
+    Default: luciel-ecs-worker-role
+    Description: >
+      Existing ECS task role for the worker (luciel-worker-service).
+      Created in an earlier arc; we only attach a managed policy here.
+
+  Region:
+    Type: String
+    Default: ca-central-1
+    Description: AWS region for ARN composition.
+
+  AwsAccountId:
+    Type: String
+    Default: "729005488042"
+    Description: AWS account id for ARN composition.
+
+Resources:
+
+  # -------------------------------------------------------------
+  # The bucket itself.
+  # -------------------------------------------------------------
+  KnowledgeBucket:
+    Type: AWS::S3::Bucket
+    # DeletionPolicy Retain so an accidental stack delete does not
+    # vaporise customer-uploaded sources. Stack updates that REPLACE
+    # the bucket also retain the old physical resource.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: false
+      VersioningConfiguration:
+        Status: Suspended
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      # No CORS — the browser never talks to S3 directly in v1.
+      # Re-add a CorsConfiguration block here if and when we switch
+      # to browser-side presigned PUT for uploads.
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: ExpireNoncurrentVersionsAndDeleteMarkers
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            ExpiredObjectDeleteMarker: true
+
+  # -------------------------------------------------------------
+  # Bucket policy: deny non-TLS connections (cheap defense in
+  # depth; AWS recommends this for every customer-data bucket).
+  # -------------------------------------------------------------
+  KnowledgeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref KnowledgeBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${BucketName}"
+              - !Sub "arn:aws:s3:::${BucketName}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  # -------------------------------------------------------------
+  # Managed IAM policy: minimal CRUD on the knowledge bucket only.
+  # Attached to both task roles (backend + worker).
+  # -------------------------------------------------------------
+  KnowledgeBucketAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: luciel-knowledge-bucket-access
+      Description: >
+        Arc 11 Step 6 — read / write / delete on the knowledge S3
+        bucket. Attached to luciel-ecs-web-role (backend) and
+        luciel-ecs-worker-role (worker). No ListBucket grant — every
+        operation is keyed on a known object path (s3_key stored on
+        the knowledge_sources row); a List grant would let a
+        compromised role enumerate other admins' object keys.
+      Roles:
+        - !Ref BackendTaskRoleName
+        - !Ref WorkerTaskRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: KnowledgeBucketObjectCRUD
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              # s3:AbortMultipartUpload so the bucket lifecycle
+              # rule (AbortIncompleteMultipartUploads after 7d) can
+              # complete its work without IAM friction, AND so the
+              # backend can clean up its own in-flight multipart
+              # uploads on error.
+              - s3:AbortMultipartUpload
+            Resource:
+              - !Sub "arn:aws:s3:::${BucketName}/*"
+
+Outputs:
+
+  KnowledgeBucketName:
+    Description: >
+      The S3 bucket name. Reference from the backend / worker
+      task-defs via SSM parameter /luciel/production/knowledge_s3_bucket
+      (stamped by the same deploy script that creates this stack).
+    Value: !Ref KnowledgeBucket
+    Export:
+      Name: luciel-knowledge-bucket-name
+
+  KnowledgeBucketArn:
+    Description: ARN of the bucket, for cross-stack references.
+    Value: !GetAtt KnowledgeBucket.Arn
+    Export:
+      Name: luciel-knowledge-bucket-arn
+
+  KnowledgeBucketAccessPolicyArn:
+    Description: >
+      The managed policy attaching CRUD on the bucket to the two
+      task roles. Useful for audit (which policy granted what).
+    Value: !Ref KnowledgeBucketAccessPolicy
+    Export:
+      Name: luciel-knowledge-bucket-access-policy-arn

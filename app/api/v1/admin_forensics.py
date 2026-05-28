@@ -1084,3 +1084,153 @@ def worker_pipeline_probe_step29y(
         polled_for_action=polled_action,
         elapsed_ms=elapsed_ms,
     )
+
+
+# =====================================================================
+# Arc 11 Step 6 -- knowledge ingest pipeline smoke probe.
+#
+# Same posture as ``worker_pipeline_probe_step29y`` above but for the
+# new knowledge ingest plane. The full happy path (S3 download +
+# parse + chunk + embed + persist) would call the LLM and burn
+# credits on every probe; the chat-path smoke probe handles the
+# Celery + broker piece. What this route covers is the STRUCTURAL
+# chain: the embed_source task is registered, the matching queue is
+# wired into the broker transport config, the S3 bucket name resolves
+# from env / SSM, and ``KnowledgeSourceRepository`` is importable +
+# constructible against a tenant-scoped session.
+#
+# If any of those is broken on a fresh deploy, this probe fails
+# loudly BEFORE the first real customer ingest hits an opaque
+# IngestionConfigError in CloudWatch.
+#
+# A future mode=full could enqueue a tiny synthetic ingest end-to-end
+# (the way worker_pipeline_probe_step29y has a mode=full); deferred
+# until we have a way to mock-out the embedder or run against a
+# dummy S3 object.
+# =====================================================================
+
+
+class KnowledgePipelineProbeResponse(BaseModel):
+    """Probe outcome for the Arc 11 Step 6 knowledge-pipeline smoke."""
+
+    celery_task_registered: bool
+    knowledge_queue_wired: bool
+    knowledge_bucket_resolved: bool
+    source_repository_constructible: bool
+    retriever_importable: bool
+    detail: dict[str, Any]
+
+
+@router.get(
+    "/knowledge_pipeline_probe_arc11",
+    response_model=KnowledgePipelineProbeResponse,
+)
+@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
+def knowledge_pipeline_probe_arc11(
+    request: Request,
+    db: DbSession,
+) -> KnowledgePipelineProbeResponse:
+    """Smoke probe for the Arc 11 knowledge ingest pipeline.
+
+    Five structural checks, each independent so the response shows
+    exactly which piece is wedged:
+
+      1. ``celery_task_registered`` — ``app.worker.tasks.embed_source.
+         embed_source`` is registered on the producer-side Celery app.
+         Failure here means the worker container is running but the
+         backend container has not imported the task module (the
+         include[] list in celery_app.py drifted).
+      2. ``knowledge_queue_wired`` — the matching SQS queue is in
+         ``broker_transport_options['predefined_queues']``. Without
+         this, the next ``.apply_async(queue='luciel-knowledge-tasks')``
+         falls through to a ListQueues call and a permission error.
+      3. ``knowledge_bucket_resolved`` — ``KNOWLEDGE_S3_BUCKET`` env
+         is populated. The worker fails the first ingest with an
+         IngestionConfigError without this; better to detect at
+         deploy time.
+      4. ``source_repository_constructible`` — the new repository
+         imports cleanly against the request-scoped session.
+      5. ``retriever_importable`` — the chunk repository's vector
+         path imports cleanly (catches pgvector ImportError that
+         would otherwise only fire on the first real retrieve).
+
+    Platform_admin gated. Read-only. No audit row.
+    """
+    _require_platform_admin_step29c(request)
+
+    detail: dict[str, Any] = {}
+
+    # ----- Check 1: task registered -----
+    try:
+        from app.worker.celery_app import celery_app
+
+        celery_app.loader.import_default_modules()
+        task_name = "app.worker.tasks.embed_source.embed_source"
+        task_registered = task_name in celery_app.tasks
+        detail["task_name"] = task_name
+    except Exception as exc:  # noqa: BLE001
+        task_registered = False
+        detail["task_registered_error"] = type(exc).__name__
+
+    # ----- Check 2: queue wired -----
+    try:
+        from app.worker.celery_app import celery_app
+
+        bto = celery_app.conf.get("broker_transport_options") or {}
+        predef = bto.get("predefined_queues") or {}
+        queue_wired = "luciel-knowledge-tasks" in predef
+        detail["predefined_queues_present"] = sorted(predef.keys())
+    except Exception as exc:  # noqa: BLE001
+        queue_wired = False
+        detail["queue_wired_error"] = type(exc).__name__
+
+    # ----- Check 3: bucket name resolves -----
+    try:
+        from app.worker.tasks.embed_source import _resolve_bucket_name
+
+        bucket = _resolve_bucket_name()
+        bucket_resolved = bool(bucket)
+        # Bucket name itself is not sensitive — it's in the IAM
+        # policy, the CFN template, and the task-def env. Surfacing
+        # it in the probe response lets the operator confirm which
+        # bucket the worker will actually hit.
+        detail["bucket_resolved_value"] = bucket or None
+    except Exception as exc:  # noqa: BLE001
+        bucket_resolved = False
+        detail["bucket_resolved_error"] = type(exc).__name__
+
+    # ----- Check 4: source repository constructible -----
+    try:
+        from app.repositories.knowledge_source_repository import (
+            KnowledgeSourceRepository,
+        )
+
+        # Construct against the request session — proves the import
+        # path is clean and the constructor signature hasn't drifted.
+        KnowledgeSourceRepository(db)
+        source_repo_constructible = True
+    except Exception as exc:  # noqa: BLE001
+        source_repo_constructible = False
+        detail["source_repo_error"] = type(exc).__name__
+
+    # ----- Check 5: retriever importable -----
+    try:
+        from app.knowledge.retriever import (  # noqa: F401
+            KnowledgeRetriever,
+            RetrievedChunk,
+            collect_source_pks,
+        )
+
+        retriever_importable = True
+    except Exception as exc:  # noqa: BLE001
+        retriever_importable = False
+        detail["retriever_error"] = type(exc).__name__
+
+    return KnowledgePipelineProbeResponse(
+        celery_task_registered=task_registered,
+        knowledge_queue_wired=queue_wired,
+        knowledge_bucket_resolved=bucket_resolved,
+        source_repository_constructible=source_repo_constructible,
+        retriever_importable=retriever_importable,
+        detail=detail,
+    )
