@@ -41,6 +41,10 @@ from app.models.admin import (  # noqa: F401
 # Arc 6 A — admin_widget_domains allowlist (Free/Pro/Enterprise widget domain control).
 from app.models.admin_widget_domain import AdminWidgetDomain  # noqa: F401
 from app.models.instance import Instance  # noqa: F401
+# Arc 12 WU2 — per-instance tool authorisation (default-deny broker gate).
+from app.models.instance_tool_authorization import (  # noqa: F401
+    InstanceToolAuthorization,
+)
 # Arc 5 Path A Commit C2: app/models/aliases.py was deleted along with the
 # Tenant / TenantConfig / LucielInstance / DomainConfig / Agent transitional
 # re-exports. Importers must reference Admin / AdminConfig / Instance
@@ -89,4 +93,6 @@ __all__ = [
     "TIER_ENTERPRISE",
     # Arc 6 A -- widget domain allowlist.
     "AdminWidgetDomain",
+    # Arc 12 WU2 -- per-instance tool authorisation.
+    "InstanceToolAuthorization",
 ]
