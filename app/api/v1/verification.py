@@ -69,7 +69,8 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
     ("retention_policies",   None,     "*",                            ["admin_id"]),
     ("deletion_logs",        None,     "*",                            ["admin_id"]),
     ("admin_audit_logs",     None,     "*",                            ["admin_id"]),
-    ("agent_configs",        None,     "*",                            ["tenant_id"]),
+    # agent_configs: REMOVED (Arc 10.5). Table dropped before Arc 10
+    # per Vision v1 §3 (no Agent layer).
 
     # Step 24.5b additions:
     # - users: tenant-agnostic identity rows. No admin_id column on the

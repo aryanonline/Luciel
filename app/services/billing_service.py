@@ -963,9 +963,11 @@ class BillingService:
             canceled_at=now.
           * Tenant cascade-deactivate via
             AdminService.deactivate_tenant_with_cascade so every child
-            row (conversations, identity_claims, memory_items, api_keys,
-            luciel_instances, agents, agent_configs, domain_configs,
-            tenant_config) flips to active=False in lock-step.
+            row (conversations, identity_claims, memory_items,
+            api_keys, instances, scope_assignments, user_invites,
+            sessions, synthetic users, admin/tenant_config) flips to
+            active=False in lock-step — Architecture v1 §3.6.1
+            10-layer cascade order.
 
         Stripe will subsequently fire ``customer.subscription.deleted``
         to our webhook; ``BillingWebhookService._on_subscription_deleted``

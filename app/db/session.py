@@ -198,10 +198,13 @@ def get_db() -> Generator[Session, None, None]:
 # narrow grant matrix:
 #   - SELECT-only on admin_audit_logs (forward-only immutability;
 #     UPDATE/DELETE blocked by the C6.2 RESTRICTIVE policies anyway)
-#   - SELECT + DELETE on the eight retention tables listed in
+#   - SELECT + DELETE on the six retention tables listed in
 #     admin_service.delete_admin_cascade (sessions, conversations,
-#     identity_claims, memory_items, api_keys, luciel_instances,
-#     agents, agent_configs)
+#     identity_claims, memory_items, api_keys, instances).
+#     Arc 10.5 removed the agents / agent_configs / luciel_instances
+#     entries from this grant matrix because the underlying tables
+#     were DROPPED before Arc 10 (V2 has no Agent layer per Vision
+#     v1 §3; luciel_instances was renamed to instances at Arc 9.2).
 #   - No INSERT, no UPDATE, no sequence USAGE, no grants on the
 #     auth perimeter (admins, tenant_configs, users, user_invites,
 #     user_consents)
