@@ -1526,7 +1526,6 @@ def get_effective_chunking_config(
     )
     cfg = ingestion_service._resolve_chunking_config(
         admin_id=instance.admin_id,
-        domain_id=None,
         luciel_instance_id=instance.id,
     )
     return kschemas.EffectiveChunkingConfigRead(

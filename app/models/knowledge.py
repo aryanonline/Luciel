@@ -47,7 +47,6 @@ class KnowledgeChunk(Base, TimestampMixin):
         nullable=True,
         index=True,
     )
-    domain_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
 
     # ---- Step 25b: Instance binding (Arc 5 Revision C re-pointed) ----
     luciel_instance_id: Mapped[int] = mapped_column(
@@ -161,15 +160,14 @@ class KnowledgeChunk(Base, TimestampMixin):
     )
 
     # ---- Indexes ----
+    # Arc 12 EX3: ``domain_id`` was dropped (v2 scopes knowledge by
+    # admin_id + luciel_instance_id only). The legacy
+    # ``ix_knowledge_scope`` composite went with it; the source-
+    # grouped composite is recreated without ``domain_id``.
     __table_args__ = (
-        Index("ix_knowledge_scope", "admin_id", "domain_id", "knowledge_type"),
-        # Composite for fast "find chunks for source" lookups. Cleanup
-        # B drops the legacy ix_knowledge_chunks_scope_source (which
-        # referenced the old String source_id column) and replaces
-        # it with the equivalent on the new FK column.
         Index(
             "ix_knowledge_chunks_scope_source",
-            "admin_id", "domain_id", "luciel_instance_id", "source_id",
+            "admin_id", "luciel_instance_id", "source_id",
         ),
     )
 

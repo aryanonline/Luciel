@@ -8,13 +8,12 @@ Post-Cleanup-C contract:
     - Primary filter dimension stays ``luciel_instance_id`` (Step 24.5).
     - The legacy ``agent_id`` parameter and its read-compat fan-out
       are gone (Cleanup C — column dropped, zero production rows).
-    - Arc 12 EX1d: the legacy ``domain_id`` parameter is removed from
-      the public retriever surface. v2 = single Admin→Instance
-      boundary (Architecture §3.7.2); the repository's
-      ``search_similar`` is invoked with ``domain_id=None`` so its
-      union-inheritance falls through to the admin-shared / global
-      legs only. ``KnowledgeChunk.domain_id`` ORM column persists
-      until EX3 drops it.
+    - Arc 12 EX1d removed the legacy ``domain_id`` parameter from
+      the public retriever surface (v2 = single Admin→Instance
+      boundary, Architecture §3.7.2). Arc 12 EX3 drops the
+      ``KnowledgeChunk.domain_id`` ORM column itself, so the
+      repository's ``search_similar`` no longer takes that argument
+      and its union-inheritance has only admin-shared / global legs.
     - Upward inheritance is delegated to
       ``KnowledgeRepository.search_similar``.
     - Active-only (``superseded_at IS NULL``), lifecycle-clean
@@ -134,13 +133,9 @@ class KnowledgeRetriever:
 
         try:
             query_embedding = embed_single(query)
-            # Arc 12 EX1d: v2 has no Domain layer (§3.7.2); pass
-            # ``domain_id=None`` so the repository's union-inheritance
-            # falls through to the admin-shared / global legs.
             results = self.repository.search_similar(
                 query_embedding=query_embedding,
                 admin_id=admin_id,
-                domain_id=None,
                 luciel_instance_id=luciel_instance_id,
                 knowledge_type=knowledge_type,
                 limit=limit,

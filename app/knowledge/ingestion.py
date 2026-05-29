@@ -278,7 +278,6 @@ class IngestionService:
                 chunks=chunks,
                 embeddings=embeddings,
                 admin_id=admin_id,
-                domain_id=None,
                 luciel_instance_id=luciel_instance_id,
                 knowledge_type=knowledge_type,
                 title=title,
@@ -354,13 +353,10 @@ class IngestionService:
         *,
         admin_id: str,
         luciel_instance_id: int | None = None,
-        domain_id: str | None = None,  # legacy compat, ignored
     ) -> EffectiveChunkingConfig:
         """Resolves the Admin → Instance chunking chain. The
         ``/admin/instances/{instance_id}/chunking-config`` diagnostic
-        endpoint also calls this directly; the ``domain_id`` kwarg
-        is preserved as a legacy no-op so old call sites don't
-        break."""
+        endpoint also calls this directly."""
         if not admin_id:
             raise IngestionError(
                 "admin_id is required to resolve chunking config"

@@ -464,7 +464,6 @@ def embed_source(
                 chunks=chunks,
                 embeddings=embeddings,
                 admin_id=admin_id,
-                domain_id=None,
                 luciel_instance_id=instance_id,
                 knowledge_type="luciel_knowledge",
                 title=source.filename,
