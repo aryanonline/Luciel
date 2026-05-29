@@ -51,7 +51,6 @@ class SessionService:
         self,
         *,
         admin_id: str,
-        domain_id: str,
         user_id: str | None = None,
         channel: str = "web",
         conversation_id: uuid.UUID | None = None,
@@ -61,7 +60,6 @@ class SessionService:
         return self.repository.create_session(
             session_id=session_id,
             admin_id=admin_id,
-            domain_id=domain_id,
             user_id=user_id,
             channel=channel,
             conversation_id=conversation_id,
@@ -126,11 +124,15 @@ class SessionService:
         # keeps backward compatibility with all legacy tooling that
         # treats sessions.user_id as opaque, while still being
         # unambiguously joinable on User.id when needed.
+        # Arc 12 EX3: sessions.domain_id is dropped at the schema level.
+        # ``domain_id`` is still threaded into the resolver above because
+        # ``identity_claims.domain_id`` / ``conversations.domain_id``
+        # excisions belong to their own EX3 runs; the session row no
+        # longer carries it.
         session_id = str(uuid.uuid4())
         new_session = self.repository.create_session(
             session_id=session_id,
             admin_id=admin_id,
-            domain_id=domain_id,
             user_id=str(resolution.user_id),
             channel=channel,
             conversation_id=resolution.conversation_id,

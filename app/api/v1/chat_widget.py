@@ -196,13 +196,12 @@ def widget_chat_stream(
     _turn_start_monotonic = time.monotonic()
 
     admin_id = getattr(request.state, "admin_id", None)
-    # Arc 12 EX1c: the widget surface scopes by (admin_id,
+    # Arc 12 EX1c / EX3: the widget surface scopes by (admin_id,
     # luciel_instance_id) only. EX1a stopped stamping request.state
     # .agent_id / .domain_id; the widget no longer reads them and no
-    # longer routes on domain_id. The legacy ``sessions.domain_id``
-    # column is still NOT NULL (EX3 owns relax/drop); the internal
-    # ``_legacy_session_domain_sentinel`` below keeps the insert
-    # satisfied without surfacing the field on the public surface.
+    # longer routes on domain_id. Arc 12 EX3 dropped
+    # ``sessions.domain_id`` / ``sessions.agent_id`` at the schema
+    # level, so no sentinel is synthesised at the insert site.
     luciel_instance_id = getattr(request.state, "luciel_instance_id", None)
     embed_key_prefix = getattr(request.state, "key_prefix", None)
 
@@ -233,14 +232,6 @@ def widget_chat_stream(
                 ),
             },
         )
-    # Arc 12 EX1c — internal sentinel to satisfy the legacy
-    # ``sessions.domain_id`` NOT NULL column. The widget no longer
-    # accepts domain_id at the API boundary; this value is built from
-    # the Instance pk so per-Instance row grouping is preserved for
-    # any legacy query that still filters on it. EX3 owns dropping
-    # ``sessions.domain_id``; this synthesis goes away with it.
-    _legacy_session_domain_sentinel = f"instance-{luciel_instance_id}"
-
     # Arc 11 Closeout PR-A — instance lifecycle gating per Customer
     # Journey §4.5 Phase 8 ("Pause my Luciel" → widget renders an empty
     # <div>"). Return 204 No Content when the instance is not in the
@@ -312,9 +303,13 @@ def widget_chat_stream(
         from app.models.identity_claim import ClaimType
         result = session_service.create_session_with_identity(
             admin_id=admin_id,
-            # Arc 12 EX1c — internal-only sentinel for the legacy
-            # NOT-NULL sessions.domain_id (EX3-owned column).
-            domain_id=_legacy_session_domain_sentinel,
+            # Arc 12 EX3 — sessions.domain_id is dropped at the schema
+            # level, but identity_claims.domain_id and
+            # conversations.domain_id remain (separate EX3 runs).
+            # The resolver still threads this value into those rows;
+            # keep the per-Instance sentinel here so the
+            # identity_claims uniqueness scope stays per-Instance.
+            domain_id=f"instance-{luciel_instance_id}",
             channel="widget",
             claim_type=ClaimType(payload.client_claim.claim_type.upper()),
             claim_value=payload.client_claim.claim_value,
@@ -336,9 +331,6 @@ def widget_chat_stream(
         # nothing was resolved; the session is anonymous.
         session = session_service.create_session(
             admin_id=admin_id,
-            # Arc 12 EX1c — internal-only sentinel for the legacy
-            # NOT-NULL sessions.domain_id (EX3-owned column).
-            domain_id=_legacy_session_domain_sentinel,
             user_id=None,  # widget visitors are anonymous at v1
             channel="widget",
             luciel_instance_id=luciel_instance_id,

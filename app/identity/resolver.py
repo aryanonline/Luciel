@@ -298,12 +298,18 @@ class IdentityResolver:
         # require conversation_id NOT NULL because a NULL-conversation
         # session is itself an unbound single-session conversation,
         # not a "join target".
+        # Arc 12 EX3 — sessions.domain_id is dropped at the schema
+        # level; the v2 scope on the session row is (admin_id,
+        # luciel_instance_id) and Wall-3 RLS enforces the latter at
+        # the engine level for this query. The matching
+        # identity_claims.domain_id excision belongs to its own EX3
+        # run, so the resolver still threads ``domain_id`` for the
+        # IdentityClaim mint path.
         latest_session_stmt = (
             select(SessionModel)
             .where(
                 SessionModel.user_id == str(claim.user_id),
                 SessionModel.admin_id == admin_id,
-                SessionModel.domain_id == domain_id,
                 SessionModel.conversation_id.is_not(None),
                 SessionModel.status == "active",
             )

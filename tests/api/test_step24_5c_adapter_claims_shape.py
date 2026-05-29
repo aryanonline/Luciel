@@ -95,15 +95,14 @@ class TestServiceLegacyShape:
         # Behavioural compat: the params legacy callers already pass
         # must still be accepted with the same defaults. Catches an
         # accidental rename.
-        # Arc 12 EX1b: agent_id is excised from SessionService per
-        # §3.7.2; v2 sessions are admin+instance scoped, no
-        # per-agent narrowing. domain_id remains until EX3 nulls the
-        # SessionModel.domain_id NOT-NULL column.
+        # Arc 12 EX1b / EX3: agent_id AND domain_id are excised from
+        # SessionService per §3.7.2; v2 sessions are admin+instance
+        # scoped, no per-agent / per-domain narrowing. Arc 12 EX3
+        # dropped both columns from the sessions table.
         from app.services.session_service import SessionService
         sig = inspect.signature(SessionService.create_session)
         for name, default in [
             ("admin_id", inspect.Parameter.empty),
-            ("domain_id", inspect.Parameter.empty),
             ("user_id", None),
             ("channel", "web"),
         ]:
@@ -112,6 +111,10 @@ class TestServiceLegacyShape:
         assert "agent_id" not in sig.parameters, (
             "Arc 12 EX1b: SessionService.create_session must not "
             "accept agent_id (v2 single Admin->Instance boundary)."
+        )
+        assert "domain_id" not in sig.parameters, (
+            "Arc 12 EX3: SessionService.create_session must not "
+            "accept domain_id (column dropped at the schema level)."
         )
 
 
@@ -259,7 +262,7 @@ class _CountingRepo:
         self.created_sessions: list[dict] = []
 
     def create_session(
-        self, *, session_id, admin_id, domain_id, user_id,
+        self, *, session_id, admin_id, user_id,
         channel, status="active", conversation_id=None,
         luciel_instance_id=None,
     ):
@@ -267,12 +270,11 @@ class _CountingRepo:
         # gained a luciel_instance_id kwarg threaded by SessionService.
         # The fake here must accept it or the End-to-End wiring tests
         # type-error before reaching the contract assertions.
-        # Arc 12 EX1b: agent_id is excised from the repository
-        # signature.
+        # Arc 12 EX1b / EX3: agent_id and domain_id are excised from
+        # the repository signature (columns dropped from sessions).
         captured = {
             "session_id": session_id,
             "admin_id": admin_id,
-            "domain_id": domain_id,
             "user_id": user_id,
             "channel": channel,
             "status": status,
@@ -352,7 +354,9 @@ class TestEndToEndWiring:
         assert isinstance(sess["conversation_id"], uuid.UUID)
         assert sess["user_id"] == str(result.user_id)
         assert sess["admin_id"] == "t-1"
-        assert sess["domain_id"] == "d-1"
+        # Arc 12 EX3: sessions.domain_id dropped — assert absence on
+        # the repository call payload.
+        assert "domain_id" not in sess
         assert sess["channel"] == "web"
         # 3) Returned SessionWithIdentity flags both mints true.
         assert isinstance(result, SessionWithIdentity)
@@ -439,7 +443,6 @@ class TestLegacyBehaviourUnchanged:
         svc = SessionService(repository=repo)  # type: ignore[arg-type]
         svc.create_session(
             admin_id="t-1",
-            domain_id="d-1",
             user_id="legacy-user",
             channel="web",
         )
@@ -449,3 +452,6 @@ class TestLegacyBehaviourUnchanged:
         # conversation session per the nullable-by-design contract.
         assert call["conversation_id"] is None
         assert call["user_id"] == "legacy-user"
+        # Arc 12 EX3: sessions.domain_id dropped at the schema level —
+        # the service must not forward it to the repository any more.
+        assert "domain_id" not in call

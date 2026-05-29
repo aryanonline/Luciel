@@ -301,12 +301,12 @@ class EmbedKeyCreate(BaseModel):
             "to prevent."
         ),
     )
-    # Arc 12 EX1c — ``domain_id`` removed from EmbedKeyCreate. In v2 embed
-    # keys bind to (admin_id, luciel_instance_id); the Domain layer was
-    # eliminated by Arc 5 Path A. EX1a flagged this field as left for the
-    # widget runtime layer; the widget now scope-resolves via
-    # luciel_instance_id alone (chat_widget.py synthesises the legacy
-    # sessions.domain_id sentinel internally until EX3 drops the column).
+    # Arc 12 EX1c / EX3 — ``domain_id`` removed from EmbedKeyCreate. In v2
+    # embed keys bind to (admin_id, luciel_instance_id); the Domain layer
+    # was eliminated by Arc 5 Path A, and Arc 12 EX3 dropped the
+    # ``sessions.domain_id`` / ``sessions.agent_id`` columns at the schema
+    # level. The widget scope-resolves via luciel_instance_id alone; no
+    # sentinel is synthesised at the insert site.
     luciel_instance_id: int | None = Field(
         default=None,
         gt=0,

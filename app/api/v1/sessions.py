@@ -181,13 +181,6 @@ def create_session(
             },
         )
 
-    # Arc 12 EX1c — internal-only sentinel for the legacy NOT NULL
-    # ``sessions.domain_id`` column (EX3 owns relax/drop). The route
-    # no longer accepts domain_id at the boundary; per-Instance
-    # grouping on the legacy column is preserved by encoding the
-    # Instance pk.
-    _legacy_session_domain_sentinel = f"instance-{luciel_instance_id}"
-
     # Audit FIRST for the privileged cross-tenant case. Tenant-scoped
     # session creation is ordinary chat traffic and intentionally does
     # NOT audit -- only the platform_admin override does, because that
@@ -223,9 +216,6 @@ def create_session(
 
     session = service.create_session(
         admin_id=effective_tenant_id,
-        # Arc 12 EX1c — internal sentinel only; not accepted from the
-        # API boundary. Removed once EX3 drops sessions.domain_id.
-        domain_id=_legacy_session_domain_sentinel,
         user_id=payload.user_id,
         channel=payload.channel,
         luciel_instance_id=luciel_instance_id,

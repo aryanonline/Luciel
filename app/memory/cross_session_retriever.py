@@ -25,11 +25,11 @@ resolver, and the persistence layer's row writes).
 
 Arc 12 EX1d (founder-directed agent_id/domain_id excision): the v1
 ``domain_id`` parameter is removed from the retriever surface. v2 has
-a single Admin→Instance boundary (Architecture §3.7.2); the
-``SessionModel.domain_id`` ORM column persists until EX3 drops it but
-is no longer a query-filter. The retriever is feature-flag-gated OFF
-at v1 (§3.5.2 / §5.6), so removing the filter has no production
-behaviour impact.
+a single Admin→Instance boundary (Architecture §3.7.2). Arc 12 EX3
+subsequently dropped ``sessions.domain_id`` / ``sessions.agent_id`` at
+the schema level, so the column is gone from the ORM as well. The
+retriever is feature-flag-gated OFF at v1 (§3.5.2 / §5.6), so removing
+the filter has no production behaviour impact.
 
 Shape contract (ARCHITECTURE §3.2.11, §3.2.6):
     The retriever takes the same shape as every other memory retriever

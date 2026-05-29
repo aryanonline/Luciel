@@ -24,8 +24,6 @@ class SessionModel(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    domain_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
-    agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
 
     # Arc 9.1 Phase A (2026-05-25): NOT NULL. See arc9_1_a_tenant_isolation_seal.
     # Every session is now bound to its Instance at creation time.

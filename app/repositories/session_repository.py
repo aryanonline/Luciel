@@ -10,20 +10,11 @@ PATCHED:
        conversation_id (UUID) that the identity resolver supplies. NULL
        is the legacy / single-session conversation path (existing
        callers see no behavioural change).
-
-Arc 12 EX1b note (agent_id excision)
------------------------------------
-
-``SessionModel.agent_id`` is still a Mapped column (nullable=True) on
-the ORM until EX3 drops it. ``create_session`` no longer accepts
-``agent_id`` from callers; rows are inserted with agent_id=NULL.
-``list_sessions`` no longer filters by agent_id either.
-
-``domain_id`` is left on ``create_session`` because
-``SessionModel.domain_id`` is currently NOT NULL — EX3 will relax /
-drop the column at the same time as the agent_id drops. Until then
-callers must supply a domain_id placeholder (the identity resolver
-threads it from the same path).
+  S4 — Arc 12 EX3: ``sessions.agent_id`` and ``sessions.domain_id`` are
+       dropped at the schema level by
+       ``arc12_ex3_drop_session_agent_domain``. ``create_session`` no
+       longer accepts either; the v2 session row is scoped by
+       (admin_id, luciel_instance_id, session_id) per Walls 3/4.
 """
 
 from __future__ import annotations
@@ -47,7 +38,6 @@ class SessionRepository:
         *,
         session_id: str,
         admin_id: str,
-        domain_id: str,
         user_id: str | None = None,
         channel: str = "web",
         status: str = "active",
@@ -68,12 +58,12 @@ class SessionRepository:
         # still pass None will hit a NotNullViolation at flush — that is
         # the desired behaviour until the call sites are converted in
         # Arc 9.2 PR #97.
-        # Arc 12 EX1b: agent_id is no longer accepted; sessions.agent_id
-        # is written as NULL until EX3 drops the column.
+        # Arc 12 EX3: agent_id / domain_id columns dropped from the
+        # schema; the v2 row is (admin_id, luciel_instance_id,
+        # session_id) per Walls 3/4.
         session = SessionModel(
             id=session_id,
             admin_id=admin_id,
-            domain_id=domain_id,
             user_id=user_id,
             channel=channel,
             status=status,

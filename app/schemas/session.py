@@ -8,11 +8,9 @@ from pydantic import BaseModel, ConfigDict
 class SessionCreate(BaseModel):
     # Arc 12 EX1c — ``domain_id`` and ``agent_id`` removed from the
     # request body. V2 sessions are admin + instance scoped
-    # (Architecture §3.7.2 / §3.7.3, Walls 3/4). The legacy
-    # ``sessions.domain_id`` column is still NOT NULL (EX3 owns the
-    # relax/drop) — the route synthesises a sentinel from
-    # ``luciel_instance_id`` to keep the insert satisfied without
-    # accepting the field at the API boundary.
+    # (Architecture §3.7.2 / §3.7.3, Walls 3/4). Arc 12 EX3 dropped
+    # both columns from the ``sessions`` table; no sentinel is
+    # synthesised any more.
     user_id: str | None = None
     channel: str = "web"
 
@@ -23,9 +21,9 @@ class SessionCreate(BaseModel):
 
 
 class SessionRead(BaseModel):
-    # Arc 12 EX1c — ``domain_id`` and ``agent_id`` removed from the
-    # public response projection. Underlying columns persist until EX3
-    # drops them; the API surface no longer surfaces them.
+    # Arc 12 EX1c / EX3 — ``domain_id`` and ``agent_id`` removed from
+    # the public response projection. Arc 12 EX3 also dropped the
+    # underlying columns from the ``sessions`` table.
     model_config = ConfigDict(from_attributes=True)
 
     id: str
