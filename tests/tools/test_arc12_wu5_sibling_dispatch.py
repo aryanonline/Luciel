@@ -230,6 +230,34 @@ def _build_sqlite_session():
             nullable=False, server_default=func.now(),
         ),
     )
+    # WU8a-WIRE: sibling dispatch ALSO writes a tool_execution_log row
+    # (§3.3.4 — the general-purpose dispatch log WU6 created and BYO
+    # already writes). Mirror the WU6 BYO test fixture so the WU8a
+    # assertion below can query the row directly.
+    Table(
+        "tool_execution_log", md,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column(
+            "admin_id", String(100),
+            ForeignKey("admins.id"), nullable=False, index=True,
+        ),
+        Column(
+            "instance_id", Integer,
+            ForeignKey("instances.id"), nullable=False, index=True,
+        ),
+        Column("tool_id", String(64), nullable=False),
+        Column("execution_mode", String(20), nullable=False),
+        Column("input_hash", String(64), nullable=False),
+        Column("output_hash", String(64), nullable=True),
+        Column("latency_ms", Integer, nullable=False),
+        Column("error_class", String(40), nullable=True),
+        Column("circuit_breaker_state", String(20), nullable=True),
+        Column("error_message", String(500), nullable=True),
+        Column(
+            "created_at", DateTime(timezone=True),
+            nullable=False, server_default=func.now(), index=True,
+        ),
+    )
 
     md.create_all(engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -873,3 +901,142 @@ def test_no_caller_instance_id_refused():
 
     assert result["success"] is False
     assert result["error_reason"] == REASON_NO_CALLER_CONTEXT
+
+
+# =====================================================================
+# 11. WU8a-WIRE — sibling dispatch writes a tool_execution_log row
+#     in addition to the existing admin_audit_logs sibling-access row.
+# =====================================================================
+
+
+def test_happy_path_writes_tool_execution_log_row():
+    """Architecture §3.3.4 requires every sibling call to ALSO write
+    a general-purpose tool_execution_log row (the WU6 surface that
+    BYO already writes to). On a successful dispatch the row carries:
+
+      * admin_id            = caller's admin
+      * instance_id         = caller_instance_id (origin of the call)
+      * tool_id             = 'call_sibling_luciel'
+      * execution_mode      = 'in_process' (no subprocess)
+      * input_hash          = 64-char SHA-256 hex
+      * output_hash         = 64-char SHA-256 hex (success)
+      * latency_ms          = >= 0
+      * error_class         = NULL on success
+      * circuit_breaker_state = NULL (no breaker on in-process path)
+
+    The existing sibling-access admin_audit_log row must still be
+    written; this test asserts BOTH rows exist for the same dispatch.
+    """
+    from sqlalchemy import text as sa_text
+    from app.tools.sibling_dispatch import (
+        TOOL_ID_CALL_SIBLING_LUCIEL,
+        dispatch_sibling_call,
+    )
+
+    session = _build_sqlite_session()
+    admin_id = "admin-wu8a-happy"
+    user_id = uuid.uuid4()
+    _seed_full_happy_path(session, admin_id, user_id)
+
+    ctx = _make_root_context(
+        admin_id=admin_id, instance_id=10, session=session,
+        inbound_message_id="msg-wu8a-1",
+    )
+    result = dispatch_sibling_call(
+        callee_instance_id=20,
+        task="please look up customer X in the CRM",
+        payload={"x": 1},
+        context=ctx,
+    )
+    # Commit so the autocommit=False audit + log writes land in
+    # the SQLite session before we query them.
+    session.commit()
+
+    assert result["success"] is True
+
+    # Existing assertion: sibling-access admin_audit_log row written.
+    n_audit = session.execute(
+        sa_text(
+            "SELECT COUNT(*) FROM admin_audit_logs WHERE "
+            "action = 'sibling_access' AND admin_id = :a"
+        ),
+        {"a": admin_id},
+    ).scalar_one()
+    assert int(n_audit) == 1
+
+    # NEW WU8a-WIRE assertion: tool_execution_log row written too.
+    rows = session.execute(
+        sa_text(
+            "SELECT admin_id, instance_id, tool_id, execution_mode, "
+            "input_hash, output_hash, latency_ms, error_class, "
+            "circuit_breaker_state FROM tool_execution_log "
+            "ORDER BY id"
+        )
+    ).fetchall()
+    assert len(rows) == 1, (
+        "sibling dispatch did not write a tool_execution_log row "
+        "(WU8a-WIRE requirement, Architecture §3.3.4)"
+    )
+    row = rows[0]
+    assert row[0] == admin_id
+    assert row[1] == 10  # caller_instance_id, the dispatch origin
+    assert row[2] == TOOL_ID_CALL_SIBLING_LUCIEL
+    assert row[3] == "in_process"
+    assert isinstance(row[4], str) and len(row[4]) == 64  # input_hash
+    assert isinstance(row[5], str) and len(row[5]) == 64  # output_hash
+    assert isinstance(row[6], int) and row[6] >= 0  # latency_ms
+    assert row[7] is None  # error_class — success
+    assert row[8] is None  # circuit_breaker_state — no breaker
+
+
+def test_refusal_path_writes_tool_execution_log_row_with_error_class():
+    """Every refusal that has both a caller_instance_id and a session
+    (i.e. SELF_TARGET and every guardrail refusal) must also write a
+    tool_execution_log row. The row carries error_class='other'
+    (Arc 12 guardrail decisions don't fit WU6's transport/HTTP
+    buckets), no output_hash, and the human-readable refusal text in
+    error_message. The two earliest refusals (NO_CALLER_CONTEXT,
+    NO_DB_SESSION) are exempt -- they precede the existence of
+    either an attributable instance_id or a session handle."""
+    from sqlalchemy import text as sa_text
+    from app.tools.sibling_dispatch import (
+        REASON_NO_LIVE_GRANT,
+        TOOL_ID_CALL_SIBLING_LUCIEL,
+        dispatch_sibling_call,
+    )
+
+    session = _build_sqlite_session()
+    admin_id = "admin-wu8a-refuse"
+    user_id = uuid.uuid4()
+    _seed_admin(session, admin_id, tier="pro")
+    _seed_instance(session, 10, admin_id)
+    _seed_instance(session, 20, admin_id)
+    _seed_user(session, user_id)
+    _grant_master_switch(session, admin_id, 10, user_id)
+    _grant_master_switch(session, admin_id, 20, user_id)
+    # No live grant → refusal at check (d).
+
+    ctx = _make_root_context(
+        admin_id=admin_id, instance_id=10, session=session,
+    )
+    result = dispatch_sibling_call(
+        callee_instance_id=20, task="x", payload=None, context=ctx,
+    )
+    session.commit()
+
+    assert result["success"] is False
+    assert result["error_reason"] == REASON_NO_LIVE_GRANT
+
+    rows = session.execute(
+        sa_text(
+            "SELECT tool_id, execution_mode, output_hash, "
+            "error_class, error_message FROM tool_execution_log"
+        )
+    ).fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row[0] == TOOL_ID_CALL_SIBLING_LUCIEL
+    assert row[1] == "in_process"
+    assert row[2] is None  # no output_hash on refusal
+    assert row[3] == "other"  # WU6 catch-all for guardrail decisions
+    assert isinstance(row[4], str) and "no live sibling_call_grants" in row[4]

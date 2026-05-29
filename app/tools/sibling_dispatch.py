@@ -18,9 +18,11 @@ Implements the §3.3.4 "Runtime dispatch path" five-check sequence for
      caller_instance_id, callee_instance_id)`` with
      ``approval_state='live'``. No live row ⇒ tool-error.
   e. **Audit + derived context** — emit a sibling-access audit row
-     (§3.7.3 Wall-3 composition exception) and construct a DERIVED
-     ToolContext naming BOTH instances. Hand off to the Arc 14
-     agentic-loop orchestrator (see :data:`_ARC14_SEAM`).
+     (§3.7.3 Wall-3 composition exception) AND a general-purpose
+     ``tool_execution_log`` row (§3.3.4 -- every tool dispatch lands
+     here; WU6 reuse), then construct a DERIVED ToolContext naming
+     BOTH instances. Hand off to the Arc 14 agentic-loop
+     orchestrator (see :data:`_ARC14_SEAM`).
 
 Decision #19 lock
 -----------------
@@ -54,7 +56,10 @@ guardrail logic.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import time
 from typing import Any, Optional
 
 from app.tools.base import (
@@ -108,6 +113,47 @@ REASON_NO_DB_SESSION: str = "sibling_no_db_session"
 REASON_SELF_TARGET: str = "sibling_self_target"
 
 
+#: Map dispatch reason → tool_execution_log error_class. Sibling
+#: dispatch failures don't fit any of WU6's transport/timeout/HTTP
+#: buckets cleanly — every refusal reason here is an Arc 12 guardrail
+#: decision (cycle, fan-out, master switch, grant), so they collapse
+#: to the WU6 ``other`` bucket. The free-form ``error_message`` column
+#: carries the specific reason for forensic queries.
+_DISPATCH_REASON_TO_ERROR_CLASS: dict[str, str] = {
+    REASON_CYCLE_DETECTED: "other",
+    REASON_FAN_OUT_BUDGET_EXHAUSTED: "other",
+    REASON_CALLER_MASTER_SWITCH_OFF: "other",
+    REASON_CALLEE_MASTER_SWITCH_OFF: "other",
+    REASON_NO_LIVE_GRANT: "other",
+    REASON_SELF_TARGET: "other",
+}
+
+
+#: Well-known tool_id for the sibling-dispatch surface; mirrors the
+#: master-switch entry in ``instance_tool_authorizations`` (§3.3.4).
+TOOL_ID_CALL_SIBLING_LUCIEL: str = "call_sibling_luciel"
+
+
+def _canonical_hash(payload: Any) -> str:
+    """SHA-256 hex of a JSON-canonical encoding of ``payload``.
+
+    Mirrors ``app.tools.byo.sandbox.canonical_hash`` so the sibling
+    dispatch row format is identical to the BYO row format the same
+    table holds. Duplicated rather than imported because importing the
+    BYO sandbox at module-load time would pull a large dependency
+    surface (subprocess driver, circuit breaker) onto a hot in-process
+    path that does not need any of it.
+    """
+    try:
+        canon = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+            default=str,
+        )
+    except (TypeError, ValueError):
+        canon = repr(payload)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
 def _error(
     *, reason: str, message: str, callee_instance_id: Optional[int] = None,
 ) -> dict[str, Any]:
@@ -157,7 +203,48 @@ def dispatch_sibling_call(
         "authorized-and-dispatched" payload (Arc 14 will replace the
         interim seam with the actual orchestrator round-trip
         response).
+
+    Tool-execution-log side effect
+    ------------------------------
+    Architecture §3.3.4 requires every sibling call to ALSO write a
+    general-purpose ``tool_execution_log`` row (in addition to the
+    Wall-3 sibling-access ``admin_audit_log`` row). The wrapping
+    timer + best-effort write is handled here so the inner dispatch
+    body stays focused on the five-check sequence. The row is
+    skipped for the two earliest refusals (no caller context, no DB
+    session) because they precede the existence of either an
+    ``instance_id`` to attribute the row to (former) or a session
+    handle to write through (latter); every other path -- success
+    AND every other refusal -- writes a row.
     """
+    start_ts = time.perf_counter()
+    result = _dispatch_sibling_call_inner(
+        callee_instance_id=callee_instance_id,
+        task=task,
+        payload=payload,
+        context=context,
+    )
+    latency_ms = max(0, int((time.perf_counter() - start_ts) * 1000))
+    _emit_tool_execution_log(
+        context=context,
+        callee_instance_id=callee_instance_id,
+        task=task,
+        payload=payload,
+        result=result,
+        latency_ms=latency_ms,
+    )
+    return result
+
+
+def _dispatch_sibling_call_inner(
+    *,
+    callee_instance_id: int,
+    task: str,
+    payload: Optional[dict[str, Any]],
+    context: ToolContext,
+) -> dict[str, Any]:
+    """Internal: the five-check sequence itself, with no telemetry
+    side-effects. See :func:`dispatch_sibling_call` for the contract."""
     caller_instance_id = context.caller_instance_id
     if caller_instance_id is None:
         # WU5 dispatch presupposes a Luciel calling another Luciel.
@@ -452,6 +539,94 @@ def dispatch_sibling_call(
 # =====================================================================
 
 
+def _emit_tool_execution_log(
+    *,
+    context: ToolContext,
+    callee_instance_id: int,
+    task: str,
+    payload: Optional[dict[str, Any]],
+    result: dict[str, Any],
+    latency_ms: int,
+) -> None:
+    """Write the general-purpose tool_execution_log row for one
+    sibling dispatch (§3.3.4).
+
+    The row is attributed to the CALLER instance — the dispatch
+    originates there, parallel to how the BYO webhook tool attributes
+    its row to ``context.instance_id`` (the calling instance). The
+    same row format the WU6 BYO sandbox writes, with:
+
+      * ``execution_mode = "in_process"`` -- the sibling dispatch path
+        is in-process Python; no subprocess driver.
+      * ``circuit_breaker_state = None`` -- there is no circuit
+        breaker on the sibling path (in-process call, not a remote
+        HTTP hop).
+      * ``error_class`` -- ``None`` on success, otherwise the WU6
+        ``other`` bucket (every dispatch refusal is an Arc 12
+        guardrail decision, not transport/timeout/HTTP).
+      * ``error_message`` -- the human-readable refusal text on
+        failure (already trimmed to 500 chars by the repository).
+
+    The two earliest refusals (NO_CALLER_CONTEXT, NO_DB_SESSION)
+    cannot write -- the former has no instance to attribute to and
+    the latter has no session to write through. Every other path
+    (including the SELF_TARGET refusal and the other four guard
+    refusals) writes a row.
+
+    Best-effort: a write failure is logged and suppressed, mirroring
+    the BYO audit-row pattern. Losing the row is a forensic
+    regression; refusing to dispatch on audit failure would convert
+    an observability bug into a customer-facing outage.
+    """
+    if context.session is None:
+        return
+    caller_instance_id = context.caller_instance_id
+    if caller_instance_id is None:
+        return
+
+    success = bool(result.get("success"))
+    reason: Optional[str] = result.get("error_reason")
+    error_class = (
+        None if success
+        else _DISPATCH_REASON_TO_ERROR_CLASS.get(reason or "", "other")
+    )
+    error_message = None if success else result.get("output")
+
+    input_payload = {
+        "callee_instance_id": callee_instance_id,
+        "task": task,
+        "payload": payload,
+    }
+    input_hash = _canonical_hash(input_payload)
+    output_hash = _canonical_hash(result) if success else None
+
+    try:
+        from app.repositories.tool_execution_log_repository import (
+            ToolExecutionLogRepository,
+        )
+        repo = ToolExecutionLogRepository(context.session)
+        repo.record(
+            admin_id=context.admin_id,
+            instance_id=caller_instance_id,
+            tool_id=TOOL_ID_CALL_SIBLING_LUCIEL,
+            execution_mode="in_process",
+            input_hash=input_hash,
+            output_hash=output_hash,
+            latency_ms=latency_ms,
+            error_class=error_class,
+            circuit_breaker_state=None,
+            error_message=error_message,
+            autocommit=False,
+        )
+    except Exception:  # noqa: BLE001 — best-effort, never block the
+        # dispatch path on an audit row failure.
+        logger.exception(
+            "Sibling tool_execution_log write failed (continuing "
+            "dispatch). admin=%s caller=%s callee=%s",
+            context.admin_id, caller_instance_id, callee_instance_id,
+        )
+
+
 def _attach_state(
     context: ToolContext, state: SiblingCompositionState
 ) -> None:
@@ -568,6 +743,7 @@ def _used_tool_id() -> str:
 
 __all__ = [
     "SIBLING_FAN_OUT_BUDGET",
+    "TOOL_ID_CALL_SIBLING_LUCIEL",
     "REASON_CYCLE_DETECTED",
     "REASON_FAN_OUT_BUDGET_EXHAUSTED",
     "REASON_CALLER_MASTER_SWITCH_OFF",
