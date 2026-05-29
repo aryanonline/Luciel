@@ -1,16 +1,15 @@
 """
 API Key model.
 
-Stores hashed API keys mapped to tenant, domain, and agent configurations.
+Stores hashed API keys mapped to tenant (admin) and instance.
 
 The raw key is only shown once at creation time — we store a hash
 so that even if the database is compromised, keys cannot be recovered.
 
-Each key is scoped to a tenant and optionally to a domain and agent.
-  - If domain_id is set, the key can only create sessions for that domain.
-  - If domain_id is null, the key works for any domain within the tenant's allowed_domains.
-  - If agent_id is set, the key is scoped to a specific agent within the tenant.
-  - If agent_id is null, the key works at the tenant level (no agent scoping).
+Each key is scoped to a tenant (admin) and pinned to a single Luciel
+Instance (Arc 9.1 Phase A: ``luciel_instance_id`` NOT NULL). The
+legacy ``domain_id`` / ``agent_id`` scoping columns were excised by
+Arc 12 EX3 (see ``arc12_ex3_drop_api_key_agent_domain``).
 """
 
 from __future__ import annotations
@@ -45,12 +44,6 @@ class ApiKey(Base, TimestampMixin):
         index=True,
     )
     """Which tenant this key belongs to. NULL for platform-admin keys (cross-tenant bypass via 'platform_admin' permission per Invariant 5; canonical constant defined as PLATFORM_ADMIN in app/policy/scope.py)."""
-
-    domain_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    """If null, the key works for any domain in the tenant's allowed_domains."""
-
-    agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    """If null, the key works at the tenant level (no agent scoping)."""
 
     # Step 24.5 — optional pin to a specific Instance (V2 unit).
     # When set, this key can only talk to that one Instance. When NULL,

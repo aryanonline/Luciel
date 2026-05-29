@@ -433,7 +433,8 @@ class EmbedKeyRead(BaseModel):
     Arc 12 EX1c — public-contract field removal: ``domain_id`` is no
     longer projected. V2 binds embed keys to (admin_id,
     luciel_instance_id) only (Architecture §3.7.2). The underlying
-    ``api_keys.domain_id`` column persists until EX3 drops it.
+    ``api_keys.domain_id`` column was dropped by Arc 12 EX3
+    (``arc12_ex3_drop_api_key_agent_domain``).
     """
 
     model_config = ConfigDict(from_attributes=True)

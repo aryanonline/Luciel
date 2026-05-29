@@ -432,8 +432,11 @@ class ApiKeyService:
             resource_type=RESOURCE_API_KEY,
             resource_pk=api_key.id,
             resource_natural_id=api_key.key_prefix,
-            domain_id=api_key.domain_id,
-            agent_id=api_key.agent_id,
+            # Arc 12 EX3 — domain_id / agent_id columns dropped from api_keys.
+            # The audit repository still accepts the kwargs (audit-chain layer
+            # is a separate EX-step); we pass None.
+            domain_id=None,
+            agent_id=None,
             luciel_instance_id=api_key.luciel_instance_id,
             before={"active": was_active},
             after={"active": False},
