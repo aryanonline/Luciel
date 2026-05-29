@@ -6,9 +6,12 @@ Handles all database operations for memory items.
 This layer only deals with persistence — no extraction logic,
 no LLM calls, no business rules about what should be remembered.
 
-Memories are scoped to user + tenant + agent (optional).
-When agent_id is provided, only memories for that specific agent are returned.
-When agent_id is None, only tenant-level memories (no agent) are returned.
+Memories are scoped to user + admin + luciel_instance (Wall-3 §3.7.3).
+Per Arc 12 EX1b excision (v2 = single Admin→Instance boundary, §3.7.2),
+agent_id is no longer a query-filter or a method parameter. The
+``MemoryItem.agent_id`` ORM column is still written via the legacy
+constructor path until EX3 drops the column; callers no longer
+supply a value and rows are inserted with agent_id=NULL.
 """
 
 from __future__ import annotations
@@ -32,7 +35,6 @@ class MemoryRepository:
         admin_id: str,
         category: str,
         content: str,
-        agent_id: str | None = None,
         source_session_id: str | None = None,
         actor_user_id: "uuid.UUID | None" = None,  # Step 24.5b File 2.6b
     ) -> MemoryItem:
@@ -48,7 +50,6 @@ class MemoryRepository:
         item = MemoryItem(
             user_id=user_id,
             admin_id=admin_id,
-            agent_id=agent_id,
             category=category,
             content=content,
             source_session_id=source_session_id,
@@ -65,20 +66,22 @@ class MemoryRepository:
         *,
         user_id: str,
         admin_id: str,
-        agent_id: str | None = None,
         category: str | None = None,
         limit: int = 50,
     ) -> list[MemoryItem]:
         """
         Retrieve active memories for a user.
 
-        Scoping rules:
-          - Always filters by user_id + admin_id.
-          - If agent_id is provided, returns only that agent's memories
-            PLUS tenant-level memories (agent_id IS NULL).
-          - If agent_id is None, returns only tenant-level memories.
+        Scoping rules (Arc 12 EX1b — v2 single Admin→Instance boundary):
+          - Always filters by user_id + admin_id (Wall-1, §3.7.2).
           - Optionally filter by category.
           - Returns newest memories first.
+
+        agent_id filtering removed: in v1 this carve-out partitioned
+        memories per-agent, but Arc 5 collapsed Agent into the single
+        Admin→Instance plane. Per-instance scoping is enforced by
+        Wall-3 RLS (memory_items.luciel_instance_id NOT NULL) at the
+        DB layer, not by an in-app filter on the read path.
         """
         stmt = (
             select(MemoryItem)
@@ -90,19 +93,6 @@ class MemoryRepository:
             .order_by(MemoryItem.created_at.desc())
             .limit(limit)
         )
-
-        if agent_id:
-            # Return agent-specific memories + tenant-level memories
-            from sqlalchemy import or_
-            stmt = stmt.where(
-                or_(
-                    MemoryItem.agent_id == agent_id,
-                    MemoryItem.agent_id.is_(None),
-                )
-            )
-        else:
-            # No agent context — return only tenant-level memories
-            stmt = stmt.where(MemoryItem.agent_id.is_(None))
 
         if category:
             stmt = stmt.where(MemoryItem.category == category)
@@ -123,7 +113,6 @@ class MemoryRepository:
         category: str,
         content: str,
         message_id: int,
-        agent_id: str | None = None,
         source_session_id: str | None = None,
         luciel_instance_id: int | None = None,
         actor_user_id: "uuid.UUID | None" = None,  # Step 24.5b File 2.6b
@@ -162,7 +151,6 @@ class MemoryRepository:
         item = MemoryItem(
             user_id=user_id,
             admin_id=admin_id,
-            agent_id=agent_id,
             category=category,
             content=content,
             source_session_id=source_session_id,

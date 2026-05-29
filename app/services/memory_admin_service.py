@@ -104,6 +104,10 @@ class MemoryAdminService:
         item.active = False
 
         audit_repo = AdminAuditRepository(self.db)
+        # Arc 12 EX1b: agent_id no longer threaded into the audit row.
+        # admin_audit_log.agent_id is in the hash chain (handled by
+        # EX4) but new rows record NULL; v2 customer-data scoping is
+        # admin_id + luciel_instance_id (Wall 3, §3.7.3).
         audit_repo.record(
             ctx=audit_ctx if audit_ctx is not None else AuditContext.system(
                 label="deactivate_memory"
@@ -114,7 +118,7 @@ class MemoryAdminService:
             resource_pk=item.id,
             resource_natural_id=None,
             domain_id=None,
-            agent_id=item.agent_id,
+            agent_id=None,
             luciel_instance_id=item.luciel_instance_id,
             before={"active": was_active},
             after={"active": False},

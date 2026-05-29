@@ -454,6 +454,12 @@ def test_memory_item_forensic_projection_includes_actor_user_id() -> None:
 # ---------------------------------------------------------------------------
 
 def test_list_memory_items_route_accepts_c2_filters() -> None:
+    # Arc 12 EX1b: agent_id is excised from the forensic memory_items
+    # filter set (v2 single Admin->Instance boundary, §3.7.2). The
+    # actor_user_id filter (Step 29 Commit C.2) is the surviving
+    # identity-stability narrowing; A5 cross-agent isolation collapses
+    # to cross-admin isolation in v2 and is already covered by the
+    # required ``admin_id`` query parameter.
     tree = _parse(_ADMIN_FORENSICS_PATH)
     func = _find_function(tree, "list_memory_items_forensic_step29c")
     assert func is not None, (
@@ -461,14 +467,16 @@ def test_list_memory_items_route_accepts_c2_filters() -> None:
     )
     arg_names = {a.arg for a in func.args.args}
     arg_names.update({a.arg for a in func.args.kwonlyargs})
-    for required in ("actor_user_id", "agent_id"):
-        assert required in arg_names, (
-            f"list_memory_items_forensic_step29c must accept "
-            f"{required!r} as a query parameter (added in Step 29 "
-            f"Commit C.2 for P12 identity-stability reads). Removing "
-            f"it forces the harness to filter client-side, which "
-            f"defeats A5's server-side scope-isolation contract."
-        )
+    assert "actor_user_id" in arg_names, (
+        "list_memory_items_forensic_step29c must accept "
+        "'actor_user_id' as a query parameter (Step 29 Commit C.2 "
+        "P12 identity-stability reads)."
+    )
+    assert "agent_id" not in arg_names, (
+        "Arc 12 EX1b: list_memory_items_forensic_step29c must not "
+        "accept agent_id (v2 boundary; per §3.7.2 the Agent layer "
+        "is gone)."
+    )
 
 
 # ---------------------------------------------------------------------------

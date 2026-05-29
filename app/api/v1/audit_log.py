@@ -110,6 +110,13 @@ DEFAULT_LIMIT = 100
 # Common safe keys for soft-delete and create flows.
 _COMMON_SAFE_KEYS = frozenset({"active", "id"})
 
+# Arc 12 EX1b: per Architecture v1 §3.7.2, the v2 boundary collapses
+# Tenant/Domain/Agent to a single Admin->Instance plane. The legacy
+# ``domain_id`` / ``agent_id`` diff keys are dropped from the
+# allow-lists below; the historical RESOURCE_DOMAIN / RESOURCE_AGENT
+# allow-list entries themselves stay (they index past audit rows
+# whose ``resource_type`` was DOMAIN or AGENT) but no longer surface
+# the legacy scope keys.
 _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
     RESOURCE_TENANT: _COMMON_SAFE_KEYS | {
         "admin_id",
@@ -122,27 +129,20 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
     },
     RESOURCE_DOMAIN: _COMMON_SAFE_KEYS | {
         "admin_id",
-        "domain_id",
         "display_name",
     },
     RESOURCE_AGENT: _COMMON_SAFE_KEYS | {
         "admin_id",
-        "domain_id",
-        "agent_id",
         "user_id",  # platform User UUID (not email)
     },
     RESOURCE_LUCIEL_INSTANCE: _COMMON_SAFE_KEYS | {
         "admin_id",
-        "domain_id",
-        "agent_id",
         "instance_id",
         "luciel_instance_id",
         # NOTE: persona / system_prompt content NOT included.
     },
     RESOURCE_API_KEY: _COMMON_SAFE_KEYS | {
         "admin_id",
-        "domain_id",
-        "agent_id",
         "luciel_instance_id",
         "key_prefix",       # safe, 12-char prefix only
         "permissions",
@@ -152,7 +152,6 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
     },
     RESOURCE_KNOWLEDGE: _COMMON_SAFE_KEYS | {
         "admin_id",
-        "domain_id",
         "source_id",
         "version",
         "chunk_count",
@@ -166,7 +165,6 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
     },
     RESOURCE_MEMORY: _COMMON_SAFE_KEYS | {
         "admin_id",
-        "agent_id",
         "luciel_instance_id",
         "category",
         "session_id",
@@ -190,8 +188,6 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
     RESOURCE_SCOPE_ASSIGNMENT: _COMMON_SAFE_KEYS | {
         "user_id",
         "admin_id",
-        "domain_id",
-        "agent_id",
         "role",
     },
 }
@@ -225,7 +221,14 @@ def _filter_diff(
 
 
 def _to_read(row: AdminAuditLog) -> AdminAuditLogRead:
-    """Build the read DTO with diff-filtering applied."""
+    """Build the read DTO with diff-filtering applied.
+
+    Arc 12 EX1b: agent_id / domain_id are no longer surfaced through
+    the read DTO (per §3.7.2 the v2 boundary is Admin->Instance). The
+    underlying audit row still carries them (canonical hash field set
+    is untouched -- EX4 owns the reseal); they simply aren't
+    projected here.
+    """
     return AdminAuditLogRead(
         id=row.id,
         created_at=row.created_at,
@@ -233,8 +236,6 @@ def _to_read(row: AdminAuditLog) -> AdminAuditLogRead:
         actor_permissions=row.actor_permissions,
         actor_label=row.actor_label,
         admin_id=row.admin_id,
-        domain_id=row.domain_id,
-        agent_id=row.agent_id,
         luciel_instance_id=row.luciel_instance_id,
         action=row.action,
         resource_type=row.resource_type,

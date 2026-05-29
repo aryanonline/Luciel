@@ -197,7 +197,8 @@ def widget_chat_stream(
 
     admin_id = getattr(request.state, "admin_id", None)
     domain_id = getattr(request.state, "domain_id", None)
-    agent_id = getattr(request.state, "agent_id", None)
+    # Arc 12 EX1b: request.state.agent_id is no longer stamped by auth
+    # middleware (EX1a). The widget chat surface is admin+instance scoped.
     luciel_instance_id = getattr(request.state, "luciel_instance_id", None)
     embed_key_prefix = getattr(request.state, "key_prefix", None)
 
@@ -281,7 +282,6 @@ def widget_chat_stream(
             "event": "widget_chat_turn_received",
             "admin_id": admin_id,
             "domain_id": domain_id,
-            "agent_id": agent_id,
             "luciel_instance_id": luciel_instance_id,
             "embed_key_prefix": embed_key_prefix,
             "message_length": len(payload.message),
@@ -315,7 +315,6 @@ def widget_chat_stream(
         result = session_service.create_session_with_identity(
             admin_id=admin_id,
             domain_id=domain_id,
-            agent_id=agent_id,
             channel="widget",
             claim_type=ClaimType(payload.client_claim.claim_type.upper()),
             claim_value=payload.client_claim.claim_value,
@@ -338,7 +337,6 @@ def widget_chat_stream(
         session = session_service.create_session(
             admin_id=admin_id,
             domain_id=domain_id,
-            agent_id=agent_id,
             user_id=None,  # widget visitors are anonymous at v1
             channel="widget",
             luciel_instance_id=luciel_instance_id,

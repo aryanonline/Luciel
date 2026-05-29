@@ -193,7 +193,10 @@ def create_session(
             resource_pk=None,  # Not yet created.
             resource_natural_id=None,
             domain_id=domain_id,
-            agent_id=agent_id,
+            # Arc 12 EX1b: agent_id no longer surfaced through to audit
+            # writes; admin_audit_log.agent_id stays in the hash chain
+            # (handled by EX4) but new rows record NULL.
+            agent_id=None,
             before=None,
             after={
                 "key_tenant_id": key_tenant_id,
@@ -227,10 +230,13 @@ def create_session(
                 ),
             },
         )
+    # Arc 12 EX1b: agent_id no longer threaded into SessionService;
+    # v2 sessions are admin+instance scoped (§3.7.2). Payload may still
+    # carry agent_id (SessionCreate schema is owned by api+schemas) but
+    # it is dropped at the service boundary here.
     session = service.create_session(
         admin_id=effective_tenant_id,
         domain_id=domain_id,
-        agent_id=agent_id,
         user_id=payload.user_id,
         channel=payload.channel,
         luciel_instance_id=luciel_instance_id,

@@ -95,17 +95,24 @@ class TestServiceLegacyShape:
         # Behavioural compat: the params legacy callers already pass
         # must still be accepted with the same defaults. Catches an
         # accidental rename.
+        # Arc 12 EX1b: agent_id is excised from SessionService per
+        # §3.7.2; v2 sessions are admin+instance scoped, no
+        # per-agent narrowing. domain_id remains until EX3 nulls the
+        # SessionModel.domain_id NOT-NULL column.
         from app.services.session_service import SessionService
         sig = inspect.signature(SessionService.create_session)
         for name, default in [
             ("admin_id", inspect.Parameter.empty),
             ("domain_id", inspect.Parameter.empty),
-            ("agent_id", None),
             ("user_id", None),
             ("channel", "web"),
         ]:
             assert name in sig.parameters
             assert sig.parameters[name].default == default
+        assert "agent_id" not in sig.parameters, (
+            "Arc 12 EX1b: SessionService.create_session must not "
+            "accept agent_id (v2 single Admin->Instance boundary)."
+        )
 
 
 # ---------------------------------------------------------------------
@@ -118,6 +125,9 @@ class TestServiceIdentityShape:
         assert hasattr(SessionService, "create_session_with_identity")
 
     def test_signature_is_kw_only(self):
+        # Arc 12 EX1b: agent_id is no longer part of the identity
+        # path signature (v2 single Admin->Instance boundary,
+        # §3.7.2). channel stays as the optional kwarg.
         from app.services.session_service import SessionService
         sig = inspect.signature(
             SessionService.create_session_with_identity
@@ -126,7 +136,7 @@ class TestServiceIdentityShape:
             "admin_id", "domain_id", "claim_type",
             "claim_value", "issuing_adapter",
         }
-        optional = {"agent_id", "channel"}
+        optional = {"channel"}
         for name, p in sig.parameters.items():
             if name == "self":
                 continue
@@ -136,6 +146,10 @@ class TestServiceIdentityShape:
         seen = set(sig.parameters.keys())
         assert required.issubset(seen)
         assert optional.issubset(seen)
+        assert "agent_id" not in seen, (
+            "Arc 12 EX1b: create_session_with_identity must not "
+            "accept agent_id."
+        )
 
 
 # ---------------------------------------------------------------------
@@ -245,7 +259,7 @@ class _CountingRepo:
         self.created_sessions: list[dict] = []
 
     def create_session(
-        self, *, session_id, admin_id, domain_id, agent_id, user_id,
+        self, *, session_id, admin_id, domain_id, user_id,
         channel, status="active", conversation_id=None,
         luciel_instance_id=None,
     ):
@@ -253,11 +267,12 @@ class _CountingRepo:
         # gained a luciel_instance_id kwarg threaded by SessionService.
         # The fake here must accept it or the End-to-End wiring tests
         # type-error before reaching the contract assertions.
+        # Arc 12 EX1b: agent_id is excised from the repository
+        # signature.
         captured = {
             "session_id": session_id,
             "admin_id": admin_id,
             "domain_id": domain_id,
-            "agent_id": agent_id,
             "user_id": user_id,
             "channel": channel,
             "status": status,
@@ -320,7 +335,6 @@ class TestEndToEndWiring:
         result = svc.create_session_with_identity(
             admin_id="t-1",
             domain_id="d-1",
-            agent_id=None,
             channel="web",
             claim_type=ClaimType.EMAIL,
             claim_value="newperson@example.com",
@@ -426,7 +440,6 @@ class TestLegacyBehaviourUnchanged:
         svc.create_session(
             admin_id="t-1",
             domain_id="d-1",
-            agent_id="agent-1",
             user_id="legacy-user",
             channel="web",
         )

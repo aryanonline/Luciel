@@ -270,11 +270,13 @@ class TestAuditLogEmissions:
             "(at request entry, after scope checks)"
         )
         keys = _call_extra_keys(candidates[0])
+        # Arc 12 EX1b: agent_id is no longer emitted in the widget
+        # chat turn received audit event (v2 single Admin->Instance
+        # boundary, §3.7.2).
         required = {
             "event",
             "admin_id",
             "domain_id",
-            "agent_id",
             "luciel_instance_id",
             "embed_key_prefix",
             "message_length",
@@ -284,6 +286,10 @@ class TestAuditLogEmissions:
         missing = required - keys
         assert not missing, (
             f"widget_chat_turn_received extra={{}} missing keys: {missing}"
+        )
+        assert "agent_id" not in keys, (
+            "Arc 12 EX1b: widget_chat_turn_received must not surface "
+            "agent_id."
         )
 
     def test_session_resolved_field_shape(self):
@@ -495,6 +501,8 @@ class TestSessionServiceSignaturePreserved:
     """
 
     def test_required_kwargs_for_widget_call_site(self):
+        # Arc 12 EX1b: agent_id is no longer in the widget call site
+        # signature (v2 single Admin->Instance boundary, §3.7.2).
         from app.services.session_service import SessionService
         sig = inspect.signature(
             SessionService.create_session_with_identity
@@ -502,7 +510,6 @@ class TestSessionServiceSignaturePreserved:
         for required in [
             "admin_id",
             "domain_id",
-            "agent_id",
             "channel",
             "claim_type",
             "claim_value",
@@ -513,3 +520,7 @@ class TestSessionServiceSignaturePreserved:
                 f"create_session_with_identity; missing from current "
                 f"signature: {sig}"
             )
+        assert "agent_id" not in sig.parameters, (
+            "Arc 12 EX1b: create_session_with_identity must not "
+            "accept agent_id (v2 boundary)."
+        )

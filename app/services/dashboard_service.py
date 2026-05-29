@@ -1,11 +1,26 @@
-"""DashboardService -- scope-bound hierarchical rollups for Step 31.
+"""DashboardService -- scope-bound rollups for Step 31.
 
-Three read-only methods that produce the aggregates the operator-facing
-dashboard renders (and that a future Step 32 frontend reads):
+Arc 12 EX1b (founder-directed agent_id/domain_id excision) collapsed
+the historical three-method surface (tenant -> domain -> agent) to a
+v2-shape rollup hierarchy that mirrors the single Admin -> Instance
+boundary in Architecture §3.7.2 / §3.7.3:
 
-  * get_tenant_dashboard(admin_id)  -> TenantDashboard
-  * get_domain_dashboard(admin_id, domain_id) -> DomainDashboard
+  * get_tenant_dashboard(admin_id)        -> TenantDashboard
+  * get_domain_dashboard(admin_id, domain_id)        -> DomainDashboard
+        DEPRECATED legacy shape: the v1 Domain layer is gone in v2.
+        The method is retained as a thin admin-rollup wrapper so the
+        Step 31 HTTP route surface (owned by another lane) does not
+        break -- it returns admin-level aggregates and the
+        domain_id is passed through to the response dataclass for
+        contract-shape continuity only. The WHERE clauses no longer
+        reference Trace.domain_id.
   * get_agent_dashboard(admin_id, domain_id, agent_id) -> AgentDashboard
+        DEPRECATED legacy shape: same as above. agent_id is no
+        longer in any WHERE clause; the method now returns the
+        equivalent instance-scoped rollup that v2 callers should
+        target directly via the response top_luciel_instances
+        list. The agent_id is passed through to the response
+        dataclass for contract-shape continuity only.
 
 Architectural pins
 ==================
@@ -219,14 +234,10 @@ class DashboardService:
         ]
         aggregates = self._aggregates(base_filter, scope_tag=("tenant", admin_id))
         trend = self._trend(base_filter, window_days, window_start)
-        top_domains = self._top_children(
-            base_filter=base_filter + [Trace.domain_id.is_not(None)],
-            group_col=Trace.domain_id,
-            display_lookup=self._domain_display_lookup(admin_id),
-            top_n=top_n,
-            scope_tag=("tenant.top_domains", admin_id),
-            scope_check=lambda row_id: row_id is not None,
-        )
+        # Arc 12 EX1b: Domain layer removed (§3.7.2). The legacy
+        # top_domains surface returns an empty list -- no v2-equivalent
+        # rollup. top_luciel_instances below carries the v2 narrowing.
+        top_domains: list[ChildRollup] = []
         top_instances = self._top_children(
             base_filter=base_filter + [Trace.luciel_instance_id.is_not(None)],
             group_col=Trace.luciel_instance_id,
@@ -255,6 +266,15 @@ class DashboardService:
         top_n: int = DEFAULT_TOP_N,
         since: datetime | None = None,
     ) -> DomainDashboard:
+        """Arc 12 EX1b: domain_id is no longer in the WHERE clause.
+
+        v2 has no Domain layer (§3.7.2). The method returns an
+        admin-level rollup; ``domain_id`` is echoed back in the
+        response dataclass only for contract-shape stability with
+        the legacy HTTP route (owned by another lane). The
+        ``top_agents`` field is always empty because the Agent layer
+        was excised in Arc 5 Path A.
+        """
         if not admin_id:
             raise ValueError("admin_id is required")
         if not domain_id:
@@ -263,21 +283,15 @@ class DashboardService:
 
         base_filter = [
             Trace.admin_id == admin_id,
-            Trace.domain_id == domain_id,
             Trace.created_at >= window_start,
         ]
         aggregates = self._aggregates(
             base_filter, scope_tag=("domain", f"{admin_id}/{domain_id}")
         )
         trend = self._trend(base_filter, window_days, window_start)
-        top_agents = self._top_children(
-            base_filter=base_filter + [Trace.agent_id.is_not(None)],
-            group_col=Trace.agent_id,
-            display_lookup=self._agent_display_lookup(admin_id, domain_id),
-            top_n=top_n,
-            scope_tag=("domain.top_agents", f"{admin_id}/{domain_id}"),
-            scope_check=lambda row_id: row_id is not None,
-        )
+        # Arc 12 EX1b: Agent layer removed. The legacy top_agents
+        # surface returns an empty list (no v2-equivalent rollup).
+        top_agents: list[ChildRollup] = []
 
         return DomainDashboard(
             admin_id=admin_id,
@@ -298,6 +312,16 @@ class DashboardService:
         top_n: int = DEFAULT_TOP_N,
         since: datetime | None = None,
     ) -> AgentDashboard:
+        """Arc 12 EX1b: agent_id is no longer in the WHERE clause.
+
+        v2 has no Agent layer (§3.7.2). The method returns an
+        admin-level rollup with the instance-level top-N
+        (which IS the v2-correct narrowing per §3.7.3 -- Wall 3 is
+        admin_id + luciel_instance_id). ``domain_id`` and
+        ``agent_id`` are echoed back in the response dataclass for
+        contract-shape stability with the legacy HTTP route (owned
+        by another lane).
+        """
         if not admin_id:
             raise ValueError("admin_id is required")
         if not domain_id:
@@ -308,8 +332,6 @@ class DashboardService:
 
         base_filter = [
             Trace.admin_id == admin_id,
-            Trace.domain_id == domain_id,
-            Trace.agent_id == agent_id,
             Trace.created_at >= window_start,
         ]
         aggregates = self._aggregates(
@@ -320,9 +342,7 @@ class DashboardService:
         top_instances = self._top_children(
             base_filter=base_filter + [Trace.luciel_instance_id.is_not(None)],
             group_col=Trace.luciel_instance_id,
-            display_lookup=self._instance_display_lookup_for_agent(
-                admin_id, domain_id, agent_id
-            ),
+            display_lookup=self._instance_display_lookup_for_tenant(admin_id),
             top_n=top_n,
             scope_tag=(
                 "agent.top_instances",

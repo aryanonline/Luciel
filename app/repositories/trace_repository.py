@@ -6,7 +6,9 @@ Handles persistence for trace records.
 PATCHED:
   T1 — get_trace() now accepts optional admin_id for ownership check.
   T2 — list_traces_for_session() now accepts optional admin_id filter.
-  T3 — Added list_traces_for_tenant() and list_traces_for_agent().
+  T3 — Added list_traces_for_tenant() (originally also took agent_id;
+       Arc 12 EX1b removed that filter -- v2 traces are admin +
+       luciel_instance_id scoped per §3.7.2 / §3.7.3).
   T4 — Arc 11 Step 5: list_recent_traces_using_source() — read path
        for the §3.2.2 delete-confirm modal "affected questions"
        preview, keyed on the GIN index over ``traces.source_ids_used``
@@ -71,21 +73,27 @@ class TraceRepository:
         self,
         admin_id: str,
         *,
-        domain_id: str | None = None,
-        agent_id: str | None = None,
+        luciel_instance_id: int | None = None,
         limit: int = 100,
     ) -> list[Trace]:
-        """Get traces scoped to a tenant, optionally filtered by domain/agent."""
+        """Get traces scoped to a tenant.
+
+        Arc 12 EX1b: pre-v2 this method also took ``domain_id`` /
+        ``agent_id`` filters. Per Architecture v1 §3.7.2 the v2
+        boundary is Admin -> Instance, and per §3.7.3 customer-data
+        scoping is admin_id + luciel_instance_id. The legacy filters
+        have been removed (domain_id) and remapped (agent_id) -- the
+        per-instance narrowing that callers used the agent_id filter
+        for is now expressed as ``luciel_instance_id``.
+        """
         stmt = (
             select(Trace)
             .where(Trace.admin_id == admin_id)
             .order_by(Trace.created_at.desc())
             .limit(limit)
         )
-        if domain_id:
-            stmt = stmt.where(Trace.domain_id == domain_id)
-        if agent_id:
-            stmt = stmt.where(Trace.agent_id == agent_id)
+        if luciel_instance_id is not None:
+            stmt = stmt.where(Trace.luciel_instance_id == luciel_instance_id)
         return list(self.db.scalars(stmt).all())
 
     def list_recent_traces_using_source(

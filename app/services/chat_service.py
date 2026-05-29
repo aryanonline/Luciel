@@ -222,10 +222,10 @@ class ChatService:
         if not provider and ctx.preferred_provider:
             provider = ctx.preferred_provider
 
-        # 4. Retrieve long-term memories (consent-gated). Memory rows
-        #    are partitioned by (admin_id, agent_id) at the schema
-        #    layer; with the Agent layer collapsed the chat path
-        #    passes agent_id=None (tenant-level memories).
+        # 4. Retrieve long-term memories (consent-gated). Arc 12 EX1b:
+        #    v2 single Admin→Instance boundary (§3.7.2); memory rows
+        #    are scoped by admin_id + Wall-3 RLS on luciel_instance_id.
+        #    The legacy per-agent partitioning has been excised.
         memories: list = []
         can_use_memory = True
         if self.consent_policy and user_id:
@@ -236,7 +236,6 @@ class ChatService:
             memories = self.memory_service.retrieve_memories(
                 user_id=user_id,
                 admin_id=admin_id,
-                agent_id=None,
             )
 
         # 5. Retrieve relevant knowledge (scope-inherited).
@@ -317,7 +316,6 @@ class ChatService:
                     self.memory_service.repository.save_memory(
                         user_id=user_id,
                         admin_id=admin_id,
-                        agent_id=None,
                         category=category,
                         content=content,
                         source_session_id=session_id,
@@ -378,7 +376,6 @@ class ChatService:
                             session_id=session_id,
                             message_id=assistant_msg.id,
                             actor_key_prefix=actor_key_prefix,
-                            agent_id=None,
                             luciel_instance_id=luciel_instance_id,
                             actor_user_id=actor_user_id,
                             trace_id=None,
@@ -398,7 +395,6 @@ class ChatService:
                         user_id=user_id,
                         admin_id=admin_id,
                         session_id=session_id,
-                        agent_id=None,
                         messages=recent_messages,
                         message_id=assistant_msg.id,
                         luciel_instance_id=luciel_instance_id,
@@ -418,8 +414,6 @@ class ChatService:
                 session_id=session_id,
                 user_id=user_id,
                 admin_id=admin_id,
-                domain_id=None,
-                agent_id=None,
                 user_message=message,
                 assistant_reply=final_reply,
                 llm_provider=llm_provider_used,
@@ -490,7 +484,6 @@ class ChatService:
             memories = self.memory_service.retrieve_memories(
                 user_id=user_id,
                 admin_id=admin_id,
-                agent_id=None,
             )
 
         knowledge = self.knowledge_retriever.retrieve(
@@ -556,7 +549,6 @@ class ChatService:
                                 session_id=session_id,
                                 message_id=assistant_msg.id,
                                 actor_key_prefix=actor_key_prefix,
-                                agent_id=None,
                                 luciel_instance_id=luciel_instance_id,
                                 actor_user_id=actor_user_id,
                                 trace_id=None,
@@ -575,7 +567,6 @@ class ChatService:
                             user_id=user_id,
                             admin_id=admin_id,
                             session_id=session_id,
-                            agent_id=None,
                             messages=recent_messages,
                             message_id=assistant_msg.id,
                             luciel_instance_id=luciel_instance_id,
@@ -594,8 +585,6 @@ class ChatService:
                     session_id=session_id,
                     user_id=user_id,
                     admin_id=admin_id,
-                    domain_id=None,
-                    agent_id=None,
                     user_message=message,
                     assistant_reply=final_reply,
                     llm_provider=None,

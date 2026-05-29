@@ -11,13 +11,16 @@ Payload (opaque ids only; NO user content):
     admin_id             str
     message_id            int        # idempotency key; FK to messages.id
     actor_key_prefix      str        # enqueuing api_key.key_prefix (audit linkage)
-    agent_id              str | None
     luciel_instance_id    int | None
     actor_user_id         str | None # Step 24.5b -- platform User UUID
                                      # serialized as string for JSON
                                      # transport. Worker parses to UUID
                                      # at task entry. None for legacy /
                                      # pre-backfill rows.
+
+    Arc 12 EX1b removed ``agent_id`` from the payload. The worker
+    body tolerates in-flight messages still carrying the legacy
+    kwarg via ``**legacy_kwargs``; new producers omit it.
 
 Pre-flight gates (Invariant 8 -- defense in depth):
     1. Payload shape validation               -> Reject to DLQ on fail
@@ -31,12 +34,12 @@ Pre-flight gates (Invariant 8 -- defense in depth):
                                               -> Reject to DLQ on fail
        Pillar 12 (Commit 3) asserts this gate fires when a User is
        deactivated mid-flight after enqueue.
-    6. Agent.user_id == payload.actor_user_id (Step 24.5b -- Q6
-       cross-tenant identity-spoof guard)     -> Reject to DLQ on fail
-       Pillar 13 (Commit 3) asserts a malicious payload claiming
-       (user_id=U, admin_id=T1, agent_id=A2_under_T2) lands in DLQ
-       because A2's row has admin_id=T2 and user_id=U2, not the
-       payload's claimed values.
+    6. Cross-tenant identity-spoof guard (Step 24.5b -- Q6)
+                                              -> Reject to DLQ on fail
+       Arc 12 EX1b: v2 v2-shape gate verifies the asserted
+       ``actor_user_id`` has an active ScopeAssignment under the
+       payload's ``admin_id`` (the Agent-level binding the legacy
+       gate consulted is gone per §3.7.2).
 
 Execution:
     - Re-read turn window from DB via join(MessageModel -> SessionModel)
@@ -221,10 +224,11 @@ def extract_memory_from_turn(
     admin_id: str,
     message_id: int,
     actor_key_prefix: str,
-    agent_id: str | None = None,
     luciel_instance_id: int | None = None,
     trace_id: str | None = None,
     actor_user_id: str | None = None,  # Step 24.5b: platform User UUID as str
+    **legacy_kwargs,  # Arc 12 EX1b: tolerate in-flight messages still
+                     # carrying the legacy ``agent_id`` kwarg; drop it.
 ) -> None:
     """
     Extract durable memories from a just-completed chat turn and persist them.
@@ -380,11 +384,11 @@ def extract_memory_from_turn(
                     )
 
             # ---------- Gate 6: cross-tenant identity-spoof guard (Step 24.5b -- Q6) ----------
-            # Arc 5 Path A: V2 binding is ScopeAssignment(user_id, admin_id).
-            # When actor_user_uuid is present and agent_id is supplied (legacy
-            # field name preserved on the payload for transition), the actor
-            # MUST have an active ScopeAssignment under this tenant.
-            if actor_user_uuid is not None and agent_id is not None:
+            # Arc 12 EX1b: v2 binding is ScopeAssignment(user_id, admin_id)
+            # only (the Agent layer was excised per §3.7.2). When
+            # ``actor_user_uuid`` is present we assert that the actor
+            # has an active ScopeAssignment under this admin.
+            if actor_user_uuid is not None:
                 spoof_agent = db.scalars(
                     select(ScopeAssignment).where(
                         ScopeAssignment.admin_id == admin_id,
@@ -395,12 +399,10 @@ def extract_memory_from_turn(
                 if spoof_agent is None:
                     logger.warning(
                         "gate6 identity spoof task=%s payload_actor_user=%s "
-                        "agent_user=%s tenant=%s agent_id=%s",
+                        "tenant=%s",
                         task_id,
                         actor_user_uuid,
-                        spoof_agent.user_id if spoof_agent else None,
                         admin_id,
-                        agent_id,
                     )
                     _reject_with_audit(
                         db,
@@ -411,9 +413,8 @@ def extract_memory_from_turn(
                         actor_key_prefix=actor_key_prefix,
                         note=(
                             f"actor_user_id mismatch: payload claims "
-                            f"{actor_user_uuid}, agent ({admin_id},"
-                            f"{agent_id}) has "
-                            f"{spoof_agent.user_id if spoof_agent else 'None'}"
+                            f"{actor_user_uuid}, no active "
+                            f"ScopeAssignment under admin={admin_id}"
                         ),
                         task_id=task_id,
                         trace_id=trace_id,
@@ -458,7 +459,6 @@ def extract_memory_from_turn(
                 user_id=user_id,
                 admin_id=admin_id,
                 session_id=session_id,
-                agent_id=agent_id,
                 messages=messages_payload,
                 message_id=message_id,
                 luciel_instance_id=luciel_instance_id,
@@ -474,6 +474,11 @@ def extract_memory_from_turn(
                 task_id=f"memory_extraction:{task_id}",
                 actor_key_prefix=actor_key_prefix,
             )
+            # Arc 12 EX1b: agent_id is no longer propagated into audit
+            # rows (admin_audit_log.agent_id stays in the hash chain
+            # for EX4 to handle; new rows write NULL). domain_id is
+            # still surfaced because admin_audit_log.domain_id is not
+            # in the EX1b excision lane.
             AdminAuditRepository(db).record(
                 ctx=ctx,
                 admin_id=admin_id,
@@ -482,7 +487,7 @@ def extract_memory_from_turn(
                 resource_pk=None,   # memory_items are append-only; no single pk
                 resource_natural_id=f"session={session_id};message={message_id}",
                 domain_id=session_row.domain_id,
-                agent_id=agent_id,
+                agent_id=None,
                 luciel_instance_id=luciel_instance_id,
                 before=None,
                 after={
