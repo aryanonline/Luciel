@@ -91,12 +91,12 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     section = "1. Migrations & schema"
     out: list[CheckResult] = []
 
-    # 1a. alembic heads is single and points at the latest Arc 11
-    # migration. Arc 11 Closeout PR-B appended
-    # ``arc11_closeout_b_ingestion_error_code`` on top of PR-A's
-    # instance-lifecycle head. The new head is the single end of the
-    # migration chain.
-    expected_head = "arc11_closeout_b_ingestion_error_code"
+    # 1a. alembic heads is single and points at the latest head on
+    # the active branch. Arc 11 Closeout PR-B advanced the chain to
+    # ``arc11_closeout_b_ingestion_error_code``; Arc 12 then appended
+    # the EX-series excisions, advancing the single head to
+    # ``arc12_ex4_reseal_audit_chain_drop_agent_domain``.
+    expected_head = "arc12_ex4_reseal_audit_chain_drop_agent_domain"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],
