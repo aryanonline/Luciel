@@ -131,7 +131,7 @@ AS $$
     canonical AS (
         SELECT admin_id
         FROM active_scopes
-        ORDER BY (role = 'owner') DESC, started_at DESC
+        ORDER BY (role = 'admin_owner') DESC, started_at DESC
         LIMIT 1
     ),
     canonical_with_tier AS (
@@ -206,7 +206,7 @@ AS $$
     canonical AS (
         SELECT admin_id
         FROM active_scopes
-        ORDER BY (role = 'owner') DESC, started_at DESC
+        ORDER BY (role = 'admin_owner') DESC, started_at DESC
         LIMIT 1
     ),
     canonical_with_tier AS (

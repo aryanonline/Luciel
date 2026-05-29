@@ -234,6 +234,27 @@ def upgrade() -> None:
     # directly (no ORM) because the chain event handler isn't installed
     # at migration time, and we already hold the advisory lock so no
     # race with runtime writers is possible.
+    #
+    # FK-safety (Arc 12 verify fix): the reseal row's actor is the
+    # ``platform`` system-actor sentinel (``SYSTEM_ACTOR_TENANT`` in
+    # app/repositories/admin_audit_repository.py). ``admin_audit_logs.admin_id``
+    # is NOT NULL with a RESTRICT FK to ``admins.id``. No prior migration
+    # seeds the ``platform`` admin (the arc5_b cutover only backfills
+    # admins from pre-existing tenant_configs), so on a fresh database the
+    # INSERT below would violate the FK. We idempotently seed the
+    # ``platform`` sentinel admin first (no-op when it already exists in
+    # prod). This makes the documented system-actor convention valid at
+    # the schema level and lets ``alembic upgrade head`` succeed on a
+    # fresh database (the CI verify contract).
+    bind.execute(
+        sa.text(
+            "INSERT INTO admins (id, name, tier, tier_source, active) "
+            "VALUES ('platform', 'Platform System Actor', 'enterprise', "
+            "'manual', true) "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+    )
+
     now = datetime.now(timezone.utc)
     reseal_row = {
         "admin_id": "platform",  # SYSTEM_ACTOR_TENANT
