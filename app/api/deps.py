@@ -3,6 +3,7 @@ FastAPI dependency injection wiring.
 """
 
 # Add import at top
+from app.cognition import CognitionService
 from app.repositories.consent_repository import ConsentRepository
 from app.policy.consent import ConsentPolicy
 from collections.abc import Generator
@@ -143,6 +144,10 @@ TenantScopedDbSession = Annotated[Session, Depends(get_tenant_scoped_db)]
 _model_router = ModelRouter()
 _tool_registry = ToolRegistry()
 _tool_broker = ToolBroker(registry=_tool_registry)
+# Arc 12 WU7 — cognition is always-on (§3.4); the module-level singleton
+# mirrors the tool_registry/tool_broker shape so ChatService gets the
+# same instance per worker. Not in the registry / not tier-gated.
+_cognition_service = CognitionService()
 
 
 def get_session_repository(db: DbSession) -> SessionRepository:
@@ -232,6 +237,7 @@ def get_chat_service(
         config_repository=config_repository,
         instance_repository=instance_repository,
         consent_policy=consent_policy,
+        cognition_service=_cognition_service,
     )
 
 def get_agent_repository(db: DbSession):
