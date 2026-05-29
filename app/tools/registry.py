@@ -6,17 +6,15 @@ is what the broker and the LLM prompt use to know what tools exist
 and what they can do. Lookups are keyed by ``tool_id`` (the §3.3.1
 identifier).
 
-Arc 12 WU1 migrated the registry off the v1 ``tool.name`` key onto
-``tool.tool_id`` and onto the §3.3.1 contract surface (``description``,
-``input_schema``, ``requires_tier``, ``requires_channels``,
-``execution_mode``). The default registration set (the three
-"cognition" tools: escalate / save_memory / session_summary) is kept
-in place for WU1 -- WU7 evicts them when the cognition module lands.
+Arc 12 WU7 evicted the three cognition tools (escalate /
+save_memory / session_summary) per founder ruling 4 + Decision #20:
+cognition is NOT in the tool registry. Their behaviour now lives in
+``app.cognition`` and is invoked directly by chat_service. The
+registry holds ONLY the 8 configurable v1 catalog tools (§3.3.2).
 
-WU2 will add a per-instance authorisation overlay so the registry's
-contents are only the universe of *available* tools; the *authorised*
-set is computed per (admin_id, instance_id) via the WU2 authorisation
-table.
+WU2's per-instance authorisation overlay computes the *authorised*
+set per (admin_id, instance_id) from this universe of *available*
+tools.
 """
 
 from __future__ import annotations
@@ -31,18 +29,15 @@ from app.tools.implementations.bring_your_own_webhook_tool import (
 from app.tools.implementations.call_sibling_luciel_tool import (
     CallSiblingLucielTool,
 )
-from app.tools.implementations.escalate_tool import EscalateTool
 from app.tools.implementations.lookup_property_tool import (
     LookupPropertyTool,
 )
 from app.tools.implementations.push_to_crm_tool import PushToCrmTool
-from app.tools.implementations.save_memory_tool import SaveMemoryTool
 from app.tools.implementations.schedule_callback_tool import (
     ScheduleCallbackTool,
 )
 from app.tools.implementations.send_email_tool import SendEmailTool
 from app.tools.implementations.send_sms_tool import SendSmsTool
-from app.tools.implementations.session_summary_tool import SessionSummaryTool
 
 
 class ToolRegistry:
@@ -55,22 +50,19 @@ class ToolRegistry:
     def _register_defaults(self) -> None:
         """Register the built-in tools.
 
-        Two groups today:
+        The registry holds the v1 catalog (Arc 12 WU3, §3.3.2): the
+        8 configurable tools every Pro/Enterprise instance can opt
+        into via the per-instance authorisation table (WU2). Some
+        carry interim execute() bodies per the 00_MASTER
+        "interim-body rule" (see each tool's module docstring for
+        the owning arc).
 
-        * **v1 catalog** (Arc 12 WU3, §3.3.2): the 8 configurable
-          tools every Pro/Enterprise instance can opt into via the
-          per-instance authorisation table (WU2). These are the
-          steady-state catalog; some carry interim execute() bodies
-          per the 00_MASTER "interim-body rule" (see each tool's
-          module docstring for the owning arc).
-
-        * **Cognition** (escalate / save_memory / session_summary):
-          interim — these still live in the registry at WU3 but get
-          evicted to the always-on cognition module in WU7 per
-          founder ruling 4. Cognition is non-tier-gated and runs
-          directly from chat_service after WU7, NOT via the broker.
+        Cognition (escalate / save_memory / session_summary) is NOT
+        registered here — Decision #20 + founder ruling 4. Its
+        behaviour lives in ``app.cognition`` and is called directly
+        by chat_service (no broker, no registry, no tier-gating).
         """
-        # v1 catalog (WU3)
+        # v1 catalog (WU3) — exactly 8 tools, nothing cognition-shaped.
         self.register(BookAppointmentTool())
         self.register(SendEmailTool())
         self.register(SendSmsTool())
@@ -79,11 +71,6 @@ class ToolRegistry:
         self.register(PushToCrmTool())
         self.register(CallSiblingLucielTool())
         self.register(BringYourOwnWebhookTool())
-
-        # Cognition (interim — evicted in WU7).
-        self.register(SaveMemoryTool())
-        self.register(SessionSummaryTool())
-        self.register(EscalateTool())
 
     def register(self, tool: LucielTool) -> None:
         """Add a tool to the registry, keyed by ``tool_id``."""
