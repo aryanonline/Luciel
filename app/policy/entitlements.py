@@ -194,6 +194,17 @@ class TierEntitlement:
     # admins.stripe_customer_id NULL, lazy-created on upgrade).
     stripe_customer_record_required: bool
 
+    # Axis 17 (Arc 12b) -- custom-role authoring (permission-based
+    # team-member role model, Architecture \u00a73.7.2). Free/Pro use the
+    # four locked roles with their default permission sets; Enterprise
+    # adds a layer of admin-composed custom roles built from atomic
+    # permissions. This axis is TRUE on Enterprise and FALSE on the
+    # other two tiers. The role-authoring API rejects writes (403)
+    # for tenants whose tier does not enable this axis. Zero behavioural
+    # change on Free/Pro: the locked-role permission seed reproduces
+    # today's role matrix exactly.
+    custom_role_authoring_enabled: bool
+
     # Axis 16 (Billing model) RETIRED at Arc 7 Commit 2 (2026-05-24).
     # Every paying tier is flat-recurring under the Arc 7 doctrine
     # pivot, so the field carried zero information. See
@@ -239,6 +250,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         export_csv_enabled=False,
         export_audit_chain_enabled=False,
         stripe_customer_record_required=False,  # Gap 1: NULL until upgrade
+        # Arc 12b: Free uses the four locked roles only.
+        custom_role_authoring_enabled=False,
     ),
     TIER_PRO: TierEntitlement(
         # 2026-05-23 revision: instances 3\u219210, leads 2000\u21925000,
@@ -274,6 +287,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         export_csv_enabled=True,
         export_audit_chain_enabled=False,
         stripe_customer_record_required=True,
+        # Arc 12b: Pro uses the four locked roles only.
+        custom_role_authoring_enabled=False,
     ),
     TIER_ENTERPRISE: TierEntitlement(
         # Arc 10: unlimited per Vision §7 tier matrix.
@@ -322,6 +337,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         export_csv_enabled=True,
         export_audit_chain_enabled=True,
         stripe_customer_record_required=True,
+        # Arc 12b: Enterprise unlocks admin-composed custom roles.
+        custom_role_authoring_enabled=True,
     ),
 }
 

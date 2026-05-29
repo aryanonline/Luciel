@@ -467,6 +467,21 @@ ACTION_TOOL_REVOKED = "tool_revoked"
 #   last v1 historical row AS RESEALED, not the v1 original).
 ACTION_AUDIT_CHAIN_RESEALED = "audit_chain_resealed"
 
+# Arc 12b — Enterprise custom-role authoring lifecycle (Architecture §3.7.2).
+# Distinct verbs per lifecycle event so auditors can filter on each:
+#   ACTION_CUSTOM_ROLE_AUTHORED — admin_owner created a new custom role.
+#   ACTION_CUSTOM_ROLE_UPDATED  — display_name / description / permission
+#                                 set changed on an existing custom role.
+#   ACTION_CUSTOM_ROLE_REVOKED  — soft-deleted (revoked_at set).
+#   ACTION_USER_ROLE_ASSIGNED   — user assigned to a role (locked or
+#                                 custom) at instance or admin scope.
+#   ACTION_USER_ROLE_REVOKED    — user_role_assignment soft-revoked.
+ACTION_CUSTOM_ROLE_AUTHORED = "custom_role_authored"
+ACTION_CUSTOM_ROLE_UPDATED = "custom_role_updated"
+ACTION_CUSTOM_ROLE_REVOKED = "custom_role_revoked"
+ACTION_USER_ROLE_ASSIGNED = "user_role_assigned"
+ACTION_USER_ROLE_REVOKED = "user_role_revoked"
+
 # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
 #
 # ACTION_SIBLING_ACCESS -- emitted by ``app.tools.sibling_dispatch`` on
@@ -635,6 +650,12 @@ ALLOWED_ACTIONS = (
     ACTION_SIBLING_ACCESS,
     # Arc 12 EX4 -- one-time audit-chain reseal.
     ACTION_AUDIT_CHAIN_RESEALED,
+    # Arc 12b -- Enterprise custom-role authoring lifecycle.
+    ACTION_CUSTOM_ROLE_AUTHORED,
+    ACTION_CUSTOM_ROLE_UPDATED,
+    ACTION_CUSTOM_ROLE_REVOKED,
+    ACTION_USER_ROLE_ASSIGNED,
+    ACTION_USER_ROLE_REVOKED,
 )
 
 
@@ -740,6 +761,10 @@ RESOURCE_SIBLING_CALL_GRANT = "sibling_call_grant"
 # with a single filter.
 RESOURCE_INSTANCE_TOOL_AUTHORIZATION = "instance_tool_authorization"
 
+# Arc 12b — custom role + user role assignment.
+RESOURCE_CUSTOM_ROLE = "custom_role"
+RESOURCE_USER_ROLE_ASSIGNMENT = "user_role_assignment"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -775,6 +800,9 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_SIBLING_CALL_GRANT,
     # Arc 12 WU2b -- instance_tool_authorizations row.
     RESOURCE_INSTANCE_TOOL_AUTHORIZATION,
+    # Arc 12b — custom role + user role assignment.
+    RESOURCE_CUSTOM_ROLE,
+    RESOURCE_USER_ROLE_ASSIGNMENT,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):

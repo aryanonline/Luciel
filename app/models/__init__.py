@@ -53,6 +53,21 @@ from app.models.sibling_call_grant import (  # noqa: F401
     APPROVAL_STATE_REVOKED,
     ALLOWED_APPROVAL_STATES,
 )
+# Arc 12b — permission-based custom roles (Enterprise).
+from app.models.permission_model import (  # noqa: F401
+    Permission,
+    CustomRole,
+    RolePermission,
+    UserRoleAssignment,
+    LOCKED_ROLE_ADMIN_OWNER,
+    LOCKED_ROLE_ADMIN_MANAGER,
+    LOCKED_ROLE_INSTANCE_OPERATOR,
+    LOCKED_ROLE_READ_ONLY_VIEWER,
+    ALL_LOCKED_ROLES,
+    SCOPE_TYPE_ALL_INSTANCES,
+    SCOPE_TYPE_INSTANCE_SPECIFIC,
+    ALL_SCOPE_TYPES,
+)
 # Arc 12 WU6 — BYO webhook config + general-purpose tool execution log.
 from app.models.byo_webhook_endpoint import ByoWebhookEndpoint  # noqa: F401
 from app.models.tool_execution_log import (  # noqa: F401
@@ -139,4 +154,17 @@ __all__ = [
     "CB_STATE_CLOSED",
     "CB_STATE_HALF_OPEN",
     "CB_STATE_OPEN",
+    # Arc 12b -- permission-based custom roles.
+    "Permission",
+    "CustomRole",
+    "RolePermission",
+    "UserRoleAssignment",
+    "LOCKED_ROLE_ADMIN_OWNER",
+    "LOCKED_ROLE_ADMIN_MANAGER",
+    "LOCKED_ROLE_INSTANCE_OPERATOR",
+    "LOCKED_ROLE_READ_ONLY_VIEWER",
+    "ALL_LOCKED_ROLES",
+    "SCOPE_TYPE_ALL_INSTANCES",
+    "SCOPE_TYPE_INSTANCE_SPECIFIC",
+    "ALL_SCOPE_TYPES",
 ]

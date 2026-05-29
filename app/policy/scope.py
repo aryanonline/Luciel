@@ -323,31 +323,76 @@ class ScopePolicy:
         """Verify the caller holds one of ``allowed_roles`` for this
         Instance's Admin.
 
+        Arc 12b: this is now a thin wrapper around the unified
+        :class:`app.policy.permissions.PermissionResolver`. The
+        semantics are PRESERVED — for every Free/Pro caller and every
+        Enterprise caller holding a locked role, this method returns
+        exactly the same decision as before Arc 12b.
+
+        How: the resolver yields the caller's effective permission set
+        (locked-role permissions ∪ custom-role permissions). This
+        method then computes the union of the locked-role permission
+        sets that ``allowed_roles`` describes ("what would a caller
+        with any of those roles hold?"), and accepts iff the caller's
+        resolved set is a superset of one of the allowed-role sets
+        (i.e. there exists a role R ∈ allowed_roles such that the
+        caller holds every permission R confers). Custom roles on
+        Enterprise can satisfy the gate without literally being one of
+        the locked roles — that's the whole point of Arc 12b.
+
         Three gates in order:
 
           1. ``platform_admin`` bypasses everything (operator role).
-          2. ``instance_operator`` is scoped: the operator's assigned
-             instance_id (set by auth middleware as
-             ``request.state.luciel_instance_id``) must match the
-             target instance's id. A manager / owner is not so
-             constrained — they hold scope at the Admin level.
-          3. The caller's resolved role must be in ``allowed_roles``.
+          2. Cross-Admin guard — caller's Admin must own the Instance.
+          3. Resolver-based permission satisfaction (subsumes the old
+             role lookup + operator-instance scoping; the resolver
+             applies the operator-instance scoping internally).
 
         Raises 403 with a stable detail message on any failure.
         """
+        # Lazy import to avoid a circular at module-load (permissions
+        # module imports nothing from scope, but ScopePolicy is
+        # imported by middlewares).
+        from app.policy.permissions import (
+            PermissionResolver,
+            PLATFORM_ADMIN_ALL,
+        )
+
         # 1. Platform-admin bypass.
         if cls.is_platform_admin(request):
             return
 
-        # 2. Cross-Admin guard first — must own the Instance before
-        #    role-gating means anything. Belt-and-suspenders to the
-        #    existing ``enforce_admin_owns_instance`` callers, but
-        #    safe to run twice.
+        # 2. Cross-Admin guard first.
         cls.enforce_admin_owns_instance(request, instance)
 
-        # 3. Look up the role.
-        role = cls._resolve_role_on_instance(request, instance)
-        if role is None:
+        # 3. Resolve the caller's effective permission set.
+        resolved = PermissionResolver.resolve(request, instance=instance)
+        if resolved is PLATFORM_ADMIN_ALL:
+            return
+
+        # 4. Build the union of permission sets implied by allowed_roles.
+        #    For each role in allowed_roles, look up its permission set
+        #    via the seeded locked-role rows. The gate accepts iff the
+        #    caller holds the FULL permission set of at least one of the
+        #    allowed roles (i.e. they are at least as capable as one of
+        #    the listed roles for this action).
+        allowed_role_strs: set[str] = set()
+        for r in allowed_roles:
+            coerced = _role_to_str(r)
+            if coerced is not None:
+                allowed_role_strs.add(coerced)
+
+        if not allowed_role_strs:
+            # Caller specified an empty / nonsense allowed_roles — fail-closed.
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No roles configured to permit this action",
+            )
+
+        # Fast path: if the resolver yielded an empty set, the caller
+        # has no Wall-2 standing under this Admin — 403 with the same
+        # detail message the pre-Arc-12b code used.
+        if not resolved:
             logger.warning(
                 "Role denial: caller has no active scope assignment for "
                 "admin=%s instance=%s",
@@ -361,43 +406,39 @@ class ScopePolicy:
                 ),
             )
 
-        # 4. Operator-instance scoping. instance_operator is the only
-        #    role bound at the Instance level; the other three roles
-        #    hold scope at the Admin level and see every Instance
-        #    under it.
-        if role == ROLE_INSTANCE_OPERATOR:
-            caller_instance_id = getattr(
-                request.state, "luciel_instance_id", None,
-            )
-            target_instance_id = getattr(instance, "id", None)
-            if (
-                caller_instance_id is None
-                or caller_instance_id != target_instance_id
-            ):
-                logger.warning(
-                    "Role denial: instance_operator caller bound to "
-                    "instance=%s tried instance=%s",
-                    caller_instance_id, target_instance_id,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=(
-                        "instance_operator scope does not include this Instance"
-                    ),
-                )
+        from app.policy.permissions import (
+            LOCKED_ROLE_PERMISSIONS_FALLBACK,
+        )
 
-        # 5. Final role check.
-        if role not in allowed_roles:
-            logger.warning(
-                "Role denial: caller role=%s not in allowed=%s",
-                role, sorted(allowed_roles),
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"Role {role!r} is not permitted for this action"
-                ),
-            )
+        # The locked-role → permission set is platform-managed seed
+        # data and is mirrored in the Python constant
+        # LOCKED_ROLE_PERMISSIONS_FALLBACK; using the constant avoids a
+        # superfluous DB round-trip on every enforce call. The unit
+        # tests assert the constant matches the DB seed row-for-row.
+        cached = LOCKED_ROLE_PERMISSIONS_FALLBACK
+
+        # Accept iff the caller holds the full permission set of at
+        # least one of the allowed roles.
+        for role_str in allowed_role_strs:
+            required = cached.get(role_str, frozenset())
+            if required and required.issubset(resolved):
+                return
+
+        # 5. None of the allowed roles' permission sets is satisfied — 403.
+        logger.warning(
+            "Role denial: caller resolved=%s does not satisfy any of "
+            "allowed_roles=%s (instance=%s)",
+            sorted(resolved),
+            sorted(allowed_role_strs),
+            getattr(instance, "id", None),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Caller does not hold the permissions required for this "
+                f"action (allowed roles: {sorted(allowed_role_strs)})"
+            ),
+        )
 
     @classmethod
     def require_knowledge_role(
@@ -432,11 +473,27 @@ class ScopePolicy:
         *,
         required_permission: str,
         action_label: str,
+        instance=None,
     ) -> None:
         """Verify the caller holds ``required_permission`` for action
         ``action_label``. Raises HTTPException(403) on miss.
 
         ``platform_admin`` satisfies any required permission by design.
+
+        Arc 12b: unified with :class:`PermissionResolver`. The
+        decision is made on the SAME resolved permission set that
+        :func:`enforce_role_on_instance` consults. Two source-of-truth
+        paths are gone — one set is queried; both gates compare
+        against it.
+
+        Backwards-compatible behavior: callers that historically
+        passed transport-layer permission strings (``"admin"``,
+        ``"chat"``, ``"sessions"``) still get a True result if those
+        strings appear in ``request.state.permissions`` (the legacy
+        API-key permission list). Wall-2 permission keys
+        (``"can_..."``) are resolved via the resolver. No existing
+        callsite passes a ``can_...`` string today; this widening is
+        forward-compatible.
         """
         if not isinstance(required_permission, str) or not required_permission.strip():
             raise ValueError("required_permission must be a non-empty str")
@@ -448,22 +505,68 @@ class ScopePolicy:
         if not isinstance(action_label, str) or not action_label.strip():
             raise ValueError("action_label must be a non-empty str")
 
+        # Platform-admin bypass — preserved. ``perms`` is the
+        # transport-layer (API-key) permission tuple from
+        # ``request.state.permissions`` (typically
+        # ``["admin","chat","sessions"]``).
         _, perms = cls._caller(request)
         if PLATFORM_ADMIN in perms:
             return
+
+        # Transport-layer permission check (legacy surface still
+        # honoured for non-``can_*`` permission strings).
         if required_permission in perms:
             return
 
+        # Wall-2 permission check via the unified resolver. After
+        # Arc 12b this is the SAME effective permission set
+        # ``enforce_role_on_instance`` consults — one authorization
+        # source of truth.
+        from app.policy.permissions import PermissionResolver
+
+        resolved = PermissionResolver.resolve(request, instance=instance)
+        if required_permission in resolved:
+            return
+
         logger.warning(
-            "Action denied: action=%s required_permission=%s caller_perms=%s",
+            "Action denied: action=%s required_permission=%s "
+            "transport_perms=%s resolved=%s",
             action_label,
             required_permission,
             sorted(perms),
+            sorted(resolved) if not _is_admin_all(resolved) else "<PLATFORM_ADMIN_ALL>",
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                f"This API key does not have permission "
+                f"This caller does not have permission "
                 f"{required_permission!r} required for action {action_label!r}."
             ),
         )
+
+
+def _role_to_str(value) -> str | None:
+    """Coerce a ``ScopeRole`` member or a plain string to its canonical
+    string value; return ``None`` on anything else (fail-closed).
+    """
+    if isinstance(value, ScopeRole):
+        return value.value
+    if isinstance(value, str):
+        if value in (
+            "admin_owner",
+            "admin_manager",
+            "instance_operator",
+            "read_only_viewer",
+        ):
+            return value
+    return None
+
+
+def _is_admin_all(value) -> bool:
+    """True when value is the PLATFORM_ADMIN_ALL sentinel."""
+    try:
+        from app.policy.permissions import PLATFORM_ADMIN_ALL
+
+        return value is PLATFORM_ADMIN_ALL
+    except Exception:
+        return False
