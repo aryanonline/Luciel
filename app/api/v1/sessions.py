@@ -194,15 +194,6 @@ def create_session(
             resource_type=RESOURCE_SESSION,
             resource_pk=None,  # Not yet created.
             resource_natural_id=None,
-            # Arc 12 EX1c: the audit row's legacy domain_id/agent_id
-            # columns are still in the canonical hash field set
-            # (EX4-owned reseal). New rows record NULL; we no longer
-            # propagate the request-side sentinel into the audit row
-            # because the audit row is supposed to record what the
-            # caller asked for, and the caller no longer asks for a
-            # domain_id.
-            domain_id=None,
-            agent_id=None,
             before=None,
             after={
                 "key_tenant_id": key_tenant_id,

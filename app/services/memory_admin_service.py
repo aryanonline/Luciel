@@ -117,8 +117,6 @@ class MemoryAdminService:
             resource_type=RESOURCE_MEMORY,
             resource_pk=item.id,
             resource_natural_id=None,
-            domain_id=None,
-            agent_id=None,
             luciel_instance_id=item.luciel_instance_id,
             before={"active": was_active},
             after={"active": False},

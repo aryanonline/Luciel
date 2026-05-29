@@ -403,7 +403,6 @@ def create_invite(
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
             admin_id=admin_id,
-            domain_id=None,
             action=ACTION_USER_INVITED,
             resource_type=RESOURCE_USER_INVITE,
             resource_pk=None,  # UUID PK, use natural id
@@ -524,7 +523,6 @@ def redeem_invite(
             AdminAuditRepository(db).record(
                 ctx=audit_ctx,
                 admin_id=invite.admin_id,
-                domain_id=None,
                 action=ACTION_INVITE_REVOKED,  # closest existing verb for system-initiated expiry
                 resource_type=RESOURCE_USER_INVITE,
                 resource_pk=None,
@@ -602,8 +600,6 @@ def redeem_invite(
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
             admin_id=admin_id,
-            domain_id=None,
-            agent_id=None,
             action=ACTION_INVITE_REDEEMED,
             resource_type=RESOURCE_USER_INVITE,
             resource_pk=None,
@@ -715,7 +711,6 @@ def resend_invite(
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
             admin_id=invite.admin_id,
-            domain_id=None,
             action=ACTION_INVITE_RESENT,
             resource_type=RESOURCE_USER_INVITE,
             resource_pk=None,
@@ -803,7 +798,6 @@ def revoke_invite(
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
             admin_id=invite.admin_id,
-            domain_id=None,
             action=ACTION_INVITE_REVOKED,
             resource_type=RESOURCE_USER_INVITE,
             resource_pk=None,

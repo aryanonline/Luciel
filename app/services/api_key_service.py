@@ -266,10 +266,6 @@ class ApiKeyService:
             key_hash=hashed,
             key_prefix=raw_key[:12],
             admin_id=admin_id,
-            # Arc 12 EX1a — write NULL into legacy columns. A later EX-step
-            # drops the columns + their RLS references.
-            domain_id=None,
-            agent_id=None,
             luciel_instance_id=luciel_instance_id,   # Step 24.5
             display_name=display_name,
             permissions=permissions or ["chat", "sessions"],
@@ -349,12 +345,6 @@ class ApiKeyService:
             resource_type=RESOURCE_API_KEY,
             resource_pk=key_id,
             resource_natural_id=api_key.key_prefix,
-            # Arc 12 EX1a — audit row no longer carries the legacy
-            # domain_id / agent_id from the key-mint layer. The audit
-            # repository still accepts these kwargs (audit-chain layer
-            # is a separate EX-step); we pass None.
-            domain_id=None,
-            agent_id=None,
             luciel_instance_id=luciel_instance_id,
             after=audit_after,
             note=None,
@@ -432,11 +422,6 @@ class ApiKeyService:
             resource_type=RESOURCE_API_KEY,
             resource_pk=api_key.id,
             resource_natural_id=api_key.key_prefix,
-            # Arc 12 EX3 — domain_id / agent_id columns dropped from api_keys.
-            # The audit repository still accepts the kwargs (audit-chain layer
-            # is a separate EX-step); we pass None.
-            domain_id=None,
-            agent_id=None,
             luciel_instance_id=api_key.luciel_instance_id,
             before={"active": was_active},
             after={"active": False},

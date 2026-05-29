@@ -20,8 +20,10 @@ Why a dedicated table (vs. reusing Trace or CloudWatch logs):
 What gets captured:
 - WHO:   actor_key_prefix + actor_permissions JSON (never the raw key)
 - WHEN:  created_at (TimestampMixin)
-- WHERE: tenant_id / domain_id / agent_id / luciel_instance_id
-         (whichever apply to the resource)
+- WHERE: admin_id / luciel_instance_id (the v2 customer-data scoping
+         per Architecture §3.7.3 Wall 3; the legacy domain_id /
+         agent_id columns were excised by Arc 12 EX4 via a controlled
+         audit-chain reseal).
 - WHAT:  action verb + resource_type + resource_pk + resource_natural_id
 - DIFF:  before / after JSON — only the fields that actually changed
 
@@ -428,6 +430,23 @@ ACTION_SIBLING_GRANT_APPROVED = "sibling_grant_approved"
 ACTION_SIBLING_GRANT_REJECTED = "sibling_grant_rejected"
 ACTION_SIBLING_GRANT_REVOKED = "sibling_grant_revoked"
 
+# Arc 12 EX4 (founder-directed, LOCKED 2026-05-28) -- audit-chain reseal.
+#
+# ACTION_AUDIT_CHAIN_RESEALED -- emitted by the
+#   ``arc12_ex4_reseal_audit_chain_drop_agent_domain`` migration AFTER it
+#   recomputes row_hash/prev_row_hash for every historical
+#   admin_audit_logs row under the new canonical _CHAIN_FIELDS set (which
+#   omits the now-dropped domain_id/agent_id columns). The reseal record
+#   is itself chained under the NEW field set so the rewrite is
+#   traceable: actor = the migration runtime; after_json carries the
+#   row-count, the OLD vs. NEW field-set diff, and the reseal rationale
+#   ("Arc 12 EX4 founder decision; v1 three-layer scaffold excised").
+#   Distinct from every other action because the "actor" is the
+#   migration itself (no API caller), and because the row is the FIRST
+#   row in the v2 chain (its prev_row_hash equals the row_hash of the
+#   last v1 historical row AS RESEALED, not the v1 original).
+ACTION_AUDIT_CHAIN_RESEALED = "audit_chain_resealed"
+
 # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
 #
 # ACTION_SIBLING_ACCESS -- emitted by ``app.tools.sibling_dispatch`` on
@@ -591,6 +610,8 @@ ALLOWED_ACTIONS = (
     ACTION_SIBLING_GRANT_REVOKED,
     # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
     ACTION_SIBLING_ACCESS,
+    # Arc 12 EX4 -- one-time audit-chain reseal.
+    ACTION_AUDIT_CHAIN_RESEALED,
 )
 
 
@@ -811,12 +832,16 @@ class AdminAuditLog(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    domain_id: Mapped[str | None] = mapped_column(
-        String(100), nullable=True, index=True
-    )
-    agent_id: Mapped[str | None] = mapped_column(
-        String(100), nullable=True, index=True
-    )
+    # Arc 12 EX4 (founder-directed, LOCKED 2026-05-28): the legacy
+    # ``domain_id`` and ``agent_id`` Mapped columns were removed from
+    # this model. Migration arc12_ex4_reseal_audit_chain_drop_agent_domain
+    # RESEALS the entire hash chain under the new canonical field set
+    # (sans agent_id/domain_id) before physically dropping both columns
+    # plus their indexes (ix_admin_audit_logs_domain_id /
+    # ix_admin_audit_logs_agent_id). See arc12_specs/02_EXCISION_PLAN.md
+    # "EX4 FOUNDER DECISION (RESEAL — LOCKED)" for the integrity
+    # rationale. v2 customer-data scoping is admin_id +
+    # luciel_instance_id (Architecture §3.7.3 Wall 3).
     # Arc 10 Gap 7 (2026-05-27): loosened back to nullable. The Arc
     # 9.1 Phase A tenant-isolation seal applied NOT NULL too
     # broadly. Per Architecture v1 §3.7.3 (Wall 3), the non-null
@@ -863,7 +888,7 @@ class AdminAuditLog(Base, TimestampMixin):
     resource_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Natural identifier of the resource when it has one
-    # (agent_id slug, tenant_id slug, instance_id slug, key_prefix).
+    # (admin_id slug, instance_id slug, key_prefix, etc.).
     # Makes log queries human-readable without joins.
     resource_natural_id: Mapped[str | None] = mapped_column(
         String(200), nullable=True, index=True

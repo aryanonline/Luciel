@@ -187,8 +187,6 @@ class MemoryService:
                             resource_type=RESOURCE_MEMORY,
                             resource_pk=None,
                             resource_natural_id=None,
-                            domain_id=None,
-                            agent_id=None,
                             luciel_instance_id=luciel_instance_id,
                             after={
                                 "exc_type": type(exc).__name__,

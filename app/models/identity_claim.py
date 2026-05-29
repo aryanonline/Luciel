@@ -283,7 +283,7 @@ class IdentityClaim(Base):
         return (
             f"<IdentityClaim id={self.id} user_id={self.user_id} "
             f"type={self.claim_type.value} "
-            f"scope=({self.admin_id!r},{self.domain_id!r}) "
+            f"scope=({self.admin_id!r}) "
             f"adapter={self.issuing_adapter!r} "
             f"verified={self.verified_at is not None} "
             f"active={self.active}>"

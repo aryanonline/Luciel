@@ -65,6 +65,19 @@ also be applied to the migration; otherwise rows backfilled at
 migration time will not chain to rows inserted post-migration. To
 catch this drift, Pillar 23 recomputes hashes for ALL rows (not
 just new ones) and asserts they match what's stored.
+
+# Arc 12 EX4 reseal (founder-directed, LOCKED 2026-05-28)
+
+The migration ``arc12_ex4_reseal_audit_chain_drop_agent_domain``
+removes ``domain_id`` and ``agent_id`` from ``_CHAIN_FIELDS`` (above)
+AND RECOMPUTES row_hash/prev_row_hash for every historical
+admin_audit_logs row under the new field set, then DROPS the
+physical columns. After that migration, the chain re-verifies
+end-to-end under the new field set; the original v1 chain values
+are no longer recoverable from the row data alone. See the
+migration docstring for the integrity rationale and the audit
+record it emits (ACTION_AUDIT_CHAIN_RESEALED) to make the rewrite
+itself traceable.
 """
 from __future__ import annotations
 
@@ -90,8 +103,6 @@ GENESIS_PREV_HASH = "0" * 64
 # after deploy. Pillar 23 catches drift by recomputing every row.
 _CHAIN_FIELDS = (
     "admin_id",
-    "domain_id",
-    "agent_id",
     "luciel_instance_id",
     "actor_key_prefix",
     "actor_permissions",
@@ -104,6 +115,21 @@ _CHAIN_FIELDS = (
     "after_json",
     "note",
     "created_at",
+    # Arc 12 EX4 (founder-directed, LOCKED 2026-05-28): ``domain_id``
+    # and ``agent_id`` were removed from this tuple as part of the
+    # superseded v1 three-layer (tenant/domain/agent) scaffold excision.
+    # The migration arc12_ex4_reseal_audit_chain_drop_agent_domain
+    # RECOMPUTES row_hash/prev_row_hash for ALL historical
+    # admin_audit_logs rows under this new field set and then DROPS
+    # the physical ``admin_audit_logs.{domain_id,agent_id}`` columns.
+    # This is a deliberate, one-time integrity operation (the
+    # historical chain is rewritten, then re-verifiable end-to-end
+    # under the new field set). The reseal migration emits its own
+    # ACTION_AUDIT_CHAIN_RESEALED admin_audit_logs row under the new
+    # chain so the rewrite is itself traceable. See
+    # arc12_specs/02_EXCISION_PLAN.md "EX4 FOUNDER DECISION (RESEAL —
+    # LOCKED)" for the full rationale.
+    #
     # NOTE: ``tier_at_write`` is intentionally NOT in this tuple.
     # See _AUDIT_INTERNAL_COLUMNS in
     # tests/integrity/test_audit_chain_fields_in_sync.py for the

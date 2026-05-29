@@ -791,9 +791,6 @@ def toggle_luciel_instance_active_step29c(
         resource_type=RESOURCE_LUCIEL_INSTANCE,
         resource_pk=inst.id,
         resource_natural_id=inst.instance_slug,
-        # Arc 5 Path A — domain_id / agent_id no longer exist in V2.
-        domain_id=None,
-        agent_id=None,
         luciel_instance_id=inst.id,
         before={"active": previous_active},
         after={"active": requested_active},
