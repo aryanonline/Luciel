@@ -22,8 +22,8 @@ from pydantic import BaseModel, ConfigDict
 class MemoryRead(BaseModel):
     # Arc 12 EX1c — ``agent_id`` removed from the public projection.
     # V2 memory rows are admin + instance + user scoped (Architecture
-    # §3.7.3). The ``memory_items.agent_id`` column persists until EX3
-    # drops it; new rows are written with NULL (EX1b).
+    # §3.7.3). Arc 12 EX3 (``arc12_ex3_drop_memory_agent_id``) dropped
+    # the ``memory_items.agent_id`` column from the table.
     model_config = ConfigDict(from_attributes=True)
 
     id: int

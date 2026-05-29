@@ -8,10 +8,9 @@ no LLM calls, no business rules about what should be remembered.
 
 Memories are scoped to user + admin + luciel_instance (Wall-3 §3.7.3).
 Per Arc 12 EX1b excision (v2 = single Admin→Instance boundary, §3.7.2),
-agent_id is no longer a query-filter or a method parameter. The
-``MemoryItem.agent_id`` ORM column is still written via the legacy
-constructor path until EX3 drops the column; callers no longer
-supply a value and rows are inserted with agent_id=NULL.
+agent_id is no longer a query-filter or a method parameter. Arc 12 EX3
+(``arc12_ex3_drop_memory_agent_id``) dropped the column from
+``memory_items``; the ORM no longer carries an ``agent_id`` attribute.
 """
 
 from __future__ import annotations

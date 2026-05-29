@@ -57,8 +57,6 @@ class MemoryItem(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    agent_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
-    """Memories are scoped to user + tenant + agent so they stay isolated."""
 
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     """What kind of memory this is (preference, constraint, goal, fact, operational)."""
