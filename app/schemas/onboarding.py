@@ -109,11 +109,22 @@ class OnboardedTenantSummary(BaseModel):
 
 
 class OnboardedDomainSummary(BaseModel):
+    """Vestigial summary kept on the response shape for source-compat.
+
+    Arc 5 Path A collapsed the Domain layer; the onboarding flow no
+    longer creates a domain_config row and this model is never
+    instantiated (the response field defaults to None). Retained as a
+    typed placeholder so callers that decoded the legacy shape
+    tolerate the null without parse errors.
+
+    Arc 12 EX1c — ``domain_id`` field removed from the public
+    projection. Underlying ``domain_configs`` table is itself slated
+    for removal post-EX3.
+    """
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     admin_id: str
-    domain_id: str
     display_name: str
     active: bool
     created_at: datetime

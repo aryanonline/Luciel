@@ -143,70 +143,20 @@ def create_session(
 ) -> SessionRead:
     """Create a new session.
 
-    admin_id, domain_id, and agent_id come from the API key for
-    tenant-scoped callers. Platform-admin keys may target a different
-    tenant by passing admin_id in the body, but every cross-tenant
-    creation writes an ACTION_SESSION_CREATE_CROSS_TENANT audit row
-    first.
-    """
-    key_domain_id = getattr(request.state, "domain_id", None)
-    key_agent_id = getattr(request.state, "agent_id", None)
+    Arc 12 EX1c — V2 has a single Admin→Instance boundary
+    (Architecture §3.7.2 / §3.7.3). The session scope is (admin_id,
+    luciel_instance_id, session_id) per Walls 3/4. ``domain_id`` and
+    ``agent_id`` are no longer accepted from the API key state or
+    from the request body.
 
+    admin_id comes from the API key for tenant-scoped callers.
+    Platform-admin keys may target a different tenant by passing
+    admin_id in the body; every cross-tenant creation writes an
+    ACTION_SESSION_CREATE_CROSS_TENANT audit row first.
+    """
     effective_tenant_id, is_cross_tenant = _resolve_session_tenant(
         request, payload.admin_id
     )
-
-    domain_id = key_domain_id or payload.domain_id
-    agent_id = key_agent_id or payload.agent_id
-
-    if not domain_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="domain_id is required (from API key or request body)",
-        )
-
-    # Domain/agent locks: a tenant-scoped key with a specific domain
-    # cannot create a session under a different domain (same rule
-    # for agent). These checks are unchanged from pre-29.y.
-    if key_domain_id and payload.domain_id and payload.domain_id != key_domain_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"API key is locked to domain '{key_domain_id}'",
-        )
-    if key_agent_id and payload.agent_id and payload.agent_id != key_agent_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"API key is locked to agent '{key_agent_id}'",
-        )
-
-    # Audit FIRST for the privileged cross-tenant case. Tenant-scoped
-    # session creation is ordinary chat traffic and intentionally does
-    # NOT audit -- only the platform_admin override does, because that
-    # is the only operationally privileged path.
-    if is_cross_tenant:
-        key_tenant_id = getattr(request.state, "admin_id", None)
-        audit_repo.record(
-            ctx=audit_ctx,
-            admin_id=effective_tenant_id,
-            action=ACTION_SESSION_CREATE_CROSS_TENANT,
-            resource_type=RESOURCE_SESSION,
-            resource_pk=None,  # Not yet created.
-            resource_natural_id=None,
-            domain_id=domain_id,
-            # Arc 12 EX1b: agent_id no longer surfaced through to audit
-            # writes; admin_audit_log.agent_id stays in the hash chain
-            # (handled by EX4) but new rows record NULL.
-            agent_id=None,
-            before=None,
-            after={
-                "key_tenant_id": key_tenant_id,
-                "target_tenant_id": effective_tenant_id,
-                "user_id": payload.user_id,
-                "channel": payload.channel,
-            },
-            note="step-29y-c1-cross-tenant-session-create",
-            autocommit=False,
-        )
 
     # Arc 9.1 Phase A: sessions.luciel_instance_id is NOT NULL. The
     # auth middleware surfaces it from the API key. Tenant-scoped
@@ -230,13 +180,52 @@ def create_session(
                 ),
             },
         )
-    # Arc 12 EX1b: agent_id no longer threaded into SessionService;
-    # v2 sessions are admin+instance scoped (§3.7.2). Payload may still
-    # carry agent_id (SessionCreate schema is owned by api+schemas) but
-    # it is dropped at the service boundary here.
+
+    # Arc 12 EX1c — internal-only sentinel for the legacy NOT NULL
+    # ``sessions.domain_id`` column (EX3 owns relax/drop). The route
+    # no longer accepts domain_id at the boundary; per-Instance
+    # grouping on the legacy column is preserved by encoding the
+    # Instance pk.
+    _legacy_session_domain_sentinel = f"instance-{luciel_instance_id}"
+
+    # Audit FIRST for the privileged cross-tenant case. Tenant-scoped
+    # session creation is ordinary chat traffic and intentionally does
+    # NOT audit -- only the platform_admin override does, because that
+    # is the only operationally privileged path.
+    if is_cross_tenant:
+        key_tenant_id = getattr(request.state, "admin_id", None)
+        audit_repo.record(
+            ctx=audit_ctx,
+            admin_id=effective_tenant_id,
+            action=ACTION_SESSION_CREATE_CROSS_TENANT,
+            resource_type=RESOURCE_SESSION,
+            resource_pk=None,  # Not yet created.
+            resource_natural_id=None,
+            # Arc 12 EX1c: the audit row's legacy domain_id/agent_id
+            # columns are still in the canonical hash field set
+            # (EX4-owned reseal). New rows record NULL; we no longer
+            # propagate the request-side sentinel into the audit row
+            # because the audit row is supposed to record what the
+            # caller asked for, and the caller no longer asks for a
+            # domain_id.
+            domain_id=None,
+            agent_id=None,
+            before=None,
+            after={
+                "key_tenant_id": key_tenant_id,
+                "target_tenant_id": effective_tenant_id,
+                "user_id": payload.user_id,
+                "channel": payload.channel,
+            },
+            note="step-29y-c1-cross-tenant-session-create",
+            autocommit=False,
+        )
+
     session = service.create_session(
         admin_id=effective_tenant_id,
-        domain_id=domain_id,
+        # Arc 12 EX1c — internal sentinel only; not accepted from the
+        # API boundary. Removed once EX3 drops sessions.domain_id.
+        domain_id=_legacy_session_domain_sentinel,
         user_id=payload.user_id,
         channel=payload.channel,
         luciel_instance_id=luciel_instance_id,

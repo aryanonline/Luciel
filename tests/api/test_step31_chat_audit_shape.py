@@ -270,13 +270,12 @@ class TestAuditLogEmissions:
             "(at request entry, after scope checks)"
         )
         keys = _call_extra_keys(candidates[0])
-        # Arc 12 EX1b: agent_id is no longer emitted in the widget
-        # chat turn received audit event (v2 single Admin->Instance
-        # boundary, §3.7.2).
+        # Arc 12 EX1b/EX1c: agent_id and domain_id are no longer
+        # emitted in the widget chat turn received audit event (v2
+        # single Admin->Instance boundary, §3.7.2).
         required = {
             "event",
             "admin_id",
-            "domain_id",
             "luciel_instance_id",
             "embed_key_prefix",
             "message_length",
@@ -291,6 +290,10 @@ class TestAuditLogEmissions:
             "Arc 12 EX1b: widget_chat_turn_received must not surface "
             "agent_id."
         )
+        assert "domain_id" not in keys, (
+            "Arc 12 EX1c: widget_chat_turn_received must not surface "
+            "domain_id."
+        )
 
     def test_session_resolved_field_shape(self):
         src = WIDGET_ROUTE_PATH.read_text()
@@ -304,10 +307,11 @@ class TestAuditLogEmissions:
             "widget_chat_session_resolved must emit exactly once per turn"
         )
         keys = _call_extra_keys(candidates[0])
+        # Arc 12 EX1c: domain_id no longer emitted (v2 single
+        # Admin->Instance boundary, §3.7.2).
         required = {
             "event",
             "admin_id",
-            "domain_id",
             "session_id",
             "user_id",
             "conversation_id",
@@ -319,6 +323,10 @@ class TestAuditLogEmissions:
         assert not missing, (
             f"widget_chat_session_resolved extra={{}} missing keys: "
             f"{missing}"
+        )
+        assert "domain_id" not in keys, (
+            "Arc 12 EX1c: widget_chat_session_resolved must not "
+            "surface domain_id."
         )
 
     def test_turn_completed_field_shape_at_every_site(self):
@@ -337,10 +345,10 @@ class TestAuditLogEmissions:
             "widget_chat_turn_completed must emit at success AND at "
             "moderation-block sites (and may emit on error-interrupt)"
         )
+        # Arc 12 EX1c: domain_id no longer emitted.
         required = {
             "event",
             "admin_id",
-            "domain_id",
             "session_id",
             "latency_ms",
             "tokens_emitted",
@@ -352,6 +360,10 @@ class TestAuditLogEmissions:
             assert not missing, (
                 f"widget_chat_turn_completed call site #{i} extra={{}} "
                 f"missing keys: {missing}"
+            )
+            assert "domain_id" not in keys, (
+                f"Arc 12 EX1c: widget_chat_turn_completed call site "
+                f"#{i} must not surface domain_id."
             )
 
 

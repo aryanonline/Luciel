@@ -37,7 +37,6 @@ from app.repositories.admin_audit_repository import AdminAuditRepository, AuditC
 # Annotated annotation on the bootstrap-tenant route below is replaced
 # with ``object`` so the FastAPI dependency resolver still parses; the
 # B1 route-body sweep rewrites that route to not depend on AgentRepository.
-from app.schemas.agent import AgentBindUserPayload, AgentCreate, AgentRead, AgentUpdate
 from app.schemas.instance import (
     LucielInstanceCreate,
     LucielInstanceRead,
@@ -90,10 +89,6 @@ from app.schemas.api_key import (
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService
 from app.services.memory_admin_service import MemoryAdminService
-from app.services.scope_prompt_preflight import (
-    ScopePromptMissingError,
-    ScopePromptPreflight,
-)
 from app.schemas.memory import MemoryRead
 from app.policy.scope import ScopePolicy
 from app.models.instance import Instance as LucielInstance
@@ -516,13 +511,13 @@ def create_embed_key(
          these fields from the client; this is the only place they
          get set.
     """
-    # --- Arc 12 EX1a scope policy ----------------------------------
+    # --- Arc 12 EX1a/EX1c scope policy ------------------------------
     # V2 has a single Admin→Instance boundary (Architecture §3.7.2).
     # Embed-key issuance collapses to the cross-Admin guard. The
-    # legacy domain-scoped / agent-scoped caller carve-outs are gone
-    # — V2 has no such callers — but the EmbedKeyCreate schema still
-    # carries a ``domain_id`` field consumed by the widget runtime
-    # layer (a separate EX-step owns that surface).
+    # legacy domain-scoped / agent-scoped caller carve-outs are gone,
+    # and (EX1c) EmbedKeyCreate no longer carries a ``domain_id``
+    # field — the widget runtime resolves scope via
+    # ``luciel_instance_id`` alone.
     ScopePolicy.enforce_tenant_scope(request, payload.admin_id)
 
     # Step 31.2 commit B: lift the v1 luciel_instance_id carve-out.
@@ -554,23 +549,8 @@ def create_embed_key(
                     "tenant scope."
                 ),
             )
-        # Arc 5 Path A — V2 collapsed: the legacy domain-scoped embed-key
-        # cross-domain guard is gone (V2 has no Domain layer). The
-        # branch below is intentionally dead — the if-condition can
-        # never fire because the second predicate is ``None is not None``.
-        # Kept as a placeholder so the test harness diff stays small;
-        # the whole block is deleted in a follow-on cleanup.
-        if (
-            payload.domain_id is not None
-            and None is not None  # noqa: F632 — Path A intentional dead branch
-            and None != payload.domain_id  # noqa: F632
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "Luciel instance belongs to a different domain."
-                ),
-            )
+        # Arc 12 EX1c — V2 has no Domain layer; the dead cross-domain
+        # guard previously kept here (Arc 5 Path A) has been removed.
         if not instance.active:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -581,43 +561,16 @@ def create_embed_key(
                 ),
             )
 
-    # --- Scope-prompt preflight (Step 30d Deliverable A) ------------
-    # For domain-scoped mints, verify the target domain_configs row
-    # exists and has a non-empty system_prompt_additions BEFORE the
-    # api_keys row is inserted. We block at issuance time rather than
-    # at chat time so existing widget keys aren't retroactively bricked
-    # and operators get the failure during a controlled admin action
-    # rather than from a stranger's browser on a customer site
-    # (ARCHITECTURE §3.2.2 'Issuance').
-    #
-    # Tenant-wide mints (domain_id is None) skip the preflight because
-    # they are governed by TenantConfig.system_prompt at chat time; we
-    # surface a non-fatal warning on the response instead.
-    warnings: list[str] = []
-    if payload.domain_id is None:
-        warnings.append(
-            "Tenant-wide embed key minted; scope is governed by "
-            "TenantConfig.system_prompt at chat time, not by a "
-            "per-domain scope prompt."
-        )
-    else:
-        try:
-            ScopePromptPreflight.check(
-                db,
-                admin_id=payload.admin_id,
-                domain_id=payload.domain_id,
-            )
-        except ScopePromptMissingError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "error": "scope_prompt_missing",
-                    "reason": exc.reason,
-                    "admin_id": exc.admin_id,
-                    "domain_id": exc.domain_id,
-                    "message": str(exc),
-                },
-            ) from exc
+    # Arc 12 EX1c — V2 has a single Admin→Instance boundary
+    # (Architecture §3.7.2). The legacy per-domain
+    # ScopePromptPreflight gate is gone: every embed-key mint is
+    # tenant-wide (governed by TenantConfig.system_prompt at chat
+    # time) and is surfaced with the same non-fatal warning that
+    # used to fire on tenant-wide mints.
+    warnings: list[str] = [
+        "Tenant-wide embed key minted; scope is governed by "
+        "TenantConfig.system_prompt at chat time."
+    ]
 
     # --- Mint via ApiKeyService -------------------------------------
     # The four embed-only kwargs were added in commit (a). The audit
@@ -630,13 +583,10 @@ def create_embed_key(
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
         admin_id=payload.admin_id,
-        # Arc 12 EX1a — embed-key mint no longer threads agent_id /
-        # domain_id through the auth-layer key service. The widget
-        # runtime layer (separate EX-step) consumes
-        # EmbedKeyCreate.domain_id directly when wiring scope-prompt
-        # selection; the api_key row itself stores the row-level
-        # binding via luciel_instance_id and (later) an admin_id-only
-        # boundary.
+        # Arc 12 EX1a/EX1c — embed-key mint no longer threads
+        # agent_id / domain_id through any layer. The api_key row's
+        # binding is (admin_id, luciel_instance_id); the widget
+        # runtime scopes by the same axes.
         luciel_instance_id=payload.luciel_instance_id,
         display_name=payload.display_name,
         # Server-set: the schema does not accept these from the client.
@@ -983,7 +933,12 @@ def create_invite_route(  # noqa: D401
         request=request, db=db
     )
     admin_id = payload.admin_id or default_tenant_id
-    domain_id = payload.domain_id or default_domain_id
+    # Arc 12 EX1c — domain_id no longer accepted from the request body;
+    # resolved server-side from the cookied user's active scope so the
+    # legacy NOT NULL ``user_invites.domain_id`` insert (EX3-owned) is
+    # still satisfied. The cookied user's resolved scope is the only
+    # source of domain_id for the row.
+    domain_id = default_domain_id
 
     # Cross-tenant safety: a cookied user can only invite into their own
     # tenant unless they hold platform_admin (which a cookied session
@@ -1122,7 +1077,6 @@ def list_team_members_route(
         out.append(TeamMemberRead(
             scope_assignment_id=a.id,
             role=a.role,
-            domain_id=a.domain_id,
             started_at=a.started_at,
             active=a.active,
             user_id=user.id,

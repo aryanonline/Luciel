@@ -106,13 +106,17 @@ class KnowledgeUploadMeta(BaseModel):
 # ============================================================
 
 class KnowledgeRead(BaseModel):
-    """Single chunk row."""
+    """Single chunk row.
+
+    Arc 12 EX1c — public-contract field removal: ``domain_id`` and
+    ``agent_id`` no longer projected. V2 knowledge rows scope by
+    (admin_id, luciel_instance_id) (Architecture §3.7.3). Underlying
+    columns persist until EX3 drops them.
+    """
     model_config = ConfigDict(from_attributes=True, extra="ignore")
 
     id: int
     admin_id: str | None
-    domain_id: str | None
-    agent_id: str | None
     luciel_instance_id: int | None
 
     content: str

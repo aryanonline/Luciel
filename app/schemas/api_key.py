@@ -140,13 +140,17 @@ class ApiKeyCreate(BaseModel):
 
 
 class ApiKeyRead(BaseModel):
+    # Arc 12 EX1c — public-contract field removal: ``domain_id`` and
+    # ``agent_id`` are no longer projected on the admin-key read shape.
+    # V2 has a single Admin→Instance boundary (Architecture §3.7.2); the
+    # underlying columns persist (EX3 drops them) but the API surface no
+    # longer surfaces them. Frontends consuming ApiKeyRead must not read
+    # those fields.
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     key_prefix: str
     admin_id: str | None
-    domain_id: str | None
-    agent_id: str | None
     display_name: str
     permissions: list[str]
     rate_limit: int
@@ -297,14 +301,12 @@ class EmbedKeyCreate(BaseModel):
             "to prevent."
         ),
     )
-    domain_id: str | None = Field(
-        default=None,
-        max_length=100,
-        description=(
-            "Optional. When set, the key only resolves chat for that "
-            "domain within the tenant."
-        ),
-    )
+    # Arc 12 EX1c — ``domain_id`` removed from EmbedKeyCreate. In v2 embed
+    # keys bind to (admin_id, luciel_instance_id); the Domain layer was
+    # eliminated by Arc 5 Path A. EX1a flagged this field as left for the
+    # widget runtime layer; the widget now scope-resolves via
+    # luciel_instance_id alone (chat_widget.py synthesises the legacy
+    # sessions.domain_id sentinel internally until EX3 drops the column).
     luciel_instance_id: int | None = Field(
         default=None,
         gt=0,
@@ -424,10 +426,14 @@ class EmbedKeyRead(BaseModel):
     """Read-side projection of an embed key.
 
     Distinct from ApiKeyRead because the embed-key shape exposes the
-    four widget columns. ``agent_id`` is always NULL on embed keys at
-    v1 (the issuance route rejects it). ``luciel_instance_id`` MAY be
-    set per Step 31.2 commit B; we surface it on the read so the UI
-    can show 'this key is pinned to instance X'.
+    four widget columns. ``luciel_instance_id`` MAY be set per Step
+    31.2 commit B; we surface it on the read so the UI can show 'this
+    key is pinned to instance X'.
+
+    Arc 12 EX1c — public-contract field removal: ``domain_id`` is no
+    longer projected. V2 binds embed keys to (admin_id,
+    luciel_instance_id) only (Architecture §3.7.2). The underlying
+    ``api_keys.domain_id`` column persists until EX3 drops it.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -435,7 +441,6 @@ class EmbedKeyRead(BaseModel):
     id: int
     key_prefix: str
     admin_id: str
-    domain_id: str | None
     luciel_instance_id: int | None
     display_name: str
     key_kind: str
