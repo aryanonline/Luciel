@@ -196,8 +196,12 @@ def widget_chat_stream(
     _turn_start_monotonic = time.monotonic()
 
     admin_id = getattr(request.state, "admin_id", None)
-    domain_id = getattr(request.state, "domain_id", None)
-    agent_id = getattr(request.state, "agent_id", None)
+    # Arc 12 EX1c / EX3: the widget surface scopes by (admin_id,
+    # luciel_instance_id) only. EX1a stopped stamping request.state
+    # .agent_id / .domain_id; the widget no longer reads them and no
+    # longer routes on domain_id. Arc 12 EX3 dropped
+    # ``sessions.domain_id`` / ``sessions.agent_id`` at the schema
+    # level, so no sentinel is synthesised at the insert site.
     luciel_instance_id = getattr(request.state, "luciel_instance_id", None)
     embed_key_prefix = getattr(request.state, "key_prefix", None)
 
@@ -214,14 +218,9 @@ def widget_chat_stream(
             },
         )
 
-    # Arc 9.2 PR #99 — V2 vocab: embed keys MUST be Instance-scoped
-    # (the Domain layer was eliminated in Arc 5 Path A). If the key
-    # carries no luciel_instance_id we fail closed; if it does, but
-    # carries no legacy domain_id, we synthesise a sentinel value so
-    # sessions.domain_id (still NOT NULL — collapses in Arc 9.2 PR
-    # #101) gets a stable, traceable bind. This is a transitional
-    # bridge: when PR #101 makes sessions.domain_id nullable / drops
-    # it, the synthesis goes away with the column.
+    # Arc 12 EX1c — embed keys MUST be Instance-scoped in V2 (Domain
+    # layer eliminated by Arc 5 Path A). Fail closed when the key
+    # carries no luciel_instance_id.
     if luciel_instance_id is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -233,14 +232,6 @@ def widget_chat_stream(
                 ),
             },
         )
-    if domain_id is None:
-        # Derived sentinel so sessions.domain_id (still NOT NULL until
-        # Arc 9.2 PR #101) is satisfied. Encodes the Instance pk so
-        # legacy queries that ever filtered on this column remain
-        # uniquely groupable per Instance — i.e. no cross-Instance
-        # bleed via sessions.domain_id.
-        domain_id = f"instance-{luciel_instance_id}"
-
     # Arc 11 Closeout PR-A — instance lifecycle gating per Customer
     # Journey §4.5 Phase 8 ("Pause my Luciel" → widget renders an empty
     # <div>"). Return 204 No Content when the instance is not in the
@@ -280,8 +271,6 @@ def widget_chat_stream(
         extra={
             "event": "widget_chat_turn_received",
             "admin_id": admin_id,
-            "domain_id": domain_id,
-            "agent_id": agent_id,
             "luciel_instance_id": luciel_instance_id,
             "embed_key_prefix": embed_key_prefix,
             "message_length": len(payload.message),
@@ -314,8 +303,6 @@ def widget_chat_stream(
         from app.models.identity_claim import ClaimType
         result = session_service.create_session_with_identity(
             admin_id=admin_id,
-            domain_id=domain_id,
-            agent_id=agent_id,
             channel="widget",
             claim_type=ClaimType(payload.client_claim.claim_type.upper()),
             claim_value=payload.client_claim.claim_value,
@@ -337,8 +324,6 @@ def widget_chat_stream(
         # nothing was resolved; the session is anonymous.
         session = session_service.create_session(
             admin_id=admin_id,
-            domain_id=domain_id,
-            agent_id=agent_id,
             user_id=None,  # widget visitors are anonymous at v1
             channel="widget",
             luciel_instance_id=luciel_instance_id,
@@ -364,7 +349,6 @@ def widget_chat_stream(
         extra={
             "event": "widget_chat_session_resolved",
             "admin_id": admin_id,
-            "domain_id": domain_id,
             "session_id": session_id,
             "user_id": user_id_for_audit,
             "conversation_id": conversation_id_for_audit,
@@ -398,7 +382,6 @@ def widget_chat_stream(
             "widget_chat_stream: turn blocked by moderation gate",
             extra={
                 "admin_id": admin_id,
-                "domain_id": domain_id,
                 "session_id": session_id,
                 "categories": moderation.categories,
                 "provider": moderation.provider,
@@ -416,7 +399,6 @@ def widget_chat_stream(
             extra={
                 "event": "widget_chat_turn_completed",
                 "admin_id": admin_id,
-                "domain_id": domain_id,
                 "session_id": session_id,
                 "latency_ms": int(
                     (time.monotonic() - _turn_start_monotonic) * 1000
@@ -506,7 +488,6 @@ def widget_chat_stream(
                 extra={
                     "event": "widget_chat_turn_completed",
                     "admin_id": admin_id,
-                    "domain_id": domain_id,
                     "session_id": session_id,
                     "latency_ms": int(
                         (time.monotonic() - _turn_start_monotonic) * 1000
@@ -538,7 +519,6 @@ def widget_chat_stream(
                     extra={
                         "event": "widget_chat_turn_completed",
                         "admin_id": admin_id,
-                        "domain_id": domain_id,
                         "session_id": session_id,
                         "latency_ms": int(
                             (time.monotonic() - _turn_start_monotonic) * 1000

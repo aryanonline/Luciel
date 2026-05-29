@@ -60,9 +60,12 @@ class AdminAuditLogRead(BaseModel):
         )
 
     # WHERE
+    # Arc 12 EX1b: ``domain_id`` and ``agent_id`` removed from the
+    # forensic projection. The underlying columns persist on
+    # ``admin_audit_logs`` (canonical hash field set untouched -- EX4
+    # owns the chain reseal). v2 scoping is admin_id + luciel_instance_id
+    # per §3.7.2 / §3.7.3.
     admin_id: str
-    domain_id: str | None
-    agent_id: str | None
     luciel_instance_id: int | None
 
     # WHAT

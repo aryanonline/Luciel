@@ -20,8 +20,10 @@ Why a dedicated table (vs. reusing Trace or CloudWatch logs):
 What gets captured:
 - WHO:   actor_key_prefix + actor_permissions JSON (never the raw key)
 - WHEN:  created_at (TimestampMixin)
-- WHERE: tenant_id / domain_id / agent_id / luciel_instance_id
-         (whichever apply to the resource)
+- WHERE: admin_id / luciel_instance_id (the v2 customer-data scoping
+         per Architecture §3.7.3 Wall 3; the legacy domain_id /
+         agent_id columns were excised by Arc 12 EX4 via a controlled
+         audit-chain reseal).
 - WHAT:  action verb + resource_type + resource_pk + resource_natural_id
 - DIFF:  before / after JSON — only the fields that actually changed
 
@@ -391,6 +393,98 @@ ACTION_EMAIL_SUPPRESSION_RECORDED = "email_suppression_recorded"
 ACTION_EMAIL_SUPPRESSION_CLEARED = "email_suppression_cleared"
 ACTION_EMAIL_SEND_EVENT_RECEIVED = "email_send_event_received"
 
+# Arc 12 WU4 -- sibling-Luciel composition grant lifecycle.
+#
+# A sibling-call grant authorises one Instance to invoke
+# ``call_sibling_luciel`` against another Instance under the same
+# Admin (Architecture v1 §3.3.4). The four verbs below are the full
+# auditable arc:
+#
+# ACTION_SIBLING_GRANT_AUTHORED  -- a user authored a new grant.
+#   On Pro, the grant lands ``approval_state='live'`` immediately;
+#   on Enterprise, ``approval_state='pending_approval'`` until an
+#   admin_owner approves. The author MUST hold role+scope on BOTH
+#   the caller and the callee Instance (Wall 2 at the sibling layer).
+# ACTION_SIBLING_GRANT_APPROVED  -- an admin_owner approved a
+#   pending Enterprise grant, flipping ``approval_state`` to
+#   ``live`` and stamping approved_by_user_id + approved_at.
+#   Distinct from ACTION_SIBLING_GRANT_AUTHORED so a regulator
+#   scanning the chain by verb can distinguish "who authored" from
+#   "who approved" -- the Wall-2 split between proposal and ratify.
+# ACTION_SIBLING_GRANT_REJECTED  -- an admin_owner rejected a
+#   pending grant. Distinct from ACTION_SIBLING_GRANT_REVOKED
+#   because reject is a pre-live terminal transition (the grant
+#   never went live), whereas revoke withdraws an already-live (or
+#   pending) grant. Both flip ``approval_state`` to 'revoked' and
+#   stamp revoked_at, but the verb captures the difference.
+# ACTION_SIBLING_GRANT_REVOKED   -- a live or pending grant was
+#   withdrawn. Emitted by the explicit revoke API AND by the
+#   instance-deactivation cascade (§3.6.1 step 3): when an Instance
+#   is deactivated, every grant where the Instance appears as
+#   caller OR callee flips to 'revoked' in the same transaction
+#   with one of these audit rows per grant. The before/after_json
+#   carries the cascade source so an auditor can distinguish
+#   operator-revoke from cascade-revoke.
+ACTION_SIBLING_GRANT_AUTHORED = "sibling_grant_authored"
+ACTION_SIBLING_GRANT_APPROVED = "sibling_grant_approved"
+ACTION_SIBLING_GRANT_REJECTED = "sibling_grant_rejected"
+ACTION_SIBLING_GRANT_REVOKED = "sibling_grant_revoked"
+
+# Arc 12 WU2b -- per-instance tool authorization admin API
+# (Architecture §3.3.1/§3.3.2 catalog + WU2 default-deny gate).
+#
+# ACTION_TOOL_AUTHORIZED -- a user authorised one of the 8 v1 catalog
+#   tools on an Instance via the admin tools API. Emits a row whose
+#   resource_type=RESOURCE_INSTANCE_TOOL_AUTHORIZATION, resource_pk
+#   = the new instance_tool_authorizations.id, resource_natural_id
+#   = "{instance_id}:{tool_id}" so an auditor can answer "every event
+#   for tool X on Instance Y" with a single filter. after_json carries
+#   {tool_id, enabled, authorized_by_user_id, tier_at_authorize}.
+#   Wall-1 + Wall-3 are scoped via (admin_id, instance_id); Wall-2
+#   (role gate) is enforced at the route layer (owner/manager only).
+# ACTION_TOOL_REVOKED -- the symmetric verb for the soft-revoke of a
+#   live authorization row. before_json carries the prior {enabled}
+#   state; after_json carries {revoked_at}. The admin tools API is
+#   idempotent against missing rows: a revoke against no-live-row is
+#   a 404 surfaced to the operator (not an audit emission).
+ACTION_TOOL_AUTHORIZED = "tool_authorized"
+ACTION_TOOL_REVOKED = "tool_revoked"
+
+# Arc 12 EX4 (founder-directed, LOCKED 2026-05-28) -- audit-chain reseal.
+#
+# ACTION_AUDIT_CHAIN_RESEALED -- emitted by the
+#   ``arc12_ex4_reseal_audit_chain_drop_agent_domain`` migration AFTER it
+#   recomputes row_hash/prev_row_hash for every historical
+#   admin_audit_logs row under the new canonical _CHAIN_FIELDS set (which
+#   omits the now-dropped domain_id/agent_id columns). The reseal record
+#   is itself chained under the NEW field set so the rewrite is
+#   traceable: actor = the migration runtime; after_json carries the
+#   row-count, the OLD vs. NEW field-set diff, and the reseal rationale
+#   ("Arc 12 EX4 founder decision; v1 three-layer scaffold excised").
+#   Distinct from every other action because the "actor" is the
+#   migration itself (no API caller), and because the row is the FIRST
+#   row in the v2 chain (its prev_row_hash equals the row_hash of the
+#   last v1 historical row AS RESEALED, not the v1 original).
+ACTION_AUDIT_CHAIN_RESEALED = "audit_chain_resealed"
+
+# Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
+#
+# ACTION_SIBLING_ACCESS -- emitted by ``app.tools.sibling_dispatch`` on
+#   every authorised invocation of ``call_sibling_luciel`` AFTER the
+#   five-check dispatch path has passed (cycle detection, fan-out
+#   budget, master switch on both endpoints, live grant lookup). This
+#   is the Wall-3 composition exception row (§3.7.3): a dispatch that
+#   names BOTH the caller and the callee instance under one admin.
+#   ``luciel_instance_id`` carries the CALLER instance (the originating
+#   Luciel for this hop). ``after_json`` carries the callee, the
+#   inbound_message_id chaining customer-message -> sibling-invocations
+#   -> final-response, the depth in the call stack, the fan-out
+#   counter after this hop, and the live grant id. The audit row is
+#   written BEFORE the Arc-14 orchestrator round-trip plug-in seam
+#   so a regulator scanning the chain can reconstruct the composition
+#   tree even if the round-trip itself is interim-bodied.
+ACTION_SIBLING_ACCESS = "sibling_access"
+
 # Arc 5 B5 -- V2 Admin/Instance lifecycle verbs.
 #
 # Per the aggressive-cleanup amendment
@@ -529,6 +623,18 @@ ALLOWED_ACTIONS = (
     ACTION_INSTANCE_DELETED,
     ACTION_INSTANCE_RESTORED,
     ACTION_INSTANCE_HARD_PURGED,
+    # Arc 12 WU4 -- sibling-Luciel composition grant lifecycle.
+    ACTION_SIBLING_GRANT_AUTHORED,
+    ACTION_SIBLING_GRANT_APPROVED,
+    ACTION_SIBLING_GRANT_REJECTED,
+    ACTION_SIBLING_GRANT_REVOKED,
+    # Arc 12 WU2b -- per-instance tool authorization admin API.
+    ACTION_TOOL_AUTHORIZED,
+    ACTION_TOOL_REVOKED,
+    # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
+    ACTION_SIBLING_ACCESS,
+    # Arc 12 EX4 -- one-time audit-chain reseal.
+    ACTION_AUDIT_CHAIN_RESEALED,
 )
 
 
@@ -618,6 +724,22 @@ RESOURCE_EMAIL_SEND_EVENT = "email_send_event"
 # resource_natural_id = knowledge_sources.source_uuid (string form).
 RESOURCE_KNOWLEDGE_SOURCE = "knowledge_source"
 
+# Arc 12 WU4 -- sibling_call_grants row (Architecture §3.3.4). The
+# auditable resource for the four sibling-grant lifecycle verbs
+# (ACTION_SIBLING_GRANT_AUTHORED / _APPROVED / _REJECTED / _REVOKED).
+# resource_pk = sibling_call_grants.id; resource_natural_id =
+# "{caller_instance_id}->{callee_instance_id}" so an auditor can
+# answer "every event involving the A->B edge" with a single filter.
+RESOURCE_SIBLING_CALL_GRANT = "sibling_call_grant"
+
+# Arc 12 WU2b -- instance_tool_authorizations row. The auditable
+# resource for the per-instance tool authorize/revoke admin API.
+# resource_pk = instance_tool_authorizations.id;
+# resource_natural_id = "{instance_id}:{tool_id}" so an auditor can
+# answer "every authorize/revoke event for tool X on Instance Y"
+# with a single filter.
+RESOURCE_INSTANCE_TOOL_AUTHORIZATION = "instance_tool_authorization"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -649,6 +771,10 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_INSTANCE,
     # Arc 11 Step 7 -- knowledge_sources row.
     RESOURCE_KNOWLEDGE_SOURCE,
+    # Arc 12 WU4 -- sibling_call_grants row (§3.3.4).
+    RESOURCE_SIBLING_CALL_GRANT,
+    # Arc 12 WU2b -- instance_tool_authorizations row.
+    RESOURCE_INSTANCE_TOOL_AUTHORIZATION,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
@@ -739,12 +865,16 @@ class AdminAuditLog(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    domain_id: Mapped[str | None] = mapped_column(
-        String(100), nullable=True, index=True
-    )
-    agent_id: Mapped[str | None] = mapped_column(
-        String(100), nullable=True, index=True
-    )
+    # Arc 12 EX4 (founder-directed, LOCKED 2026-05-28): the legacy
+    # ``domain_id`` and ``agent_id`` Mapped columns were removed from
+    # this model. Migration arc12_ex4_reseal_audit_chain_drop_agent_domain
+    # RESEALS the entire hash chain under the new canonical field set
+    # (sans agent_id/domain_id) before physically dropping both columns
+    # plus their indexes (ix_admin_audit_logs_domain_id /
+    # ix_admin_audit_logs_agent_id). See arc12_specs/02_EXCISION_PLAN.md
+    # "EX4 FOUNDER DECISION (RESEAL — LOCKED)" for the integrity
+    # rationale. v2 customer-data scoping is admin_id +
+    # luciel_instance_id (Architecture §3.7.3 Wall 3).
     # Arc 10 Gap 7 (2026-05-27): loosened back to nullable. The Arc
     # 9.1 Phase A tenant-isolation seal applied NOT NULL too
     # broadly. Per Architecture v1 §3.7.3 (Wall 3), the non-null
@@ -791,7 +921,7 @@ class AdminAuditLog(Base, TimestampMixin):
     resource_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Natural identifier of the resource when it has one
-    # (agent_id slug, tenant_id slug, instance_id slug, key_prefix).
+    # (admin_id slug, instance_id slug, key_prefix, etc.).
     # Makes log queries human-readable without joins.
     resource_natural_id: Mapped[str | None] = mapped_column(
         String(200), nullable=True, index=True

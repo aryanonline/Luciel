@@ -91,19 +91,29 @@ ROUTER_FNS = _functions(ROUTER_TREE)
 
 
 class TestModuleSurface:
-    """The three handler functions, the DI helper, and the router
-    object must exist with the documented names. Sub-branch 4 + Step 32
+    """The handler function, the DI helper, and the router object
+    must exist with the documented names. Sub-branch 4 + Step 32
     import from these names; renaming them is a breaking contract change.
+
+    Arc 12 EX1c — V2 has a single Admin→Instance boundary
+    (Architecture §3.7.2). The legacy ``get_domain_dashboard`` /
+    ``get_agent_dashboard`` HTTP handlers were removed; the
+    instance-scoped rollup is surfaced via ``top_luciel_instances``
+    on the tenant envelope. We pin both the surviving handler's
+    presence and the legacy handlers' absence.
     """
 
     def test_handlers_present(self):
-        for name in (
-            "get_tenant_dashboard",
-            "get_domain_dashboard",
-            "get_agent_dashboard",
-        ):
-            assert name in ROUTER_FNS, (
-                f"Handler `{name}` missing from app/api/v1/dashboard.py"
+        assert "get_tenant_dashboard" in ROUTER_FNS, (
+            "Handler `get_tenant_dashboard` missing from "
+            "app/api/v1/dashboard.py"
+        )
+
+    def test_legacy_domain_agent_handlers_removed(self):
+        for name in ("get_domain_dashboard", "get_agent_dashboard"):
+            assert name not in ROUTER_FNS, (
+                f"Arc 12 EX1c: handler `{name}` must be removed "
+                "(V2 single Admin→Instance boundary, §3.7.2)."
             )
 
     def test_di_helper_present(self):
@@ -170,25 +180,23 @@ class TestEndpointWiring:
             "otherwise the service runs against an unauthorized scope"
         )
 
-    def test_domain_handler_path_and_policy(self):
-        fn = ROUTER_FNS["get_domain_dashboard"]
-        assert "/domain/{domain_id}" in _decorator_paths(fn)
-        names = [f"{o}.{a}" for o, a in _calls_in(fn)]
-        assert "ScopePolicy.enforce_domain_scope" in names
-        assert "service.get_domain_dashboard" in names
-        assert names.index("ScopePolicy.enforce_domain_scope") < names.index(
-            "service.get_domain_dashboard"
-        )
-
-    def test_agent_handler_path_and_policy(self):
-        fn = ROUTER_FNS["get_agent_dashboard"]
-        assert "/agent/{agent_id}" in _decorator_paths(fn)
-        names = [f"{o}.{a}" for o, a in _calls_in(fn)]
-        assert "ScopePolicy.enforce_agent_scope" in names
-        assert "service.get_agent_dashboard" in names
-        assert names.index("ScopePolicy.enforce_agent_scope") < names.index(
-            "service.get_agent_dashboard"
-        )
+    def test_legacy_domain_agent_paths_removed(self):
+        """Arc 12 EX1c: the legacy ``/domain/{domain_id}`` and
+        ``/agent/{agent_id}`` routes must not appear anywhere in the
+        dashboard module. V2 single Admin→Instance boundary (§3.7.2).
+        """
+        src = ROUTER_PATH.read_text()
+        # Search for the literal route-path strings used in decorators.
+        for legacy_path in (
+            '"/domain/{domain_id}"',
+            "'/domain/{domain_id}'",
+            '"/agent/{agent_id}"',
+            "'/agent/{agent_id}'",
+        ):
+            assert legacy_path not in src, (
+                f"Arc 12 EX1c: legacy dashboard route {legacy_path} "
+                "must be removed (V2 §3.7.2)."
+            )
 
 
 # --------------------------------------------------------------------- #
@@ -232,11 +240,7 @@ class TestRateLimit:
     def test_tenant_handler_rate_limited(self):
         assert self._has_limiter(ROUTER_FNS["get_tenant_dashboard"])
 
-    def test_domain_handler_rate_limited(self):
-        assert self._has_limiter(ROUTER_FNS["get_domain_dashboard"])
-
-    def test_agent_handler_rate_limited(self):
-        assert self._has_limiter(ROUTER_FNS["get_agent_dashboard"])
+    # Arc 12 EX1c: get_domain_dashboard / get_agent_dashboard removed.
 
 
 # --------------------------------------------------------------------- #
@@ -262,11 +266,8 @@ class TestEnvelopeShape:
         assert "from dataclasses import asdict" in src
 
     def test_each_handler_returns_envelope(self):
-        for name in (
-            "get_tenant_dashboard",
-            "get_domain_dashboard",
-            "get_agent_dashboard",
-        ):
+        # Arc 12 EX1c: only get_tenant_dashboard remains.
+        for name in ("get_tenant_dashboard",):
             fn = ROUTER_FNS[name]
             src = ast.unparse(fn)
             assert "_to_envelope(result)" in src, (
@@ -410,11 +411,8 @@ class TestLiveImport:
     def test_handlers_take_request_first(self):
         from app.api.v1 import dashboard
 
-        for name in (
-            "get_tenant_dashboard",
-            "get_domain_dashboard",
-            "get_agent_dashboard",
-        ):
+        # Arc 12 EX1c: only get_tenant_dashboard remains.
+        for name in ("get_tenant_dashboard",):
             fn = getattr(dashboard, name)
             sig = inspect.signature(fn)
             params = list(sig.parameters.values())

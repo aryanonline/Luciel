@@ -6,7 +6,7 @@ the message-history thread on SessionModel.messages). Where the per-session
 retriever answers "what did THIS session say recently?", the cross-session
 retriever answers:
 
-    Given the active session's (conversation_id, admin_id, domain_id),
+    Given the active session's (conversation_id, admin_id),
     what are the N most recent messages from SIBLING sessions under the
     same conversation, ordered by recency, capped by a per-call budget?
 
@@ -15,13 +15,21 @@ source_channel, timestamp) that the runtime layer threads into the
 foundation-model context as the cross-session leg of memory retrieval.
 
 Scope filtering happens INSIDE the retriever, not at the caller. The
-retriever refuses to return a row whose admin_id / domain_id does not
-match the calling scope, even if the same conversation_id is shared
-across scopes — which it cannot be, by the conversations-table FK, but
-the retriever asserts it anyway. Defense in depth, same discipline as
+retriever refuses to return a row whose admin_id does not match the
+calling scope, even if the same conversation_id is shared across
+scopes — which it cannot be, by the conversations-table FK, but the
+retriever asserts it anyway. Defense in depth, same discipline as
 ARCHITECTURE §4.7. This is the FOURTH check in the scope-enforcement
 chain (the first three live at the auth surface, the runtime scope
 resolver, and the persistence layer's row writes).
+
+Arc 12 EX1d (founder-directed agent_id/domain_id excision): the v1
+``domain_id`` parameter is removed from the retriever surface. v2 has
+a single Admin→Instance boundary (Architecture §3.7.2). Arc 12 EX3
+subsequently dropped ``sessions.domain_id`` / ``sessions.agent_id`` at
+the schema level, so the column is gone from the ORM as well. The
+retriever is feature-flag-gated OFF at v1 (§3.5.2 / §5.6), so removing
+the filter has no production behaviour impact.
 
 Shape contract (ARCHITECTURE §3.2.11, §3.2.6):
     The retriever takes the same shape as every other memory retriever
@@ -123,7 +131,6 @@ class CrossSessionRetriever:
         *,
         conversation_id: uuid.UUID,
         admin_id: str,
-        domain_id: str,
         limit: int = 20,
         exclude_session_id: str | None = None,
     ) -> list[CrossSessionPassage]:
@@ -137,9 +144,6 @@ class CrossSessionRetriever:
             admin_id:       The natural-key tenant scope. Asserted on
                 EVERY returned row's session.admin_id; mismatched
                 rows are dropped (defense-in-depth, §4.7).
-            domain_id:       The natural-key domain scope. Asserted on
-                EVERY returned row's session.domain_id; mismatched
-                rows are dropped.
             limit:           Maximum number of passages to return.
                 Clamped to [1, MAX_LIMIT]. Values outside the range
                 are normalised silently; a misconfigured caller does
@@ -161,7 +165,7 @@ class CrossSessionRetriever:
                 Defense against string-typing creeping in from older
                 routes — fail loudly at the boundary, not silently
                 via SQL-side coercion.
-            ValueError: if admin_id or domain_id is empty / whitespace.
+            ValueError: if admin_id is empty / whitespace.
                 A blank scope assertion is never legitimate; refusing it
                 here prevents a "match anything in admin_id" bug class.
         """
@@ -173,8 +177,6 @@ class CrossSessionRetriever:
             )
         if not admin_id or not admin_id.strip():
             raise ValueError("admin_id must be a non-empty string")
-        if not domain_id or not domain_id.strip():
-            raise ValueError("domain_id must be a non-empty string")
 
         # ---- Arc 9.1 Phase D1 feature-flag gate (G1) -----------------
         #
@@ -232,7 +234,6 @@ class CrossSessionRetriever:
         # JOIN: messages → sessions ON sessions.id = messages.session_id.
         # Scope: sessions.conversation_id = X
         #        AND sessions.admin_id = X
-        #        AND sessions.domain_id = X
         # Optional exclusion: sessions.id != exclude_session_id.
         # Order: messages.created_at DESC (newest first; recency-ranking
         #        is v1 — see module docstring).
@@ -243,7 +244,6 @@ class CrossSessionRetriever:
             .where(
                 SessionModel.conversation_id == conversation_id,
                 SessionModel.admin_id == admin_id,
-                SessionModel.domain_id == domain_id,
             )
             .order_by(MessageModel.created_at.desc())
             .limit(effective_limit)
@@ -273,7 +273,6 @@ class CrossSessionRetriever:
         for message, session in rows:
             if (
                 session.admin_id != admin_id
-                or session.domain_id != domain_id
                 or session.conversation_id != conversation_id
             ):
                 # Should be impossible via the WHERE clause. Log
@@ -282,10 +281,10 @@ class CrossSessionRetriever:
                 dropped += 1
                 logger.error(
                     "cross_session_retriever scope mismatch (defense-in-depth "
-                    "drop): asked tenant=%s domain=%s conv=%s, got "
-                    "session=%s tenant=%s domain=%s conv=%s",
-                    admin_id, domain_id, str(conversation_id),
-                    session.id, session.admin_id, session.domain_id,
+                    "drop): asked tenant=%s conv=%s, got "
+                    "session=%s tenant=%s conv=%s",
+                    admin_id, str(conversation_id),
+                    session.id, session.admin_id,
                     str(session.conversation_id)
                     if session.conversation_id else None,
                 )
@@ -307,8 +306,8 @@ class CrossSessionRetriever:
             # This is the metric an operator would alert on.
             logger.error(
                 "cross_session_retriever dropped %d row(s) on post-query "
-                "scope check for conversation=%s tenant=%s domain=%s",
-                dropped, str(conversation_id), admin_id, domain_id,
+                "scope check for conversation=%s tenant=%s",
+                dropped, str(conversation_id), admin_id,
             )
 
         return passages

@@ -1,0 +1,380 @@
+"""Tool authorisation — Arc 12 WU2.
+
+The broker default-deny gate, factored into its own module so:
+
+  * the broker stays focused on dispatch / classification / schema
+    validation;
+  * Arc 14's agentic loop has a single, documented seam to construct
+    or extend the authoriser (cycle accounting, fan-out budget, etc.
+    bolt on here);
+  * tests can inject a synthetic authoriser without monkey-patching
+    the broker.
+
+Stable interface (KEEP THIS SIGNATURE)
+--------------------------------------
+
+``ToolAuthorizer.authorize(tool, context) -> AuthorizationDecision``
+
+* ``tool``     — the ``LucielTool`` the broker is about to dispatch.
+* ``context``  — the immutable ``ToolContext`` the broker constructed
+  for this invocation. Carries ``admin_id`` + ``instance_id`` (and,
+  per WU1, optional ``session`` + ``inbound_message_id``).
+
+Returns an ``AuthorizationDecision``:
+
+* ``allowed: bool``           — True ⇒ proceed; False ⇒ refuse.
+* ``reason: str``             — short machine-readable code; the broker
+                                surfaces this in the structured
+                                tool-error metadata.
+* ``message: str``            — admin-facing description.
+* ``failure_kind: str``       — one of:
+    - ``"unauthorized"``         (no live row / disabled / revoked)
+    - ``"tier_not_permitted"``   (tool.requires_tier rejects admin tier)
+    - ``"channel_not_enabled"``  (tool.requires_channels not satisfied)
+    - ``""``                     (when ``allowed=True``)
+
+Arc 14 will compose additional checks (cycle detection for
+``call_sibling_luciel``, fan-out budget across the composition tree)
+on top of this interface — the dispatch contract MUST remain stable.
+
+Tier + channel structural checks (WU2 founder ruling)
+-----------------------------------------------------
+
+The WU2 brief asks the broker to enforce ``requires_tier`` and
+``requires_channels`` at this gate if the data is available, and to
+leave a clearly-marked ``TODO(ARC14)`` if it is not. ``ToolContext``
+WU1-as-shipped does NOT carry the admin's tier or the enabled
+channel set. We therefore:
+
+  * Implement the *structural* check points here so the wiring is in
+    place — methods ``_check_tier`` and ``_check_channels`` are
+    plumbed through ``authorize`` and gated on the (currently absent)
+    context fields.
+  * When the data is absent (the WU2 baseline), tier and channel
+    enforcement *skip* and emit a debug log message so a maintainer
+    knows the gate is structurally live but data-blind. The
+    authorisation-row check (the load-bearing part of WU2) is
+    enforced unconditionally.
+  * The relevant TODOs anchor at ``TODO(ARC14)`` — when Arc 14
+    threads admin tier and enabled channels onto the ``ToolContext``
+    (or onto the authorisation row itself), the checks switch on.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Optional, Protocol
+
+from app.tools.base import LucielTool, ToolContext
+
+logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# Public decision shape
+# =====================================================================
+
+
+@dataclass(frozen=True)
+class AuthorizationDecision:
+    """Result of an authorisation check.
+
+    The broker translates an ``allowed=False`` decision into a
+    structured ``ToolResult(success=False, ...)`` whose metadata
+    carries the reason + failure_kind so the runtime layer and
+    audit row construction can branch.
+    """
+
+    allowed: bool
+    reason: str
+    message: str
+    failure_kind: str = ""
+
+    @classmethod
+    def allow(cls) -> "AuthorizationDecision":
+        return cls(
+            allowed=True,
+            reason="authorized",
+            message="",
+            failure_kind="",
+        )
+
+    @classmethod
+    def deny(
+        cls, *, reason: str, message: str, failure_kind: str = "unauthorized"
+    ) -> "AuthorizationDecision":
+        return cls(
+            allowed=False,
+            reason=reason,
+            message=message,
+            failure_kind=failure_kind,
+        )
+
+
+# =====================================================================
+# Stable interface — Arc 14 will compose on top of this
+# =====================================================================
+
+
+class ToolAuthorizer(Protocol):
+    """Stable interface the broker calls before dispatch.
+
+    Implementations:
+      * ``DefaultDenyToolAuthorizer``  — production WU2 path. Looks
+        up the live row in ``instance_tool_authorizations`` via the
+        repository and refuses if absent / revoked / disabled.
+      * Test doubles construct ``AuthorizationDecision`` directly.
+      * Arc 14 will subclass / wrap ``DefaultDenyToolAuthorizer`` to
+        add cycle detection and fan-out budget — KEEP this method
+        signature stable.
+    """
+
+    def authorize(
+        self, tool: LucielTool, context: ToolContext
+    ) -> AuthorizationDecision: ...
+
+
+# =====================================================================
+# Production implementation — default-deny on the live row
+# =====================================================================
+
+
+class DefaultDenyToolAuthorizer:
+    """Default-deny authoriser backed by ``instance_tool_authorizations``.
+
+    Construct with a session-getter callable so the broker can stay
+    framework-agnostic (FastAPI dependency injection writes sessions
+    to ``ctx.session``; the unit tests build a session and pass it
+    in directly). If ``ctx.session`` is ``None`` and no session
+    getter is configured, the authoriser refuses — there is no
+    silent-allow path.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_factory: "Optional[callable]" = None,  # type: ignore[name-defined]
+    ) -> None:
+        """``session_factory`` is an optional zero-arg callable that
+        returns a SQLAlchemy ``Session`` to use when ``ctx.session``
+        is not provided. In production the API deps fill ``ctx.session``
+        directly so this fallback is rarely used; tests and the
+        worker path use it."""
+        self._session_factory = session_factory
+
+    # ------------------------------------------------------------------
+    # Stable entry point
+    # ------------------------------------------------------------------
+
+    def authorize(
+        self, tool: LucielTool, context: ToolContext
+    ) -> AuthorizationDecision:
+        # 1. Load-bearing: the per-instance authorisation row check.
+        row_decision = self._check_row(tool, context)
+        if not row_decision.allowed:
+            return row_decision
+
+        # 2. Structural check point: tier enforcement.
+        #    TODO(ARC14): wire the admin's tier into ToolContext (or
+        #    surface it on the authorisation row payload) so this
+        #    check can switch on. Until then the check skips with a
+        #    debug log — see module docstring.
+        tier_decision = self._check_tier(tool, context)
+        if not tier_decision.allowed:
+            return tier_decision
+
+        # 3. Structural check point: channel enforcement.
+        #    TODO(ARC14): wire the per-instance enabled-channel set
+        #    into ToolContext (or onto the authorisation row config)
+        #    so this check can switch on. Until then the check skips
+        #    on instances with no channel data — see module docstring.
+        channel_decision = self._check_channels(tool, context)
+        if not channel_decision.allowed:
+            return channel_decision
+
+        return AuthorizationDecision.allow()
+
+    # ------------------------------------------------------------------
+    # Step 1 — the load-bearing row lookup
+    # ------------------------------------------------------------------
+
+    def _check_row(
+        self, tool: LucielTool, context: ToolContext
+    ) -> AuthorizationDecision:
+        # Default-deny: empty admin_id / instance_id (the WU1
+        # placeholder context) refuses immediately. This catches
+        # call sites that forgot to thread a real ToolContext.
+        if not context.admin_id or not context.instance_id:
+            return AuthorizationDecision.deny(
+                reason="no_tool_context",
+                message=(
+                    "Tool dispatch refused: no admin/instance context "
+                    "supplied. Per Arc 12 WU2 every invocation must "
+                    "carry an explicit ToolContext."
+                ),
+                failure_kind="unauthorized",
+            )
+
+        # Fetch the session — prefer the one threaded onto ctx; fall
+        # back to the session_factory if configured. If neither is
+        # present, refuse — there is no silent-allow path.
+        session = context.session
+        owns_session = False
+        if session is None and self._session_factory is not None:
+            session = self._session_factory()
+            owns_session = True
+        if session is None:
+            logger.warning(
+                "DefaultDenyToolAuthorizer: no DB session available "
+                "for admin=%s instance=%s tool=%s — refusing.",
+                context.admin_id, context.instance_id, tool.tool_id,
+            )
+            return AuthorizationDecision.deny(
+                reason="no_db_session",
+                message=(
+                    "Tool dispatch refused: authorisation lookup "
+                    "could not access a database session."
+                ),
+                failure_kind="unauthorized",
+            )
+
+        try:
+            from app.repositories.instance_tool_authorization_repository import (
+                InstanceToolAuthorizationRepository,
+            )
+            repo = InstanceToolAuthorizationRepository(session)
+            row = repo.get_live(
+                admin_id=context.admin_id,
+                instance_id=context.instance_id,
+                tool_id=tool.tool_id,
+            )
+        finally:
+            if owns_session:
+                try:
+                    session.close()
+                except Exception:  # pragma: no cover
+                    logger.exception(
+                        "DefaultDenyToolAuthorizer: session.close() raised"
+                    )
+
+        if row is None:
+            return AuthorizationDecision.deny(
+                reason="no_authorization_row",
+                message=(
+                    f"Tool '{tool.tool_id}' is not authorised on this "
+                    "instance. Per Arc 12 WU2 the broker refuses any "
+                    "tool that does not have a live row in "
+                    "instance_tool_authorizations."
+                ),
+                failure_kind="unauthorized",
+            )
+
+        if not row.enabled:
+            return AuthorizationDecision.deny(
+                reason="authorization_disabled",
+                message=(
+                    f"Tool '{tool.tool_id}' is paused on this instance "
+                    "(authorisation row exists but enabled=False)."
+                ),
+                failure_kind="unauthorized",
+            )
+
+        return AuthorizationDecision.allow()
+
+    # ------------------------------------------------------------------
+    # Step 2 — tier check (structural point, data-blind in WU2)
+    # ------------------------------------------------------------------
+
+    def _check_tier(
+        self, tool: LucielTool, context: ToolContext
+    ) -> AuthorizationDecision:
+        # TODO(ARC14): when the admin's tier is threaded onto
+        # ``ToolContext`` (or onto the authorisation row payload),
+        # compare it against ``tool.requires_tier`` and refuse on
+        # mismatch with ``failure_kind="tier_not_permitted"``.
+        admin_tier = getattr(context, "admin_tier", None)
+        if not admin_tier:
+            logger.debug(
+                "Tool authorisation: tier check SKIPPED — admin_tier "
+                "not present on ToolContext (TODO(ARC14)). "
+                "tool=%s requires_tier=%s",
+                tool.tool_id, tool.requires_tier,
+            )
+            return AuthorizationDecision.allow()
+
+        if admin_tier not in tool.requires_tier:
+            return AuthorizationDecision.deny(
+                reason="tier_not_permitted",
+                message=(
+                    f"Tool '{tool.tool_id}' requires tier in "
+                    f"{tool.requires_tier!r}; admin is on '{admin_tier}'."
+                ),
+                failure_kind="tier_not_permitted",
+            )
+        return AuthorizationDecision.allow()
+
+    # ------------------------------------------------------------------
+    # Step 3 — channel check (structural point, data-blind in WU2)
+    # ------------------------------------------------------------------
+
+    def _check_channels(
+        self, tool: LucielTool, context: ToolContext
+    ) -> AuthorizationDecision:
+        # TODO(ARC14): when the per-instance enabled-channel set is
+        # threaded onto ``ToolContext`` (or persisted on the
+        # authorisation row config), refuse here on missing channels
+        # with ``failure_kind="channel_not_enabled"``.
+        required = tool.requires_channels
+        if not required:
+            return AuthorizationDecision.allow()
+
+        enabled_channels = getattr(context, "enabled_channels", None)
+        if enabled_channels is None:
+            logger.debug(
+                "Tool authorisation: channel check SKIPPED — "
+                "enabled_channels not present on ToolContext "
+                "(TODO(ARC14)). tool=%s requires_channels=%s",
+                tool.tool_id, required,
+            )
+            return AuthorizationDecision.allow()
+
+        missing = required - frozenset(enabled_channels)
+        if missing:
+            return AuthorizationDecision.deny(
+                reason="channel_not_enabled",
+                message=(
+                    f"Tool '{tool.tool_id}' requires channel(s) "
+                    f"{sorted(missing)!r} which are not enabled on "
+                    "this instance."
+                ),
+                failure_kind="channel_not_enabled",
+            )
+        return AuthorizationDecision.allow()
+
+
+# =====================================================================
+# Convenience: a flat-allow authoriser used by legacy / cognition paths
+# =====================================================================
+
+
+class _AlwaysAllowAuthorizer:
+    """Test/legacy authoriser that allows every call.
+
+    NOT used in production. Exposed so callers that explicitly want
+    to bypass authorisation (a unit test exercising the classifier
+    or schema validation in isolation) have a documented mechanism
+    rather than ad-hoc monkey-patching.
+    """
+
+    def authorize(
+        self, tool: LucielTool, context: ToolContext
+    ) -> AuthorizationDecision:
+        return AuthorizationDecision.allow()
+
+
+__all__ = [
+    "AuthorizationDecision",
+    "ToolAuthorizer",
+    "DefaultDenyToolAuthorizer",
+    "_AlwaysAllowAuthorizer",
+]

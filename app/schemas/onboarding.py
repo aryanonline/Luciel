@@ -51,10 +51,22 @@ class TenantOnboardRequest(BaseModel):
     system_prompt_additions: str | None = None
 
     # --- Default domain (optional overrides) ---
+    # NOTE (v2 alignment, Architecture §3.7.2): ``default_domain_id`` is
+    # a *vestigial seed value* used only as the single entry in the
+    # ``allowed_domains`` egress-list payload written into the
+    # onboarding audit row (see onboarding_service.onboard_tenant). It
+    # is NOT the legacy Arc-4 Domain layer (that layer was eliminated at
+    # Arc 5 Path A and there is no longer a DomainConfig row created
+    # during onboarding). The field is retained on the request shape
+    # for API source-compat and touches many callers; do not rename.
     default_domain_id: str = Field(
         default="general",
         min_length=2, max_length=100,
-        description="Domain ID for the seed domain config",
+        description=(
+            "Vestigial seed value used only to populate the "
+            "allowed_domains egress list in the onboarding audit row; "
+            "NOT the legacy Domain layer (eliminated at Arc 5 Path A)."
+        ),
     )
     default_domain_display_name: str = Field(
         default="General Assistant",
@@ -109,11 +121,22 @@ class OnboardedTenantSummary(BaseModel):
 
 
 class OnboardedDomainSummary(BaseModel):
+    """Vestigial summary kept on the response shape for source-compat.
+
+    Arc 5 Path A collapsed the Domain layer; the onboarding flow no
+    longer creates a domain_config row and this model is never
+    instantiated (the response field defaults to None). Retained as a
+    typed placeholder so callers that decoded the legacy shape
+    tolerate the null without parse errors.
+
+    Arc 12 EX1c — ``domain_id`` field removed from the public
+    projection. Underlying ``domain_configs`` table is itself slated
+    for removal post-EX3.
+    """
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     admin_id: str
-    domain_id: str
     display_name: str
     active: bool
     created_at: datetime

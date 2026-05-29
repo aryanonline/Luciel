@@ -155,8 +155,11 @@ class ApiKeyService:
         self,
         *,
         admin_id: str | None,                      # Step 27a: was `str`
-        domain_id: str | None = None,
-        agent_id: str | None = None,
+        # Arc 12 EX1a — domain_id / agent_id removed from the key-mint
+        # contract. The api_key.{domain,agent}_id columns still exist
+        # (later EX-step drops them) but the key layer no longer
+        # accepts or writes meaningful values; legacy callers that
+        # passed these kwargs must be updated.
         luciel_instance_id: int | None = None,      # Step 24.5
         display_name: str,
         permissions: list[str] | None = None,
@@ -263,8 +266,6 @@ class ApiKeyService:
             key_hash=hashed,
             key_prefix=raw_key[:12],
             admin_id=admin_id,
-            domain_id=domain_id,
-            agent_id=agent_id,
             luciel_instance_id=luciel_instance_id,   # Step 24.5
             display_name=display_name,
             permissions=permissions or ["chat", "sessions"],
@@ -344,8 +345,6 @@ class ApiKeyService:
             resource_type=RESOURCE_API_KEY,
             resource_pk=key_id,
             resource_natural_id=api_key.key_prefix,
-            domain_id=domain_id,
-            agent_id=agent_id,
             luciel_instance_id=luciel_instance_id,
             after=audit_after,
             note=None,
@@ -423,8 +422,6 @@ class ApiKeyService:
             resource_type=RESOURCE_API_KEY,
             resource_pk=api_key.id,
             resource_natural_id=api_key.key_prefix,
-            domain_id=api_key.domain_id,
-            agent_id=api_key.agent_id,
             luciel_instance_id=api_key.luciel_instance_id,
             before={"active": was_active},
             after={"active": False},

@@ -301,14 +301,11 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
                     },
                 )
 
-            # Cookied callers are tenant-admin. They never carry a
-            # domain or agent scope at v1 -- those are concepts for
-            # scoped API keys minted within the tenant. If a tenant
-            # later adds department-scoped logins (Step 30a.1 multi-
-            # seat work), we'll extend this to read scope from the
-            # cookie payload or a ScopeAssignment row.
-            domain_id: str | None = None
-            agent_id: str | None = None
+            # Arc 12 EX1a — cookied callers are Admin-scope only in V2.
+            # domain_id / agent_id are not stamped onto request.state at
+            # all; the legacy three-level scaffold is gone from this
+            # layer. luciel_instance_id remains None for cookied admin
+            # callers (instance pinning is for embed keys only).
             luciel_instance_id: str | None = None
 
             # Audit fields. key_prefix is None for cookied actions --
@@ -327,8 +324,7 @@ class SessionCookieAuthMiddleware(BaseHTTPMiddleware):
             # checks key_kind only on the widget path which we do not
             # reach via cookie.
             request.state.admin_id = admin_id
-            request.state.domain_id = domain_id
-            request.state.agent_id = agent_id
+            # Arc 12 EX1a — domain_id / agent_id no longer stamped.
             request.state.api_key_id = None
             request.state.permissions = list(COOKIE_PERMISSIONS)
             request.state.key_prefix = key_prefix

@@ -476,7 +476,6 @@ class TestArc11KnowledgeRls(unittest.TestCase):
                 results = repo.search_similar(
                     query_embedding=query_vec,
                     admin_id=self.admin_b,
-                    domain_id=None,
                     luciel_instance_id=self.instance_b,
 
                     knowledge_type=None,
@@ -536,7 +535,6 @@ class TestArc11KnowledgeRls(unittest.TestCase):
                 results = repo.search_similar(
                     query_embedding=[0.0001] * 1536,
                     admin_id=self.admin_a,
-                    domain_id=None,
                     luciel_instance_id=self.instance_a,
 
                     knowledge_type=None,

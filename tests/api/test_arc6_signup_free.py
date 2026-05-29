@@ -182,15 +182,15 @@ class TestTierProvisioningFreeRouted:
         # The constant should be referenced in the module namespace.
         assert hasattr(svc, "TIER_FREE")
 
-    def test_domain_collapse_sentinel_present(self):
-        # Arc 6 / Commit 8 added a sentinel ("default") to side-step
-        # the latent IntegrityError when ScopeAssignment.domain_id is
-        # None during pre-mint. Pin the constant so a rename trips
-        # this test instead of failing silently at INSERT time.
+    def test_domain_collapse_sentinel_removed(self):
+        # Arc 12 EX3 dropped ``scope_assignments.domain_id`` together
+        # with the Domain-collapse sentinel that satisfied its NOT-NULL
+        # constraint. Pin the absence so a regression that re-introduces
+        # the sentinel trips this test instead of writing dead values
+        # back into the table.
         import app.services.tier_provisioning_service as svc
 
-        assert hasattr(svc, "_DOMAIN_COLLAPSE_SENTINEL")
-        assert svc._DOMAIN_COLLAPSE_SENTINEL == "default"
+        assert not hasattr(svc, "_DOMAIN_COLLAPSE_SENTINEL")
 
 
 # ---------------------------------------------------------------------

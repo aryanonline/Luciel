@@ -13,6 +13,8 @@ from app.api.v1 import billing  # Step 30a
 from app.api.v1 import auth  # Step 30a.3 -- password auth, mandatory at signup
 from app.api.v1 import ses_events  # Arc 8 WU-6 Phase C -- SES feedback / suppression sink
 from app.api.v1 import admin_knowledge  # Arc 11 Step 7
+from app.api.v1 import admin_sibling_grants  # Arc 12 WU4
+from app.api.v1 import admin_tools  # Arc 12 WU2b
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -32,3 +34,5 @@ api_router.include_router(auth.router)  # Step 30a.3 -- password auth
 api_router.include_router(ses_events.router)  # Arc 8 WU-6 Phase C
 api_router.include_router(admin_knowledge.router)  # Arc 11 Step 7
 api_router.include_router(admin_knowledge.internal_router)  # Arc 11 Step 7
+api_router.include_router(admin_sibling_grants.router)  # Arc 12 WU4
+api_router.include_router(admin_tools.router)  # Arc 12 WU2b

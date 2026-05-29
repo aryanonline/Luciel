@@ -26,7 +26,9 @@ import sys
 import unittest
 from pathlib import Path
 
-MIGRATION_PATH = Path(__file__).resolve().parents[2] / "alembic/versions/arc9_c4_3e_rls_instance_traces.py"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MIGRATION_PATH = REPO_ROOT / "alembic/versions/arc9_c4_3e_rls_instance_traces.py"
+ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
 
 class TestC43EMigrationShape(unittest.TestCase):
@@ -141,7 +143,7 @@ class TestC43EMigrationImports(unittest.TestCase):
     def test_module_imports_cleanly(self):
         from alembic.script import ScriptDirectory
         from alembic.config import Config
-        cfg = Config("/home/user/workspace/luciel/alembic.ini")
+        cfg = Config(str(ALEMBIC_INI))
         sd = ScriptDirectory.from_config(cfg)
         rev = sd.get_revision("arc9_c4_3e_rls_instance_traces")
         self.assertIsNotNone(rev)

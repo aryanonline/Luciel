@@ -4,30 +4,32 @@ Step 24.5c (Cross-channel identity and conversation continuity).
 
 A Conversation is the durable thread that groups multiple Sessions across
 channels (widget, programmatic API, voice/SMS/email when Step 34a lands).
-One real-world person interacting with one Luciel through multiple channels
-shows up as one Conversation row and N Session rows.
+One real-world person interacting with one Luciel Instance through
+multiple channels shows up as one Conversation row and N Session rows.
 
 Design contract (see ARCHITECTURE.md §3.2.11 "Identity & conversation
-continuity" for the canonical spec):
+continuity" and §3.7.2 "Admin → Instance boundary" for the canonical
+specs):
 
 - Sessions remain the atomic auditable unit. Sessions are never merged.
   conversation_id is session-LINKING, not session-merging. Messages still
   hang off sessions.id; the audit chain at the session granularity stays
   walkable end-to-end.
 
-- A Conversation lives in exactly one scope (tenant_id, domain_id). It is
-  the grouping concept WITHIN a scope, never above it. Cross-tenant
-  identity federation (the same person across two paying tenants) is
-  Step 38 territory by design (ARCHITECTURE §4.9 rejected-alternative).
+- A Conversation lives in exactly one Admin scope (admin_id). Under
+  Architecture §3.7.2 the single authorization boundary is Admin →
+  Instance; the Domain layer was eliminated at Arc 5 Path A. A
+  Conversation belongs to one Admin and (via its bound sessions) to a
+  specific Instance under that Admin. Cross-Admin identity federation
+  (the same person across two paying Admins) is Step 38 territory by
+  design (ARCHITECTURE §4.9 rejected-alternative).
 
-- tenant_id and domain_id mirror the existing scope-arithmetic shape used
-  by SessionModel, ScopeAssignment, Agent, ApiKey, LucielInstance: both
-  are String(100). tenant_id carries a FK to tenant_configs.tenant_id
-  (RESTRICT). domain_id intentionally has no FK because domain_configs
-  uses (tenant_id, domain_id) as a composite natural key -- a single-
-  column FK from here would be a half-truth. Service layer validates
-  the (tenant_id, domain_id) pair against domain_configs at write time.
-  Same convention scope_assignments uses.
+- admin_id is the sole v2 scope column; it is ``String(100)`` with a
+  RESTRICT FK to ``admins.id``. The legacy ``domain_id`` column was
+  dropped from this table at Arc 12 EX3 (alembic migration
+  ``arc12_ex3_drop_conversation_domain``); the V2 cross-session
+  retriever resolves continuity by ``(admin_id, user_id)`` and no
+  surface here reads ``domain_id`` anymore.
 
 - PK is UUID (postgresql.UUID, gen_random_uuid()), matching the discipline
   introduced in 24.5b's User and ScopeAssignment tables. The cross-session
@@ -76,7 +78,6 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
-    Index,
     String,
     text,
 )
@@ -110,11 +111,6 @@ class Conversation(Base):
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
-    domain_id: Mapped[str] = mapped_column(
-        String(100),
         nullable=False,
         index=True,
     )
@@ -167,31 +163,25 @@ class Conversation(Base):
     )
 
     # ------ table-level indexes ------
+    # Arc 12 EX3: domain_id was dropped (alembic
+    # arc12_ex3_drop_conversation_domain). The legacy composite
+    # (tenant_id, domain_id, last_activity_at) was already gone from
+    # prod after Arc 9.2 PR #101's auto-detect. v2 scope for this
+    # table is just admin_id, served by ix_conversations_admin_id
+    # (PR #96). No composite is recreated here pending measured
+    # resolver hot-path pressure.
     __table_args__ = (
-        # Composite index on (tenant_id, domain_id, last_activity_at DESC)
-        # serves the identity resolver's "most-recent active conversation
-        # under this scope for this user" lookup once joined to sessions.
-        # Recency-ordered partial index would be marginally tighter but
-        # the simple form is easier to reason about; we can revisit if
-        # the cross-session retriever shows hot-path pressure once it
-        # lands in sub-branch 2.
-        Index(
-            "ix_conversations_tenant_domain_last_activity",
-            "admin_id",
-            "domain_id",
-            "last_activity_at",
-        ),
         {"comment": (
             "Step 24.5c -- durable cross-channel conversation grouping. "
             "Session-linking via sessions.conversation_id, never session-"
             "merging. One Conversation lives in exactly one scope "
-            "(tenant_id, domain_id). See ARCHITECTURE §3.2.11."
+            "(admin_id). See ARCHITECTURE §3.2.11."
         )},
     )
 
     def __repr__(self) -> str:  # pragma: no cover -- debug only
         return (
             f"<Conversation id={self.id} "
-            f"tenant_id={self.admin_id!r} domain_id={self.domain_id!r} "
+            f"admin_id={self.admin_id!r} "
             f"active={self.active}>"
         )

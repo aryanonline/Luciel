@@ -59,7 +59,6 @@ class KnowledgeRepository:
         chunks: Sequence[str],
         embeddings: Sequence[Sequence[float]],
         admin_id: str | None,
-        domain_id: str | None,
         luciel_instance_id: int,
         knowledge_type: str,
         title: str | None,
@@ -89,7 +88,6 @@ class KnowledgeRepository:
         for text, emb in zip(chunks, embeddings):
             row = KnowledgeChunk(
                 admin_id=admin_id,
-                domain_id=domain_id,
                 luciel_instance_id=luciel_instance_id,
                 content=text,
                 title=title,
@@ -132,7 +130,6 @@ class KnowledgeRepository:
         self,
         *,
         admin_id: str | None,
-        domain_id: str | None,
         luciel_instance_id: int | None,
         knowledge_type: str | None = None,
         limit: int = 1000,
@@ -141,36 +138,30 @@ class KnowledgeRepository:
 
         Returns active chunks visible to this scope:
             - chunks bound to this luciel_instance_id  (instance-private)
-            - chunks at this (admin_id, domain_id) with luciel_instance_id IS NULL
-              (domain-shared)
-            - chunks at this admin_id with domain_id IS NULL and
-              luciel_instance_id IS NULL  (tenant-shared)
-            - chunks with all of (admin_id, domain_id, luciel_instance_id) NULL
-              (global / domain_knowledge across all tenants for a domain)
+            - chunks at this admin_id with luciel_instance_id IS NULL
+              (tenant-shared)
+            - chunks with both (admin_id, luciel_instance_id) NULL
+              (global)
+
+        Arc 12 EX3: the legacy ``domain_id`` leg is gone — v2 scopes
+        knowledge by ``(admin_id, luciel_instance_id)`` only.
         """
         instance_clause = (
             KnowledgeChunk.luciel_instance_id == luciel_instance_id
             if luciel_instance_id is not None
             else None
         )
-        domain_clause = and_(
-            KnowledgeChunk.luciel_instance_id.is_(None),
-            KnowledgeChunk.admin_id == admin_id,
-            KnowledgeChunk.domain_id == domain_id,
-        ) if domain_id is not None else None
         tenant_clause = and_(
             KnowledgeChunk.luciel_instance_id.is_(None),
-            KnowledgeChunk.domain_id.is_(None),
             KnowledgeChunk.admin_id == admin_id,
         ) if admin_id is not None else None
         global_clause = and_(
             KnowledgeChunk.luciel_instance_id.is_(None),
             KnowledgeChunk.admin_id.is_(None),
-            KnowledgeChunk.domain_id.is_(None),
         )
 
         union_parts = [
-            c for c in (instance_clause, domain_clause, tenant_clause, global_clause)
+            c for c in (instance_clause, tenant_clause, global_clause)
             if c is not None
         ]
         if not union_parts:
@@ -233,7 +224,6 @@ class KnowledgeRepository:
         *,
         query_embedding: Sequence[float],
         admin_id: str | None,
-        domain_id: str | None,
         luciel_instance_id: int | None = None,
         knowledge_type: str | None = None,
         limit: int = 5,
@@ -242,9 +232,11 @@ class KnowledgeRepository:
 
         Visibility (union of):
           - luciel_instance_id == given  (instance-private)
-          - luciel_instance_id IS NULL AND admin_id+domain_id match  (domain-shared)
-          - luciel_instance_id IS NULL AND domain_id IS NULL AND admin_id match (tenant-shared)
-          - admin_id IS NULL AND domain_id IS NULL  (global)
+          - luciel_instance_id IS NULL AND admin_id match (tenant-shared)
+          - admin_id IS NULL  (global)
+
+        Arc 12 EX3: the legacy ``domain_id`` leg is gone — v2 scopes
+        knowledge by ``(admin_id, luciel_instance_id)`` only.
 
         Active-only (``superseded_at IS NULL``). Excludes lifecycle
         flagged rows: ``soft_deleted_at IS NULL`` and
@@ -277,19 +269,10 @@ class KnowledgeRepository:
             clauses.append(
                 KnowledgeChunk.luciel_instance_id == luciel_instance_id
             )
-        if domain_id is not None and admin_id is not None:
-            clauses.append(
-                and_(
-                    KnowledgeChunk.luciel_instance_id.is_(None),
-                    KnowledgeChunk.admin_id == admin_id,
-                    KnowledgeChunk.domain_id == domain_id,
-                )
-            )
         if admin_id is not None:
             clauses.append(
                 and_(
                     KnowledgeChunk.luciel_instance_id.is_(None),
-                    KnowledgeChunk.domain_id.is_(None),
                     KnowledgeChunk.admin_id == admin_id,
                 )
             )
@@ -297,7 +280,6 @@ class KnowledgeRepository:
             and_(
                 KnowledgeChunk.luciel_instance_id.is_(None),
                 KnowledgeChunk.admin_id.is_(None),
-                KnowledgeChunk.domain_id.is_(None),
             )
         )
 
@@ -319,7 +301,6 @@ class KnowledgeRepository:
                 KnowledgeChunk.knowledge_type,
                 KnowledgeChunk.luciel_instance_id,
                 KnowledgeChunk.admin_id,
-                KnowledgeChunk.domain_id,
                 KnowledgeChunk.source_id,
                 ks.id.label("source_record_id"),
                 ks.ingestion_status.label("source_record_status"),
@@ -352,7 +333,6 @@ class KnowledgeRepository:
                 "knowledge_type": r.knowledge_type,
                 "luciel_instance_id": r.luciel_instance_id,
                 "admin_id": r.admin_id,
-                "domain_id": r.domain_id,
                 "distance": float(r.distance) if r.distance is not None else None,
                 "source_id": r.source_id,
                 "source_record_id": r.source_record_id,

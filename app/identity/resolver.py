@@ -198,7 +198,6 @@ class IdentityResolver:
         claim_type: ClaimType,
         claim_value: str,
         admin_id: str,
-        domain_id: str,
         issuing_adapter: str,
     ) -> IdentityResolution:
         """Resolve an asserted claim to (User, Conversation).
@@ -209,10 +208,11 @@ class IdentityResolver:
                               normalises internally; callers don't
                               need to pre-normalise (but may, since
                               normalise_claim_value() is idempotent).
-            admin_id:        Natural-key tenant scope. Asserted on
-                              the claim lookup.
-            domain_id:        Natural-key domain scope. Asserted on
-                              the claim lookup.
+            admin_id:         Natural-key admin scope. Asserted on
+                              the claim lookup. Arc 12 EX3 dropped
+                              the legacy ``domain_id`` second half;
+                              the v2 natural key is (admin_id +
+                              claim_type + claim_value).
             issuing_adapter:  Free-form adapter identifier (e.g.
                               "widget", "programmatic_api",
                               "voice_gateway"). Stored on the
@@ -226,13 +226,11 @@ class IdentityResolver:
         Raises:
             ValueError / TypeError via normalise_claim_value() on
             malformed input.
-            ValueError on blank admin_id / domain_id / issuing_adapter.
+            ValueError on blank admin_id / issuing_adapter.
         """
         # ---- input validation ---------------------------------------
         if not admin_id or not admin_id.strip():
             raise ValueError("admin_id must be a non-empty string")
-        if not domain_id or not domain_id.strip():
-            raise ValueError("domain_id must be a non-empty string")
         if not issuing_adapter or not issuing_adapter.strip():
             raise ValueError("issuing_adapter must be a non-empty string")
 
@@ -243,7 +241,7 @@ class IdentityResolver:
         # ---- step A: look up an existing claim ----------------------
         # ONE query, indexed by the unique constraint
         # uq_identity_claims_type_value_scope on
-        # (claim_type, claim_value, admin_id, domain_id).
+        # (claim_type, claim_value, admin_id).
         # active=True so soft-deleted claims do not resolve.
         existing_claim_stmt = (
             select(IdentityClaim)
@@ -251,7 +249,6 @@ class IdentityResolver:
                 IdentityClaim.claim_type == claim_type,
                 IdentityClaim.claim_value == normalised_value,
                 IdentityClaim.admin_id == admin_id,
-                IdentityClaim.domain_id == domain_id,
                 IdentityClaim.active.is_(True),
             )
             .limit(1)
@@ -263,7 +260,6 @@ class IdentityResolver:
             return self._resolve_existing(
                 claim=existing_claim,
                 admin_id=admin_id,
-                domain_id=domain_id,
             )
 
         # MISS: mint user + claim + conversation in the same txn.
@@ -271,7 +267,6 @@ class IdentityResolver:
             claim_type=claim_type,
             normalised_value=normalised_value,
             admin_id=admin_id,
-            domain_id=domain_id,
             issuing_adapter=issuing_adapter,
         )
 
@@ -284,26 +279,30 @@ class IdentityResolver:
         *,
         claim: IdentityClaim,
         admin_id: str,
-        domain_id: str,
     ) -> IdentityResolution:
         """Bind to claim.user_id; find or mint conversation_id.
 
-        Walks the User's recent active sessions under the SAME scope.
-        Most recent active conversation wins (§3.2.11 "most recent
-        active conversation wins; configurable per scope" -- v1 is
-        not configurable, just the default rule).
+        Walks the User's recent active sessions under the SAME admin
+        scope. Most recent active conversation wins (§3.2.11 "most
+        recent active conversation wins; configurable per scope" --
+        v1 is not configurable, just the default rule).
         """
-        # ONE query. Latest session under the same scope for this
-        # user whose conversation_id is non-NULL. We deliberately
+        # ONE query. Latest session under the same admin scope for
+        # this user whose conversation_id is non-NULL. We deliberately
         # require conversation_id NOT NULL because a NULL-conversation
         # session is itself an unbound single-session conversation,
         # not a "join target".
+        # Arc 12 EX3 — sessions.domain_id is dropped at the schema
+        # level; the v2 scope on the session row is (admin_id,
+        # luciel_instance_id) and Wall-3 RLS enforces the latter at
+        # the engine level for this query. identity_claims.domain_id
+        # is also dropped at the schema level — the v2 natural key is
+        # (admin_id + claim_type + claim_value).
         latest_session_stmt = (
             select(SessionModel)
             .where(
                 SessionModel.user_id == str(claim.user_id),
                 SessionModel.admin_id == admin_id,
-                SessionModel.domain_id == domain_id,
                 SessionModel.conversation_id.is_not(None),
                 SessionModel.status == "active",
             )
@@ -324,13 +323,11 @@ class IdentityResolver:
                 is_new_conversation=False,
             )
 
-        # No prior active conversation under this scope. The User
-        # exists (from another scope, or from a session that's been
-        # archived), but we need a fresh conversation to host this
-        # session's sibling thread. Mint just the conversation.
-        new_conv = self._mint_conversation(
-            admin_id=admin_id, domain_id=domain_id
-        )
+        # No prior active conversation under this admin scope. The
+        # User exists (from another scope, or from a session that's
+        # been archived), but we need a fresh conversation to host
+        # this session's sibling thread. Mint just the conversation.
+        new_conv = self._mint_conversation(admin_id=admin_id)
         return IdentityResolution(
             user_id=claim.user_id,
             conversation_id=new_conv.id,
@@ -349,7 +346,6 @@ class IdentityResolver:
         claim_type: ClaimType,
         normalised_value: str,
         admin_id: str,
-        domain_id: str,
         issuing_adapter: str,
     ) -> IdentityResolution:
         """Mint User + Conversation + IdentityClaim in one transaction.
@@ -384,9 +380,7 @@ class IdentityResolver:
         self.db.add(new_user)
 
         # Mint Conversation.
-        new_conv = self._mint_conversation(
-            admin_id=admin_id, domain_id=domain_id
-        )
+        new_conv = self._mint_conversation(admin_id=admin_id)
 
         # Mint IdentityClaim, binding the new User. verified_at=NULL
         # per §3.2.11 v1: claims are asserted by the adapter and
@@ -398,7 +392,6 @@ class IdentityResolver:
             claim_type=claim_type,
             claim_value=normalised_value,
             admin_id=admin_id,
-            domain_id=domain_id,
             issuing_adapter=issuing_adapter,
             verified_at=None,
             active=True,
@@ -414,9 +407,9 @@ class IdentityResolver:
 
         logger.info(
             "identity_resolver minted fresh user=%s conversation=%s "
-            "claim_type=%s tenant=%s domain=%s adapter=%s",
+            "claim_type=%s admin=%s adapter=%s",
             str(new_user_id), str(new_conv.id), claim_type.value,
-            admin_id, domain_id, issuing_adapter,
+            admin_id, issuing_adapter,
         )
 
         return IdentityResolution(
@@ -431,13 +424,11 @@ class IdentityResolver:
         self,
         *,
         admin_id: str,
-        domain_id: str,
     ) -> Conversation:
         """Helper: mint a new Conversation row, flush, return."""
         new_conv = Conversation(
             id=uuid.uuid4(),
             admin_id=admin_id,
-            domain_id=domain_id,
             last_activity_at=datetime.now(timezone.utc),
             active=True,
             created_at=datetime.now(timezone.utc),

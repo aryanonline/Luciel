@@ -37,10 +37,6 @@ class Trace(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    domain_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    """Agent ID for per-agent audit trail."""
-
     # --- Input/Output ---
     user_message: Mapped[str] = mapped_column(Text, nullable=False)
     assistant_reply: Mapped[str] = mapped_column(Text, nullable=False)
@@ -72,7 +68,7 @@ class Trace(Base, TimestampMixin):
     # never received content in V2. The arc10_5_drop_dead_config_id
     # _columns migration drops all three; the Mapped attributes are
     # removed here. The free-text traces.domain_id / traces.agent_id
-    # columns are KEPT (historical pre-V2 forensic content).
+    # columns were dropped in Arc 12 EX3.
 
     # Arc 9.1 Phase A (2026-05-25): NOT NULL.
     # Pre-Arc 9.1 doctrine: NULL = legacy/unbound. That doctrine created

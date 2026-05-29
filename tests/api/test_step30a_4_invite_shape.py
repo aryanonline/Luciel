@@ -58,7 +58,6 @@ class TestUserInviteModel:
         required = {
             "id",
             "admin_id",
-            "domain_id",
             "inviter_user_id",
             "invited_email",
             "role",
@@ -236,7 +235,6 @@ class TestUserInviteRepository:
         # `self` plus all-keyword args
         for name in (
             "admin_id",
-            "domain_id",
             "inviter_user_id",
             "invited_email",
             "role",
@@ -293,7 +291,6 @@ class TestInviteService:
         for name in (
             "db",
             "admin_id",
-            "domain_id",
             "inviter_user_id",
             "inviter_email",
             "invited_email",
@@ -399,21 +396,29 @@ class TestAuthSetPasswordInviteBranch:
 
 class TestInviteSchemas:
     def test_create_payload_fields(self):
+        # Arc 12 EX1c — ``domain_id`` removed from the request shape;
+        # the route resolves it server-side from the cookied user's
+        # active scope. Pin the absence so a regression that
+        # reintroduces it at the API boundary fails loudly.
         from app.schemas.invite import UserInviteCreate
         fields = UserInviteCreate.model_fields
         assert "invited_email" in fields
         assert fields["invited_email"].is_required() is True
         assert "admin_id" in fields
-        assert "domain_id" in fields
+        assert "domain_id" not in fields, (
+            "Arc 12 EX1c: UserInviteCreate must not carry domain_id"
+        )
         assert "role" in fields
 
     def test_read_response_fields(self):
+        # Arc 12 EX1c — ``domain_id`` removed from the public read
+        # projection. Pin both the required-fields set and the
+        # absence of the removed field.
         from app.schemas.invite import UserInviteRead
         fields = UserInviteRead.model_fields
         required = {
             "id",
             "admin_id",
-            "domain_id",
             "invited_email",
             "role",
             "status",
@@ -427,6 +432,9 @@ class TestInviteSchemas:
         missing = required - set(fields.keys())
         assert not missing, (
             f"UserInviteRead missing fields: {missing}"
+        )
+        assert "domain_id" not in fields, (
+            "Arc 12 EX1c: UserInviteRead must not carry domain_id"
         )
 
     def test_resend_and_revoke_response_shapes(self):

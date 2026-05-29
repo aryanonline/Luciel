@@ -234,8 +234,9 @@ class OnboardingService:
             )
             admin_key, admin_raw = self.api_key_service.create_key(
                 admin_id=admin_id,
-                domain_id=None,
-                agent_id=None,
+                # Arc 12 EX1a — domain_id / agent_id removed from
+                # create_key contract; V2 keys are bound to
+                # (admin_id, instance_id) only.
                 display_name=f"{display_name} — Admin Key",
                 permissions=["chat", "sessions", "admin"],
                 rate_limit=api_key_rate_limit,

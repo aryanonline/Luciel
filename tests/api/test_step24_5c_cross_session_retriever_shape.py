@@ -186,18 +186,19 @@ class TestRetrieverClassSurface:
 
     def test_retrieve_signature_kwonly(self):
         # retrieve() takes keyword-only args. Positional args invite
-        # subtle bugs where a caller swaps admin_id and domain_id —
+        # subtle bugs where a caller swaps admin_id with another id —
         # the kw-only signature makes that a compile-time error.
         from app.memory.cross_session_retriever import (
             CrossSessionRetriever,
         )
         sig = inspect.signature(CrossSessionRetriever.retrieve)
         params = sig.parameters
-        # Expect: self + kw-only required (conversation_id, admin_id,
-        # domain_id) + kw-only optional (limit, exclude_session_id).
+        # Arc 12 EX1d: ``domain_id`` excised. Expect: self + kw-only
+        # required (conversation_id, admin_id) + kw-only optional
+        # (limit, exclude_session_id).
         assert "conversation_id" in params
         assert "admin_id" in params
-        assert "domain_id" in params
+        assert "domain_id" not in params
         assert "limit" in params
         assert "exclude_session_id" in params
         # Every non-self parameter must be KEYWORD_ONLY.
@@ -267,7 +268,6 @@ class TestInputValidation:
             r.retrieve(
                 conversation_id="not-a-uuid",  # type: ignore[arg-type]
                 admin_id="t-1",
-                domain_id="d-1",
             )
 
     def test_rejects_blank_tenant_id(self):
@@ -279,7 +279,6 @@ class TestInputValidation:
             r.retrieve(
                 conversation_id=uuid.uuid4(),
                 admin_id="",
-                domain_id="d-1",
             )
 
     def test_rejects_whitespace_tenant_id(self):
@@ -291,32 +290,11 @@ class TestInputValidation:
             r.retrieve(
                 conversation_id=uuid.uuid4(),
                 admin_id="   ",
-                domain_id="d-1",
             )
 
-    def test_rejects_blank_domain_id(self):
-        from app.memory.cross_session_retriever import (
-            CrossSessionRetriever,
-        )
-        r = CrossSessionRetriever(db=_StubDb())  # type: ignore[arg-type]
-        with pytest.raises(ValueError):
-            r.retrieve(
-                conversation_id=uuid.uuid4(),
-                admin_id="t-1",
-                domain_id="",
-            )
-
-    def test_rejects_whitespace_domain_id(self):
-        from app.memory.cross_session_retriever import (
-            CrossSessionRetriever,
-        )
-        r = CrossSessionRetriever(db=_StubDb())  # type: ignore[arg-type]
-        with pytest.raises(ValueError):
-            r.retrieve(
-                conversation_id=uuid.uuid4(),
-                admin_id="t-1",
-                domain_id="\t\n",
-            )
+    # Arc 12 EX1d: ``domain_id`` excised — the matching
+    # ``test_rejects_blank_domain_id`` / ``test_rejects_whitespace_domain_id``
+    # tests are removed with the parameter.
 
 
 # -----------------------------------------------------------------------
@@ -405,7 +383,6 @@ class TestLimitClamping:
         r.retrieve(
             conversation_id=uuid.uuid4(),
             admin_id="t-1",
-            domain_id="d-1",
             limit=0,
         )
         assert _captured_limit(db) == 1
@@ -419,7 +396,6 @@ class TestLimitClamping:
         r.retrieve(
             conversation_id=uuid.uuid4(),
             admin_id="t-1",
-            domain_id="d-1",
             limit=-7,
         )
         assert _captured_limit(db) == 1
@@ -434,7 +410,6 @@ class TestLimitClamping:
         r.retrieve(
             conversation_id=uuid.uuid4(),
             admin_id="t-1",
-            domain_id="d-1",
             limit=MAX_LIMIT * 10,
         )
         assert _captured_limit(db) == MAX_LIMIT
@@ -448,7 +423,6 @@ class TestLimitClamping:
         r.retrieve(
             conversation_id=uuid.uuid4(),
             admin_id="t-1",
-            domain_id="d-1",
             limit=17,
         )
         assert _captured_limit(db) == 17
@@ -466,16 +440,18 @@ class TestSqlScopePredicates:
     visible in the source.
     """
 
-    def test_retrieve_where_clauses_include_three_scope_predicates(self):
+    def test_retrieve_where_clauses_include_scope_predicates(self):
         tree = _retriever_ast()
         cls = _find_class(tree, "CrossSessionRetriever")
         fn = _find_function_in_class(cls, "retrieve")
         src = ast.unparse(fn)
-        # The three required scope predicates as they appear in the
-        # source. Token-based check is robust against whitespace.
+        # Arc 12 EX1d: the v1 ``SessionModel.domain_id == domain_id``
+        # predicate is gone — v2 has a single Admin→Instance boundary
+        # (§3.7.2). The remaining two scope predicates are the
+        # conversation FK + the admin natural-key match.
         assert "SessionModel.conversation_id == conversation_id" in src
         assert "SessionModel.admin_id == admin_id" in src
-        assert "SessionModel.domain_id == domain_id" in src
+        assert "SessionModel.domain_id" not in src
 
     def test_retrieve_orders_by_message_created_at_desc(self):
         tree = _retriever_ast()
@@ -524,12 +500,13 @@ class TestDefenseInDepthScopeCheck:
         cls = _find_class(tree, "CrossSessionRetriever")
         fn = _find_function_in_class(cls, "retrieve")
         src = ast.unparse(fn)
-        # Look for the explicit per-row scope assertion. We check
-        # for the three predicates as they appear in the post-loop
-        # `if (...)` guard.
+        # Arc 12 EX1d: the v1 ``session.domain_id != domain_id``
+        # predicate is gone with the param. The post-loop guard still
+        # re-asserts admin_id + conversation_id (the two surviving
+        # scope dimensions in v2).
         assert "session.admin_id != admin_id" in src
-        assert "session.domain_id != domain_id" in src
         assert "session.conversation_id != conversation_id" in src
+        assert "session.domain_id" not in src
 
     def test_post_query_scope_drops_are_logged(self):
         tree = _retriever_ast()

@@ -3,11 +3,18 @@ Session repository.
 
 PATCHED:
   S1 — get_session() now accepts optional admin_id for ownership check.
-  S2 — list_sessions() now accepts agent_id filter.
+  S2 — Arc 12 EX1b: ``list_sessions()`` no longer takes ``agent_id``;
+       v2 scoping (§3.7.2) is admin_id + (Wall-3 RLS on)
+       luciel_instance_id. Sessions are not partitioned per-agent.
   S3 — Step 24.5c sub-branch 4: create_session() now accepts an optional
        conversation_id (UUID) that the identity resolver supplies. NULL
        is the legacy / single-session conversation path (existing
        callers see no behavioural change).
+  S4 — Arc 12 EX3: ``sessions.agent_id`` and ``sessions.domain_id`` are
+       dropped at the schema level by
+       ``arc12_ex3_drop_session_agent_domain``. ``create_session`` no
+       longer accepts either; the v2 session row is scoped by
+       (admin_id, luciel_instance_id, session_id) per Walls 3/4.
 """
 
 from __future__ import annotations
@@ -31,8 +38,6 @@ class SessionRepository:
         *,
         session_id: str,
         admin_id: str,
-        domain_id: str,
-        agent_id: str | None = None,
         user_id: str | None = None,
         channel: str = "web",
         status: str = "active",
@@ -53,11 +58,12 @@ class SessionRepository:
         # still pass None will hit a NotNullViolation at flush — that is
         # the desired behaviour until the call sites are converted in
         # Arc 9.2 PR #97.
+        # Arc 12 EX3: agent_id / domain_id columns dropped from the
+        # schema; the v2 row is (admin_id, luciel_instance_id,
+        # session_id) per Walls 3/4.
         session = SessionModel(
             id=session_id,
             admin_id=admin_id,
-            domain_id=domain_id,
-            agent_id=agent_id,
             user_id=user_id,
             channel=channel,
             status=status,
@@ -94,9 +100,16 @@ class SessionRepository:
         *,
         admin_id: str | None = None,
         user_id: str | None = None,
-        agent_id: str | None = None,
         limit: int = 50,
     ) -> list[SessionModel]:
+        """List sessions.
+
+        Arc 12 EX1b: agent_id filter removed. v2 sessions are scoped
+        by admin_id (Wall-1) + luciel_instance_id (Wall-3 RLS); both
+        of those scopes are enforced at the engine level for the
+        request's session, so this method needs only the admin_id /
+        user_id narrowings for application-level lookups.
+        """
         stmt = (
             select(SessionModel)
             .order_by(SessionModel.created_at.desc())
@@ -106,8 +119,6 @@ class SessionRepository:
             stmt = stmt.where(SessionModel.admin_id == admin_id)
         if user_id:
             stmt = stmt.where(SessionModel.user_id == user_id)
-        if agent_id:
-            stmt = stmt.where(SessionModel.agent_id == agent_id)
         return list(self.db.scalars(stmt).all())
 
     def add_message(

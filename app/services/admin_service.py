@@ -133,9 +133,9 @@ class AdminService:
     #
     # Memory cascade for agent-scoped rows was a no-op in practice
     # (no agent_id is ever set on memory_items in V2 since the Agent
-    # layer is gone; MemoryItem.agent_id is a legacy nullable column).
-    # The admin-scoped + instance-scoped memory cascades remain in
-    # deactivate_tenant_with_cascade.
+    # layer is gone; the memory_items.agent_id column was dropped in
+    # arc12_ex3_drop_memory_agent_id). The admin-scoped + instance-scoped
+    # memory cascades remain in deactivate_tenant_with_cascade.
 
     def bulk_soft_deactivate_memory_items_for_tenant(
         self,
@@ -161,8 +161,8 @@ class AdminService:
         Returns count of rows deactivated. Always emits one audit row
         with action=ACTION_CASCADE_DEACTIVATE -- even when count == 0 --
         so the audit trail records that this scope was visited on
-        every (idempotent) re-run. The after_json carries a per-(agent,
-        instance) breakdown for granular forensic queries.
+        every (idempotent) re-run. The after_json carries a per-instance
+        breakdown for granular forensic queries.
 
         audit_ctx is REQUIRED.
         """
@@ -183,7 +183,6 @@ class AdminService:
             # Pre-deactivation breakdown for forensic granularity in audit.
             breakdown_rows = (
                 self.db.query(
-                    MemoryItem.agent_id,
                     MemoryItem.luciel_instance_id,
                     func.count().label("row_count"),
                 )
@@ -191,16 +190,15 @@ class AdminService:
                     MemoryItem.admin_id == admin_id,
                     MemoryItem.active.is_(True),
                 )
-                .group_by(MemoryItem.agent_id, MemoryItem.luciel_instance_id)
+                .group_by(MemoryItem.luciel_instance_id)
                 .all()
             )
             breakdown = [
                 {
-                    "agent_id": agent_id,
                     "luciel_instance_id": luciel_instance_id,
                     "count": row_count,
                 }
-                for (agent_id, luciel_instance_id, row_count) in breakdown_rows
+                for (luciel_instance_id, row_count) in breakdown_rows
             ]
 
             # Bulk single-pass deactivation.
@@ -264,11 +262,9 @@ class AdminService:
 
         Returns count deactivated. Always emits one
         ACTION_CASCADE_DEACTIVATE audit row even when count == 0.
-        Breakdown by agent_id is captured in after_json.
 
         audit_ctx is REQUIRED.
         """
-        from sqlalchemy import func
         from app.models.memory import MemoryItem
         from app.repositories.admin_audit_repository import AdminAuditRepository
         from app.models.admin_audit_log import (
@@ -283,27 +279,6 @@ class AdminService:
             )
 
         try:
-            breakdown_rows = (
-                self.db.query(
-                    MemoryItem.agent_id,
-                    func.count().label("row_count"),
-                )
-                .filter(
-                    MemoryItem.admin_id == admin_id,
-                    MemoryItem.luciel_instance_id == luciel_instance_id,
-                    MemoryItem.active.is_(True),
-                )
-                .group_by(MemoryItem.agent_id)
-                .all()
-            )
-            breakdown = [
-                {
-                    "agent_id": agent_id,
-                    "count": row_count,
-                }
-                for (agent_id, row_count) in breakdown_rows
-            ]
-
             count = (
                 self.db.query(MemoryItem)
                 .filter(
@@ -330,7 +305,6 @@ class AdminService:
                     "scope": "luciel_instance",
                     "admin_id": admin_id,
                     "luciel_instance_id": luciel_instance_id,
-                    "breakdown": breakdown,
                     "trigger": "luciel_instance_deactivate_cascade",
                     "updated_by": updated_by,
                 },

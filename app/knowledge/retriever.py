@@ -8,6 +8,12 @@ Post-Cleanup-C contract:
     - Primary filter dimension stays ``luciel_instance_id`` (Step 24.5).
     - The legacy ``agent_id`` parameter and its read-compat fan-out
       are gone (Cleanup C — column dropped, zero production rows).
+    - Arc 12 EX1d removed the legacy ``domain_id`` parameter from
+      the public retriever surface (v2 = single Admin→Instance
+      boundary, Architecture §3.7.2). Arc 12 EX3 drops the
+      ``KnowledgeChunk.domain_id`` ORM column itself, so the
+      repository's ``search_similar`` no longer takes that argument
+      and its union-inheritance has only admin-shared / global legs.
     - Upward inheritance is delegated to
       ``KnowledgeRepository.search_similar``.
     - Active-only (``superseded_at IS NULL``), lifecycle-clean
@@ -83,7 +89,6 @@ class KnowledgeRetriever:
         *,
         query: str,
         admin_id: str | None = None,
-        domain_id: str | None = None,
         luciel_instance_id: int | None = None,
         knowledge_type: str | None = None,
         limit: int = 5,
@@ -102,7 +107,6 @@ class KnowledgeRetriever:
         chunks = self.retrieve_with_sources(
             query=query,
             admin_id=admin_id,
-            domain_id=domain_id,
             luciel_instance_id=luciel_instance_id,
             knowledge_type=knowledge_type,
             limit=limit,
@@ -114,7 +118,6 @@ class KnowledgeRetriever:
         *,
         query: str,
         admin_id: str | None = None,
-        domain_id: str | None = None,
         luciel_instance_id: int | None = None,
         knowledge_type: str | None = None,
         limit: int = 5,
@@ -133,7 +136,6 @@ class KnowledgeRetriever:
             results = self.repository.search_similar(
                 query_embedding=query_embedding,
                 admin_id=admin_id,
-                domain_id=domain_id,
                 luciel_instance_id=luciel_instance_id,
                 knowledge_type=knowledge_type,
                 limit=limit,
@@ -170,9 +172,8 @@ class KnowledgeRetriever:
             )
 
         logger.info(
-            "Retrieved %d knowledge chunks for tenant=%s domain=%s "
-            "instance=%s",
-            len(out), admin_id, domain_id, luciel_instance_id,
+            "Retrieved %d knowledge chunks for tenant=%s instance=%s",
+            len(out), admin_id, luciel_instance_id,
         )
         return out
 

@@ -59,7 +59,6 @@ class UserInviteRepository:
         self,
         *,
         admin_id: str,
-        domain_id: str,
         inviter_user_id: uuid.UUID,
         invited_email: str,
         role: str,
@@ -83,7 +82,6 @@ class UserInviteRepository:
 
         invite = UserInvite(
             admin_id=admin_id,
-            domain_id=domain_id,
             inviter_user_id=inviter_user_id,
             invited_email=invited_email.strip(),
             role=role,

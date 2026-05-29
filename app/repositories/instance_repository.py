@@ -412,6 +412,15 @@ class InstanceRepository:
         stamps ``soft_deleted_at = now()``. Writes an
         ``ACTION_INSTANCE_DELETED`` audit row.
 
+        Arc 12 WU4 — sibling-grant cascade (Architecture §3.6.1 step
+        3): in the same transaction as the soft-delete, revoke every
+        non-revoked ``sibling_call_grants`` row where this Instance
+        appears as caller OR callee. Each revocation emits its own
+        ``ACTION_SIBLING_GRANT_REVOKED`` audit row carrying the
+        cascade source. The cascade runs only when ``audit_ctx`` is
+        provided (test paths without an audit context skip it, same
+        as the instance-level audit row).
+
         Idempotent on an already-deleted row: returns the row without
         re-stamping ``soft_deleted_at`` (the original delete moment is
         the only honest grace-window start) and without emitting a
@@ -454,6 +463,31 @@ class InstanceRepository:
                 },
                 autocommit=False,
             )
+
+            # Arc 12 WU4 — sibling-grant cascade per Architecture
+            # §3.6.1 step 3. Wired here so the grant revocations
+            # commit atomically with the instance-status flip. The
+            # service handles the per-grant audit emission.
+            # Imported lazily to avoid a circular import (the
+            # service constructs an AdminAuditRepository internally
+            # which imports back into this module's models).
+            from app.services.sibling_call_grant_service import (
+                SiblingCallGrantService,
+            )
+
+            grant_service = SiblingCallGrantService(self.db)
+            revoked_grants = grant_service.revoke_all_touching_instance(
+                admin_id=instance.admin_id,
+                instance_id=instance.id,
+                audit_ctx=audit_ctx,
+                autocommit=False,
+            )
+            if revoked_grants:
+                logger.info(
+                    "Instance delete cascade revoked %s sibling-call "
+                    "grant(s) touching pk=%s admin=%s",
+                    len(revoked_grants), instance.id, instance.admin_id,
+                )
 
         self.db.commit()
         self.db.refresh(instance)

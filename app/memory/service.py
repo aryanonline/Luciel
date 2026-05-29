@@ -56,13 +56,11 @@ class MemoryService:
         *,
         user_id: str,
         admin_id: str,
-        agent_id: str | None = None,
         limit: int = 20,
     ) -> list[str]:
         items = self.repository.get_user_memories(
             user_id=user_id,
             admin_id=admin_id,
-            agent_id=agent_id,
             limit=limit,
         )
         return [f"[{item.category}] {item.content}" for item in items]
@@ -74,7 +72,6 @@ class MemoryService:
         user_id: str,
         admin_id: str,
         session_id: str,
-        agent_id: str | None = None,
         messages: list[dict],
         message_id: int | None = None,
         luciel_instance_id: int | None = None,
@@ -105,7 +102,6 @@ class MemoryService:
                     saved = self.repository.upsert_by_message_id(
                         user_id=user_id,
                         admin_id=admin_id,
-                        agent_id=agent_id,
                         category=item["category"],
                         content=item["content"],
                         source_session_id=session_id,
@@ -119,7 +115,6 @@ class MemoryService:
                     self.repository.save_memory(
                         user_id=user_id,
                         admin_id=admin_id,
-                        agent_id=agent_id,
                         category=item["category"],
                         content=item["content"],
                         source_session_id=session_id,
@@ -192,8 +187,6 @@ class MemoryService:
                             resource_type=RESOURCE_MEMORY,
                             resource_pk=None,
                             resource_natural_id=None,
-                            domain_id=None,
-                            agent_id=agent_id,
                             luciel_instance_id=luciel_instance_id,
                             after={
                                 "exc_type": type(exc).__name__,
@@ -227,9 +220,9 @@ class MemoryService:
 
         if saved_count:
             logger.info(
-                "Extracted %d memories user=%s session=%s agent=%s "
+                "Extracted %d memories user=%s session=%s "
                 "instance=%s actor_user=%s",
-                saved_count, user_id, session_id, agent_id,
+                saved_count, user_id, session_id,
                 luciel_instance_id,
                 str(actor_user_id) if actor_user_id else None,
             )
@@ -244,7 +237,6 @@ class MemoryService:
         session_id: str,
         message_id: int,
         actor_key_prefix: str,
-        agent_id: str | None = None,
         luciel_instance_id: int | None = None,
         trace_id: str | None = None,
         actor_user_id: "uuid.UUID | None" = None,  # Step 24.5b File 2.6c
@@ -299,7 +291,6 @@ class MemoryService:
                 "admin_id": admin_id,
                 "message_id": message_id,
                 "actor_key_prefix": actor_key_prefix,
-                "agent_id": agent_id,
                 "luciel_instance_id": luciel_instance_id,
                 "trace_id": trace_id,
                 "actor_user_id": actor_user_id_str,  # Step 24.5b File 2.6c

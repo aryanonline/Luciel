@@ -155,7 +155,6 @@ class ScopeAssignmentService:
         return sa_repo.create(
             user_id=user_id,
             admin_id=payload.admin_id,
-            domain_id=payload.domain_id,
             role=payload.role,
             started_at=payload.started_at,
             autocommit=autocommit,
@@ -382,7 +381,6 @@ class ScopeAssignmentService:
         created = sa_repo.create(
             user_id=new_user_id,
             admin_id=new_payload.admin_id,
-            domain_id=new_payload.domain_id,
             role=new_payload.role,
             started_at=new_payload.started_at,
             autocommit=False,

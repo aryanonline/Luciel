@@ -219,12 +219,14 @@ class LucielOrchestrator:
             return str(uuid4())
 
         try:
+            # Arc 12 EX1d: ``domain_id`` / ``agent_id`` removed from the
+            # record_trace surface. v2 = single Admin→Instance boundary
+            # (Architecture §3.7.2); Trace ORM columns persist until EX3
+            # drops them but are written NULL via the TraceService.
             return trace_service.record_trace(
                 session_id=req.session_id,
                 user_id=req.user_id,
                 admin_id=req.admin_id,
-                domain_id=req.domain_id,
-                agent_id=None,
                 user_message=req.message,
                 assistant_reply=assistant_reply,
                 # Arc 14 will fill these. For now the orchestrator

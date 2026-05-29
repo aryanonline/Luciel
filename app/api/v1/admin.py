@@ -37,7 +37,6 @@ from app.repositories.admin_audit_repository import AdminAuditRepository, AuditC
 # Annotated annotation on the bootstrap-tenant route below is replaced
 # with ``object`` so the FastAPI dependency resolver still parses; the
 # B1 route-body sweep rewrites that route to not depend on AgentRepository.
-from app.schemas.agent import AgentBindUserPayload, AgentCreate, AgentRead, AgentUpdate
 from app.schemas.instance import (
     LucielInstanceCreate,
     LucielInstanceRead,
@@ -90,10 +89,6 @@ from app.schemas.api_key import (
 from app.services.admin_service import AdminService
 from app.services.api_key_service import ApiKeyService
 from app.services.memory_admin_service import MemoryAdminService
-from app.services.scope_prompt_preflight import (
-    ScopePromptMissingError,
-    ScopePromptPreflight,
-)
 from app.schemas.memory import MemoryRead
 from app.policy.scope import ScopePolicy
 from app.models.instance import Instance as LucielInstance
@@ -364,33 +359,16 @@ def create_api_key(
     luciel_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> ApiKeyCreateResponse:
-    # --- Step 24 scope + privilege guards (unchanged) ---------------
-    # Scope: a caller can only mint keys at or below their own scope.
-    ScopePolicy.enforce_agent_scope(
-        request,
-        payload.admin_id,
-        payload.domain_id,
-        payload.agent_id,
-    )
+    # --- Arc 12 EX1a scope + privilege guards -----------------------
+    # V2 has a single Admin→Instance boundary (Architecture §3.7.2);
+    # the legacy domain/agent levels do not exist. Scope enforcement
+    # collapses to the cross-Admin guard. The "domain-scoped caller
+    # may not mint tenant-wide" and "agent-scoped caller may only mint
+    # for itself" carve-outs are gone — there is no domain/agent
+    # caller in V2.
+    ScopePolicy.enforce_tenant_scope(request, payload.admin_id)
     # Prevent privilege escalation (non-platform_admin cannot grant platform_admin).
     ScopePolicy.enforce_no_privilege_escalation(request, payload.permissions or [])
-
-    # Extra rule: a domain-scoped caller cannot mint a tenant-wide key
-    # (i.e. target domain_id must be set and match caller_domain).
-    caller_domain = getattr(request.state, "domain_id", None)
-    caller_agent = getattr(request.state, "agent_id", None)
-    if caller_domain and not ScopePolicy.is_platform_admin(request):
-        if payload.domain_id is None:
-            raise HTTPException(
-                status_code=403,
-                detail="Domain-scoped key may not mint tenant-wide keys",
-            )
-    if caller_agent and not ScopePolicy.is_platform_admin(request):
-        if payload.agent_id is None or payload.agent_id != caller_agent:
-            raise HTTPException(
-                status_code=403,
-                detail="Agent-scoped key may only mint keys for itself",
-            )
 
     # --- Step 24.5: LucielInstance binding validation ---------------
     # If the key is being pinned to a specific LucielInstance, the
@@ -425,8 +403,8 @@ def create_api_key(
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
         admin_id=payload.admin_id,
-        domain_id=payload.domain_id,
-        agent_id=payload.agent_id,
+        # Arc 12 EX1a — agent_id / domain_id removed from the admin-key
+        # mint contract. V2 keys are bound to (admin_id, instance_id).
         luciel_instance_id=payload.luciel_instance_id,   # Step 24.5
         display_name=payload.display_name,
         permissions=payload.permissions,
@@ -456,12 +434,14 @@ def list_api_keys(
 
     keys = service.list_keys(admin_id=admin_id)
 
-    caller_domain = getattr(request.state, "domain_id", None)
-    caller_agent = getattr(request.state, "agent_id", None)
-    if caller_agent and not ScopePolicy.is_platform_admin(request):
-        keys = [k for k in keys if k.agent_id == caller_agent]
-    elif caller_domain and not ScopePolicy.is_platform_admin(request):
-        keys = [k for k in keys if k.domain_id == caller_domain]
+    # Arc 12 EX1a — V2 has a single Admin→Instance boundary
+    # (Architecture §3.7.2). The legacy domain-scoped and agent-scoped
+    # caller post-filters are gone: there is no domain/agent caller in
+    # V2, and the cross-Admin guard above already restricts non-
+    # platform_admin callers to their own admin_id. Instance-level
+    # scoping for callers bound to a specific Luciel instance will
+    # land in a later EX-step once instance-keyed list filtering is
+    # introduced; until then admin-key list reads are admin-scoped.
 
     return [ApiKeyRead.model_validate(k) for k in keys]
 
@@ -531,48 +511,14 @@ def create_embed_key(
          these fields from the client; this is the only place they
          get set.
     """
-    # --- Scope policy: caller mints at or below their own scope ----
-    # Reuse the existing helper from create_api_key. Embed keys never
-    # carry agent_id or luciel_instance_id at v1, so we pass None for
-    # both -- the helper treats that as "no agent constraint", which
-    # is correct: the embed key is tenant- or domain-scoped only.
-    ScopePolicy.enforce_agent_scope(
-        request,
-        payload.admin_id,
-        payload.domain_id,
-        target_agent_id=None,
-    )
-
-    # Domain-scoped callers cannot mint tenant-wide embed keys (i.e.
-    # the request must specify a domain_id that matches the caller's
-    # domain). Same rule as admin keys; restated here for clarity.
-    caller_domain = getattr(request.state, "domain_id", None)
-    if caller_domain and not ScopePolicy.is_platform_admin(request):
-        if payload.domain_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Domain-scoped key may not mint tenant-wide embed keys",
-            )
-        if payload.domain_id != caller_domain:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Domain-scoped key may only mint embed keys within its own domain",
-            )
-
-    # Agent-scoped callers cannot mint embed keys (embed keys are
-    # tenant-, domain-, or instance-scoped -- never agent-scoped). The
-    # agent-scope carve-out remains as a guardrail: an agent-bound key
-    # has no need to mint widget credentials.
-    caller_agent = getattr(request.state, "agent_id", None)
-    if caller_agent and not ScopePolicy.is_platform_admin(request):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Agent-scoped keys cannot mint embed keys. Use a "
-                "tenant- or domain-scoped admin key (or the customer's "
-                "cookied dashboard session)."
-            ),
-        )
+    # --- Arc 12 EX1a/EX1c scope policy ------------------------------
+    # V2 has a single Admin→Instance boundary (Architecture §3.7.2).
+    # Embed-key issuance collapses to the cross-Admin guard. The
+    # legacy domain-scoped / agent-scoped caller carve-outs are gone,
+    # and (EX1c) EmbedKeyCreate no longer carries a ``domain_id``
+    # field — the widget runtime resolves scope via
+    # ``luciel_instance_id`` alone.
+    ScopePolicy.enforce_tenant_scope(request, payload.admin_id)
 
     # Step 31.2 commit B: lift the v1 luciel_instance_id carve-out.
     # When the caller passes luciel_instance_id, validate the instance
@@ -603,23 +549,8 @@ def create_embed_key(
                     "tenant scope."
                 ),
             )
-        # Arc 5 Path A — V2 collapsed: the legacy domain-scoped embed-key
-        # cross-domain guard is gone (V2 has no Domain layer). The
-        # branch below is intentionally dead — the if-condition can
-        # never fire because the second predicate is ``None is not None``.
-        # Kept as a placeholder so the test harness diff stays small;
-        # the whole block is deleted in a follow-on cleanup.
-        if (
-            payload.domain_id is not None
-            and None is not None  # noqa: F632 — Path A intentional dead branch
-            and None != payload.domain_id  # noqa: F632
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "Luciel instance belongs to a different domain."
-                ),
-            )
+        # Arc 12 EX1c — V2 has no Domain layer; the dead cross-domain
+        # guard previously kept here (Arc 5 Path A) has been removed.
         if not instance.active:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -630,43 +561,16 @@ def create_embed_key(
                 ),
             )
 
-    # --- Scope-prompt preflight (Step 30d Deliverable A) ------------
-    # For domain-scoped mints, verify the target domain_configs row
-    # exists and has a non-empty system_prompt_additions BEFORE the
-    # api_keys row is inserted. We block at issuance time rather than
-    # at chat time so existing widget keys aren't retroactively bricked
-    # and operators get the failure during a controlled admin action
-    # rather than from a stranger's browser on a customer site
-    # (ARCHITECTURE §3.2.2 'Issuance').
-    #
-    # Tenant-wide mints (domain_id is None) skip the preflight because
-    # they are governed by TenantConfig.system_prompt at chat time; we
-    # surface a non-fatal warning on the response instead.
-    warnings: list[str] = []
-    if payload.domain_id is None:
-        warnings.append(
-            "Tenant-wide embed key minted; scope is governed by "
-            "TenantConfig.system_prompt at chat time, not by a "
-            "per-domain scope prompt."
-        )
-    else:
-        try:
-            ScopePromptPreflight.check(
-                db,
-                admin_id=payload.admin_id,
-                domain_id=payload.domain_id,
-            )
-        except ScopePromptMissingError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "error": "scope_prompt_missing",
-                    "reason": exc.reason,
-                    "admin_id": exc.admin_id,
-                    "domain_id": exc.domain_id,
-                    "message": str(exc),
-                },
-            ) from exc
+    # Arc 12 EX1c — V2 has a single Admin→Instance boundary
+    # (Architecture §3.7.2). The legacy per-domain
+    # ScopePromptPreflight gate is gone: every embed-key mint is
+    # tenant-wide (governed by TenantConfig.system_prompt at chat
+    # time) and is surfaced with the same non-fatal warning that
+    # used to fire on tenant-wide mints.
+    warnings: list[str] = [
+        "Tenant-wide embed key minted; scope is governed by "
+        "TenantConfig.system_prompt at chat time."
+    ]
 
     # --- Mint via ApiKeyService -------------------------------------
     # The four embed-only kwargs were added in commit (a). The audit
@@ -679,8 +583,10 @@ def create_embed_key(
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
         admin_id=payload.admin_id,
-        domain_id=payload.domain_id,
-        agent_id=None,
+        # Arc 12 EX1a/EX1c — embed-key mint no longer threads
+        # agent_id / domain_id through any layer. The api_key row's
+        # binding is (admin_id, luciel_instance_id); the widget
+        # runtime scopes by the same axes.
         luciel_instance_id=payload.luciel_instance_id,
         display_name=payload.display_name,
         # Server-set: the schema does not accept these from the client.
@@ -739,22 +645,13 @@ def deactivate_api_key(
         # touch keys outside their domain; same for agent.
         if not ScopePolicy.is_platform_admin(request):
             caller_tenant = getattr(request.state, "admin_id", None)
-            caller_domain = getattr(request.state, "domain_id", None)
-            caller_agent = getattr(request.state, "agent_id", None)
+            # Arc 12 EX1a — V2 has a single Admin→Instance boundary
+            # (Architecture §3.7.2); the domain-scoped and agent-scoped
+            # caller carve-outs are gone.
             if caller_tenant and target.admin_id != caller_tenant:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Cannot deactivate API key outside your tenant",
-                )
-            if caller_domain and target.domain_id and target.domain_id != caller_domain:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Cannot deactivate API key outside your domain",
-                )
-            if caller_agent and target.agent_id and target.agent_id != caller_agent:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Cannot deactivate API key outside your agent",
                 )
         success = service.deactivate_key(key_id, audit_ctx=audit_ctx)
         if not success:
@@ -933,13 +830,12 @@ def _resolve_invite_actor(
     *,
     request: Request,
     db,
-) -> tuple["User", str, str]:
-    """Resolve (cookied_user, admin_id, default_domain_id) for invite routes.
+) -> tuple["User", str]:
+    """Resolve (cookied_user, admin_id) for invite routes.
 
     Reads the session cookie off the Request directly (same pattern as
-    billing routes). Returns the cookied User, their active admin_id
-    (from the session JWT), and the domain_id of their currently-active
-    ScopeAssignment within that tenant.
+    billing routes). Returns the cookied User and their active admin_id
+    (from the session JWT, validated against an active ScopeAssignment).
 
     Raises HTTPException:
       * 401 -- no valid session cookie, or User row inactive.
@@ -978,7 +874,7 @@ def _resolve_invite_actor(
         )
 
     # Find the cookied user's active ScopeAssignment to source
-    # (admin_id, domain_id) when the caller omits them on the payload.
+    # admin_id when the caller omits it on the payload.
     sar = ScopeAssignmentRepository(db)
     active_assignments = sar.list_for_user(user.id, active_only=True)
     if not active_assignments:
@@ -993,7 +889,7 @@ def _resolve_invite_actor(
         (a for a in active_assignments if a.admin_id == session_tenant_id),
         active_assignments[0],
     )
-    return user, chosen.admin_id, chosen.domain_id
+    return user, chosen.admin_id
 
 
 def _map_invite_error(exc: InviteError) -> HTTPException:
@@ -1032,11 +928,10 @@ def create_invite_route(  # noqa: D401
     Cookied route. The cookied User is the inviter; tenant + domain
     default to the cookied user's active scope when omitted.
     """
-    inviter, default_tenant_id, default_domain_id = _resolve_invite_actor(
+    inviter, default_tenant_id = _resolve_invite_actor(
         request=request, db=db
     )
     admin_id = payload.admin_id or default_tenant_id
-    domain_id = payload.domain_id or default_domain_id
 
     # Cross-tenant safety: a cookied user can only invite into their own
     # tenant unless they hold platform_admin (which a cookied session
@@ -1052,7 +947,6 @@ def create_invite_route(  # noqa: D401
         invite, _token = invite_service.create_invite(
             db=db,
             admin_id=admin_id,
-            domain_id=domain_id,
             inviter_user_id=inviter.id,
             inviter_email=inviter.email,
             invited_email=str(payload.invited_email),
@@ -1096,7 +990,7 @@ def list_invites_route(
     from app.models.user_invite import InviteStatus
     from app.repositories.user_invites import UserInviteRepository
 
-    _user, admin_id, _domain_id = _resolve_invite_actor(
+    _user, admin_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1145,7 +1039,7 @@ def list_team_members_route(
         ScopeAssignmentRepository,
     )
 
-    _user, admin_id, _domain_id = _resolve_invite_actor(
+    _user, admin_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1175,7 +1069,6 @@ def list_team_members_route(
         out.append(TeamMemberRead(
             scope_assignment_id=a.id,
             role=a.role,
-            domain_id=a.domain_id,
             started_at=a.started_at,
             active=a.active,
             user_id=user.id,
@@ -1198,7 +1091,7 @@ def resend_invite_route(
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> UserInviteResendResponse:
     """Rotate token_jti and re-mint the welcome email (Step 30a.4)."""
-    inviter, admin_id, _domain_id = _resolve_invite_actor(
+    inviter, admin_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1239,7 +1132,7 @@ def revoke_invite_route(
     """Flip a still-pending invite to REVOKED (Step 30a.4)."""
     from app.repositories.user_invites import UserInviteRepository
 
-    _inviter, admin_id, _domain_id = _resolve_invite_actor(
+    _inviter, admin_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1625,7 +1518,6 @@ def get_effective_chunking_config(
     )
     cfg = ingestion_service._resolve_chunking_config(
         admin_id=instance.admin_id,
-        domain_id=None,
         luciel_instance_id=instance.id,
     )
     return kschemas.EffectiveChunkingConfigRead(

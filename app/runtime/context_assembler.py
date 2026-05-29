@@ -40,8 +40,9 @@ class ContextAssembler:
     ``build_system_prompt`` layer-builder. The legacy ``LUCIEL_IDENTITY``
     string constant was retired during the persona refactor; the
     replacement is ``build_system_prompt(...)`` which formats the
-    canonical ``LUCIEL_SYSTEM_PROMPT`` template with ``assistant_name``
-    and the optional tenant/domain/agent layers.
+    canonical ``LUCIEL_SYSTEM_PROMPT`` template with ``assistant_name``.
+    Arc 12 EX1d collapsed the v1 tenant/domain/agent layering to the
+    v2 single Admin→Instance boundary (Architecture §3.7.2).
     """
 
     def build_prompt(
@@ -51,9 +52,12 @@ class ContextAssembler:
         retrieved_chunks: Sequence[RetrievedChunk] | None = None,
     ) -> str:
         identity = build_system_prompt()
+        # Arc 12 EX1d: v1 ``Domain:`` line removed — v2 has a single
+        # Admin→Instance boundary (Architecture §3.7.2). The prompt now
+        # carries the Admin slug and the channel only.
         base = (
             f"{identity}\n\n"
-            f"Tenant: {req.admin_id}\nDomain: {req.domain_id}\nChannel: {req.channel}\n"
+            f"Tenant: {req.admin_id}\nChannel: {req.channel}\n"
         )
         knowledge_stanza = self._render_knowledge_context(retrieved_chunks)
         return (

@@ -1,17 +1,16 @@
-"""Step 31 sub-branch 3: hierarchical dashboard HTTP surface.
+"""Step 31 sub-branch 3 (Arc 12 EX1c collapsed): tenant dashboard HTTP surface.
 
-Three GET endpoints, one per scope level, that wrap the read-only
-`DashboardService` (sub-branch 2) behind the `ScopePolicy` chain
-(`enforce_tenant_scope` / `enforce_domain_scope` / `enforce_agent_scope`).
-Cross-tenant access is denied by `ScopePolicy`; embed keys are denied at
-the perimeter by `ApiKeyAuthMiddleware` because this router mounts under
+A single GET endpoint that wraps the read-only `DashboardService`
+behind `ScopePolicy.enforce_tenant_scope`. Cross-tenant access is
+denied by `ScopePolicy`; embed keys are denied at the perimeter by
+`ApiKeyAuthMiddleware` because this router mounts under
 `ADMIN_AUTH_PATHS` (`/api/v1/dashboard`) and embed keys carry
 `EMBED_REQUIRED_PERMISSIONS = {"chat"}` only — they cannot also carry
 `"admin"`, so the middleware rejects them with 403 before any route
 handler runs. The same gate that blocks embed keys from `/api/v1/admin/*`
 blocks them here.
 
-The three endpoints:
+The endpoint:
 
   - GET /api/v1/dashboard/tenant
         Returns a TenantDashboard rollup for the caller's tenant.
@@ -19,19 +18,11 @@ The three endpoints:
         tenant; non-platform-admin callers MUST omit the query param
         (their key's tenant scope is used). Passing a admin_id that
         does not match the caller's scope is rejected by
-        `ScopePolicy.enforce_tenant_scope`.
-
-  - GET /api/v1/dashboard/domain/{domain_id}
-        Returns a DomainDashboard rollup. The tenant is derived from
-        the caller's scope (or `?admin_id=...` for platform_admin).
-        Domain-scoped keys whose `caller_domain != domain_id` are
-        rejected by `enforce_domain_scope`.
-
-  - GET /api/v1/dashboard/agent/{agent_id}
-        Returns an AgentDashboard rollup. Tenant + domain are derived
-        from caller scope (or `?admin_id=` / `?domain_id=` for
-        platform_admin). Agent-scoped keys whose `caller_agent !=
-        agent_id` are rejected by `enforce_agent_scope`.
+        `ScopePolicy.enforce_tenant_scope`. The instance-scoped rollup
+        is surfaced through the ``top_luciel_instances`` field on the
+        envelope — V2 has no Domain or Agent layer (Architecture
+        §3.7.2), so the per-domain / per-agent HTTP endpoints that
+        used to live here were removed in Arc 12 EX1c.
 
 Response shape
 --------------
@@ -150,24 +141,6 @@ def _resolve_tenant_id(request: Request, query_tenant_id: str | None) -> str:
     return target
 
 
-def _resolve_domain_id(request: Request, query_domain_id: str | None) -> str:
-    """Resolve the target domain_id when an endpoint needs one but the
-    path didn't supply it (the agent endpoint). Mirrors `_resolve_tenant_id`.
-    """
-    caller_domain = getattr(request.state, "domain_id", None)
-    target = query_domain_id or caller_domain
-    if not target:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "domain_id is required: platform-admin / tenant-admin "
-                "callers must pass it as a query parameter; "
-                "domain-scoped callers use their key's domain by default"
-            ),
-        )
-    return target
-
-
 def _to_envelope(result: Any) -> dict[str, Any]:
     """Convert a frozen dataclass dashboard result into a JSON-serializable
     dict using `dataclasses.asdict`. Nested dataclasses (ScopeAggregates,
@@ -213,68 +186,15 @@ def get_tenant_dashboard(
     return _to_envelope(result)
 
 
-@router.get("/domain/{domain_id}")
-@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
-def get_domain_dashboard(
-    request: Request,
-    domain_id: str,
-    service: DashboardServiceDep,
-    admin_id: str | None = Query(
-        default=None,
-        description=(
-            "Target tenant. Required for platform-admin callers; "
-            "ignored for scope-bound callers."
-        ),
-    ),
-    window_days: int = Query(default=7, ge=1, le=90),
-    top_n: int = Query(default=5, ge=1, le=50),
-) -> dict[str, Any]:
-    """Return the domain-scope dashboard rollup."""
-    target_tenant = _resolve_tenant_id(request, admin_id)
-    ScopePolicy.enforce_domain_scope(request, target_tenant, domain_id)
-    result = service.get_domain_dashboard(
-        target_tenant,
-        domain_id,
-        window_days=window_days,
-        top_n=top_n,
-    )
-    return _to_envelope(result)
-
-
-@router.get("/agent/{agent_id}")
-@limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
-def get_agent_dashboard(
-    request: Request,
-    agent_id: str,
-    service: DashboardServiceDep,
-    admin_id: str | None = Query(
-        default=None,
-        description=(
-            "Target tenant. Required for platform-admin callers; "
-            "ignored for scope-bound callers."
-        ),
-    ),
-    domain_id: str | None = Query(
-        default=None,
-        description=(
-            "Target domain. Required for platform-admin or tenant-admin "
-            "callers; ignored for domain-scoped callers."
-        ),
-    ),
-    window_days: int = Query(default=7, ge=1, le=90),
-    top_n: int = Query(default=5, ge=1, le=50),
-) -> dict[str, Any]:
-    """Return the agent-scope dashboard rollup."""
-    target_tenant = _resolve_tenant_id(request, admin_id)
-    target_domain = _resolve_domain_id(request, domain_id)
-    ScopePolicy.enforce_agent_scope(
-        request, target_tenant, target_domain, agent_id
-    )
-    result = service.get_agent_dashboard(
-        target_tenant,
-        target_domain,
-        agent_id,
-        window_days=window_days,
-        top_n=top_n,
-    )
-    return _to_envelope(result)
+# Arc 12 EX1c — the legacy ``/domain/{domain_id}`` and
+# ``/agent/{agent_id}`` dashboard endpoints have been removed at the
+# HTTP surface. V2 has a single Admin→Instance boundary (Architecture
+# §3.7.2 / §3.7.3); callers consume the instance-scoped rollup via the
+# ``top_luciel_instances`` field on the tenant envelope. The
+# DashboardService.get_domain_dashboard / .get_agent_dashboard methods
+# persist in the service layer for forensic compatibility (owned by a
+# later EX-step); they are no longer surfaced over HTTP.
+#
+# Public-contract removal (frontend will be told):
+#   * GET /api/v1/dashboard/domain/{domain_id}
+#   * GET /api/v1/dashboard/agent/{agent_id}

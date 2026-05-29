@@ -1,5 +1,17 @@
 """Admin forensic-read endpoints for the verify harness.
 
+Arc 12 EX1b note (agent_id excision)
+-----------------------------------
+
+Per Architecture v1 §3.7.2 / §3.7.3 the v2 boundary is Admin ->
+Instance; per-Agent forensic narrowing has no v2 equivalent. The
+``agent_id`` query parameter on ``memory_items_step29c`` and the
+``agent_id`` projection field on ``ApiKeyForensic`` /
+``MemoryItemForensic`` / ``AdminAuditLogForensic`` are removed.
+Verify-harness pillars that previously narrowed by agent_id now
+narrow by ``admin_id`` (already required) +
+``luciel_instance_id`` if a per-instance probe is needed.
+
 Step 29 Commit C.1 (P11 reads) lands the first four endpoints. C.2
 (P12 reads) extends `memory_items_step29c` with `actor_user_id` and
 `agent_id` filters and adds `actor_user_id` to the
@@ -37,7 +49,6 @@ Routes
         ?admin_id=<str>
         &user_id=<str>                  # chat-end-user string (P11)
         &actor_user_id=<uuid>           # platform User UUID (P12, C.2)
-        &agent_id=<str>                 # agent slug (P12, C.2)
         &message_id_not_null=<bool>
         &message_id=<int>               # exact match (P13, C.3)
         &content_contains=<str>         # substring probe (P13, C.3)
@@ -173,13 +184,15 @@ class ApiKeyForensic(BaseModel):
     `key_hash` is NEVER included. The 12-char `key_prefix` is the
     same public correlation handle already stored on every audit
     row, so admins can correlate without any secret exposure.
+
+    Arc 12 EX1b: ``domain_id`` and ``agent_id`` projection fields
+    removed. Per §3.7.2 / §3.7.3 the v2 forensic narrowing is
+    admin_id + luciel_instance_id.
     """
 
     id: int
     key_prefix: str
     admin_id: str | None
-    domain_id: str | None
-    agent_id: str | None
     luciel_instance_id: int | None
     active: bool
     created_at: datetime
@@ -198,13 +211,16 @@ class MemoryItemForensic(BaseModel):
     Agent role changes. It is the platform User UUID (FK to users.id),
     NOT user-supplied content, and is the canonical attribution
     handle Step 24.5b made NOT NULL on every memory row.
+
+    Arc 12 EX1b: ``agent_id`` projection field removed (the Agent
+    layer was excised; per-instance narrowing is via
+    luciel_instance_id).
     """
 
     id: int
     user_id: str
     actor_user_id: uuid.UUID | None
     admin_id: str
-    agent_id: str | None
     category: str
     message_id: int | None
     luciel_instance_id: int | None
@@ -224,14 +240,18 @@ class AdminAuditLogForensic(BaseModel):
     `after_json` (the F5 assertion verifies this every run).
     `before_json`, `note`, `row_hash`, `prev_row_hash` are omitted
     to keep the projection minimal; harness does not read them.
+
+    Arc 12 EX1b: ``domain_id`` and ``agent_id`` projection fields
+    removed. The underlying columns persist on ``admin_audit_logs``
+    (the canonical hash field set still includes them -- EX4 owns
+    the chain reseal). The forensic projection no longer exposes
+    them because v2 scoping is admin_id + luciel_instance_id.
     """
 
     id: int
     action: str
     resource_type: str
     admin_id: str
-    domain_id: str | None
-    agent_id: str | None
     luciel_instance_id: int | None
     actor_key_prefix: str | None
     actor_label: str | None
@@ -376,8 +396,6 @@ def get_api_key_forensic_step29c(
         id=row.id,
         key_prefix=row.key_prefix,
         admin_id=row.admin_id,
-        domain_id=row.domain_id,
-        agent_id=row.agent_id,
         luciel_instance_id=row.luciel_instance_id,
         active=row.active,
         created_at=row.created_at,
@@ -395,7 +413,6 @@ def list_memory_items_forensic_step29c(
     admin_id: str = Query(..., max_length=100),
     user_id: str | None = Query(default=None, max_length=100),
     actor_user_id: uuid.UUID | None = Query(default=None),
-    agent_id: str | None = Query(default=None, max_length=100),
     message_id_not_null: bool = Query(default=False),
     message_id: int | None = Query(default=None, ge=1),
     content_contains: str | None = Query(default=None, max_length=200),
@@ -405,10 +422,13 @@ def list_memory_items_forensic_step29c(
 
     Step 29 Commit C.1 backs P11 F2 line 238 (idempotency probe target
     lookup). Step 29 Commit C.2 extends the filter set with
-    `actor_user_id` (platform User UUID) and `agent_id` (agent slug)
-    so P12 A1/A3/A4/A5 identity-stability assertions can read
-    actor-attributed memory rows over HTTP. P13/P14 cross-tenant leak
-    checks reuse this endpoint in later sub-commits.
+    `actor_user_id` (platform User UUID) so P12 A1/A3/A4/A5
+    identity-stability assertions can read actor-attributed memory
+    rows over HTTP. P13/P14 cross-tenant leak checks reuse this
+    endpoint in later sub-commits. Arc 12 EX1b: the legacy
+    ``agent_id`` filter was removed (the Agent layer was excised
+    per §3.7.2; per-instance narrowing -- if needed -- is via
+    luciel_instance_id added by the api+schemas lane).
 
     Step 29 Commit C.3 adds `message_id` (exact match) and
     `content_contains` (substring probe) for P13 A1/A3/A5/degraded
@@ -426,8 +446,6 @@ def list_memory_items_forensic_step29c(
         (memory_items.user_id, e.g. "pillar11-user")
       - actor_user_id is the platform User UUID
         (memory_items.actor_user_id FK -> users.id)
-      - agent_id is the agent slug
-        (memory_items.agent_id, e.g. "p12-a1-abc123")
       - message_id_not_null narrows to rows where message_id is set
         (Step 27b idempotency probe shape)
       - message_id is exact match on the FK to messages.id (P13 C.3)
@@ -446,8 +464,6 @@ def list_memory_items_forensic_step29c(
         stmt = stmt.where(MemoryItem.user_id == user_id)
     if actor_user_id is not None:
         stmt = stmt.where(MemoryItem.actor_user_id == actor_user_id)
-    if agent_id is not None:
-        stmt = stmt.where(MemoryItem.agent_id == agent_id)
     if message_id_not_null:
         stmt = stmt.where(MemoryItem.message_id.is_not(None))
     if message_id is not None:
@@ -468,7 +484,6 @@ def list_memory_items_forensic_step29c(
                 user_id=r.user_id,
                 actor_user_id=r.actor_user_id,
                 admin_id=r.admin_id,
-                agent_id=r.agent_id,
                 category=r.category,
                 message_id=r.message_id,
                 luciel_instance_id=r.luciel_instance_id,
@@ -540,8 +555,6 @@ def list_admin_audit_logs_forensic_step29c(
                 action=r.action,
                 resource_type=r.resource_type,
                 admin_id=r.admin_id,
-                domain_id=r.domain_id,
-                agent_id=r.agent_id,
                 luciel_instance_id=r.luciel_instance_id,
                 actor_key_prefix=r.actor_key_prefix,
                 actor_label=r.actor_label,
@@ -778,9 +791,6 @@ def toggle_luciel_instance_active_step29c(
         resource_type=RESOURCE_LUCIEL_INSTANCE,
         resource_pk=inst.id,
         resource_natural_id=inst.instance_slug,
-        # Arc 5 Path A — domain_id / agent_id no longer exist in V2.
-        domain_id=None,
-        agent_id=None,
         luciel_instance_id=inst.id,
         before={"active": previous_active},
         after={"active": requested_active},

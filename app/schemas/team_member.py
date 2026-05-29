@@ -20,13 +20,16 @@ class TeamMemberRead(BaseModel):
     """One team member under the caller's Admin.
 
     Sourced from an active ScopeAssignment row joined to its User.
+
+    Arc 12 EX1c — ``domain_id`` removed from the public projection.
+    V2 has a single Admin→Instance boundary; the underlying column
+    persists on scope_assignments until EX3 drops it.
     """
     model_config = ConfigDict(from_attributes=True)
 
     # ScopeAssignment fields
     scope_assignment_id: UUID
     role: str  # admin_owner / admin_manager / instance_operator / read_only_viewer
-    domain_id: str | None
     started_at: datetime
     active: bool
 

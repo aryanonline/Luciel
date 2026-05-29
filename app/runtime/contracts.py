@@ -6,9 +6,11 @@ retriever needs it to scope its query) and the response with
 to ``traces.source_ids_used`` so the §3.2.2 delete-modal preview
 can light up).
 
-Both new fields default for backwards compatibility — no current
-caller threads ``luciel_instance_id`` through; the retrieve path
-short-circuits when it is ``None`` anyway.
+Arc 12 EX1d (founder-directed agent_id/domain_id excision): the
+v1 ``domain_id`` field is removed from ``RuntimeRequest``. v2 has
+a single Admin→Instance boundary (Architecture §3.7.2); the prompt
+no longer carries a Domain layer and the orchestrator no longer
+threads a Domain value into the trace write.
 """
 from __future__ import annotations
 
@@ -21,7 +23,6 @@ class RuntimeRequest:
     session_id: str
     user_id: str | None
     admin_id: str
-    domain_id: str
     channel: str
     # Arc 11 Step 8 — needed by KnowledgeRetriever for Wall-3 scoping.
     # Defaults None so existing call sites (chat path stubs, tests

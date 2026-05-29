@@ -33,10 +33,15 @@ _SLUG_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 class UserInviteCreate(BaseModel):
     """Payload for POST /api/v1/admin/invites.
 
-    admin_id and domain_id are derived server-side from the cookied
-    User's active ScopeAssignment when omitted; passing them explicitly
-    is the platform_admin path (Step 30a.5's Company-admin-invites-lead
-    leg). Most Team-tier callers will only pass invited_email.
+    Arc 12 EX1c — ``domain_id`` removed from the request body. Arc 12
+    EX3 (this run) drops ``user_invites.domain_id`` outright; the v2
+    invite is scoped by ``admin_id`` (plus instance where relevant)
+    via the cookied user's active ScopeAssignment.
+
+    admin_id is derived server-side from the cookied User's active
+    ScopeAssignment when omitted; passing it explicitly is the
+    platform_admin path (Step 30a.5's Company-admin-invites-lead leg).
+    Most Team-tier callers will only pass invited_email.
     """
 
     invited_email: EmailStr = Field(
@@ -51,16 +56,6 @@ class UserInviteCreate(BaseModel):
         description=(
             "Tenant that owns the invite. Defaults to the cookied user's "
             "active tenant when omitted."
-        ),
-    )
-    domain_id: str | None = Field(
-        default=None,
-        min_length=2,
-        max_length=100,
-        pattern=_SLUG_PATTERN,
-        description=(
-            "Domain (department/vertical) the invitee will be provisioned "
-            "into. Defaults to the cookied user's active domain when omitted."
         ),
     )
     role: ScopeRole = Field(
@@ -88,11 +83,12 @@ class UserInviteRead(BaseModel):
     body. Admins see only the lifecycle state.
     """
 
+    # Arc 12 EX1c — ``domain_id`` removed from the public projection.
+    # Underlying column persists on user_invites (NOT NULL until EX3).
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     admin_id: str
-    domain_id: str
     invited_email: str
     role: str
     status: InviteStatus

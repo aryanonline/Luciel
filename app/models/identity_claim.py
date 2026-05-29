@@ -1,4 +1,4 @@
-"""IdentityClaim model -- channel-specific identifier bound to a User within a scope.
+"""IdentityClaim model -- channel-specific identifier bound to a User within an Admin scope.
 
 Step 24.5c (Cross-channel identity and conversation continuity).
 
@@ -6,23 +6,28 @@ An IdentityClaim records the channel-specific identifier (email, phone, sso
 subject) that resolves back to a durable User identity. At request time the
 ingress adapter (widget, programmatic API, voice/SMS/email when 34a lands)
 asserts a claim; the identity resolver looks it up against this table within
-the calling scope and binds the session to the matching User.
+the calling Admin scope and binds the session to the matching User.
 
 Design contract (see ARCHITECTURE.md §3.2.11 "Identity & conversation
-continuity" for the canonical spec):
+continuity" and §3.7.2 "Admin → Instance boundary" for the canonical
+specs):
 
 - Claims are ORTHOGONAL to scope the same way Users are. A single User
-  can have many IdentityClaim rows, possibly under different scopes
+  can have many IdentityClaim rows, possibly under different Admins
   (e.g. Sarah's work-email claim at REMAX Crossroads + Sarah's personal
-  phone claim at the same scope, all rolling up to one User UUID).
+  phone claim at the same Admin, all rolling up to one User UUID).
 
-- Each claim is SCOPED to its issuing scope -- (tenant_id, domain_id) --
-  in v1. Cross-scope continuity is explicitly out of scope at v1
-  (Step 38 territory, ARCHITECTURE §4.9 rejected-alternative bullet).
-  Uniqueness is enforced on (claim_type, claim_value, tenant_id, domain_id)
-  so two scopes can independently assert the same number or email
-  without colliding -- a number that belongs to Brokerage A's prospect
-  and to Brokerage B's prospect is two facts, both true.
+- Each claim is SCOPED to its issuing Admin (admin_id) under the v2
+  single Admin → Instance boundary -- the Domain layer was eliminated
+  at Arc 5 Path A and the legacy ``domain_id`` column on this table was
+  dropped at Arc 12 EX3 (alembic
+  ``arc12_ex3_drop_identity_claims_domain``). Cross-Admin continuity is
+  explicitly out of scope at v1 (Step 38 territory, ARCHITECTURE §4.9
+  rejected-alternative bullet). Uniqueness is enforced on the v2
+  natural key (claim_type, claim_value, admin_id), so two Admins can
+  independently assert the same number or email without colliding -- a
+  number that belongs to Brokerage A's prospect and to Brokerage B's
+  prospect is two facts, both true.
 
 - claim_type is a closed enum: email, phone, sso_subject. The runtime
   passes the type alongside the value to the resolver; the table stores
@@ -190,11 +195,6 @@ class IdentityClaim(Base):
         nullable=False,
         index=True,
     )
-    domain_id: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-        index=True,
-    )
 
     # Free-form label for which ingress adapter asserted the claim.
     # v1: 'widget', 'programmatic_api'. Step 34a adds: 'voice_gateway',
@@ -251,57 +251,44 @@ class IdentityClaim(Base):
 
     # ------ table-level constraints + indexes ------
     __table_args__ = (
-        # The load-bearing uniqueness. Two facts about the same value
-        # under two scopes are independent; the same fact asserted twice
-        # under the same scope is a duplicate. Writer is responsible for
-        # normalising claim_value before insert (LOWER for email, E.164
-        # for phone) so the comparison is meaningful.
+        # The load-bearing uniqueness on the v2 natural key. Arc 12
+        # EX3 dropped domain_id; the duplicate-claim guard now lives
+        # on (claim_type, claim_value, admin_id). Writer is responsible
+        # for normalising claim_value before insert (LOWER for email,
+        # E.164 for phone) so the comparison is meaningful.
         UniqueConstraint(
             "claim_type",
             "claim_value",
             "admin_id",
-            "domain_id",
             name="uq_identity_claims_type_value_scope",
         ),
-        # Resolver hot path: "given (tenant_id, domain_id, claim_type,
-        # claim_value), find the matching active claim". The unique
-        # constraint above already creates a unique btree on those four
-        # columns; we add an active-filter partial index so the resolver
-        # never scans inactive claims.
+        # Resolver hot path: "given (admin_id, claim_type, claim_value),
+        # find the matching active claim". The unique constraint above
+        # already creates a unique btree on this prefix; the partial
+        # index keeps the resolver from scanning inactive claims.
         Index(
             "ix_identity_claims_active_resolver",
             "admin_id",
-            "domain_id",
             "claim_type",
             "claim_value",
             postgresql_where=text("active = true"),
         ),
-        # "All claims for this user under this scope" -- the inverse
-        # lookup used when an adapter has the User but needs to surface
-        # known identifiers (Step 31 dashboards territory; v1 doesn't
-        # use this path but the index is cheap and the shape is correct).
+        # "All active claims for this user under this admin scope" --
+        # the inverse lookup used when an adapter has the User but
+        # needs to surface known identifiers.
         Index(
             "ix_identity_claims_user_tenant_domain_active",
             "user_id",
             "admin_id",
-            "domain_id",
             postgresql_where=text("active = true"),
         ),
-        {"comment": (
-            "Step 24.5c -- channel-specific identifier bound to a User "
-            "within a scope. Orthogonal to scope the same way Users are. "
-            "Uniqueness scoped to (claim_type, claim_value, tenant_id, "
-            "domain_id). v1 trust model is adapter-asserted; "
-            "verified_at lands with Step 34a + Step 31. See "
-            "ARCHITECTURE §3.2.11."
-        )},
     )
 
     def __repr__(self) -> str:  # pragma: no cover -- debug only
         return (
             f"<IdentityClaim id={self.id} user_id={self.user_id} "
             f"type={self.claim_type.value} "
-            f"scope=({self.admin_id!r},{self.domain_id!r}) "
+            f"scope=({self.admin_id!r}) "
             f"adapter={self.issuing_adapter!r} "
             f"verified={self.verified_at is not None} "
             f"active={self.active}>"

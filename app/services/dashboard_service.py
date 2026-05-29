@@ -1,11 +1,16 @@
-"""DashboardService -- scope-bound hierarchical rollups for Step 31.
+"""DashboardService -- scope-bound rollups for Step 31.
 
-Three read-only methods that produce the aggregates the operator-facing
-dashboard renders (and that a future Step 32 frontend reads):
+Arc 12 EX1d collapsed the dashboard surface to the single v2
+Admin → Instance boundary in Architecture §3.7.2 / §3.7.3:
 
-  * get_tenant_dashboard(admin_id)  -> TenantDashboard
-  * get_domain_dashboard(admin_id, domain_id) -> DomainDashboard
-  * get_agent_dashboard(admin_id, domain_id, agent_id) -> AgentDashboard
+  * get_tenant_dashboard(admin_id) -> TenantDashboard
+
+The legacy v1 ``get_domain_dashboard`` / ``get_agent_dashboard``
+methods (kept as thin wrappers during EX1b for HTTP-route shape
+continuity) had no remaining in-tree callers post-EX1c — the
+matching HTTP handlers were removed in EX1c — and were excised
+here. ``top_luciel_instances`` on the tenant envelope is the
+v2-correct narrowing.
 
 Architectural pins
 ==================
@@ -158,27 +163,6 @@ class TenantDashboard:
     top_luciel_instances: list[ChildRollup] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class DomainDashboard:
-    admin_id: str
-    domain_id: str
-    window_days: int
-    aggregates: ScopeAggregates
-    trend: list[TrendBucket]
-    top_agents: list[ChildRollup] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class AgentDashboard:
-    admin_id: str
-    domain_id: str
-    agent_id: str
-    window_days: int
-    aggregates: ScopeAggregates
-    trend: list[TrendBucket]
-    top_luciel_instances: list[ChildRollup] = field(default_factory=list)
-
-
 # --------------------------------------------------------------------- #
 # Service
 # --------------------------------------------------------------------- #
@@ -219,14 +203,10 @@ class DashboardService:
         ]
         aggregates = self._aggregates(base_filter, scope_tag=("tenant", admin_id))
         trend = self._trend(base_filter, window_days, window_start)
-        top_domains = self._top_children(
-            base_filter=base_filter + [Trace.domain_id.is_not(None)],
-            group_col=Trace.domain_id,
-            display_lookup=self._domain_display_lookup(admin_id),
-            top_n=top_n,
-            scope_tag=("tenant.top_domains", admin_id),
-            scope_check=lambda row_id: row_id is not None,
-        )
+        # Arc 12 EX1b: Domain layer removed (§3.7.2). The legacy
+        # top_domains surface returns an empty list -- no v2-equivalent
+        # rollup. top_luciel_instances below carries the v2 narrowing.
+        top_domains: list[ChildRollup] = []
         top_instances = self._top_children(
             base_filter=base_filter + [Trace.luciel_instance_id.is_not(None)],
             group_col=Trace.luciel_instance_id,
@@ -243,102 +223,6 @@ class DashboardService:
             aggregates=aggregates,
             trend=trend,
             top_domains=top_domains,
-            top_luciel_instances=top_instances,
-        )
-
-    def get_domain_dashboard(
-        self,
-        admin_id: str,
-        domain_id: str,
-        *,
-        window_days: int = DEFAULT_TREND_DAYS,
-        top_n: int = DEFAULT_TOP_N,
-        since: datetime | None = None,
-    ) -> DomainDashboard:
-        if not admin_id:
-            raise ValueError("admin_id is required")
-        if not domain_id:
-            raise ValueError("domain_id is required")
-        window_start = self._window_start(window_days, since)
-
-        base_filter = [
-            Trace.admin_id == admin_id,
-            Trace.domain_id == domain_id,
-            Trace.created_at >= window_start,
-        ]
-        aggregates = self._aggregates(
-            base_filter, scope_tag=("domain", f"{admin_id}/{domain_id}")
-        )
-        trend = self._trend(base_filter, window_days, window_start)
-        top_agents = self._top_children(
-            base_filter=base_filter + [Trace.agent_id.is_not(None)],
-            group_col=Trace.agent_id,
-            display_lookup=self._agent_display_lookup(admin_id, domain_id),
-            top_n=top_n,
-            scope_tag=("domain.top_agents", f"{admin_id}/{domain_id}"),
-            scope_check=lambda row_id: row_id is not None,
-        )
-
-        return DomainDashboard(
-            admin_id=admin_id,
-            domain_id=domain_id,
-            window_days=window_days,
-            aggregates=aggregates,
-            trend=trend,
-            top_agents=top_agents,
-        )
-
-    def get_agent_dashboard(
-        self,
-        admin_id: str,
-        domain_id: str,
-        agent_id: str,
-        *,
-        window_days: int = DEFAULT_TREND_DAYS,
-        top_n: int = DEFAULT_TOP_N,
-        since: datetime | None = None,
-    ) -> AgentDashboard:
-        if not admin_id:
-            raise ValueError("admin_id is required")
-        if not domain_id:
-            raise ValueError("domain_id is required")
-        if not agent_id:
-            raise ValueError("agent_id is required")
-        window_start = self._window_start(window_days, since)
-
-        base_filter = [
-            Trace.admin_id == admin_id,
-            Trace.domain_id == domain_id,
-            Trace.agent_id == agent_id,
-            Trace.created_at >= window_start,
-        ]
-        aggregates = self._aggregates(
-            base_filter,
-            scope_tag=("agent", f"{admin_id}/{domain_id}/{agent_id}"),
-        )
-        trend = self._trend(base_filter, window_days, window_start)
-        top_instances = self._top_children(
-            base_filter=base_filter + [Trace.luciel_instance_id.is_not(None)],
-            group_col=Trace.luciel_instance_id,
-            display_lookup=self._instance_display_lookup_for_agent(
-                admin_id, domain_id, agent_id
-            ),
-            top_n=top_n,
-            scope_tag=(
-                "agent.top_instances",
-                f"{admin_id}/{domain_id}/{agent_id}",
-            ),
-            scope_check=lambda row_id: row_id is not None,
-            id_cast=str,
-        )
-
-        return AgentDashboard(
-            admin_id=admin_id,
-            domain_id=domain_id,
-            agent_id=agent_id,
-            window_days=window_days,
-            aggregates=aggregates,
-            trend=trend,
             top_luciel_instances=top_instances,
         )
 
@@ -515,16 +399,6 @@ class DashboardService:
 
     # --- display-name lookups (cheap because they're small lists) --- #
 
-    def _domain_display_lookup(self, admin_id: str) -> dict[str, str]:
-        """Arc 5 Path A V2 stub. Domain layer is gone; returns {}."""
-        return {}
-
-    def _agent_display_lookup(
-        self, admin_id: str, domain_id: str
-    ) -> dict[str, str]:
-        """Arc 5 Path A V2 stub. Agent layer is gone; returns {}."""
-        return {}
-
     def _instance_display_lookup_for_tenant(
         self, admin_id: str
     ) -> dict[str, str]:
@@ -535,14 +409,3 @@ class DashboardService:
             LucielInstance.admin_id == admin_id
         )
         return {str(row.id): row.display_name for row in self.db.execute(stmt).all()}
-
-    def _instance_display_lookup_for_agent(
-        self, admin_id: str, domain_id: str, agent_id: str
-    ) -> dict[str, str]:
-        # Arc 5 Path A — Agent layer eliminated. The dashboard's
-        # per-agent instance lookup has no V2 equivalent (V2 dashboards
-        # are admin-rollup or single-instance only). Return empty so
-        # any surviving call site renders a blank panel rather than
-        # 500ing; the caller is on B-tier dashboards that the Arc 6
-        # frontend rewrite replaces.
-        return {}

@@ -51,8 +51,6 @@ class SessionService:
         self,
         *,
         admin_id: str,
-        domain_id: str,
-        agent_id: str | None = None,
         user_id: str | None = None,
         channel: str = "web",
         conversation_id: uuid.UUID | None = None,
@@ -62,8 +60,6 @@ class SessionService:
         return self.repository.create_session(
             session_id=session_id,
             admin_id=admin_id,
-            domain_id=domain_id,
-            agent_id=agent_id,
             user_id=user_id,
             channel=channel,
             conversation_id=conversation_id,
@@ -74,8 +70,6 @@ class SessionService:
         self,
         *,
         admin_id: str,
-        domain_id: str,
-        agent_id: str | None = None,
         channel: str = "web",
         claim_type,  # ClaimType -- imported lazily inside body
         claim_value: str,
@@ -99,8 +93,7 @@ class SessionService:
         method does not pay any extra import cost on cold start.
 
         Args:
-            admin_id, domain_id, agent_id, channel: same as
-                create_session().
+            admin_id, channel: same as create_session().
             claim_type:      ClaimType -- EMAIL / PHONE / SSO_SUBJECT.
             claim_value:     The raw asserted value (resolver normalises).
             issuing_adapter: The ingress adapter identifier, e.g.
@@ -120,7 +113,6 @@ class SessionService:
             claim_type=claim_type,
             claim_value=claim_value,
             admin_id=admin_id,
-            domain_id=domain_id,
             issuing_adapter=issuing_adapter,
         )
 
@@ -134,8 +126,6 @@ class SessionService:
         new_session = self.repository.create_session(
             session_id=session_id,
             admin_id=admin_id,
-            domain_id=domain_id,
-            agent_id=agent_id,
             user_id=str(resolution.user_id),
             channel=channel,
             conversation_id=resolution.conversation_id,
