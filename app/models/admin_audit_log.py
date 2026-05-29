@@ -428,6 +428,24 @@ ACTION_SIBLING_GRANT_APPROVED = "sibling_grant_approved"
 ACTION_SIBLING_GRANT_REJECTED = "sibling_grant_rejected"
 ACTION_SIBLING_GRANT_REVOKED = "sibling_grant_revoked"
 
+# Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
+#
+# ACTION_SIBLING_ACCESS -- emitted by ``app.tools.sibling_dispatch`` on
+#   every authorised invocation of ``call_sibling_luciel`` AFTER the
+#   five-check dispatch path has passed (cycle detection, fan-out
+#   budget, master switch on both endpoints, live grant lookup). This
+#   is the Wall-3 composition exception row (§3.7.3): a dispatch that
+#   names BOTH the caller and the callee instance under one admin.
+#   ``luciel_instance_id`` carries the CALLER instance (the originating
+#   Luciel for this hop). ``after_json`` carries the callee, the
+#   inbound_message_id chaining customer-message -> sibling-invocations
+#   -> final-response, the depth in the call stack, the fan-out
+#   counter after this hop, and the live grant id. The audit row is
+#   written BEFORE the Arc-14 orchestrator round-trip plug-in seam
+#   so a regulator scanning the chain can reconstruct the composition
+#   tree even if the round-trip itself is interim-bodied.
+ACTION_SIBLING_ACCESS = "sibling_access"
+
 # Arc 5 B5 -- V2 Admin/Instance lifecycle verbs.
 #
 # Per the aggressive-cleanup amendment
@@ -571,6 +589,8 @@ ALLOWED_ACTIONS = (
     ACTION_SIBLING_GRANT_APPROVED,
     ACTION_SIBLING_GRANT_REJECTED,
     ACTION_SIBLING_GRANT_REVOKED,
+    # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
+    ACTION_SIBLING_ACCESS,
 )
 
 

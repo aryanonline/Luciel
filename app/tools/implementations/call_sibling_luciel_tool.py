@@ -6,14 +6,18 @@ not a customer-facing side effect (the sibling's own tool calls run
 through its own broker + tier gate), but it is a meaningful
 cross-instance dispatch the runtime should surface.
 
-Interim-body rule (00_MASTER §"interim-body rule")
-==================================================
-The sibling composition runtime — cycle detection, per-inbound
-fan-out budget, grant lookup, derived context, sibling-access audit
-row — is the Arc 12 WU5 deliverable. Until WU5 lands, this tool
-declares its full §3.3.1 contract (so the registry, broker, schema
-validator, and authorisation gate can all reason about it) and
-``execute()`` returns a structured "not yet available" dict.
+WU5 wiring
+==========
+The five-check dispatch path (cycle detection, per-inbound fan-out
+budget, master switch on both endpoints, live grant lookup, derived
+context + sibling-access audit row) is implemented in
+``app.tools.sibling_dispatch``. ``execute()`` is a thin adapter:
+unpack the input, hand off to ``dispatch_sibling_call``, return the
+result dict. The single Arc 14 seam is the structured
+"authorized-and-dispatched" payload returned on the happy path —
+when Arc 14's agentic loop lands, the seam swaps the structured
+payload for the orchestrator round-trip response without touching
+the guardrails.
 
 ``execution_mode`` is ``"in_process"`` per WU3 — the sibling call
 runs inside the worker's event loop, not in a subprocess.
@@ -21,16 +25,13 @@ runs inside the worker's event loop, not in a subprocess.
 channel adapter dependency.
 """
 
-# TODO(ARC12_WU5): replace this interim body with the real sibling
-# composition runtime (cycle detection + per-inbound fan-out budget
-# + grant lookup + sibling-access audit row).
-
 from __future__ import annotations
 
 from typing import Any
 
 from app.policy.action_classification import ActionTier
 from app.tools.base import LucielTool, ToolContext
+from app.tools.sibling_dispatch import dispatch_sibling_call
 
 
 class CallSiblingLucielTool(LucielTool):
@@ -94,6 +95,16 @@ class CallSiblingLucielTool(LucielTool):
             "properties": {
                 "success": {"type": "boolean"},
                 "output": {"type": "string"},
+                "callee_instance_id": {"type": ["integer", "null"]},
+                "caller_instance_id": {"type": ["integer", "null"]},
+                "grant_id": {"type": ["integer", "null"]},
+                "depth": {"type": ["integer", "null"]},
+                "fan_out_count": {"type": ["integer", "null"]},
+                "derived_context": {
+                    "type": ["object", "null"],
+                    "additionalProperties": True,
+                },
+                "error_reason": {"type": ["string", "null"]},
                 "not_yet_available": {"type": "boolean"},
                 "owning_arc": {"type": "string"},
             },
@@ -111,8 +122,7 @@ class CallSiblingLucielTool(LucielTool):
     @property
     def execution_mode(self) -> str:
         # In-process per WU3: sibling dispatch runs inside the
-        # worker's event loop, not in a subprocess. WU5 wires the
-        # real dispatch path.
+        # worker's event loop, not in a subprocess.
         return "in_process"
 
     async def execute(
@@ -120,15 +130,11 @@ class CallSiblingLucielTool(LucielTool):
         input: dict[str, Any],
         context: ToolContext,
     ) -> dict[str, Any]:
-        # Interim body — NO dispatch. The sibling composition
-        # runtime ships in Arc 12 WU5.
-        return {
-            "success": False,
-            "output": (
-                "call_sibling_luciel is registered but the sibling "
-                "composition runtime has not yet shipped (owning "
-                "arc: ARC12_WU5). No sibling was invoked."
-            ),
-            "not_yet_available": True,
-            "owning_arc": "ARC12_WU5",
-        }
+        # The §3.3.1 input_schema validation already ran in the
+        # broker before we got here — we can trust the shape.
+        return dispatch_sibling_call(
+            callee_instance_id=int(input["target_instance_id"]),
+            task=str(input["task"]),
+            payload=input.get("payload"),
+            context=context,
+        )

@@ -261,7 +261,12 @@ _INTERIM_TOOLS = {
     "lookup_property": "ARC14",
     "schedule_callback": "ARC13",
     "push_to_crm": "ARC12_WU6",
-    "call_sibling_luciel": "ARC12_WU5",
+    # call_sibling_luciel: Arc 12 WU5 SHIPPED — guardrails + audit are
+    # real; only the LLM round-trip remains as an Arc-14 seam INSIDE
+    # the happy path. The tool no longer satisfies the "interim body"
+    # invariant (success=False / no side effect) so it is excluded
+    # from this parametrisation. See
+    # test_arc12_wu5_sibling_dispatch.py for the real coverage.
     "bring_your_own_webhook": "ARC12_WU6",
 }
 
@@ -320,7 +325,11 @@ def test_interim_bodies_carry_greppable_todo_arc_comments() -> None:
         "lookup_property_tool.py": "TODO(ARC14)",
         "schedule_callback_tool.py": "TODO(ARC13)",
         "push_to_crm_tool.py": "TODO(ARC12_WU6)",
-        "call_sibling_luciel_tool.py": "TODO(ARC12_WU5)",
+        # call_sibling_luciel: Arc 12 WU5 shipped — guardrails/audit
+        # are real. The only remaining seam is the Arc-14 orchestrator
+        # round-trip, which lives in app/tools/sibling_dispatch.py
+        # (the dispatch module the tool delegates to). See the
+        # TODO(ARC14) breadcrumb there.
         "bring_your_own_webhook_tool.py": "TODO(ARC12_WU6)",
     }
     for fname, todo_marker in file_to_todo.items():

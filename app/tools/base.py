@@ -102,6 +102,37 @@ class ToolResult:
 # =====================================================================
 
 
+@dataclass
+class SiblingCompositionState:
+    """Mutable per-inbound-message composition accounting.
+
+    Threaded through ``ToolContext.composition_state`` so the WU5
+    sibling-dispatch path can:
+
+      * detect cycles (a callee already on ``call_stack`` is a cycle);
+      * enforce the per-inbound fan-out budget (``fan_out_count`` is
+        the total number of sibling-call invocations across the
+        whole composition tree for this inbound message — when it
+        reaches ``app.tools.sibling_dispatch.SIBLING_FAN_OUT_BUDGET``
+        further calls are refused as a tool-error).
+
+    Mutable on purpose. ``ToolContext`` itself is frozen so a tool
+    body cannot rewrite admin/instance identity, but the composition
+    accounting MUST mutate as the tree expands and contracts. The
+    convention is: the dispatch path is the SOLE writer (push on
+    entry, pop on exit, increment fan-out exactly once per allowed
+    dispatch). Tool bodies treat it as read-only.
+
+    Runtime-internal. Not admin-configurable, not surfaced in any
+    API, not in entitlements, not in any UI. See
+    ``app/tools/sibling_dispatch.py`` for the budget default and the
+    rationale.
+    """
+
+    call_stack: list[tuple[int, int]] = field(default_factory=list)
+    fan_out_count: int = 0
+
+
 @dataclass(frozen=True)
 class ToolContext:
     """Identity + scope handle threaded through every tool invocation.
@@ -130,12 +161,31 @@ class ToolContext:
         Identifier for the current inbound message. WU5 uses this to
         scope cycle-detection state and the per-inbound fan-out
         budget across a composition tree.
+    caller_instance_id : Optional[int]
+        For a SIBLING invocation, the instance that initiated this
+        hop. ``None`` on the customer-facing entry point (the root
+        of the composition tree). The WU5 dispatch path derives a
+        new ``ToolContext`` for the callee whose ``instance_id``
+        is the callee and whose ``caller_instance_id`` is the
+        current ``instance_id`` — this is the Wall-3 composition
+        exception (§3.7.3) that names BOTH instances.
+    composition_state : Optional[SiblingCompositionState]
+        Shared mutable accounting for cycle detection + per-inbound
+        fan-out budget. ``None`` on the customer-facing entry point;
+        WU5 dispatch lazily allocates one on first sibling call and
+        propagates the SAME instance to every derived child context
+        so the call stack and fan-out counter are global across the
+        composition tree for this inbound message. Backward-
+        compatible: WU1/WU2/WU3 contexts that never enter the
+        sibling dispatch path leave this ``None`` and never touch it.
     """
 
     admin_id: str
     instance_id: int
     session: Optional["Session"] = None
     inbound_message_id: Optional[str] = None
+    caller_instance_id: Optional[int] = None
+    composition_state: Optional["SiblingCompositionState"] = None
 
 
 # =====================================================================
@@ -256,6 +306,7 @@ class LucielTool(ABC):
 
 __all__ = [
     "LucielTool",
+    "SiblingCompositionState",
     "ToolContext",
     "ToolResult",
     "validate_schema",
