@@ -364,33 +364,16 @@ def create_api_key(
     luciel_service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> ApiKeyCreateResponse:
-    # --- Step 24 scope + privilege guards (unchanged) ---------------
-    # Scope: a caller can only mint keys at or below their own scope.
-    ScopePolicy.enforce_agent_scope(
-        request,
-        payload.admin_id,
-        payload.domain_id,
-        payload.agent_id,
-    )
+    # --- Arc 12 EX1a scope + privilege guards -----------------------
+    # V2 has a single Admin→Instance boundary (Architecture §3.7.2);
+    # the legacy domain/agent levels do not exist. Scope enforcement
+    # collapses to the cross-Admin guard. The "domain-scoped caller
+    # may not mint tenant-wide" and "agent-scoped caller may only mint
+    # for itself" carve-outs are gone — there is no domain/agent
+    # caller in V2.
+    ScopePolicy.enforce_tenant_scope(request, payload.admin_id)
     # Prevent privilege escalation (non-platform_admin cannot grant platform_admin).
     ScopePolicy.enforce_no_privilege_escalation(request, payload.permissions or [])
-
-    # Extra rule: a domain-scoped caller cannot mint a tenant-wide key
-    # (i.e. target domain_id must be set and match caller_domain).
-    caller_domain = getattr(request.state, "domain_id", None)
-    caller_agent = getattr(request.state, "agent_id", None)
-    if caller_domain and not ScopePolicy.is_platform_admin(request):
-        if payload.domain_id is None:
-            raise HTTPException(
-                status_code=403,
-                detail="Domain-scoped key may not mint tenant-wide keys",
-            )
-    if caller_agent and not ScopePolicy.is_platform_admin(request):
-        if payload.agent_id is None or payload.agent_id != caller_agent:
-            raise HTTPException(
-                status_code=403,
-                detail="Agent-scoped key may only mint keys for itself",
-            )
 
     # --- Step 24.5: LucielInstance binding validation ---------------
     # If the key is being pinned to a specific LucielInstance, the
@@ -425,8 +408,8 @@ def create_api_key(
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
         admin_id=payload.admin_id,
-        domain_id=payload.domain_id,
-        agent_id=payload.agent_id,
+        # Arc 12 EX1a — agent_id / domain_id removed from the admin-key
+        # mint contract. V2 keys are bound to (admin_id, instance_id).
         luciel_instance_id=payload.luciel_instance_id,   # Step 24.5
         display_name=payload.display_name,
         permissions=payload.permissions,
@@ -456,12 +439,14 @@ def list_api_keys(
 
     keys = service.list_keys(admin_id=admin_id)
 
-    caller_domain = getattr(request.state, "domain_id", None)
-    caller_agent = getattr(request.state, "agent_id", None)
-    if caller_agent and not ScopePolicy.is_platform_admin(request):
-        keys = [k for k in keys if k.agent_id == caller_agent]
-    elif caller_domain and not ScopePolicy.is_platform_admin(request):
-        keys = [k for k in keys if k.domain_id == caller_domain]
+    # Arc 12 EX1a — V2 has a single Admin→Instance boundary
+    # (Architecture §3.7.2). The legacy domain-scoped and agent-scoped
+    # caller post-filters are gone: there is no domain/agent caller in
+    # V2, and the cross-Admin guard above already restricts non-
+    # platform_admin callers to their own admin_id. Instance-level
+    # scoping for callers bound to a specific Luciel instance will
+    # land in a later EX-step once instance-keyed list filtering is
+    # introduced; until then admin-key list reads are admin-scoped.
 
     return [ApiKeyRead.model_validate(k) for k in keys]
 
@@ -531,48 +516,14 @@ def create_embed_key(
          these fields from the client; this is the only place they
          get set.
     """
-    # --- Scope policy: caller mints at or below their own scope ----
-    # Reuse the existing helper from create_api_key. Embed keys never
-    # carry agent_id or luciel_instance_id at v1, so we pass None for
-    # both -- the helper treats that as "no agent constraint", which
-    # is correct: the embed key is tenant- or domain-scoped only.
-    ScopePolicy.enforce_agent_scope(
-        request,
-        payload.admin_id,
-        payload.domain_id,
-        target_agent_id=None,
-    )
-
-    # Domain-scoped callers cannot mint tenant-wide embed keys (i.e.
-    # the request must specify a domain_id that matches the caller's
-    # domain). Same rule as admin keys; restated here for clarity.
-    caller_domain = getattr(request.state, "domain_id", None)
-    if caller_domain and not ScopePolicy.is_platform_admin(request):
-        if payload.domain_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Domain-scoped key may not mint tenant-wide embed keys",
-            )
-        if payload.domain_id != caller_domain:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Domain-scoped key may only mint embed keys within its own domain",
-            )
-
-    # Agent-scoped callers cannot mint embed keys (embed keys are
-    # tenant-, domain-, or instance-scoped -- never agent-scoped). The
-    # agent-scope carve-out remains as a guardrail: an agent-bound key
-    # has no need to mint widget credentials.
-    caller_agent = getattr(request.state, "agent_id", None)
-    if caller_agent and not ScopePolicy.is_platform_admin(request):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Agent-scoped keys cannot mint embed keys. Use a "
-                "tenant- or domain-scoped admin key (or the customer's "
-                "cookied dashboard session)."
-            ),
-        )
+    # --- Arc 12 EX1a scope policy ----------------------------------
+    # V2 has a single Admin→Instance boundary (Architecture §3.7.2).
+    # Embed-key issuance collapses to the cross-Admin guard. The
+    # legacy domain-scoped / agent-scoped caller carve-outs are gone
+    # — V2 has no such callers — but the EmbedKeyCreate schema still
+    # carries a ``domain_id`` field consumed by the widget runtime
+    # layer (a separate EX-step owns that surface).
+    ScopePolicy.enforce_tenant_scope(request, payload.admin_id)
 
     # Step 31.2 commit B: lift the v1 luciel_instance_id carve-out.
     # When the caller passes luciel_instance_id, validate the instance
@@ -679,8 +630,13 @@ def create_embed_key(
     service = ApiKeyService(db)
     api_key, raw_key = service.create_key(
         admin_id=payload.admin_id,
-        domain_id=payload.domain_id,
-        agent_id=None,
+        # Arc 12 EX1a — embed-key mint no longer threads agent_id /
+        # domain_id through the auth-layer key service. The widget
+        # runtime layer (separate EX-step) consumes
+        # EmbedKeyCreate.domain_id directly when wiring scope-prompt
+        # selection; the api_key row itself stores the row-level
+        # binding via luciel_instance_id and (later) an admin_id-only
+        # boundary.
         luciel_instance_id=payload.luciel_instance_id,
         display_name=payload.display_name,
         # Server-set: the schema does not accept these from the client.
@@ -739,22 +695,13 @@ def deactivate_api_key(
         # touch keys outside their domain; same for agent.
         if not ScopePolicy.is_platform_admin(request):
             caller_tenant = getattr(request.state, "admin_id", None)
-            caller_domain = getattr(request.state, "domain_id", None)
-            caller_agent = getattr(request.state, "agent_id", None)
+            # Arc 12 EX1a — V2 has a single Admin→Instance boundary
+            # (Architecture §3.7.2); the domain-scoped and agent-scoped
+            # caller carve-outs are gone.
             if caller_tenant and target.admin_id != caller_tenant:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Cannot deactivate API key outside your tenant",
-                )
-            if caller_domain and target.domain_id and target.domain_id != caller_domain:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Cannot deactivate API key outside your domain",
-                )
-            if caller_agent and target.agent_id and target.agent_id != caller_agent:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Cannot deactivate API key outside your agent",
                 )
         success = service.deactivate_key(key_id, audit_ctx=audit_ctx)
         if not success:

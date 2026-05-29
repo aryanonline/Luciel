@@ -87,8 +87,12 @@ class ApiKeyCreate(BaseModel):
             "platform_admin permission per Invariant 5)."
         ),
     )
-    domain_id: str | None = None
-    agent_id: str | None = None
+    # Arc 12 EX1a — admin-key mint no longer accepts agent_id /
+    # domain_id. V2 has a single Admin→Instance boundary
+    # (Architecture §3.7.2); the legacy three-level scaffold is gone
+    # from the key-mint surface. The api_key.{domain,agent}_id columns
+    # still exist (later EX-step drops them) but the auth layer no
+    # longer writes meaningful values.
     luciel_instance_id: int | None = Field(  # Step 24.5
         default=None,
         description=(

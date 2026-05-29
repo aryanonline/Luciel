@@ -136,10 +136,13 @@ def test_cookie_permissions_is_tuple() -> None:
 
 
 REQUIRED_STATE_FIELDS = {
-    # Auth-vector fields ApiKeyAuthMiddleware sets:
+    # Auth-vector fields ApiKeyAuthMiddleware sets. Arc 12 EX1a:
+    # ``domain_id`` and ``agent_id`` are no longer stamped — V2 has a
+    # single Admin→Instance boundary (Architecture §3.7.2). Downstream
+    # readers already defensively use ``getattr(request.state,
+    # "domain_id", None)`` and ScopePolicy._caller returns ``None``
+    # for those slots regardless of request.state since Revision B.
     "admin_id",
-    "domain_id",
-    "agent_id",
     "api_key_id",
     "permissions",
     "key_prefix",

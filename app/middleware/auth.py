@@ -171,8 +171,11 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
                 )
 
             admin_id = apikey.admin_id
-            domain_id = apikey.domain_id
-            agent_id = apikey.agent_id
+            # Arc 12 EX1a — V2 auth subject is admin_id (+ luciel_instance_id
+            # where instance-scoping applies). The legacy domain_id / agent_id
+            # api_key columns are read by other layers (forensics/dashboard)
+            # which a sibling EX-step rewrites; the auth layer no longer
+            # reads them and no longer stamps request.state.{domain,agent}_id.
             api_key_id = apikey.id
             permissions = apikey.permissions or []
             key_prefix = apikey.key_prefix
@@ -225,8 +228,15 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
             )
 
         request.state.admin_id = admin_id
-        request.state.domain_id = domain_id
-        request.state.agent_id = agent_id
+        # Arc 12 EX1a — request.state.domain_id / agent_id are NO LONGER
+        # stamped. V2 auth subject = admin_id (+ luciel_instance_id).
+        # Downstream code that still calls
+        # ``getattr(request.state, "domain_id", None)`` already treats the
+        # absent attribute as ``None`` (V2 collapse). ScopePolicy._caller
+        # was rewritten at Revision B to return ``None`` for those slots
+        # regardless of request.state. The api-key columns still exist on
+        # the row (later EX-step drops them); this layer just stops
+        # forwarding their values into request.state.
         request.state.api_key_id = api_key_id
         request.state.permissions = permissions
         request.state.key_prefix = key_prefix
