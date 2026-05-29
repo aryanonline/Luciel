@@ -25,8 +25,16 @@ Branch: `arc12/tool-registry-sibling-byo` (53 commits off Arc 11 head `d4baf14`)
 6. **Tier entitlements = Vision §7:** internally consistent on load-bearing axes; two soft items flagged for review (below).
 7. **Three canonical docs internally consistent with the system:** consistent except the flagged items below — none resolved unilaterally.
 
-## 4. Tests
-Authoritative full-suite run (WU8a-verify, bisected against Arc 11 baseline `d4baf14`): **0 failures.** The earlier "11 pre-existing failures" were bisected: 6× rls_c4_3 (genuinely pre-existing stale-path — FIXED to repo-relative), 3× audit_script (Arc-12-INTRODUCED by the migration-head pin — FIXED), 2× lookup_property (Arc-12-introduced interim-body assertions — aligned). A subsequent 1-test failure from the founder-review lookup_property anchor correction was fixed in lockstep (code + both test assertion sites → UNASSIGNED). Suite green.
+## 4. Tests & REAL-DATABASE verification (run by the agent in-environment, not on subagent report)
+**A live Postgres 17 + Redis were provisioned and `alembic upgrade head` was run against a REAL database — this caught two release-blocking migration bugs the sqlite-based test suite (1923 passing) completely missed, because sqlite does not enforce Postgres enums or FKs the same way:**
+1. **EX3 scope_assignment (FIXED):** the recreated `arc9_c22_bootstrap_identity` SECURITY DEFINER function compared the `scope_role` ENUM against the string literal `'owner'` (the pre-cleanup_c role name) → `InvalidTextRepresentation`. Fixed to `'admin_owner'` (the v2 enum label) in both upgrade + downgrade bodies.
+2. **EX4 reseal (FIXED):** the reseal self-audit row inserted `admin_id='platform'`, but `admin_audit_logs.admin_id` is NOT NULL FK→admins.id RESTRICT and no migration seeds the `platform` sentinel admin → `ForeignKeyViolation` on any fresh DB (would have bricked the prod deploy). Fixed by idempotently seeding the `platform` system-actor admin (`ON CONFLICT DO NOTHING`) before the reseal record.
+   - **Bisect proof:** Arc 11 baseline `d4baf14` migrates to head cleanly (exit 0); the Arc 12 branch failed before these fixes → both were Arc-12-introduced, now resolved.
+VERIFIED on real Postgres after the fixes: `alembic upgrade head` EXIT 0 → head `arc12_ex4_reseal_audit_chain_drop_agent_domain`; all 4 Arc-12 tables present with RLS enabled; zero agent_id/domain_id columns in the live schema; EX4 reseal record written + platform sentinel seeded; **the audit hash chain VERIFIES under the runtime verifier with the new field set**; EX4 downgrade→re-upgrade round-trips clean (reversible as documented).
+
+Full pytest suite (sqlite, self-configured): **1923 passed / 0 failed / 61 skipped**, run by the agent directly.
+
+Earlier note (WU8a-verify, bisected against `d4baf14`): **0 failures** at the unit level. The earlier "11 pre-existing failures" were bisected: 6× rls_c4_3 (genuinely pre-existing stale-path — FIXED to repo-relative), 3× audit_script (Arc-12-INTRODUCED by the migration-head pin — FIXED), 2× lookup_property (Arc-12-introduced interim-body assertions — aligned). A subsequent 1-test failure from the founder-review lookup_property anchor correction was fixed in lockstep (code + both test assertion sites → UNASSIGNED). Suite green.
 
 ## 5. FLAGGED FOR FOUNDER REVIEW (not resolved unilaterally)
 1. **§4.1/§4.3 vs implementation — BYO sandbox topology.** Architecture describes a separate Fargate "subprocess sandbox pool / small Fargate task family"; WU6 ships in-container subprocess isolation. §3.3.5 envelope fully met either way. Recommendation: keep in-container for v1, amend §4.1/§4.3 to match. **Founder: confirm + amend the doc, or direct a separate task family.**
