@@ -652,6 +652,22 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
     svc = _service(db)
     sub = svc.get_active_subscription_for_user(user_id=user.id)
 
+    # Arc 12b: resolve the caller's Wall-2 permission set so the
+    # dashboard can gate the Custom Roles UI on the same source of
+    # truth the server enforces. Admin-scoped (no Instance). For
+    # platform_admin callers we serialize to the full catalog rather
+    # than leaking the PLATFORM_ADMIN_ALL sentinel.
+    from app.policy.permissions import (
+        ALL_PERMISSIONS,
+        PLATFORM_ADMIN_ALL,
+        PermissionResolver,
+    )
+    _resolved = PermissionResolver.resolve(request)
+    if _resolved is PLATFORM_ADMIN_ALL:
+        resolved_permissions = sorted(ALL_PERMISSIONS)
+    else:
+        resolved_permissions = sorted(_resolved)
+
     if sub is None:
         # Free admin (or transient no-sub state): build a tier-only
         # response off the Admin row. ``status='free'`` is the
@@ -677,6 +693,7 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
             is_pilot=False,
             pilot_window_end=None,
             active_role=active_role,
+            resolved_permissions=resolved_permissions,
         )
 
     # Step 30a.2-pilot: derive pilot signal from the same source the
@@ -736,6 +753,8 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
         pilot_window_end=pilot_window_end,
         # Step 30a.5 addition.
         active_role=active_role,
+        # Arc 12b addition.
+        resolved_permissions=resolved_permissions,
     )
 
 
