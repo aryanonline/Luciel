@@ -261,7 +261,7 @@ _INTERIM_TOOLS = {
     "book_appointment": "ARC13",
     "send_email": "ARC13",
     "send_sms": "ARC13",
-    "lookup_property": "ARC14",
+    "lookup_property": "UNASSIGNED",
     "schedule_callback": "ARC13",
     "push_to_crm": "ARC12_WU6",
     # call_sibling_luciel: Arc 12 WU5 SHIPPED — guardrails + audit are
