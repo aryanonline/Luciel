@@ -53,6 +53,22 @@ from app.models.sibling_call_grant import (  # noqa: F401
     APPROVAL_STATE_REVOKED,
     ALLOWED_APPROVAL_STATES,
 )
+# Arc 12 WU6 — BYO webhook config + general-purpose tool execution log.
+from app.models.byo_webhook_endpoint import ByoWebhookEndpoint  # noqa: F401
+from app.models.tool_execution_log import (  # noqa: F401
+    ToolExecutionLog,
+    ERROR_CLASS_TRANSPORT,
+    ERROR_CLASS_TIMEOUT,
+    ERROR_CLASS_SCHEMA_INPUT,
+    ERROR_CLASS_SCHEMA_OUTPUT,
+    ERROR_CLASS_CIRCUIT_OPEN,
+    ERROR_CLASS_EGRESS_DENIED,
+    ERROR_CLASS_HTTP_ERROR,
+    ERROR_CLASS_OTHER,
+    CB_STATE_CLOSED,
+    CB_STATE_HALF_OPEN,
+    CB_STATE_OPEN,
+)
 # Arc 5 Path A Commit C2: app/models/aliases.py was deleted along with the
 # Tenant / TenantConfig / LucielInstance / DomainConfig / Agent transitional
 # re-exports. Importers must reference Admin / AdminConfig / Instance
@@ -109,4 +125,18 @@ __all__ = [
     "APPROVAL_STATE_PENDING",
     "APPROVAL_STATE_REVOKED",
     "ALLOWED_APPROVAL_STATES",
+    # Arc 12 WU6 -- BYO webhook config + tool execution log.
+    "ByoWebhookEndpoint",
+    "ToolExecutionLog",
+    "ERROR_CLASS_TRANSPORT",
+    "ERROR_CLASS_TIMEOUT",
+    "ERROR_CLASS_SCHEMA_INPUT",
+    "ERROR_CLASS_SCHEMA_OUTPUT",
+    "ERROR_CLASS_CIRCUIT_OPEN",
+    "ERROR_CLASS_EGRESS_DENIED",
+    "ERROR_CLASS_HTTP_ERROR",
+    "ERROR_CLASS_OTHER",
+    "CB_STATE_CLOSED",
+    "CB_STATE_HALF_OPEN",
+    "CB_STATE_OPEN",
 ]

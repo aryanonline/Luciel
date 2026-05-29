@@ -86,7 +86,10 @@ _REPRESENTATIVE_INPUTS = {
         "task": "Pull the mortgage pre-approval lead and summarise.",
     },
     "bring_your_own_webhook": {
-        "endpoint_id": "crm-prod",
+        # WU6 wired the real subprocess body — endpoint_id is the
+        # ``byo_webhook_endpoints.id`` row PK (integer). Pre-WU6 this
+        # was a free string; the interim body has been retired.
+        "endpoint_id": 42,
         "payload": {"name": "Jane Doe"},
     },
 }
@@ -267,7 +270,13 @@ _INTERIM_TOOLS = {
     # invariant (success=False / no side effect) so it is excluded
     # from this parametrisation. See
     # test_arc12_wu5_sibling_dispatch.py for the real coverage.
-    "bring_your_own_webhook": "ARC12_WU6",
+    #
+    # bring_your_own_webhook: Arc 12 WU6 SHIPPED — the real
+    # subprocess sandbox is wired (input/output schema, egress
+    # allowlist, retry+backoff, per-endpoint circuit breaker, audit
+    # row). The real body returns structured success/failure rather
+    # than a ``not_yet_available`` envelope; see
+    # test_arc12_wu6_byo_sandbox.py for the WU6 coverage.
 }
 
 
@@ -330,7 +339,10 @@ def test_interim_bodies_carry_greppable_todo_arc_comments() -> None:
         # round-trip, which lives in app/tools/sibling_dispatch.py
         # (the dispatch module the tool delegates to). See the
         # TODO(ARC14) breadcrumb there.
-        "bring_your_own_webhook_tool.py": "TODO(ARC12_WU6)",
+        #
+        # bring_your_own_webhook: Arc 12 WU6 shipped — the real
+        # subprocess sandbox is wired and the file no longer carries
+        # a TODO(ARC12_WU6).
     }
     for fname, todo_marker in file_to_todo.items():
         src = (impl_dir / fname).read_text()
