@@ -391,6 +391,43 @@ ACTION_EMAIL_SUPPRESSION_RECORDED = "email_suppression_recorded"
 ACTION_EMAIL_SUPPRESSION_CLEARED = "email_suppression_cleared"
 ACTION_EMAIL_SEND_EVENT_RECEIVED = "email_send_event_received"
 
+# Arc 12 WU4 -- sibling-Luciel composition grant lifecycle.
+#
+# A sibling-call grant authorises one Instance to invoke
+# ``call_sibling_luciel`` against another Instance under the same
+# Admin (Architecture v1 §3.3.4). The four verbs below are the full
+# auditable arc:
+#
+# ACTION_SIBLING_GRANT_AUTHORED  -- a user authored a new grant.
+#   On Pro, the grant lands ``approval_state='live'`` immediately;
+#   on Enterprise, ``approval_state='pending_approval'`` until an
+#   admin_owner approves. The author MUST hold role+scope on BOTH
+#   the caller and the callee Instance (Wall 2 at the sibling layer).
+# ACTION_SIBLING_GRANT_APPROVED  -- an admin_owner approved a
+#   pending Enterprise grant, flipping ``approval_state`` to
+#   ``live`` and stamping approved_by_user_id + approved_at.
+#   Distinct from ACTION_SIBLING_GRANT_AUTHORED so a regulator
+#   scanning the chain by verb can distinguish "who authored" from
+#   "who approved" -- the Wall-2 split between proposal and ratify.
+# ACTION_SIBLING_GRANT_REJECTED  -- an admin_owner rejected a
+#   pending grant. Distinct from ACTION_SIBLING_GRANT_REVOKED
+#   because reject is a pre-live terminal transition (the grant
+#   never went live), whereas revoke withdraws an already-live (or
+#   pending) grant. Both flip ``approval_state`` to 'revoked' and
+#   stamp revoked_at, but the verb captures the difference.
+# ACTION_SIBLING_GRANT_REVOKED   -- a live or pending grant was
+#   withdrawn. Emitted by the explicit revoke API AND by the
+#   instance-deactivation cascade (§3.6.1 step 3): when an Instance
+#   is deactivated, every grant where the Instance appears as
+#   caller OR callee flips to 'revoked' in the same transaction
+#   with one of these audit rows per grant. The before/after_json
+#   carries the cascade source so an auditor can distinguish
+#   operator-revoke from cascade-revoke.
+ACTION_SIBLING_GRANT_AUTHORED = "sibling_grant_authored"
+ACTION_SIBLING_GRANT_APPROVED = "sibling_grant_approved"
+ACTION_SIBLING_GRANT_REJECTED = "sibling_grant_rejected"
+ACTION_SIBLING_GRANT_REVOKED = "sibling_grant_revoked"
+
 # Arc 5 B5 -- V2 Admin/Instance lifecycle verbs.
 #
 # Per the aggressive-cleanup amendment
@@ -529,6 +566,11 @@ ALLOWED_ACTIONS = (
     ACTION_INSTANCE_DELETED,
     ACTION_INSTANCE_RESTORED,
     ACTION_INSTANCE_HARD_PURGED,
+    # Arc 12 WU4 -- sibling-Luciel composition grant lifecycle.
+    ACTION_SIBLING_GRANT_AUTHORED,
+    ACTION_SIBLING_GRANT_APPROVED,
+    ACTION_SIBLING_GRANT_REJECTED,
+    ACTION_SIBLING_GRANT_REVOKED,
 )
 
 
@@ -618,6 +660,14 @@ RESOURCE_EMAIL_SEND_EVENT = "email_send_event"
 # resource_natural_id = knowledge_sources.source_uuid (string form).
 RESOURCE_KNOWLEDGE_SOURCE = "knowledge_source"
 
+# Arc 12 WU4 -- sibling_call_grants row (Architecture §3.3.4). The
+# auditable resource for the four sibling-grant lifecycle verbs
+# (ACTION_SIBLING_GRANT_AUTHORED / _APPROVED / _REJECTED / _REVOKED).
+# resource_pk = sibling_call_grants.id; resource_natural_id =
+# "{caller_instance_id}->{callee_instance_id}" so an auditor can
+# answer "every event involving the A->B edge" with a single filter.
+RESOURCE_SIBLING_CALL_GRANT = "sibling_call_grant"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -649,6 +699,8 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_INSTANCE,
     # Arc 11 Step 7 -- knowledge_sources row.
     RESOURCE_KNOWLEDGE_SOURCE,
+    # Arc 12 WU4 -- sibling_call_grants row (§3.3.4).
+    RESOURCE_SIBLING_CALL_GRANT,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):

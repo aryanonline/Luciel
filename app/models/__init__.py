@@ -45,6 +45,14 @@ from app.models.instance import Instance  # noqa: F401
 from app.models.instance_tool_authorization import (  # noqa: F401
     InstanceToolAuthorization,
 )
+# Arc 12 WU4 — sibling-Luciel composition grants (§3.3.4).
+from app.models.sibling_call_grant import (  # noqa: F401
+    SiblingCallGrant,
+    APPROVAL_STATE_LIVE,
+    APPROVAL_STATE_PENDING,
+    APPROVAL_STATE_REVOKED,
+    ALLOWED_APPROVAL_STATES,
+)
 # Arc 5 Path A Commit C2: app/models/aliases.py was deleted along with the
 # Tenant / TenantConfig / LucielInstance / DomainConfig / Agent transitional
 # re-exports. Importers must reference Admin / AdminConfig / Instance
@@ -95,4 +103,10 @@ __all__ = [
     "AdminWidgetDomain",
     # Arc 12 WU2 -- per-instance tool authorisation.
     "InstanceToolAuthorization",
+    # Arc 12 WU4 -- sibling-Luciel composition grants.
+    "SiblingCallGrant",
+    "APPROVAL_STATE_LIVE",
+    "APPROVAL_STATE_PENDING",
+    "APPROVAL_STATE_REVOKED",
+    "ALLOWED_APPROVAL_STATES",
 ]
