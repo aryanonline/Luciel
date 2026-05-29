@@ -457,6 +457,22 @@ class SubscriptionStatusResponse(BaseModel):
                     "'read_only_viewer'. Used by the frontend to gate "
                     "org-building UI surfaces.",
     )
+    # Arc 12b: server-side resolved Wall-2 permission set for the cookied
+    # caller (admin-scoped, no Instance), so the dashboard can gate the
+    # Custom Roles UI on the same permission keys the server enforces
+    # rather than guessing from active_role. For platform_admin callers
+    # this is the full catalog (sorted(ALL_PERMISSIONS)); for everyone
+    # else it is PermissionResolver.resolve(request) serialized to a
+    # sorted concrete list. Empty list is the safe default.
+    resolved_permissions: list[str] = Field(
+        default_factory=list,
+        description="Caller's resolved Wall-2 permission keys "
+                    "(admin-scoped). Source of truth for client-side "
+                    "Custom Roles UI gating; mirrors the server's "
+                    "PermissionResolver.resolve(request) output as a "
+                    "sorted concrete list. For platform_admin callers, "
+                    "the full catalog (sorted(ALL_PERMISSIONS)).",
+    )
 
 
 # ---------------------------------------------------------------------
