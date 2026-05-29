@@ -323,7 +323,6 @@ def create_invite(
     *,
     db: Session,
     admin_id: str,
-    domain_id: str,
     inviter_user_id: uuid.UUID,
     inviter_email: str,
     invited_email: str,
@@ -394,7 +393,6 @@ def create_invite(
     try:
         invite = repo.create(
             admin_id=admin_id,
-            domain_id=domain_id,
             inviter_user_id=inviter_user_id,
             invited_email=email_norm,
             role=role,
@@ -405,7 +403,7 @@ def create_invite(
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
             admin_id=admin_id,
-            domain_id=domain_id,
+            domain_id=None,
             action=ACTION_USER_INVITED,
             resource_type=RESOURCE_USER_INVITE,
             resource_pk=None,  # UUID PK, use natural id
@@ -413,7 +411,6 @@ def create_invite(
             after={
                 "invite_id": str(invite.id),
                 "admin_id": admin_id,
-                "domain_id": domain_id,
                 "invited_email": email_norm,
                 "role": role,
                 "inviter_user_id": str(inviter_user_id),
@@ -527,7 +524,7 @@ def redeem_invite(
             AdminAuditRepository(db).record(
                 ctx=audit_ctx,
                 admin_id=invite.admin_id,
-                domain_id=invite.domain_id,
+                domain_id=None,
                 action=ACTION_INVITE_REVOKED,  # closest existing verb for system-initiated expiry
                 resource_type=RESOURCE_USER_INVITE,
                 resource_pk=None,
@@ -550,7 +547,6 @@ def redeem_invite(
         )
 
     admin_id = invite.admin_id
-    domain_id = invite.domain_id
     email_norm = invite.invited_email.strip()
     email_lc = email_norm.lower()
 
@@ -608,8 +604,8 @@ def redeem_invite(
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
             admin_id=admin_id,
-            domain_id=domain_id,
-            agent_id=agent_slug,
+            domain_id=None,
+            agent_id=None,
             action=ACTION_INVITE_REDEEMED,
             resource_type=RESOURCE_USER_INVITE,
             resource_pk=None,
@@ -621,7 +617,6 @@ def redeem_invite(
                 "accepted_user_id": str(user.id),
                 "agent_id": agent_slug,
                 "admin_id": admin_id,
-                "domain_id": domain_id,
                 "role": invite.role,
             },
             note=(
@@ -722,7 +717,7 @@ def resend_invite(
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
             admin_id=invite.admin_id,
-            domain_id=invite.domain_id,
+            domain_id=None,
             action=ACTION_INVITE_RESENT,
             resource_type=RESOURCE_USER_INVITE,
             resource_pk=None,
@@ -810,7 +805,7 @@ def revoke_invite(
         AdminAuditRepository(db).record(
             ctx=audit_ctx,
             admin_id=invite.admin_id,
-            domain_id=invite.domain_id,
+            domain_id=None,
             action=ACTION_INVITE_REVOKED,
             resource_type=RESOURCE_USER_INVITE,
             resource_pk=None,

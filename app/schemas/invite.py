@@ -33,11 +33,10 @@ _SLUG_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 class UserInviteCreate(BaseModel):
     """Payload for POST /api/v1/admin/invites.
 
-    Arc 12 EX1c — ``domain_id`` removed from the request body. The
-    route resolves the invitee's domain from the cookied user's active
-    ScopeAssignment server-side. ``user_invites.domain_id`` is still
-    NOT NULL (EX3 owns relax/drop); the service-layer call site fills
-    it from the cookied scope.
+    Arc 12 EX1c — ``domain_id`` removed from the request body. Arc 12
+    EX3 (this run) drops ``user_invites.domain_id`` outright; the v2
+    invite is scoped by ``admin_id`` (plus instance where relevant)
+    via the cookied user's active ScopeAssignment.
 
     admin_id is derived server-side from the cookied User's active
     ScopeAssignment when omitted; passing it explicitly is the

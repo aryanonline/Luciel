@@ -143,16 +143,6 @@ class UserInvite(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    # Service-layer validated against domain_configs(tenant_id, domain_id).
-    # Mirrors Agent.domain_id and ScopeAssignment.domain_id -- no direct FK
-    # because domain_configs uses a composite natural key. NOT NULL because
-    # every invite resolves to a specific domain at provisioning time (for
-    # Team tier this is the tenant's default domain; for Company tier the
-    # inviter picks the domain explicitly).
-    domain_id: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-    )
 
     # The cookied user who clicked Invite teammate. RESTRICT mirrors the
     # User-as-actor convention elsewhere (Agent.user_id, ScopeAssignment.user_id).

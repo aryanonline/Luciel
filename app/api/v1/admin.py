@@ -830,13 +830,12 @@ def _resolve_invite_actor(
     *,
     request: Request,
     db,
-) -> tuple["User", str, str]:
-    """Resolve (cookied_user, admin_id, default_domain_id) for invite routes.
+) -> tuple["User", str]:
+    """Resolve (cookied_user, admin_id) for invite routes.
 
     Reads the session cookie off the Request directly (same pattern as
-    billing routes). Returns the cookied User, their active admin_id
-    (from the session JWT), and the domain_id of their currently-active
-    ScopeAssignment within that tenant.
+    billing routes). Returns the cookied User and their active admin_id
+    (from the session JWT, validated against an active ScopeAssignment).
 
     Raises HTTPException:
       * 401 -- no valid session cookie, or User row inactive.
@@ -875,7 +874,7 @@ def _resolve_invite_actor(
         )
 
     # Find the cookied user's active ScopeAssignment to source
-    # (admin_id, domain_id) when the caller omits them on the payload.
+    # admin_id when the caller omits it on the payload.
     sar = ScopeAssignmentRepository(db)
     active_assignments = sar.list_for_user(user.id, active_only=True)
     if not active_assignments:
@@ -890,7 +889,7 @@ def _resolve_invite_actor(
         (a for a in active_assignments if a.admin_id == session_tenant_id),
         active_assignments[0],
     )
-    return user, chosen.admin_id, chosen.domain_id
+    return user, chosen.admin_id
 
 
 def _map_invite_error(exc: InviteError) -> HTTPException:
@@ -929,16 +928,10 @@ def create_invite_route(  # noqa: D401
     Cookied route. The cookied User is the inviter; tenant + domain
     default to the cookied user's active scope when omitted.
     """
-    inviter, default_tenant_id, default_domain_id = _resolve_invite_actor(
+    inviter, default_tenant_id = _resolve_invite_actor(
         request=request, db=db
     )
     admin_id = payload.admin_id or default_tenant_id
-    # Arc 12 EX1c — domain_id no longer accepted from the request body;
-    # resolved server-side from the cookied user's active scope so the
-    # legacy NOT NULL ``user_invites.domain_id`` insert (EX3-owned) is
-    # still satisfied. The cookied user's resolved scope is the only
-    # source of domain_id for the row.
-    domain_id = default_domain_id
 
     # Cross-tenant safety: a cookied user can only invite into their own
     # tenant unless they hold platform_admin (which a cookied session
@@ -954,7 +947,6 @@ def create_invite_route(  # noqa: D401
         invite, _token = invite_service.create_invite(
             db=db,
             admin_id=admin_id,
-            domain_id=domain_id,
             inviter_user_id=inviter.id,
             inviter_email=inviter.email,
             invited_email=str(payload.invited_email),
@@ -998,7 +990,7 @@ def list_invites_route(
     from app.models.user_invite import InviteStatus
     from app.repositories.user_invites import UserInviteRepository
 
-    _user, admin_id, _domain_id = _resolve_invite_actor(
+    _user, admin_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1047,7 +1039,7 @@ def list_team_members_route(
         ScopeAssignmentRepository,
     )
 
-    _user, admin_id, _domain_id = _resolve_invite_actor(
+    _user, admin_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1099,7 +1091,7 @@ def resend_invite_route(
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
 ) -> UserInviteResendResponse:
     """Rotate token_jti and re-mint the welcome email (Step 30a.4)."""
-    inviter, admin_id, _domain_id = _resolve_invite_actor(
+    inviter, admin_id = _resolve_invite_actor(
         request=request, db=db
     )
 
@@ -1140,7 +1132,7 @@ def revoke_invite_route(
     """Flip a still-pending invite to REVOKED (Step 30a.4)."""
     from app.repositories.user_invites import UserInviteRepository
 
-    _inviter, admin_id, _domain_id = _resolve_invite_actor(
+    _inviter, admin_id = _resolve_invite_actor(
         request=request, db=db
     )
 

@@ -58,7 +58,6 @@ class TestUserInviteModel:
         required = {
             "id",
             "admin_id",
-            "domain_id",
             "inviter_user_id",
             "invited_email",
             "role",
@@ -236,7 +235,6 @@ class TestUserInviteRepository:
         # `self` plus all-keyword args
         for name in (
             "admin_id",
-            "domain_id",
             "inviter_user_id",
             "invited_email",
             "role",
@@ -293,7 +291,6 @@ class TestInviteService:
         for name in (
             "db",
             "admin_id",
-            "domain_id",
             "inviter_user_id",
             "inviter_email",
             "invited_email",
