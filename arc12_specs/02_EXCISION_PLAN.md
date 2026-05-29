@@ -30,3 +30,17 @@ Forward migration: drop `memory.agent_id`, `session.agent_id`, `trace.agent_id`,
 After EX1–EX4: grep for `\bagent_id\b`/`\bdomain_id\b` across app/ returns ONLY (a) historical migration files (never edited) and (b) the EX4 reseal's documented archival, if any. Full pytest green with the failure-bisect from WU8. RLS fail-closed verified. Audit chain verifies end-to-end.
 
 This excision is folded into Arc 12's closeout as IN-SCOPE founder-directed work (not a documented deviation) — but the EX4 audit-chain reseal IS recorded as a deliberate integrity operation with its rationale.
+
+## EX4 FOUNDER DECISION (2026-05-28): RESEAL (approach A) — LOCKED
+Founder chose: remove domain_id + agent_id from `audit_chain._CHAIN_FIELDS`, DROP the physical
+`admin_audit_logs.{domain_id,agent_id}` columns, and RESEAL — recompute row_hash/prev_row_hash for
+ALL historical rows under the new canonical field set, in a controlled, audited migration.
+- This is a deliberate, one-time integrity operation. It is the inverse of the `tier_at_write`
+  precedent (which kept the field OUT to avoid invalidating history) — here we accept rewriting the
+  historical chain because the founder mandate is "column gone from the system."
+- The reseal migration MUST: (1) drop both columns from _CHAIN_FIELDS; (2) recompute the full chain
+  in id order under the new field set, preserving GENESIS + the advisory-lock discipline; (3) keep the
+  `tests/integrity/test_audit_chain_fields_in_sync.py` invariant green (it pins _CHAIN_FIELDS ⇄ migration
+  backfill lockstep); (4) emit a dedicated audit record of the reseal itself (who/when/why) so the
+  rewrite is itself traceable; (5) keep admin_audit_logs RLS + append-only immutability intact throughout.
+- Record in the Arc 12 closeout as a deliberate, logged integrity operation (not a silent change).
