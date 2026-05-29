@@ -331,7 +331,7 @@ def test_interim_bodies_carry_greppable_todo_arc_comments() -> None:
         "book_appointment_tool.py": "TODO(ARC13)",
         "send_email_tool.py": "TODO(ARC13)",
         "send_sms_tool.py": "TODO(ARC13)",
-        "lookup_property_tool.py": "TODO(ARC14)",
+        "lookup_property_tool.py": "TODO(ARC-UNASSIGNED)",
         "schedule_callback_tool.py": "TODO(ARC13)",
         "push_to_crm_tool.py": "TODO(ARC12_WU6)",
         # call_sibling_luciel: Arc 12 WU5 shipped — guardrails/audit
