@@ -86,10 +86,6 @@ class TraceService:
             session_id=session_id,
             user_id=user_id,
             admin_id=admin_id,
-            # Arc 12 EX1d — Trace.domain_id / Trace.agent_id are ORM
-            # columns (EX3 owns the column drop). New rows write NULL.
-            domain_id=None,
-            agent_id=None,
             user_message=user_message,
             assistant_reply=assistant_reply,
             llm_provider=llm_provider,
