@@ -69,7 +69,6 @@ class TestQuarantineGate(unittest.TestCase):
                 r.retrieve(
                     conversation_id=CONV_ID,
                     admin_id="t1",
-                    domain_id="d1",
                 )
             self.assertIn("quarantined", str(cm.exception).lower())
 
@@ -85,7 +84,6 @@ class TestQuarantineGate(unittest.TestCase):
                 r.retrieve(
                     conversation_id=CONV_ID,
                     admin_id="t1",
-                    domain_id="d1",
                 )
             self.assertIn("app.admin_id", str(cm.exception).lower())
 
@@ -101,7 +99,6 @@ class TestQuarantineGate(unittest.TestCase):
                 r.retrieve(
                     conversation_id=CONV_ID,
                     admin_id="t1",
-                    domain_id="d1",
                 )
             self.assertIn("guc", str(cm.exception).lower())
 
@@ -118,7 +115,6 @@ class TestQuarantineGate(unittest.TestCase):
             out = r.retrieve(
                 conversation_id=CONV_ID,
                 admin_id="t1",
-                domain_id="d1",
             )
             self.assertEqual(out, [])
 
@@ -138,7 +134,6 @@ class TestGateDoesNotBlockInputValidation(unittest.TestCase):
                 r.retrieve(
                     conversation_id=CONV_ID,
                     admin_id="   ",
-                    domain_id="d1",
                 )
 
     def test_non_uuid_still_raises_type_error(self):
@@ -153,7 +148,6 @@ class TestGateDoesNotBlockInputValidation(unittest.TestCase):
                 r.retrieve(
                     conversation_id="not-a-uuid",  # type: ignore[arg-type]
                     admin_id="t1",
-                    domain_id="d1",
                 )
 
 

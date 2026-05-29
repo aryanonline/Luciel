@@ -242,7 +242,6 @@ class ChatService:
         knowledge = self.knowledge_retriever.retrieve(
             query=message,
             admin_id=admin_id,
-            domain_id=None,
             luciel_instance_id=ctx.luciel_instance_id,
         )
 
@@ -489,7 +488,6 @@ class ChatService:
         knowledge = self.knowledge_retriever.retrieve(
             query=message,
             admin_id=admin_id,
-            domain_id=None,
             luciel_instance_id=ctx.luciel_instance_id,
         )
 

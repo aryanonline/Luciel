@@ -4,8 +4,12 @@ Trace service.
 Creates and stores trace records for each chat turn (Architecture
 v1 §5.1 — Observability).
 
-Includes tenant/domain/agent config references and the actual
-memories that were used.
+Arc 12 EX1d (founder-directed agent_id/domain_id excision): the
+``agent_id`` / ``domain_id`` parameters were removed from
+``record_trace``. v2 has a single Admin→Instance boundary
+(Architecture §3.7.2); ``traces.agent_id`` / ``traces.domain_id``
+ORM columns persist until EX3 drops them and are written NULL
+on every new row.
 
 Arc 11 Step 5 update — ``source_ids_used``:
     Each trace now carries the list of ``knowledge_sources.id``
@@ -24,8 +28,6 @@ The orchestrator (Step 8) computes the list by calling
 the retrieve step and the trace write. The legacy ``memories_used``
 column is unrelated — memories are conversation-history items;
 sources are knowledge-base sources. They stay independent.
-
-PATCHED: Added agent_id and agent_config_id parameters.
 """
 
 from __future__ import annotations
@@ -50,8 +52,6 @@ class TraceService:
         session_id: str,
         user_id: str | None,
         admin_id: str,
-        domain_id: str | None = None,
-        agent_id: str | None = None,
         user_message: str,
         assistant_reply: str,
         llm_provider: str | None = None,
@@ -86,8 +86,10 @@ class TraceService:
             session_id=session_id,
             user_id=user_id,
             admin_id=admin_id,
-            domain_id=domain_id,
-            agent_id=agent_id,
+            # Arc 12 EX1d — Trace.domain_id / Trace.agent_id are ORM
+            # columns (EX3 owns the column drop). New rows write NULL.
+            domain_id=None,
+            agent_id=None,
             user_message=user_message,
             assistant_reply=assistant_reply,
             llm_provider=llm_provider,

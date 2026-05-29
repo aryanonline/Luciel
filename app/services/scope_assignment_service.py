@@ -74,6 +74,14 @@ from app.schemas.scope_assignment import (
 logger = logging.getLogger(__name__)
 
 
+# Arc 12 EX1d: ``scope_assignments.domain_id`` is NOT NULL (EX3 owns
+# the column drop). The public payload schema no longer carries
+# ``domain_id``; the service writes the same V2 Domain-collapse
+# sentinel that ``tier_provisioning_service`` already uses so the
+# NOT-NULL constraint stays satisfied until EX3.
+_DOMAIN_COLLAPSE_SENTINEL = "default"
+
+
 # ---------------------------------------------------------------------
 # Domain exceptions -- route layer translates to HTTP
 # ---------------------------------------------------------------------
@@ -152,10 +160,13 @@ class ScopeAssignmentService:
                 f"cannot assign role to inactive user: {user_id}"
             )
 
+        # Arc 12 EX1d: ``ScopeAssignmentCreate`` no longer carries
+        # ``domain_id``; the service supplies the V2 sentinel until
+        # EX3 drops the NOT-NULL column.
         return sa_repo.create(
             user_id=user_id,
             admin_id=payload.admin_id,
-            domain_id=payload.domain_id,
+            domain_id=_DOMAIN_COLLAPSE_SENTINEL,
             role=payload.role,
             started_at=payload.started_at,
             autocommit=autocommit,
@@ -379,10 +390,13 @@ class ScopeAssignmentService:
                 f"{old_assignment_id}"
             )
 
+        # Arc 12 EX1d: ``ScopeAssignmentCreate`` no longer carries
+        # ``domain_id``; the service supplies the V2 sentinel until
+        # EX3 drops the NOT-NULL column.
         created = sa_repo.create(
             user_id=new_user_id,
             admin_id=new_payload.admin_id,
-            domain_id=new_payload.domain_id,
+            domain_id=_DOMAIN_COLLAPSE_SENTINEL,
             role=new_payload.role,
             started_at=new_payload.started_at,
             autocommit=False,

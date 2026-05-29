@@ -474,11 +474,12 @@ def extract_memory_from_turn(
                 task_id=f"memory_extraction:{task_id}",
                 actor_key_prefix=actor_key_prefix,
             )
-            # Arc 12 EX1b: agent_id is no longer propagated into audit
-            # rows (admin_audit_log.agent_id stays in the hash chain
-            # for EX4 to handle; new rows write NULL). domain_id is
-            # still surfaced because admin_audit_log.domain_id is not
-            # in the EX1b excision lane.
+            # Arc 12 EX1b/EX1d: agent_id and domain_id are no longer
+            # propagated into audit rows (admin_audit_log.agent_id and
+            # admin_audit_log.domain_id are in the canonical hash chain
+            # — EX4 owns the field-set resolution. New rows write NULL
+            # for both; v2 customer-data scoping is admin_id +
+            # luciel_instance_id per §3.7.3).
             AdminAuditRepository(db).record(
                 ctx=ctx,
                 admin_id=admin_id,
@@ -486,7 +487,7 @@ def extract_memory_from_turn(
                 resource_type=RESOURCE_MEMORY,
                 resource_pk=None,   # memory_items are append-only; no single pk
                 resource_natural_id=f"session={session_id};message={message_id}",
-                domain_id=session_row.domain_id,
+                domain_id=None,
                 agent_id=None,
                 luciel_instance_id=luciel_instance_id,
                 before=None,

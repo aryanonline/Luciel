@@ -54,12 +54,12 @@ def _chunk(
 
 
 def _request(*, instance_id: int | None = None, message: str = "Q?") -> RuntimeRequest:
+    # Arc 12 EX1d: RuntimeRequest no longer carries ``domain_id``.
     return RuntimeRequest(
         message=message,
         session_id="sess-1",
         user_id="user-1",
         admin_id="admin-test-1",
-        domain_id="domain-1",
         channel="api",
         luciel_instance_id=instance_id,
     )
@@ -445,12 +445,12 @@ class TestW8CollectSourcePks(unittest.TestCase):
 class TestContractBackwardsCompat(unittest.TestCase):
 
     def test_runtime_request_can_be_built_without_instance_id(self):
+        # Arc 12 EX1d: RuntimeRequest no longer carries ``domain_id``.
         req = RuntimeRequest(
             message="Q",
             session_id="s",
             user_id="u",
             admin_id="a",
-            domain_id="d",
             channel="api",
         )
         self.assertIsNone(req.luciel_instance_id)
