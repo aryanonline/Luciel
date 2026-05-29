@@ -411,10 +411,10 @@ class TestMintPath:
         new_user = next(o for o in db.added if isinstance(o, User))
         assert new_user.synthetic is True
         assert new_user.active is True
-        # Conversation scoped to (t-1, d-1)
+        # Conversation scoped to admin_id (Arc 12 EX3 dropped domain_id
+        # from conversations; IdentityClaim still carries it).
         new_conv = next(o for o in db.added if isinstance(o, Conversation))
         assert new_conv.admin_id == "t-1"
-        assert new_conv.domain_id == "d-1"
         assert new_conv.active is True
         # Resolver MUST flush so caller sees PKs before commit.
         assert db.flush_count >= 1
@@ -498,7 +498,6 @@ class TestExistingClaimHitPath:
         assert all(not isinstance(o, IdentityClaim) for o in db.added)
         new_conv = next(o for o in db.added if isinstance(o, Conversation))
         assert new_conv.admin_id == "t-1"
-        assert new_conv.domain_id == "d-1"
         assert res.user_id == existing_user
         assert res.identity_claim_id == existing_claim
         assert res.is_new_user is False

@@ -334,9 +334,7 @@ class IdentityResolver:
         # exists (from another scope, or from a session that's been
         # archived), but we need a fresh conversation to host this
         # session's sibling thread. Mint just the conversation.
-        new_conv = self._mint_conversation(
-            admin_id=admin_id, domain_id=domain_id
-        )
+        new_conv = self._mint_conversation(admin_id=admin_id)
         return IdentityResolution(
             user_id=claim.user_id,
             conversation_id=new_conv.id,
@@ -390,9 +388,7 @@ class IdentityResolver:
         self.db.add(new_user)
 
         # Mint Conversation.
-        new_conv = self._mint_conversation(
-            admin_id=admin_id, domain_id=domain_id
-        )
+        new_conv = self._mint_conversation(admin_id=admin_id)
 
         # Mint IdentityClaim, binding the new User. verified_at=NULL
         # per §3.2.11 v1: claims are asserted by the adapter and
@@ -437,13 +433,11 @@ class IdentityResolver:
         self,
         *,
         admin_id: str,
-        domain_id: str,
     ) -> Conversation:
         """Helper: mint a new Conversation row, flush, return."""
         new_conv = Conversation(
             id=uuid.uuid4(),
             admin_id=admin_id,
-            domain_id=domain_id,
             last_activity_at=datetime.now(timezone.utc),
             active=True,
             created_at=datetime.now(timezone.utc),

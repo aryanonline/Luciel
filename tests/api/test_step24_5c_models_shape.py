@@ -110,13 +110,13 @@ class TestConversationTableShape:
         assert m["Conversation"].__tablename__ == "conversations"
 
     def test_required_columns_present(self) -> None:
-        """The six columns named in §3.2.11 all exist."""
+        """The columns named in §3.2.11 all exist (post Arc 12 EX3
+        which dropped domain_id)."""
         m = _import_models()
         cols = {c.name for c in m["Conversation"].__table__.columns}
         expected = {
             "id",
             "admin_id",
-            "domain_id",
             "last_activity_at",
             "active",
             "created_at",
@@ -130,7 +130,6 @@ class TestConversationTableShape:
         expected = {
             "id",
             "admin_id",
-            "domain_id",
             "last_activity_at",
             "active",
             "created_at",
@@ -138,10 +137,6 @@ class TestConversationTableShape:
             # §3.2.11 row was updated in the same commit that added the
             # alembic migration dfea1a04e037; this row is intentional.
             "deactivated_at",
-            # Arc 9.2 PR #96: additive admin_id column (Option A --
-            # collapses admin_id -> admin_id).  Both columns coexist
-            # during the alias window; admin_id is dropped in PR #101.
-            "admin_id",
         }
         unexpected = cols - expected
         assert not unexpected, (
@@ -191,17 +186,14 @@ class TestConversationTableShape:
             f"history protection), is {fk.ondelete}"
         )
 
-    def test_domain_id_has_no_fk(self) -> None:
-        """domain_id intentionally has no FK -- composite natural key in
-        domain_configs, validated at service layer. Matches the
-        scope_assignments convention."""
+    def test_domain_id_is_absent(self) -> None:
+        """domain_id was dropped by Arc 12 EX3 (alembic
+        arc12_ex3_drop_conversation_domain). v2 scope for this
+        table is admin_id only; conversations has no luciel_instance_id."""
         m = _import_models()
-        col = m["Conversation"].__table__.columns["domain_id"]
-        assert not list(col.foreign_keys), (
-            "Conversation.domain_id must have NO foreign key. "
-            "domain_configs uses (admin_id, domain_id) as a composite natural "
-            "key; a single-column FK would be a half-truth. See §3.2.11 + "
-            "scope_assignments precedent in 24.5b File 1.2."
+        cols = {c.name for c in m["Conversation"].__table__.columns}
+        assert "domain_id" not in cols, (
+            "Conversation.domain_id must not be present after Arc 12 EX3."
         )
 
     def test_active_is_nonnullable_with_default_true(self) -> None:

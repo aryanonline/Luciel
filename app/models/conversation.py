@@ -76,7 +76,6 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
-    Index,
     String,
     text,
 )
@@ -110,11 +109,6 @@ class Conversation(Base):
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
-    domain_id: Mapped[str] = mapped_column(
-        String(100),
         nullable=False,
         index=True,
     )
@@ -167,31 +161,25 @@ class Conversation(Base):
     )
 
     # ------ table-level indexes ------
+    # Arc 12 EX3: domain_id was dropped (alembic
+    # arc12_ex3_drop_conversation_domain). The legacy composite
+    # (tenant_id, domain_id, last_activity_at) was already gone from
+    # prod after Arc 9.2 PR #101's auto-detect. v2 scope for this
+    # table is just admin_id, served by ix_conversations_admin_id
+    # (PR #96). No composite is recreated here pending measured
+    # resolver hot-path pressure.
     __table_args__ = (
-        # Composite index on (tenant_id, domain_id, last_activity_at DESC)
-        # serves the identity resolver's "most-recent active conversation
-        # under this scope for this user" lookup once joined to sessions.
-        # Recency-ordered partial index would be marginally tighter but
-        # the simple form is easier to reason about; we can revisit if
-        # the cross-session retriever shows hot-path pressure once it
-        # lands in sub-branch 2.
-        Index(
-            "ix_conversations_tenant_domain_last_activity",
-            "admin_id",
-            "domain_id",
-            "last_activity_at",
-        ),
         {"comment": (
             "Step 24.5c -- durable cross-channel conversation grouping. "
             "Session-linking via sessions.conversation_id, never session-"
             "merging. One Conversation lives in exactly one scope "
-            "(tenant_id, domain_id). See ARCHITECTURE §3.2.11."
+            "(admin_id). See ARCHITECTURE §3.2.11."
         )},
     )
 
     def __repr__(self) -> str:  # pragma: no cover -- debug only
         return (
             f"<Conversation id={self.id} "
-            f"tenant_id={self.admin_id!r} domain_id={self.domain_id!r} "
+            f"admin_id={self.admin_id!r} "
             f"active={self.active}>"
         )
