@@ -332,33 +332,40 @@ def test_schema_validator_supports_required_subset() -> None:
         )
 
 
-def test_tools_execute_returns_validated_dict() -> None:
-    """The three shipped (cognition) tools' ``execute`` must return a
-    dict matching their ``output_schema``. Smoke-tests the §3.3.1
-    contract literal end-to-end."""
+def test_registered_tools_execute_returns_validated_dict() -> None:
+    """A representative subset of registered v1-catalog tools must
+    return §3.3.1-conformant dicts.
+
+    Arc 12 WU7 retired the cognition-tool smoke (EscalateTool /
+    SaveMemoryTool / SessionSummaryTool); their behaviour lives in
+    ``app.cognition`` now (Decision #20). We exercise the simplest
+    catalog tools with interim bodies so the §3.3.1 contract
+    literal stays end-to-end pinned.
+    """
 
     from app.tools.base import ToolContext
-    from app.tools.implementations.escalate_tool import EscalateTool
-    from app.tools.implementations.save_memory_tool import SaveMemoryTool
-    from app.tools.implementations.session_summary_tool import (
-        SessionSummaryTool,
-    )
+    from app.tools.implementations.send_email_tool import SendEmailTool
+    from app.tools.implementations.send_sms_tool import SendSmsTool
     from app.tools.schema import validate_schema
 
     ctx = ToolContext(admin_id="adm_1", instance_id=1)
 
     async def _run():
         for tool, payload in [
-            (EscalateTool(), {"reason": "user frustrated"}),
             (
-                SaveMemoryTool(),
-                {"category": "preference", "content": "terminal dev"},
+                SendEmailTool(),
+                {"to": "x@example.com", "subject": "s", "body": "b"},
             ),
-            (SessionSummaryTool(), {}),
+            (
+                SendSmsTool(),
+                {"to": "+15555550100", "body": "hi"},
+            ),
         ]:
             out = await tool.execute(payload, ctx)
             assert isinstance(out, dict)
             validate_schema(out, tool.output_schema)
-            assert out["success"] is True
+            # Interim bodies report success=False per the channel-
+            # adapter-not-shipped contract (Arc 13). What matters is
+            # the dict shape validates against output_schema.
 
     asyncio.run(_run())

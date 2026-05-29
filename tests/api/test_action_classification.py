@@ -422,56 +422,68 @@ def test_broker_short_circuits_approval_required_without_executing() -> None:
 # =====================================================================
 
 
-@pytest.mark.parametrize(
-    "rel_path, class_name, expected_tier_name",
-    [
-        ("app/tools/implementations/save_memory_tool.py",
-         "SaveMemoryTool", "ROUTINE"),
-        ("app/tools/implementations/session_summary_tool.py",
-         "SessionSummaryTool", "ROUTINE"),
-        ("app/tools/implementations/escalate_tool.py",
-         "EscalateTool", "NOTIFY_AND_PROCEED"),
-    ],
-)
-def test_shipped_tool_declares_expected_tier(
-    rel_path: str, class_name: str, expected_tier_name: str
-) -> None:
-    """Each tool that ships in app/tools/implementations/ must
-    declare a tier explicitly on its class. The expected tier is
-    pinned here so a silent retier (e.g. someone changing escalate
-    from NOTIFY_AND_PROCEED to ROUTINE because it was annoying in
-    a demo) trips a test rather than reaching production.
-    """
+# Arc 12 WU7 retired the per-cognition-tool tier pinning here. The
+# three cognition tools (SaveMemoryTool, SessionSummaryTool,
+# EscalateTool) were evicted from the registry and their files
+# deleted (Decision #20 + founder ruling 4). Cognition behaviour
+# now lives in ``app.cognition`` and is NOT classified by the
+# action-classification gate — §3.4 makes cognition non-tier-gated
+# and always-on. The replacement assertions below pin the eviction.
 
-    tree = _parse(rel_path)
-    cls = _find_class(tree, class_name)
 
-    # Look for `declared_tier = ActionTier.<expected>` at class body.
-    found_tier_name: str | None = None
-    for node in cls.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(
-            isinstance(t, ast.Name) and t.id == "declared_tier"
-            for t in node.targets
-        ):
-            continue
-        val = node.value
-        if isinstance(val, ast.Attribute) and isinstance(val.value, ast.Name):
-            if val.value.id == "ActionTier":
-                found_tier_name = val.attr
-                break
+def test_cognition_tool_files_were_removed_in_wu7() -> None:
+    """The three cognition tool implementation files were deleted in
+    Arc 12 WU7. Their behaviour lives in ``app.cognition`` and must
+    not reappear as registry-shaped LucielTool subclasses."""
 
-    assert found_tier_name is not None, (
-        f"Step 30c: {class_name} in {rel_path} must declare "
-        f"`declared_tier = ActionTier.<TIER>` on the class body so "
-        f"the static classifier can read it."
+    for rel in (
+        "app/tools/implementations/save_memory_tool.py",
+        "app/tools/implementations/session_summary_tool.py",
+        "app/tools/implementations/escalate_tool.py",
+    ):
+        assert not (_PROJECT_ROOT / rel).exists(), (
+            f"Arc 12 WU7 removed {rel}. If this file is back, "
+            f"cognition has regressed back into the tool registry — "
+            f"see Decision #20 and arc12_specs/00_ARC12_MASTER.md "
+            f"founder ruling 4."
+        )
+
+
+def test_registry_does_not_register_cognition_after_wu7() -> None:
+    """The shipped ToolRegistry must hold exactly the 8 §3.3.2
+    catalog tools — nothing cognition-shaped. This is the
+    behavioural mirror of the file-removal AST check above."""
+
+    import os
+    os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+    os.environ.setdefault("MODERATION_PROVIDER", "null")
+    os.environ.setdefault("OPENAI_API_KEY", "dummy")
+
+    from app.tools.registry import ToolRegistry
+
+    tool_ids = {t.tool_id for t in ToolRegistry().list_tools()}
+    expected = {
+        "book_appointment",
+        "send_email",
+        "send_sms",
+        "lookup_property",
+        "schedule_callback",
+        "push_to_crm",
+        "call_sibling_luciel",
+        "bring_your_own_webhook",
+    }
+    assert tool_ids == expected, (
+        f"Arc 12 WU7: registry must hold exactly the 8 catalog tools. "
+        f"Got {tool_ids!r}; expected {expected!r}."
     )
-    assert found_tier_name == expected_tier_name, (
-        f"Step 30c: {class_name}.declared_tier drifted from "
-        f"{expected_tier_name!r} to {found_tier_name!r}. If the retier "
-        f"is intentional, update this test AND CANONICAL_RECAP §12 / "
-        f"ARCHITECTURE §3.3 step 8 together."
+    cognition_intents = {
+        "escalate_to_human", "save_memory", "get_session_summary",
+    }
+    assert not (tool_ids & cognition_intents), (
+        f"Arc 12 WU7: cognition intents must NOT be in the registry. "
+        f"Decision #20 + §3.4 — cognition is non-registry, "
+        f"non-tier-gated, always-on. Found leakage: "
+        f"{tool_ids & cognition_intents!r}"
     )
 
 
@@ -756,13 +768,72 @@ def broker():
     )
 
 
+def _register_tier_probe_tool(broker, *, tool_id, tier, extra_output=None):
+    """Helper: register an inline tool with the given tier and a
+    success=True body. The pre-WU7 versions of the two tests below
+    exercised this through SaveMemoryTool / EscalateTool — both
+    cognition tools that were evicted from the registry in WU7
+    (Decision #20 + founder ruling 4). The broker dispatch behaviour
+    they were pinning is orthogonal to cognition; we re-pin it with
+    inline fakes so the test stays meaningful without resurrecting
+    the cognition tool classes."""
+
+    from app.policy.action_classification import ActionTier
+    from app.tools.base import LucielTool
+
+    class _Probe(LucielTool):
+        declared_tier = tier
+
+        @property
+        def tool_id(self) -> str:
+            return tool_id
+
+        @property
+        def display_name(self) -> str:
+            return tool_id
+
+        @property
+        def description(self) -> str:
+            return "tier probe"
+
+        @property
+        def input_schema(self) -> dict:
+            return {"type": "object", "additionalProperties": True}
+
+        @property
+        def output_schema(self) -> dict:
+            return {"type": "object", "additionalProperties": True}
+
+        @property
+        def requires_tier(self) -> tuple[str, ...]:
+            return ("free", "pro", "enterprise")
+
+        @property
+        def execution_mode(self) -> str:
+            return "in_process"
+
+        async def execute(self, input, context):
+            return {"success": True, "output": "ran", **(extra_output or {})}
+
+    broker.registry.register(_Probe())
+
+
 def test_broker_executes_routine_tool_and_stamps_tier(broker) -> None:
-    """save_memory is declared ROUTINE -- the broker must run it and
-    return a successful ToolResult whose metadata['tier'] is
-    'routine'."""
+    """A ROUTINE-declared tool must execute and have its tier stamped
+    on the result. WU7 retired the cognition-tool dispatch path so
+    we drive this with an inline ROUTINE probe."""
+
+    from app.policy.action_classification import ActionTier
+
+    _register_tier_probe_tool(
+        broker,
+        tool_id="probe_routine",
+        tier=ActionTier.ROUTINE,
+        extra_output={"category": "preference"},
+    )
 
     result = broker.execute_tool(
-        "save_memory",
+        "probe_routine",
         {"category": "preference", "content": "prefers terminal-based dev"},
     )
     assert result.success is True
@@ -773,12 +844,22 @@ def test_broker_executes_routine_tool_and_stamps_tier(broker) -> None:
 
 
 def test_broker_executes_notify_and_proceed_tool_and_stamps_tier(broker) -> None:
-    """escalate_to_human is declared NOTIFY_AND_PROCEED -- the broker
-    must run it and surface the tier so the runtime layer can render
-    a notification."""
+    """A NOTIFY_AND_PROCEED-declared tool must execute and surface
+    the tier so the runtime layer can render a notification. WU7
+    retired the cognition-tool dispatch path; we re-pin with an
+    inline probe."""
+
+    from app.policy.action_classification import ActionTier
+
+    _register_tier_probe_tool(
+        broker,
+        tool_id="probe_notify",
+        tier=ActionTier.NOTIFY_AND_PROCEED,
+        extra_output={"escalated": True},
+    )
 
     result = broker.execute_tool(
-        "escalate_to_human", {"reason": "frustrated user"}
+        "probe_notify", {"reason": "frustrated user"}
     )
     assert result.success is True
     assert result.metadata["tier"] == "notify_and_proceed"
