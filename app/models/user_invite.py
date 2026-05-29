@@ -11,17 +11,22 @@ expired, revoked). Step 30a.4 carves this surface out cleanly.
 Design contract
 ---------------
 
-A UserInvite is the durable record of "tenant T invited <email> to hold
-role R within (tenant T, domain D) at time A; token has jti J; expires at
-time B; status is pending|accepted|expired|revoked". The corresponding JWT
-is a thin capability handle keyed by `token_jti`; the structured payload
-(tenant_id, domain_id, role, inviter) lives here, not on the token.
+A UserInvite is the durable record of "admin A invited <email> to hold
+role R at time A; token has jti J; expires at time B; status is
+pending|accepted|expired|revoked". The corresponding JWT is a thin
+capability handle keyed by `token_jti`; the structured payload
+(admin_id, role, inviter) lives here, not on the token.
+
+v2 note (Arc 12): the legacy three-layer (tenant_id, domain_id, agent_id)
+scope is fully retired. Invites are scoped to the single Admin->Instance
+boundary (admin_id + role); the `domain_id` column was dropped in Arc 12
+EX3. Any (tenant_id/domain_id) references below are historical.
 
 * **Token is 24h-TTL via `mint_set_password_token(purpose="invite")`.**
   The set_password-class token (Step 30a.3 primitive) carries `sub`,
-  `email`, `tenant_id`, `typ`, `purpose=invite`, `jti`. It does NOT carry
-  `domain_id` or `role` -- those live here, looked up at redemption time
-  by `token_jti`. This keeps Step 30a.3's auth surface untouched.
+  `email`, `admin_id`, `typ`, `purpose=invite`, `jti`. It does NOT carry
+  `role` -- that lives here, looked up at redemption time by `token_jti`.
+  This keeps Step 30a.3's auth surface untouched.
 
 * **Invite row TTL is 7 days via `expires_at`** (independent of token TTL).
   If the 24h token lapses before the 7-day invite window, the resend
@@ -48,11 +53,9 @@ Relationships
   Invite teammate).
 * UserInvite N..1 User (accepted_user -- the User row created or fetched
   on redemption). Nullable while status='pending'.
-* `domain_id` is service-layer validated against domain_configs, NOT a
-  direct FK -- domain_configs uses (tenant_id, domain_id) as its natural
-  key, and the project convention (Agent, ScopeAssignment) is to validate
-  composite-key references at the service layer rather than via composite
-  FK. Same pattern as Agent.domain_id and ScopeAssignment.domain_id.
+* Invites are scoped by `admin_id` (the v2 Admin boundary). The legacy
+  `domain_id` column and its service-layer domain_configs validation were
+  removed in Arc 12 EX3 along with the rest of the three-layer scaffold.
 
 Invariants honored
 ------------------
