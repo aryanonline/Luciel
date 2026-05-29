@@ -117,25 +117,18 @@ class ScopeAssignment(Base, TimestampMixin):
         index=True,
     )
 
-    # Tenant + domain + role triple. Mirrors the scope-arithmetic columns
-    # used elsewhere (api_keys, agents, luciel_instances). String FKs match
-
+    # Admin + role pair. Arc 12 EX3 dropped the vestigial v1 ``domain_id``
+    # half; v2 keys a role binding by (user_id, admin_id, role) with
+    # optional instance-level operator scoping handled at the policy
+    # layer (ScopePolicy._resolve_role_on_instance).
     admin_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("admins.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
-    # domain_id is validated at the service layer against domain_configs
-    # (which uses (tenant_id, domain_id) as natural key), matching the same
-    # pattern Agent.domain_id uses. No direct FK to avoid composite-key
-    # mismatch with existing schema convention.
-    domain_id: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-    )
 
-    # Role label within the (tenant, domain) scope. Arc 11 Cleanup C
+    # Role label within the Admin scope. Arc 11 Cleanup C
     # promoted this from a free-form ``String(100)`` to a Postgres
     # ENUM with the four canonical values (see ``ScopeRole`` above).
     role: Mapped[ScopeRole] = mapped_column(
@@ -232,12 +225,15 @@ class ScopeAssignment(Base, TimestampMixin):
             "active",
             postgresql_where=text("ended_at IS NULL"),
         ),
-        # Composite for "is this user currently assigned to this (tenant, domain, role)?"
+        # Composite duplicate-assignment guard: "is this user currently
+        # assigned to this (admin, role)?" Arc 12 EX3 narrowed the
+        # shape from (user_id, admin_id, domain_id, role) to
+        # (user_id, admin_id, role); the index name is preserved for
+        # operator-runbook symmetry.
         Index(
             "ix_scope_assignments_user_tenant_domain_role_active",
             "user_id",
             "admin_id",
-            "domain_id",
             "role",
             postgresql_where=text("ended_at IS NULL"),
         ),
@@ -255,6 +251,5 @@ class ScopeAssignment(Base, TimestampMixin):
         state = "active" if self.ended_at is None else f"ended={self.ended_reason}"
         return (
             f"<ScopeAssignment id={self.id} user={self.user_id} "
-            f"tenant={self.admin_id} domain={self.domain_id} "
-            f"role={self.role!r} {state}>"
+            f"admin={self.admin_id} role={self.role!r} {state}>"
         )

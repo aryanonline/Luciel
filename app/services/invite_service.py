@@ -575,7 +575,6 @@ def redeem_invite(
             select(ScopeAssignment).where(
                 ScopeAssignment.user_id == user.id,
                 ScopeAssignment.admin_id == admin_id,
-                ScopeAssignment.domain_id.is_(None),
                 ScopeAssignment.ended_at.is_(None),
                 ScopeAssignment.active.is_(True),
             )
@@ -584,7 +583,6 @@ def redeem_invite(
             assignment = ScopeAssignment(
                 user_id=user.id,
                 admin_id=admin_id,
-                domain_id=None,  # V2: no Domain layer
                 role=invite.role,
                 active=True,
             )

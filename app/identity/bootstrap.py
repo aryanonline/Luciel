@@ -176,7 +176,6 @@ class IdentityBootstrap:
         "canonical_tier",
         "scope_assignment_id",
         "admin_id",
-        "domain_id",
         "role",
         "started_at",
         "ended_at",
@@ -194,7 +193,7 @@ class IdentityBootstrap:
         rows = self.db.execute(
             _sa_text(
                 "SELECT canonical_tenant_id, canonical_tier, "
-                "scope_assignment_id, admin_id, domain_id, role, "
+                "scope_assignment_id, admin_id, role, "
                 "started_at, ended_at, ended_reason, ended_note, "
                 "ended_by_api_key_id, active "
                 "FROM public.arc9_c22_bootstrap_identity(:uid)"
@@ -225,7 +224,6 @@ class IdentityBootstrap:
                     scope_id=r.scope_assignment_id,
                     user_id=user_id,
                     admin_id=r.admin_id,
-                    domain_id=r.domain_id,
                     role=r.role,
                     started_at=r.started_at,
                     ended_at=r.ended_at,
@@ -254,7 +252,6 @@ def _hydrate_scope_assignment(
     scope_id: uuid.UUID,
     user_id: uuid.UUID,
     admin_id: str,
-    domain_id: str,
     role: str,
     started_at: datetime,
     ended_at: Optional[datetime],
@@ -274,7 +271,6 @@ def _hydrate_scope_assignment(
         id=scope_id,
         user_id=user_id,
         admin_id=admin_id,
-        domain_id=domain_id,
         role=role,
         started_at=started_at,
         ended_at=ended_at,

@@ -75,34 +75,6 @@ _CREATED_BY = "tier_provisioning"
 from app.models.scope_assignment import ScopeRole as _ScopeRole
 _OWNER_ROLE = _ScopeRole.ADMIN_OWNER
 
-# Arc 6 Commit 8 (2026-05-23) -- Domain-collapse sentinel.
-#
-# The ``scope_assignments.domain_id`` column is declared
-# ``nullable=False`` at the DB layer (born under the Step 24.5b Q6
-# resolution before Arc 5 collapsed the Domain layer). V2 doctrine
-# says "no Domain layer" but the COLUMN survives until the schema
-# subtractive revision that drops it (out of scope here -- it's a
-# Pro/Enterprise schema cleanup tracked separately).
-#
-# Until that drop lands, every ScopeAssignment insert must satisfy
-# the NOT-NULL by writing a sentinel string. ``"default"`` is the
-# value chosen because:
-#   1. It matches the V1 legacy default (the only legitimate value
-#      in the post-Arc-5 world; "general" was the legacy fixture but
-#      is no longer enforced as a real domain).
-#   2. It collides with itself across all V2 ScopeAssignments under
-#      the same Admin, which is the correct V2 behaviour (V2 has
-#      ONE domain per admin, full stop).
-#   3. A future Domain-drop migration can backfill in-place from
-#      this sentinel without ambiguity.
-#
-# Pre-Arc-6-Commit-8 this code passed ``domain_id=None`` which would
-# IntegrityError at flush. The Pro pre-mint path was latent-broken;
-# only Free signup (this commit) exercises the same column today.
-# Fixing both with one constant keeps the rule legible.
-_DOMAIN_COLLAPSE_SENTINEL = "default"
-
-
 # ---------------------------------------------------------------------
 # Email shape validation
 # ---------------------------------------------------------------------
@@ -771,11 +743,6 @@ class TierProvisioningService:
         sar.create(
             user_id=primary_user.id,
             admin_id=admin.id,
-            # Arc 6 Commit 8 -- write the Domain-collapse sentinel rather
-            # than None. The column is nullable=False at the DB layer
-            # (V1 inheritance), and the V2 model has not yet had the
-            # column dropped. See _DOMAIN_COLLAPSE_SENTINEL docstring.
-            domain_id=_DOMAIN_COLLAPSE_SENTINEL,
             role=_OWNER_ROLE,
             autocommit=False,  # we commit below, after the audit row lands
             audit_ctx=audit_ctx,

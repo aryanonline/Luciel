@@ -84,7 +84,6 @@ class ScopeAssignmentRepository:
         *,
         user_id: uuid.UUID,
         admin_id: str,
-        domain_id: str,
         role: str,
         started_at: datetime | None = None,
         autocommit: bool = True,
@@ -94,11 +93,11 @@ class ScopeAssignmentRepository:
 
         Caller (ScopeAssignmentService) is expected to:
         1. Verify the User exists and is active.
-        2. Verify (admin_id, domain_id) exist and are active.
+        2. Verify admin_id exists and is active.
         3. Verify the calling key has admin scope at-or-above
-           (admin_id, domain_id) per Invariant 5.
+           admin_id per Invariant 5.
         4. Optionally end any conflicting active assignment for the
-           same User in the same tenant before calling create() --
+           same User under the same Admin before calling create() --
            this is the "promotion" composition pattern.
 
         autocommit=False lets the service compose this with
@@ -106,11 +105,16 @@ class ScopeAssignmentRepository:
 
         started_at defaults to server now() if omitted (matches the
         column server_default). Override only for historical backfills.
+
+        Arc 12 EX3: the legacy ``domain_id`` parameter is gone with
+        the column drop. The audit-row write still threads
+        ``domain_id=None`` into ``admin_audit_logs`` (EX4 owns the
+        audit-log column drop separately) so the hash chain stays
+        intact.
         """
         assignment = ScopeAssignment(
             user_id=user_id,
             admin_id=admin_id,
-            domain_id=domain_id,
             role=role,
             started_at=started_at,  # None -> DB server_default fires
             active=True,
@@ -126,12 +130,11 @@ class ScopeAssignmentRepository:
                 resource_type=RESOURCE_SCOPE_ASSIGNMENT,
                 resource_pk=None,  # ScopeAssignment PK is UUID
                 resource_natural_id=str(assignment.id),
-                domain_id=domain_id,
+                domain_id=None,  # Arc 12 EX3: column dropped; EX4 owns admin_audit_logs.domain_id
                 after={
                     "id": str(assignment.id),
                     "user_id": str(user_id),
                     "admin_id": admin_id,
-                    "domain_id": domain_id,
                     "role": role,
                     "active": True,
                 },
@@ -143,11 +146,10 @@ class ScopeAssignmentRepository:
             self.db.refresh(assignment)
 
         logger.info(
-            "ScopeAssignment created id=%s user=%s tenant=%s domain=%s role=%s",
+            "ScopeAssignment created id=%s user=%s admin=%s role=%s",
             assignment.id,
             user_id,
             admin_id,
-            domain_id,
             role,
         )
         return assignment
@@ -373,7 +375,7 @@ class ScopeAssignmentRepository:
                 resource_type=RESOURCE_SCOPE_ASSIGNMENT,
                 resource_pk=None,  # ScopeAssignment PK is UUID
                 resource_natural_id=str(assignment.id),
-                domain_id=assignment.domain_id,
+                domain_id=None,  # Arc 12 EX3: scope_assignments.domain_id dropped
                 before=before_snapshot,
                 after=after_snapshot,
                 note=(

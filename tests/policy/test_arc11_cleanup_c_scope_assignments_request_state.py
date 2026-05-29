@@ -49,7 +49,6 @@ def _assignment(*, admin_id: str, role: str | ScopeRole) -> ScopeAssignment:
         id=uuid.uuid4(),
         user_id=uuid.uuid4(),
         admin_id=admin_id,
-        domain_id="d1",
         role=role,
         active=True,
         ended_at=None,
