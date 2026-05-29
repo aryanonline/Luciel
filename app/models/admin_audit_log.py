@@ -430,6 +430,26 @@ ACTION_SIBLING_GRANT_APPROVED = "sibling_grant_approved"
 ACTION_SIBLING_GRANT_REJECTED = "sibling_grant_rejected"
 ACTION_SIBLING_GRANT_REVOKED = "sibling_grant_revoked"
 
+# Arc 12 WU2b -- per-instance tool authorization admin API
+# (Architecture §3.3.1/§3.3.2 catalog + WU2 default-deny gate).
+#
+# ACTION_TOOL_AUTHORIZED -- a user authorised one of the 8 v1 catalog
+#   tools on an Instance via the admin tools API. Emits a row whose
+#   resource_type=RESOURCE_INSTANCE_TOOL_AUTHORIZATION, resource_pk
+#   = the new instance_tool_authorizations.id, resource_natural_id
+#   = "{instance_id}:{tool_id}" so an auditor can answer "every event
+#   for tool X on Instance Y" with a single filter. after_json carries
+#   {tool_id, enabled, authorized_by_user_id, tier_at_authorize}.
+#   Wall-1 + Wall-3 are scoped via (admin_id, instance_id); Wall-2
+#   (role gate) is enforced at the route layer (owner/manager only).
+# ACTION_TOOL_REVOKED -- the symmetric verb for the soft-revoke of a
+#   live authorization row. before_json carries the prior {enabled}
+#   state; after_json carries {revoked_at}. The admin tools API is
+#   idempotent against missing rows: a revoke against no-live-row is
+#   a 404 surfaced to the operator (not an audit emission).
+ACTION_TOOL_AUTHORIZED = "tool_authorized"
+ACTION_TOOL_REVOKED = "tool_revoked"
+
 # Arc 12 EX4 (founder-directed, LOCKED 2026-05-28) -- audit-chain reseal.
 #
 # ACTION_AUDIT_CHAIN_RESEALED -- emitted by the
@@ -608,6 +628,9 @@ ALLOWED_ACTIONS = (
     ACTION_SIBLING_GRANT_APPROVED,
     ACTION_SIBLING_GRANT_REJECTED,
     ACTION_SIBLING_GRANT_REVOKED,
+    # Arc 12 WU2b -- per-instance tool authorization admin API.
+    ACTION_TOOL_AUTHORIZED,
+    ACTION_TOOL_REVOKED,
     # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
     ACTION_SIBLING_ACCESS,
     # Arc 12 EX4 -- one-time audit-chain reseal.
@@ -709,6 +732,14 @@ RESOURCE_KNOWLEDGE_SOURCE = "knowledge_source"
 # answer "every event involving the A->B edge" with a single filter.
 RESOURCE_SIBLING_CALL_GRANT = "sibling_call_grant"
 
+# Arc 12 WU2b -- instance_tool_authorizations row. The auditable
+# resource for the per-instance tool authorize/revoke admin API.
+# resource_pk = instance_tool_authorizations.id;
+# resource_natural_id = "{instance_id}:{tool_id}" so an auditor can
+# answer "every authorize/revoke event for tool X on Instance Y"
+# with a single filter.
+RESOURCE_INSTANCE_TOOL_AUTHORIZATION = "instance_tool_authorization"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -742,6 +773,8 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_KNOWLEDGE_SOURCE,
     # Arc 12 WU4 -- sibling_call_grants row (§3.3.4).
     RESOURCE_SIBLING_CALL_GRANT,
+    # Arc 12 WU2b -- instance_tool_authorizations row.
+    RESOURCE_INSTANCE_TOOL_AUTHORIZATION,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
