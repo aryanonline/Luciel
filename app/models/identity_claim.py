@@ -1,4 +1,4 @@
-"""IdentityClaim model -- channel-specific identifier bound to a User within a scope.
+"""IdentityClaim model -- channel-specific identifier bound to a User within an Admin scope.
 
 Step 24.5c (Cross-channel identity and conversation continuity).
 
@@ -6,23 +6,28 @@ An IdentityClaim records the channel-specific identifier (email, phone, sso
 subject) that resolves back to a durable User identity. At request time the
 ingress adapter (widget, programmatic API, voice/SMS/email when 34a lands)
 asserts a claim; the identity resolver looks it up against this table within
-the calling scope and binds the session to the matching User.
+the calling Admin scope and binds the session to the matching User.
 
 Design contract (see ARCHITECTURE.md §3.2.11 "Identity & conversation
-continuity" for the canonical spec):
+continuity" and §3.7.2 "Admin → Instance boundary" for the canonical
+specs):
 
 - Claims are ORTHOGONAL to scope the same way Users are. A single User
-  can have many IdentityClaim rows, possibly under different scopes
+  can have many IdentityClaim rows, possibly under different Admins
   (e.g. Sarah's work-email claim at REMAX Crossroads + Sarah's personal
-  phone claim at the same scope, all rolling up to one User UUID).
+  phone claim at the same Admin, all rolling up to one User UUID).
 
-- Each claim is SCOPED to its issuing scope -- (tenant_id, domain_id) --
-  in v1. Cross-scope continuity is explicitly out of scope at v1
-  (Step 38 territory, ARCHITECTURE §4.9 rejected-alternative bullet).
-  Uniqueness is enforced on (claim_type, claim_value, tenant_id, domain_id)
-  so two scopes can independently assert the same number or email
-  without colliding -- a number that belongs to Brokerage A's prospect
-  and to Brokerage B's prospect is two facts, both true.
+- Each claim is SCOPED to its issuing Admin (admin_id) under the v2
+  single Admin → Instance boundary -- the Domain layer was eliminated
+  at Arc 5 Path A and the legacy ``domain_id`` column on this table was
+  dropped at Arc 12 EX3 (alembic
+  ``arc12_ex3_drop_identity_claims_domain``). Cross-Admin continuity is
+  explicitly out of scope at v1 (Step 38 territory, ARCHITECTURE §4.9
+  rejected-alternative bullet). Uniqueness is enforced on the v2
+  natural key (claim_type, claim_value, admin_id), so two Admins can
+  independently assert the same number or email without colliding -- a
+  number that belongs to Brokerage A's prospect and to Brokerage B's
+  prospect is two facts, both true.
 
 - claim_type is a closed enum: email, phone, sso_subject. The runtime
   passes the type alongside the value to the resolver; the table stores

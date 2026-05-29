@@ -1,44 +1,60 @@
 """
 Authentication middleware.
 
-Validates API keys on incoming requests and injects admin_id, domain_id,
-agent_id, luciel_instance_id, and (Step 24.5b) user_id into the request
-state.
+Validates API keys on incoming requests and injects the v2 identity
+fields onto ``request.state``:
 
-PATCHED (Step 21): Admin routes are no longer skipped. They now require a
-valid API key with 'admin' in permissions.
+  * ``admin_id``           -- the Admin slug owning the key (v2 boundary)
+  * ``luciel_instance_id`` -- the bound Instance, when the key is
+                              Instance-scoped (None for admin / platform
+                              keys)
+  * ``actor_user_id``      -- the platform User UUID attributed to the
+                              request, when resolvable from the cookied
+                              path; None on the API-key path until the
+                              ScopeAssignment-based resolution lands.
+  * ``api_key_id`` / ``key_prefix`` / ``permissions`` / ``actor_label``
+                           -- audit-trail metadata.
+  * ``key_kind`` / ``allowed_origins`` / ``rate_limit_per_minute`` /
+    ``widget_config``      -- surfaced for the widget endpoint dependency
+                              in ``app/api/widget_deps.py``; not enforced
+                              here (admin/server-to-server keys must keep
+                              flowing without origin checks).
 
-PATCHED (Step 24.5 File 10.5): Inject key_prefix + actor_label for audit.
+V2 boundary: the platform collapsed the legacy three-layer
+(tenant_id, domain_id, agent_id) scope tuple at Arc 5 Path A and Arc 12
+EX3 excised the residual ``domain_id`` / ``agent_id`` columns from
+``api_keys`` (alembic ``arc12_ex3_drop_api_keys_domain_agent``). The
+single authorization boundary now is Admin → Instance (Architecture
+§3.7.2): one Admin owns N Instances; every request that authenticates
+resolves to exactly one Admin and (optionally) one Instance under that
+Admin. Downstream callers read ``admin_id`` + ``luciel_instance_id``
+only.
 
-PATCHED (Step 24.5 File 14): Inject luciel_instance_id onto request.state
-so chat_service (File 15) can resolve persona / provider / tools / prompt
-from the bound LucielInstance. None for legacy / unbound keys -> legacy
-fallback path in chat_service.
+Admin-route gating: routes mounted under ``ADMIN_AUTH_PATHS``
+(``/api/v1/admin`` and ``/api/v1/dashboard``) require ``"admin"`` in the
+key's ``permissions`` array. Embed keys (whose ``EMBED_REQUIRED_PERMISSIONS
+= {"chat"}`` excludes ``admin``) are 403'd here before any route handler
+runs; ScopePolicy still enforces Admin/Instance isolation inside each
+handler as defense-in-depth.
 
-PATCHED (Step 30b commit (c)): Inject the four widget-related fields
-from api_keys onto request.state for downstream consumption by the
-widget endpoint. The middleware does NOT enforce origin or key_kind
-here -- the existing middleware is shared by every authenticated
-route and admin/server-to-server keys must continue to flow without
-origin checks. Enforcement lives in app/api/widget_deps.py, scoped
-only to the widget endpoint that needs it.
+Authentication paths recognised:
 
-PATCHED (Step 24.5b File 2.4): Inject actor_user_id onto request.state.
-Resolved from the Agent row keyed by (admin_id, domain_id, agent_id) when
-the key is agent-scoped. None for tenant-admin / platform-admin keys (no
-single bound User), and None for agent-scoped keys whose Agent.user_id is
-still NULL (legacy rows pending the Commit 3 backfill).
+  * ``Authorization: Bearer <api_key>`` -- this middleware's primary path.
+  * Session cookie -- ``SessionCookieAuthMiddleware`` runs first; when it
+    has already authenticated the request (``request.state.auth_method ==
+    "cookie"``), this middleware short-circuits.
+  * Skip-listed paths -- ``SKIP_AUTH_PATHS`` (health probes, Stripe
+    webhooks, SES SNS sink, password-auth and billing routes which gate
+    themselves inside the handler).
 
-Distinct from the existing session.user_id which is a free-form
-client-supplied end-user identifier string -- actor_user_id is the
-platform User UUID identifying which Agent's durable identity wrote a
-given memory/trace row. The two coexist by design (drift item D7
-resolution): a single platform User (Sarah-the-listings-agent) may
-handle conversations on behalf of many session.user_id values
-(prospect-1234, lead-5678, etc.). ChatService and the async memory
-worker treat actor_user_id=None as "no platform User attribution
-available" -- writes still work, just without the FK populated until
-backfill.
+``actor_user_id`` vs ``session.user_id``: ``actor_user_id`` is the
+platform User UUID identifying who wrote a given memory/trace row;
+``session.user_id`` remains a free-form client-supplied end-user
+identifier string. They coexist by design -- a single platform User may
+handle conversations on behalf of many session.user_id values.
+ChatService and the async memory worker treat ``actor_user_id=None`` as
+"no platform User attribution available" -- writes still work, just
+without the FK populated.
 """
 from __future__ import annotations
 
@@ -105,7 +121,7 @@ SKIP_AUTH_PATHS = {
 # perimeter denial that `/api/v1/admin/*` enjoys -- embed keys (whose
 # `EMBED_REQUIRED_PERMISSIONS = {"chat"}` excludes `admin`) get a 403
 # from this middleware before any route handler runs. ScopePolicy still
-# enforces tenant/domain/agent isolation inside each handler; this is
+# enforces Admin/Instance isolation inside each handler; this is
 # defense-in-depth.
 ADMIN_AUTH_PATHS = ("/api/v1/admin", "/api/v1/dashboard")
 
@@ -172,10 +188,11 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
 
             admin_id = apikey.admin_id
             # Arc 12 EX1a — V2 auth subject is admin_id (+ luciel_instance_id
-            # where instance-scoping applies). The legacy domain_id / agent_id
-            # api_key columns are read by other layers (forensics/dashboard)
-            # which a sibling EX-step rewrites; the auth layer no longer
-            # reads them and no longer stamps request.state.{domain,agent}_id.
+            # where instance-scoping applies). Arc 12 EX3 also dropped the
+            # ``domain_id`` / ``agent_id`` columns from ``api_keys``
+            # (alembic ``arc12_ex3_drop_api_keys_domain_agent``), so they
+            # are no longer readable from ``apikey`` at all; this layer
+            # never stamps ``request.state.{domain,agent}_id``.
             api_key_id = apikey.id
             permissions = apikey.permissions or []
             key_prefix = apikey.key_prefix
@@ -234,9 +251,9 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
         # ``getattr(request.state, "domain_id", None)`` already treats the
         # absent attribute as ``None`` (V2 collapse). ScopePolicy._caller
         # was rewritten at Revision B to return ``None`` for those slots
-        # regardless of request.state. The api-key columns still exist on
-        # the row (later EX-step drops them); this layer just stops
-        # forwarding their values into request.state.
+        # regardless of request.state. Arc 12 EX3 dropped the
+        # ``domain_id`` / ``agent_id`` columns from ``api_keys`` entirely
+        # so this layer cannot forward what no longer exists.
         request.state.api_key_id = api_key_id
         request.state.permissions = permissions
         request.state.key_prefix = key_prefix
