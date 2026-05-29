@@ -232,7 +232,9 @@ class TestResolverSurface:
         assert "claim_type" in params
         assert "claim_value" in params
         assert "admin_id" in params
-        assert "domain_id" in params
+        # Arc 12 EX3: identity_claims.domain_id dropped — resolver no
+        # longer accepts a domain_id parameter.
+        assert "domain_id" not in params
         assert "issuing_adapter" in params
         for name, p in params.items():
             if name == "self":
@@ -279,20 +281,6 @@ class TestResolverInputValidation:
                 claim_type=ClaimType.EMAIL,
                 claim_value="a@b.co",
                 admin_id="",
-                domain_id="d-1",
-                issuing_adapter="widget",
-            )
-
-    def test_rejects_blank_domain_id(self):
-        from app.identity import IdentityResolver
-        from app.models.identity_claim import ClaimType
-        r = IdentityResolver(db=_NoCallDb())  # type: ignore[arg-type]
-        with pytest.raises(ValueError):
-            r.resolve(
-                claim_type=ClaimType.EMAIL,
-                claim_value="a@b.co",
-                admin_id="t-1",
-                domain_id="   ",
                 issuing_adapter="widget",
             )
 
@@ -305,7 +293,6 @@ class TestResolverInputValidation:
                 claim_type=ClaimType.EMAIL,
                 claim_value="a@b.co",
                 admin_id="t-1",
-                domain_id="d-1",
                 issuing_adapter="",
             )
 
@@ -318,7 +305,6 @@ class TestResolverInputValidation:
                 claim_type=ClaimType.EMAIL,
                 claim_value="not-an-email",
                 admin_id="t-1",
-                domain_id="d-1",
                 issuing_adapter="widget",
             )
 
@@ -384,7 +370,6 @@ class TestMintPath:
             claim_type=ClaimType.EMAIL,
             claim_value="Aryan@Example.COM",
             admin_id="t-1",
-            domain_id="d-1",
             issuing_adapter="widget",
         )
         # Should add exactly one of each kind.
@@ -403,7 +388,8 @@ class TestMintPath:
         new_claim = next(o for o in db.added if isinstance(o, IdentityClaim))
         assert new_claim.claim_value == "aryan@example.com"
         assert new_claim.admin_id == "t-1"
-        assert new_claim.domain_id == "d-1"
+        # Arc 12 EX3: IdentityClaim.domain_id dropped from the model.
+        assert not hasattr(new_claim, "domain_id")
         assert new_claim.issuing_adapter == "widget"
         assert new_claim.verified_at is None
         assert new_claim.active is True
@@ -411,8 +397,8 @@ class TestMintPath:
         new_user = next(o for o in db.added if isinstance(o, User))
         assert new_user.synthetic is True
         assert new_user.active is True
-        # Conversation scoped to admin_id (Arc 12 EX3 dropped domain_id
-        # from conversations; IdentityClaim still carries it).
+        # Conversation scoped to admin_id (Arc 12 EX3 dropped
+        # domain_id from conversations AND from identity_claims).
         new_conv = next(o for o in db.added if isinstance(o, Conversation))
         assert new_conv.admin_id == "t-1"
         assert new_conv.active is True
@@ -457,7 +443,6 @@ class TestExistingClaimHitPath:
             claim_type=ClaimType.PHONE,
             claim_value="+14165551234",
             admin_id="t-1",
-            domain_id="d-1",
             issuing_adapter="voice_gateway",
         )
         # No mints.
@@ -488,7 +473,6 @@ class TestExistingClaimHitPath:
             claim_type=ClaimType.SSO_SUBJECT,
             claim_value="okta|sub-007",
             admin_id="t-1",
-            domain_id="d-1",
             issuing_adapter="programmatic_api",
         )
         # ONE conversation mint, NO user mint, NO claim mint.
@@ -562,7 +546,6 @@ class TestExistingClaimPathDoesNotAddNewClaim:
             claim_type=ClaimType.EMAIL,
             claim_value="hit@example.com",
             admin_id="t-1",
-            domain_id="d-1",
             issuing_adapter="widget",
         )
         new_claims = [o for o in db.added if isinstance(o, IdentityClaim)]

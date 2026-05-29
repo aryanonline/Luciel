@@ -26,7 +26,10 @@ FK instead of the tenant_configs.admin_id string, or that made
 sessions.conversation_id NOT NULL, or that dropped the load-bearing
 uniqueness on (claim_type, claim_value, admin_id, domain_id), would
 not necessarily fail any other unit test but would silently invalidate
-the design contract the impl arc rests on.
+the design contract the impl arc rests on. (Arc 12 EX3 narrowed the
+identity_claims uniqueness shape from (claim_type, claim_value,
+admin_id, domain_id) to (claim_type, claim_value, admin_id) when the
+legacy domain_id half was dropped.)
 
 These tests are backend-free: they import the model classes, inspect
 their SQLAlchemy table metadata, and parse the migration file as AST.
@@ -244,19 +247,24 @@ class TestIdentityClaimTableShape:
     def test_required_columns_present(self) -> None:
         m = _import_models()
         cols = {c.name for c in m["IdentityClaim"].__table__.columns}
+        # Arc 12 EX3: identity_claims.domain_id dropped at the schema
+        # level. v2 natural key is (admin_id, claim_type, claim_value).
         expected = {
             "id",
             "user_id",
             "claim_type",
             "claim_value",
             "admin_id",
-            "domain_id",
             "issuing_adapter",
             "verified_at",
             "active",
             "created_at",
         }
         assert expected.issubset(cols), f"missing columns: {expected - cols}"
+        assert "domain_id" not in cols, (
+            "Arc 12 EX3: IdentityClaim.domain_id must be absent "
+            "(column dropped at the schema level)."
+        )
 
     def test_no_unexpected_columns(self) -> None:
         m = _import_models()
@@ -267,7 +275,6 @@ class TestIdentityClaimTableShape:
             "claim_type",
             "claim_value",
             "admin_id",
-            "domain_id",
             "issuing_adapter",
             "verified_at",
             "active",
@@ -277,8 +284,6 @@ class TestIdentityClaimTableShape:
             # in lockstep when AdminService.deactivate_tenant_with_cascade
             # tears a tenant down.
             "deactivated_at",
-            # Arc 9.2 PR #96: additive admin_id (Option A).
-            "admin_id",
         }
         unexpected = cols - expected
         assert not unexpected, (
@@ -326,12 +331,15 @@ class TestIdentityClaimTableShape:
         assert fk.column.name == "id"
         assert fk.ondelete == "RESTRICT"
 
-    def test_domain_id_has_no_fk(self) -> None:
+    def test_domain_id_is_absent(self) -> None:
+        """Arc 12 EX3: identity_claims.domain_id dropped at the
+        schema level (alembic arc12_ex3_drop_identity_claim_domain).
+        v2 natural key is (admin_id, claim_type, claim_value).
+        """
         m = _import_models()
-        col = m["IdentityClaim"].__table__.columns["domain_id"]
-        assert not list(col.foreign_keys), (
-            "IdentityClaim.domain_id must have NO foreign key -- composite "
-            "natural key convention. See scope_assignments precedent."
+        cols = {c.name for c in m["IdentityClaim"].__table__.columns}
+        assert "domain_id" not in cols, (
+            "IdentityClaim.domain_id must not be present after Arc 12 EX3."
         )
 
     def test_verified_at_is_nullable(self) -> None:
@@ -373,7 +381,9 @@ class TestIdentityClaimUniqueness:
         # Order doesn't matter for uniqueness, but the *set* is what's
         # load-bearing. We assert the set so a future re-ordering of the
         # constraint definition doesn't trip the test for the wrong reason.
-        assert set(cols) == {"claim_type", "claim_value", "admin_id", "domain_id"}
+        # Arc 12 EX3: domain_id dropped. v2 uniqueness shape is
+        # (claim_type, claim_value, admin_id).
+        assert set(cols) == {"claim_type", "claim_value", "admin_id"}
 
 
 # ======================================================================

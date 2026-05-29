@@ -190,11 +190,6 @@ class IdentityClaim(Base):
         nullable=False,
         index=True,
     )
-    domain_id: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-        index=True,
-    )
 
     # Free-form label for which ingress adapter asserted the claim.
     # v1: 'widget', 'programmatic_api'. Step 34a adds: 'voice_gateway',
@@ -251,50 +246,37 @@ class IdentityClaim(Base):
 
     # ------ table-level constraints + indexes ------
     __table_args__ = (
-        # The load-bearing uniqueness. Two facts about the same value
-        # under two scopes are independent; the same fact asserted twice
-        # under the same scope is a duplicate. Writer is responsible for
-        # normalising claim_value before insert (LOWER for email, E.164
-        # for phone) so the comparison is meaningful.
+        # The load-bearing uniqueness on the v2 natural key. Arc 12
+        # EX3 dropped domain_id; the duplicate-claim guard now lives
+        # on (claim_type, claim_value, admin_id). Writer is responsible
+        # for normalising claim_value before insert (LOWER for email,
+        # E.164 for phone) so the comparison is meaningful.
         UniqueConstraint(
             "claim_type",
             "claim_value",
             "admin_id",
-            "domain_id",
             name="uq_identity_claims_type_value_scope",
         ),
-        # Resolver hot path: "given (tenant_id, domain_id, claim_type,
-        # claim_value), find the matching active claim". The unique
-        # constraint above already creates a unique btree on those four
-        # columns; we add an active-filter partial index so the resolver
-        # never scans inactive claims.
+        # Resolver hot path: "given (admin_id, claim_type, claim_value),
+        # find the matching active claim". The unique constraint above
+        # already creates a unique btree on this prefix; the partial
+        # index keeps the resolver from scanning inactive claims.
         Index(
             "ix_identity_claims_active_resolver",
             "admin_id",
-            "domain_id",
             "claim_type",
             "claim_value",
             postgresql_where=text("active = true"),
         ),
-        # "All claims for this user under this scope" -- the inverse
-        # lookup used when an adapter has the User but needs to surface
-        # known identifiers (Step 31 dashboards territory; v1 doesn't
-        # use this path but the index is cheap and the shape is correct).
+        # "All active claims for this user under this admin scope" --
+        # the inverse lookup used when an adapter has the User but
+        # needs to surface known identifiers.
         Index(
             "ix_identity_claims_user_tenant_domain_active",
             "user_id",
             "admin_id",
-            "domain_id",
             postgresql_where=text("active = true"),
         ),
-        {"comment": (
-            "Step 24.5c -- channel-specific identifier bound to a User "
-            "within a scope. Orthogonal to scope the same way Users are. "
-            "Uniqueness scoped to (claim_type, claim_value, tenant_id, "
-            "domain_id). v1 trust model is adapter-asserted; "
-            "verified_at lands with Step 34a + Step 31. See "
-            "ARCHITECTURE §3.2.11."
-        )},
     )
 
     def __repr__(self) -> str:  # pragma: no cover -- debug only

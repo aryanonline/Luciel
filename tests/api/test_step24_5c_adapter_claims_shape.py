@@ -136,7 +136,7 @@ class TestServiceIdentityShape:
             SessionService.create_session_with_identity
         )
         required = {
-            "admin_id", "domain_id", "claim_type",
+            "admin_id", "claim_type",
             "claim_value", "issuing_adapter",
         }
         optional = {"channel"}
@@ -152,6 +152,12 @@ class TestServiceIdentityShape:
         assert "agent_id" not in seen, (
             "Arc 12 EX1b: create_session_with_identity must not "
             "accept agent_id."
+        )
+        # Arc 12 EX3: identity_claims.domain_id dropped — service no
+        # longer threads domain_id into the resolver.
+        assert "domain_id" not in seen, (
+            "Arc 12 EX3: create_session_with_identity must not "
+            "accept domain_id (column dropped from identity_claims)."
         )
 
 
@@ -336,7 +342,6 @@ class TestEndToEndWiring:
         svc = SessionService(repository=repo)  # type: ignore[arg-type]
         result = svc.create_session_with_identity(
             admin_id="t-1",
-            domain_id="d-1",
             channel="web",
             claim_type=ClaimType.EMAIL,
             claim_value="newperson@example.com",
@@ -392,7 +397,6 @@ class TestEndToEndWiring:
         svc = SessionService(repository=repo)  # type: ignore[arg-type]
         result = svc.create_session_with_identity(
             admin_id="t-1",
-            domain_id="d-1",
             channel="programmatic_api",
             claim_type=ClaimType.EMAIL,
             claim_value="returning@example.com",

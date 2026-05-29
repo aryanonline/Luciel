@@ -303,13 +303,6 @@ def widget_chat_stream(
         from app.models.identity_claim import ClaimType
         result = session_service.create_session_with_identity(
             admin_id=admin_id,
-            # Arc 12 EX3 — sessions.domain_id is dropped at the schema
-            # level, but identity_claims.domain_id and
-            # conversations.domain_id remain (separate EX3 runs).
-            # The resolver still threads this value into those rows;
-            # keep the per-Instance sentinel here so the
-            # identity_claims uniqueness scope stays per-Instance.
-            domain_id=f"instance-{luciel_instance_id}",
             channel="widget",
             claim_type=ClaimType(payload.client_claim.claim_type.upper()),
             claim_value=payload.client_claim.claim_value,

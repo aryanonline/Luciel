@@ -521,7 +521,6 @@ class TestSessionServiceSignaturePreserved:
         )
         for required in [
             "admin_id",
-            "domain_id",
             "channel",
             "claim_type",
             "claim_value",
@@ -535,4 +534,10 @@ class TestSessionServiceSignaturePreserved:
         assert "agent_id" not in sig.parameters, (
             "Arc 12 EX1b: create_session_with_identity must not "
             "accept agent_id (v2 boundary)."
+        )
+        # Arc 12 EX3: identity_claims.domain_id dropped — service no
+        # longer threads domain_id.
+        assert "domain_id" not in sig.parameters, (
+            "Arc 12 EX3: create_session_with_identity must not "
+            "accept domain_id (column dropped from identity_claims)."
         )
