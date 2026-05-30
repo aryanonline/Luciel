@@ -49,6 +49,14 @@
                                                          {
                                                              "name":  "FROM_EMAIL",
                                                              "value":  "noreply@vantagemind.ai"
+                                                         },
+                                                         {
+                                                             "name":  "MAIL_INBOUND_DOMAIN",
+                                                             "value":  "luciel-mail.com"
+                                                         },
+                                                         {
+                                                             "name":  "SES_INBOUND_BUCKET",
+                                                             "value":  "luciel-mail-inbound-prod"
                                                          }
                                                      ],
                                      "mountPoints":  [
@@ -125,6 +133,30 @@
                                                      {
                                                          "valueFrom":  "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/jwt_grace_kid",
                                                          "name":  "JWT_GRACE_KID"
+                                                     },
+                                                     {
+                                                         "name":  "TWILIO_ACCOUNT_SID",
+                                                         "valueFrom":  "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/twilio_account_sid"
+                                                     },
+                                                     {
+                                                         "name":  "TWILIO_AUTH_TOKEN",
+                                                         "valueFrom":  "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/twilio_auth_token"
+                                                     },
+                                                     {
+                                                         "name":  "TWILIO_MESSAGING_SERVICE_SID",
+                                                         "valueFrom":  "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/twilio_messaging_service_sid"
+                                                     },
+                                                     {
+                                                         "name":  "TWILIO_API_KEY_SID",
+                                                         "valueFrom":  "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/twilio_api_key_sid"
+                                                     },
+                                                     {
+                                                         "name":  "TWILIO_API_KEY_SECRET",
+                                                         "valueFrom":  "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/twilio_api_key_secret"
+                                                     },
+                                                     {
+                                                         "name":  "SES_INBOUND_TOPIC_ARN",
+                                                         "valueFrom":  "arn:aws:ssm:ca-central-1:729005488042:parameter/luciel/production/ses_inbound_topic_arn"
                                                      }
                                                  ],
                                      "logConfiguration":  {

@@ -639,6 +639,78 @@ class Settings(BaseSettings):
     #   hot/cold boundary.
     audit_cold_archive_bucket: str = "luciel-audit-cold-archive"
 
+    # -----------------------------------------------------------------
+    # Arc 13 — Twilio SMS messaging.
+    # -----------------------------------------------------------------
+    # Per-instance phone-number acquisition is purchase-on-demand
+    # (Admin toggle → backend slice buys a number through the Twilio
+    # API). These settings hold the PLATFORM-level Twilio credentials
+    # that the number-purchase flow and the inbound/outbound message
+    # paths authenticate with. Empty defaults keep boot safe (dev / CI):
+    # the Twilio-touching routes fail closed (501) when the relevant
+    # slot is empty, mirroring the Stripe-not-configured pattern (§3.2.9).
+    #
+    # twilio_account_sid:   Twilio account SID (AC...). Identifies the
+    #                       account every API call and number purchase
+    #                       bills against. Prod injects from SSM
+    #                       /luciel/production/twilio_account_sid.
+    # twilio_auth_token:    Twilio auth token. Also used to validate the
+    #                       X-Twilio-Signature on inbound webhook POSTs
+    #                       so a forged request cannot reach the handler.
+    #                       Prod injects from SSM
+    #                       /luciel/production/twilio_auth_token.
+    # twilio_messaging_service_sid: the Messaging Service (MG...) that
+    #                       owns the 10DLC-registered sender pool. Numbers
+    #                       purchased per-instance are added to this
+    #                       service so they inherit the registered A2P
+    #                       campaign. Prod injects from SSM
+    #                       /luciel/production/twilio_messaging_service_sid.
+    # twilio_api_key_sid /  optional API Key (SK...) + secret pair. When
+    # twilio_api_key_secret set, the client authenticates with the API
+    #                       Key instead of the raw auth token (rotatable
+    #                       without changing the account credential). Prod
+    #                       injects from SSM
+    #                       /luciel/production/twilio_api_key_sid and
+    #                       /luciel/production/twilio_api_key_secret.
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_messaging_service_sid: str = ""
+    twilio_api_key_sid: str = ""
+    twilio_api_key_secret: str = ""
+
+    # -----------------------------------------------------------------
+    # Arc 13 — luciel-mail.com inbound email + SES inbound infra.
+    # -----------------------------------------------------------------
+    # Inbound mail for luciel-mail.com flows: SES receipt rule writes the
+    # raw MIME to the inbound S3 bucket, then publishes a notification to
+    # the inbound SNS topic; the backend's inbound-email handler reads the
+    # object back out of the bucket. See cfn/luciel-ses-inbound.yaml.
+    #
+    # mail_inbound_domain:  the verified inbound mail domain. Recipients
+    #                       on this domain are matched by the SES receipt
+    #                       rule. luciel-mail.com is intentionally distinct
+    #                       from the outbound transactional domain
+    #                       (vantagemind.ai) so inbound parsing and
+    #                       deliverability are isolated from the magic-link
+    #                       send reputation.
+    # ses_inbound_bucket:   name of the S3 bucket SES writes inbound MIME
+    #                       to (InboundMailBucket output of the inbound
+    #                       stack). Prod injects from SSM
+    #                       /luciel/production/ses_inbound_bucket.
+    # ses_inbound_topic_arn: ARN of the SNS topic SES publishes inbound
+    #                       notifications to. The inbound-email route
+    #                       verifies incoming SNS messages carry this exact
+    #                       TopicArn as its trust gate (same two-check
+    #                       pattern as ses_sns_topic_arn on the outbound
+    #                       feedback route). Empty default means "do not
+    #                       enforce TopicArn match" — used in tests and
+    #                       during the deploy bring-up window before the
+    #                       topic is subscribed. Prod injects from SSM
+    #                       /luciel/production/ses_inbound_topic_arn.
+    mail_inbound_domain: str = "luciel-mail.com"
+    ses_inbound_bucket: str = "luciel-mail-inbound-prod"
+    ses_inbound_topic_arn: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
