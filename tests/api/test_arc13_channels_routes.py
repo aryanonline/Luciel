@@ -288,6 +288,193 @@ class TestArc13ChannelRoutes(unittest.TestCase):
         email_view = next(c for c in resp.channels if c.channel == "email")
         self.assertTrue(email_view.enabled)
 
+    # -----------------------------------------------------------------
+    # Email enable → inbound-resolve round-trip — THE GAP-FIX test.
+    # -----------------------------------------------------------------
+
+    def _enable_email(self, *, admin_id: str, inst):
+        from app.api.v1.admin_channels import (
+            ChannelToggleRequest,
+            set_email_channel,
+        )
+
+        return set_email_channel(
+            request=_request(admin_id=admin_id),
+            instance_id=inst.id,
+            body=ChannelToggleRequest(enabled=True),
+            db=self.db,
+            instance_service=self._instance_service(),
+            audit_ctx=self._audit_ctx(),
+        )
+
+    def _disable_email(self, *, admin_id: str, inst):
+        from app.api.v1.admin_channels import (
+            ChannelToggleRequest,
+            set_email_channel,
+        )
+
+        return set_email_channel(
+            request=_request(admin_id=admin_id),
+            instance_id=inst.id,
+            body=ChannelToggleRequest(enabled=False),
+            db=self.db,
+            instance_service=self._instance_service(),
+            audit_ctx=self._audit_ctx(),
+        )
+
+    def _default_address(self, *, admin_id: str, inst):
+        from app.api.v1.admin_channels import _default_email_address
+
+        return _default_email_address(admin_id=admin_id, instance=inst)
+
+    def _sns_email(self, *, recipient: str, topic: str, cert_url: str):
+        import json
+
+        inner = {
+            "mail": {
+                "destination": [recipient],
+                "source": "customer@example.com",
+                "commonHeaders": {"subject": "Help please"},
+            },
+            "body": "I need help with my order",
+        }
+        return {
+            "Type": "Notification",
+            "TopicArn": topic,
+            "SigningCertURL": cert_url,
+            "MessageId": uuid.uuid4().hex,
+            "Message": json.dumps(inner),
+        }
+
+    def test_email_enable_then_inbound_resolves_roundtrip(self):
+        """Enable email via the API → the derived default-address email
+        ChannelRoute is live → a signature-valid inbound addressed to it
+        RESOLVES to (admin_id, instance_id) instead of raising
+        UnresolvableInboundError. This is the gap the fix closes.
+        """
+        from unittest.mock import patch
+
+        from app.channels.email_adapter import EmailChannelAdapter
+        from app.models.channel_route import CHANNEL_EMAIL, ChannelRoute
+        from app.policy.entitlements import TIER_PRO
+
+        admin_id, inst = self._make_admin_instance(TIER_PRO)
+        self._enable_email(admin_id=admin_id, inst=inst)
+
+        address = self._default_address(admin_id=admin_id, inst=inst)
+        live = (
+            self.db.query(ChannelRoute)
+            .filter(
+                ChannelRoute.channel == CHANNEL_EMAIL,
+                ChannelRoute.route_value == address,
+                ChannelRoute.revoked_at.is_(None),
+            )
+            .one()
+        )
+        self.assertEqual(live.admin_id, admin_id)
+        self.assertEqual(live.luciel_instance_id, inst.id)
+
+        topic = "arn:aws:sns:ca-central-1:123:luciel-inbound"
+        payload = self._sns_email(
+            recipient=address,
+            topic=topic,
+            cert_url="https://sns.ca-central-1.amazonaws.com/cert.pem",
+        )
+        with patch("app.channels.email_adapter.settings") as mock_settings:
+            mock_settings.ses_inbound_topic_arn = topic
+            adapter = EmailChannelAdapter(self.db)
+            ctx = adapter.verify_inbound(payload)
+            inbound = adapter.receive(payload)
+
+        self.assertEqual(ctx.admin_id, admin_id)
+        self.assertEqual(ctx.instance_id, inst.id)
+        self.assertIsNone(ctx.session_id)  # webhook resolves the session later
+        self.assertEqual(inbound.admin_id, admin_id)
+        self.assertEqual(inbound.instance_id, inst.id)
+        self.assertEqual(inbound.customer_identifier, "customer@example.com")
+
+    def test_email_disable_revokes_route_then_inbound_unresolvable(self):
+        from unittest.mock import patch
+
+        from app.channels.base import UnresolvableInboundError
+        from app.channels.email_adapter import EmailChannelAdapter
+        from app.models.channel_route import CHANNEL_EMAIL, ChannelRoute
+        from app.policy.entitlements import TIER_PRO
+
+        admin_id, inst = self._make_admin_instance(TIER_PRO)
+        self._enable_email(admin_id=admin_id, inst=inst)
+        address = self._default_address(admin_id=admin_id, inst=inst)
+
+        self._disable_email(admin_id=admin_id, inst=inst)
+
+        # Route is soft-revoked (historical row kept, revoked_at set).
+        row = (
+            self.db.query(ChannelRoute)
+            .filter(
+                ChannelRoute.channel == CHANNEL_EMAIL,
+                ChannelRoute.route_value == address,
+            )
+            .one()
+        )
+        self.assertIsNotNone(row.revoked_at)
+        no_live = (
+            self.db.query(ChannelRoute)
+            .filter(
+                ChannelRoute.channel == CHANNEL_EMAIL,
+                ChannelRoute.route_value == address,
+                ChannelRoute.revoked_at.is_(None),
+            )
+            .first()
+        )
+        self.assertIsNone(no_live)
+
+        topic = "arn:aws:sns:ca-central-1:123:luciel-inbound"
+        payload = self._sns_email(
+            recipient=address,
+            topic=topic,
+            cert_url="https://sns.ca-central-1.amazonaws.com/cert.pem",
+        )
+        with patch("app.channels.email_adapter.settings") as mock_settings:
+            mock_settings.ses_inbound_topic_arn = topic
+            with self.assertRaises(UnresolvableInboundError):
+                EmailChannelAdapter(self.db).verify_inbound(payload)
+
+    def test_email_enable_disable_reenable_no_duplicate_live_route(self):
+        from app.models.channel_route import CHANNEL_EMAIL, ChannelRoute
+        from app.policy.entitlements import TIER_PRO
+
+        admin_id, inst = self._make_admin_instance(TIER_PRO)
+        address = self._default_address(admin_id=admin_id, inst=inst)
+
+        self._enable_email(admin_id=admin_id, inst=inst)
+        self._disable_email(admin_id=admin_id, inst=inst)
+        self._enable_email(admin_id=admin_id, inst=inst)  # must not duplicate
+
+        # Exactly one LIVE route at the address (no unique-constraint blow-up).
+        live = (
+            self.db.query(ChannelRoute)
+            .filter(
+                ChannelRoute.channel == CHANNEL_EMAIL,
+                ChannelRoute.route_value == address,
+                ChannelRoute.revoked_at.is_(None),
+            )
+            .all()
+        )
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0].luciel_instance_id, inst.id)
+
+        # And re-enable reused a row rather than piling up history: at most
+        # one total row at this address for this instance (the reused one).
+        total = (
+            self.db.query(ChannelRoute)
+            .filter(
+                ChannelRoute.channel == CHANNEL_EMAIL,
+                ChannelRoute.route_value == address,
+            )
+            .count()
+        )
+        self.assertEqual(total, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
