@@ -1,0 +1,267 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Arc 13 — SES inbound mail infrastructure for luciel-mail.com. Receipt
+  rule set + S3 bucket for raw inbound MIME + SNS topic that notifies
+  the Luciel backend of each inbound message. SES writes the MIME object
+  to S3 and publishes a notification to SNS; the backend's inbound-email
+  handler (built by the backend slice) HTTPS-subscribes to the topic and
+  reads the MIME object back out of the bucket. Region: ca-central-1.
+
+# IaC ONLY — this template is DEFINED, not applied. Live provisioning is
+# gated behind founder go (see ops/arc13_golive_runbook.md). SES inbound
+# receipt-rule processing is a us-east-1 / us-west-2 / eu-west-1 regional
+# feature; if SES inbound is not offered in ca-central-1 at apply time
+# the runbook documents pinning THIS stack (and only this stack) to a
+# supported inbound region while keeping the rest of the platform in
+# ca-central-1. The bucket here therefore takes an explicit Region param
+# rather than inheriting AWS::Region blindly.
+#
+# Outbound feedback (bounce/complaint) already flows through the
+# pre-existing SNS topic luciel-ses-events — that topic is unrelated and
+# is NOT touched here. This template owns ONLY the inbound path.
+#
+# Cutover deploy (DO NOT RUN until the founder flips the gate):
+#   aws cloudformation deploy \
+#     --template-file cfn/luciel-ses-inbound.yaml \
+#     --stack-name luciel-ses-inbound \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --region <ses-inbound-supported-region>
+#
+# The matching SSM parameters
+#   /luciel/production/ses_inbound_bucket
+#   /luciel/production/ses_inbound_topic_arn
+# are stamped by the go-live runbook step that runs this stack — the
+# backend task-def reads them at boot (see app/core/config.py).
+
+Parameters:
+  MailDomain:
+    Type: String
+    Default: luciel-mail.com
+    Description: >
+      The inbound mail domain. SES must have this domain verified and an
+      MX record pointing at the SES inbound endpoint for the deploy
+      region (see runbook). The receipt rule matches recipients on this
+      domain.
+
+  InboundBucketName:
+    Type: String
+    Default: luciel-mail-inbound-prod
+    Description: >
+      S3 bucket that SES writes raw inbound MIME objects into. The
+      matching SSM parameter (/luciel/production/ses_inbound_bucket) is
+      stamped by the same go-live step that runs this stack.
+
+  InboundTopicName:
+    Type: String
+    Default: luciel-mail-inbound
+    Description: >
+      SNS topic SES publishes an inbound notification to after writing
+      the MIME object. The backend HTTPS-subscribes to this topic. The
+      matching SSM parameter (/luciel/production/ses_inbound_topic_arn)
+      is stamped by the same go-live step that runs this stack.
+
+  ObjectKeyPrefix:
+    Type: String
+    Default: inbound/
+    Description: >
+      Key prefix SES prepends to every stored MIME object. The S3 action
+      in the receipt rule and the bucket policy both scope to this prefix
+      so the SES-write grant cannot touch objects outside it.
+
+  RuleSetName:
+    Type: String
+    Default: luciel-inbound-ruleset
+    Description: >
+      Name of the SES receipt rule set. Only ONE rule set can be active
+      per account/region at a time; activating this set is a runbook
+      step (aws ses set-active-receipt-rule-set), not done by the stack,
+      so applying this template does not disturb any existing active set.
+
+  AwsAccountId:
+    Type: String
+    Default: "729005488042"
+    Description: AWS account id for ARN composition / SES source-account scoping.
+
+Resources:
+
+  # -------------------------------------------------------------
+  # S3 bucket for raw inbound MIME. SES PutObject lands here; the
+  # backend reads objects back out by key (carried in the SNS
+  # notification). Same posture as the knowledge bucket: AES256,
+  # all public access blocked, TLS-only, BucketOwnerEnforced.
+  # -------------------------------------------------------------
+  InboundMailBucket:
+    Type: AWS::S3::Bucket
+    # Retain so an accidental stack delete does not vaporise inbound
+    # customer mail that has not yet been processed by the backend.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    DependsOn: InboundMailTopicPolicy
+    Properties:
+      BucketName: !Ref InboundBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: false
+      VersioningConfiguration:
+        Status: Suspended
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          # Inbound MIME is transient: the backend reads it shortly after
+          # SES drops it. Expire stored objects after 30 days so the
+          # bucket does not accumulate processed mail forever. The
+          # backend owns durable persistence of message content in its
+          # own tables; S3 here is a hand-off buffer, not the system of
+          # record.
+          - Id: ExpireProcessedInboundMime
+            Status: Enabled
+            Prefix: !Ref ObjectKeyPrefix
+            ExpirationInDays: 30
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  # -------------------------------------------------------------
+  # Bucket policy: (1) deny non-TLS; (2) allow ses.amazonaws.com to
+  # PutObject under the inbound prefix, scoped to THIS account's SES
+  # so a cross-account SES cannot write into our bucket.
+  # -------------------------------------------------------------
+  InboundMailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref InboundMailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${InboundBucketName}"
+              - !Sub "arn:aws:s3:::${InboundBucketName}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+          - Sid: AllowSESInboundPutObject
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: "s3:PutObject"
+            Resource: !Sub "arn:aws:s3:::${InboundBucketName}/${ObjectKeyPrefix}*"
+            Condition:
+              StringEquals:
+                # Only OUR account's SES may write. aws:Referer is the
+                # documented SES condition key for the S3 receipt action
+                # (SES sets it to the account id on the PutObject call).
+                "aws:Referer": !Ref AwsAccountId
+
+  # -------------------------------------------------------------
+  # SNS topic SES publishes the inbound notification to. The backend
+  # HTTPS-subscribes POST /api/v1/inbound-email (subscription is a
+  # runbook step, NOT created here — the endpoint must be live first).
+  # -------------------------------------------------------------
+  InboundMailTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref InboundTopicName
+      DisplayName: Luciel inbound mail notifications
+      # SSE so the notification payload (carries S3 object key + envelope
+      # metadata) is encrypted at rest in SNS. alias/aws/sns is the
+      # AWS-managed key; matches the SqsManagedSseEnabled posture on the
+      # knowledge queues.
+      KmsMasterKeyId: alias/aws/sns
+
+  # -------------------------------------------------------------
+  # Topic policy: allow ses.amazonaws.com to Publish, scoped to this
+  # account's SES. Mirrors the S3 source-account scoping.
+  # -------------------------------------------------------------
+  InboundMailTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref InboundMailTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSESInboundPublish
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: "sns:Publish"
+            Resource: !Ref InboundMailTopic
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AwsAccountId
+
+  # -------------------------------------------------------------
+  # SES receipt rule set + a single rule: for mail addressed to the
+  # mail domain, store the raw MIME in S3 then publish to SNS. Order
+  # matters — S3 action first so the object exists before the SNS
+  # notification (which carries the key) is published.
+  # -------------------------------------------------------------
+  InboundRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties:
+      RuleSetName: !Ref RuleSetName
+
+  InboundReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    # Both the bucket (with its SES-write policy) and the topic (with its
+    # SES-publish policy) must exist before SES will accept a rule that
+    # references them, or rule creation fails its own destination check.
+    DependsOn:
+      - InboundMailBucketPolicy
+      - InboundMailTopicPolicy
+    Properties:
+      RuleSetName: !Ref InboundRuleSet
+      Rule:
+        Name: luciel-inbound-store-and-notify
+        Enabled: true
+        ScanEnabled: true
+        TlsPolicy: Require
+        Recipients:
+          - !Ref MailDomain
+        Actions:
+          - S3Action:
+              BucketName: !Ref InboundBucketName
+              ObjectKeyPrefix: !Ref ObjectKeyPrefix
+              TopicArn: !Ref InboundMailTopic
+
+Outputs:
+  InboundBucketName:
+    Description: >
+      Inbound MIME bucket name. Backend reads via SSM parameter
+      /luciel/production/ses_inbound_bucket (stamped by the go-live step
+      that runs this stack).
+    Value: !Ref InboundMailBucket
+    Export:
+      Name: luciel-ses-inbound-bucket-name
+
+  InboundTopicArn:
+    Description: >
+      Inbound notification SNS topic ARN. Backend reads via SSM parameter
+      /luciel/production/ses_inbound_topic_arn and verifies it as the
+      TopicArn trust gate on the inbound-email route.
+    Value: !Ref InboundMailTopic
+    Export:
+      Name: luciel-ses-inbound-topic-arn
+
+  InboundRuleSetName:
+    Description: >
+      Receipt rule set name. Activate with
+      `aws ses set-active-receipt-rule-set --rule-set-name <this>`
+      as a go-live runbook step (NOT done by this stack).
+    Value: !Ref InboundRuleSet
+    Export:
+      Name: luciel-ses-inbound-ruleset-name
