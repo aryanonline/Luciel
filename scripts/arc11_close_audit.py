@@ -97,8 +97,10 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     # the EX-series excisions, advancing the head to
     # ``arc12_ex4_reseal_audit_chain_drop_agent_domain``; Arc 12b
     # advances the head once more to
-    # ``arc12b_custom_roles_permission_model``.
-    expected_head = "arc12b_custom_roles_permission_model"
+    # ``arc12b_custom_roles_permission_model``; Arc 13 then appends
+    # ``arc13_a_channel_routes`` → ``arc13_b_instance_channel_fields``,
+    # advancing the single head to ``arc13_b_instance_channel_fields``.
+    expected_head = "arc13_b_instance_channel_fields"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],

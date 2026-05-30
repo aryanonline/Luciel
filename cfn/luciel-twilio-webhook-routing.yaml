@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Arc 13 — ALB routing for the Twilio inbound-SMS webhook. The webhook
+  HANDLER (POST /api/v1/twilio/inbound-sms) is implemented by the backend
+  slice and runs in the existing luciel-backend ECS service. This stack
+  only makes that path REACHABLE from Twilio: an HTTPS listener rule on
+  the existing production ALB that routes the webhook path to the backend
+  target group, plus the security-group ingress that lets the ALB reach
+  the backend task port. Region: ca-central-1.
+
+# IaC ONLY — DEFINED, not applied. Live provisioning is gated behind
+# founder go (see ops/arc13_golive_runbook.md).
+#
+# Why a listener RULE and not a new listener/ALB:
+#   The production API is already served at https://api.vantagemind.ai
+#   behind an existing internet-facing ALB with an HTTPS:443 listener and
+#   an ACM cert (provisioned in an earlier arc / the console, NOT in
+#   CloudFormation — see cfn/luciel-verify-task-role.yaml Description,
+#   which names the prod ALB). The backend already sits behind a target
+#   group on that listener via a default/catch-all rule. Twilio just
+#   needs to POST to a path under the same host, so the minimal,
+#   pattern-matching change is to add a higher-priority listener rule
+#   that forwards the webhook path to that SAME backend target group.
+#
+#   We therefore take the existing listener ARN, target-group ARN, ALB
+#   security-group id, and backend-task security-group id as PARAMETERS
+#   rather than re-declaring resources this stack does not own. This
+#   keeps the change reviewable and avoids CloudFormation trying to
+#   adopt/replace console-managed infrastructure.
+#
+# Cutover deploy (DO NOT RUN until the founder flips the gate):
+#   aws cloudformation deploy \
+#     --template-file cfn/luciel-twilio-webhook-routing.yaml \
+#     --stack-name luciel-twilio-webhook-routing \
+#     --parameter-overrides \
+#        HttpsListenerArn=<prod ALB :443 listener ARN> \
+#        BackendTargetGroupArn=<luciel-backend target group ARN> \
+#        AlbSecurityGroupId=<sg of the ALB> \
+#        BackendSecurityGroupId=<sg of the backend Fargate tasks> \
+#     --region ca-central-1
+
+Parameters:
+  HttpsListenerArn:
+    Type: String
+    Description: >
+      ARN of the existing HTTPS:443 listener on the production ALB that
+      fronts https://api.vantagemind.ai. Required — no default, because
+      a wrong value would attach the rule to the wrong listener. Read it
+      from the runbook / `aws elbv2 describe-listeners`.
+
+  BackendTargetGroupArn:
+    Type: String
+    Description: >
+      ARN of the EXISTING target group that the luciel-backend ECS
+      service is registered to. The webhook path forwards to the same
+      backend tasks that already serve /api/v1/*, so we reuse this group
+      rather than create a second one. Read from
+      `aws elbv2 describe-target-groups`.
+
+  AlbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group attached to the production ALB.
+
+  BackendSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >
+      Security group attached to the luciel-backend Fargate tasks. The
+      ingress rule below lets the ALB reach the backend container port.
+
+  BackendContainerPort:
+    Type: Number
+    Default: 8000
+    Description: >
+      Container port the backend listens on (matches the portMappings
+      containerPort 8000 in td-backend-*.json).
+
+  WebhookPathPattern:
+    Type: String
+    Default: /api/v1/twilio/*
+    Description: >
+      Path pattern Twilio POSTs the inbound-SMS webhook to. Wildcard so
+      both the inbound-SMS path and any sibling Twilio callback paths
+      (delivery-status, etc.) the backend slice adds resolve to the same
+      backend target group without another rule.
+
+  ListenerRulePriority:
+    Type: Number
+    Default: 40
+    Description: >
+      Priority for the listener rule. Must be unique on the listener and
+      LOWER (higher precedence) than any catch-all/default-forward rule
+      so the explicit Twilio path match wins. 40 chosen to sit alongside
+      the other arc rule-priority blocks; adjust in the runbook if it
+      collides with an existing rule (describe-rules first).
+
+Resources:
+
+  # -------------------------------------------------------------
+  # Listener rule: forward the Twilio webhook path to the existing
+  # backend target group. host-header is implicitly api.vantagemind.ai
+  # via the listener; we match on path only.
+  # -------------------------------------------------------------
+  TwilioWebhookListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListenerArn
+      Priority: !Ref ListenerRulePriority
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - !Ref WebhookPathPattern
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroupArn
+
+  # -------------------------------------------------------------
+  # SG ingress: allow the ALB SG to reach the backend task port. If an
+  # equivalent rule already exists (because /api/v1/* is already routed
+  # to these tasks), this is a redundant no-op at apply time — but it is
+  # declared here so the webhook path's reachability is self-contained
+  # and auditable in one stack. The runbook notes to skip applying this
+  # resource if the ingress already exists to avoid a duplicate-rule
+  # error.
+  # -------------------------------------------------------------
+  BackendIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref BackendSecurityGroupId
+      IpProtocol: tcp
+      FromPort: !Ref BackendContainerPort
+      ToPort: !Ref BackendContainerPort
+      SourceSecurityGroupId: !Ref AlbSecurityGroupId
+      Description: Arc13 — ALB to luciel-backend for Twilio webhook path
+
+Outputs:
+  TwilioWebhookListenerRuleArn:
+    Description: ARN of the listener rule routing the Twilio webhook path.
+    Value: !Ref TwilioWebhookListenerRule
+    Export:
+      Name: luciel-twilio-webhook-listener-rule-arn
+
+  TwilioWebhookUrl:
+    Description: >
+      The public URL Twilio must be configured to POST inbound SMS to.
+      Register this in the Twilio console / Messaging Service inbound
+      webhook (see runbook). Host is the existing prod API host.
+    Value: !Sub "https://api.vantagemind.ai${WebhookPathPattern}"

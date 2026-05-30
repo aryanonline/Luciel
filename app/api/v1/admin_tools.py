@@ -285,12 +285,25 @@ def _resolve_admin_tier(db, *, admin_id: str) -> str:
 
 def _instance_channels_enabled(instance: Instance) -> frozenset[str]:
     """Return the set of channel ids structurally enabled on this
-    Instance. Channel adapters are an Arc 13 deliverable; until then
-    no Instance has any channel enabled, so this returns an empty
-    frozenset. Defined as a single chokepoint so the future Arc 13
-    wire-up replaces ONE function rather than every callsite.
+    Instance.
+
+    Arc 13 wire-up: reads the real per-instance ``enabled_channels``
+    column (migration arc13_b_instance_channel_fields) instead of the
+    pre-Arc-13 empty-set stub. The widget is always present (it is the
+    entitlement floor for every tier and needs no provisioning); email
+    and sms appear once the admin enables + provisions them, which adds
+    their id to ``enabled_channels``.
+
+    Single chokepoint by design — every callsite that asks "is channel
+    X live on this Instance?" routes through here, so the column read
+    lives in exactly one place.
     """
-    return frozenset()
+    enabled = set(instance.enabled_channels or ())
+    # Widget is structurally always available; defend against a row
+    # whose enabled_channels somehow lost it (older backfill, manual
+    # edit) so the widget surface never goes dark on a tier that has it.
+    enabled.add("widget")
+    return frozenset(enabled)
 
 
 def _registry() -> ToolRegistry:

@@ -41,6 +41,39 @@ os.environ.setdefault("MODERATION_PROVIDER", "null")
 os.environ.setdefault("OPENAI_API_KEY", "dummy")
 
 
+@pytest.fixture(autouse=True)
+def _restore_prod_audit_chain_handler():
+    """Restore the prod audit-chain before_flush handler after each test.
+
+    ``_build_sqlite_session`` globally swaps the prod
+    ``_before_flush_handler`` for a SQLite stub that stamps
+    ``row_hash``/``prev_row_hash`` = ``'0'*64``. Without this teardown the
+    stub leaks onto ``sqlalchemy.orm.Session`` for the rest of the
+    process, so a later real-Postgres test (e.g. the Arc 13 channel
+    provisioning audit tests) writes zero-hash rows that collide on
+    ``ux_admin_audit_logs_row_hash``. This fixture strips the stub and
+    reinstalls the prod handler once the test finishes.
+    """
+    yield
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session as _SQLASession
+
+    from app.repositories.audit_chain import (
+        _before_flush_handler,
+        install_audit_chain_event,
+    )
+
+    try:
+        clslevel = _SQLASession.dispatch.before_flush._clslevel
+        for target, fns in list(clslevel.items()):
+            for fn in list(fns):
+                if fn is not _before_flush_handler:
+                    event.remove(target, "before_flush", fn)
+    except Exception:
+        pass
+    install_audit_chain_event()
+
+
 # =====================================================================
 # In-memory SQLite test fixture.
 # =====================================================================
