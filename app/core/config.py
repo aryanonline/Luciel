@@ -639,6 +639,51 @@ class Settings(BaseSettings):
     #   hot/cold boundary.
     audit_cold_archive_bucket: str = "luciel-audit-cold-archive"
 
+    # -----------------------------------------------------------------
+    # Arc 13 — channel adapters (email + SMS) provisioning + transport.
+    # -----------------------------------------------------------------
+    #
+    # PLATFORM LIVE-SWITCH. Master gate separating real-Twilio /
+    # real-provisioning from the fake/no-op path. When False (the
+    # boot-safe default), NO real Twilio API call is ever made: the
+    # PhoneNumberProvisioningService selects FakePhoneNumberProvider
+    # and the SMS adapter's outbound send becomes a no-op receipt.
+    # Production flips this True in lockstep with the SSM-injected
+    # Twilio credentials below. Dev / CI / tests leave it False so a
+    # mis-wired test can never bill Twilio.
+    channels_live_provisioning_enabled: bool = False
+
+    # Twilio credentials + messaging service. Sourced in prod from SSM
+    # under /luciel/production/ (cross-checked against arc13-infra). All
+    # default empty so the backend boots cleanly without Twilio
+    # configured; the provisioning service refuses to make a live call
+    # when channels_live_provisioning_enabled is True AND any required
+    # credential is empty (fail-loud, never a half-configured live call).
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_messaging_service_sid: str = ""
+    twilio_api_key_sid: str = ""
+    twilio_api_key_secret: str = ""
+    # Public base URL the Twilio inbound webhook is wired to point at.
+    # Provisioning sets each purchased number's SMS webhook to
+    # f"{twilio_webhook_base_url}/api/v1/twilio/sms". Empty default keeps
+    # boot safe; live provisioning requires it to be set.
+    twilio_webhook_base_url: str = ""
+
+    # Inbound email (SES → SNS) channel settings. MAIL_INBOUND_DOMAIN is
+    # the platform subdomain inbound addresses live under
+    # (<instance-slug>@<admin-slug>.MAIL_INBOUND_DOMAIN). SES_INBOUND_BUCKET
+    # is the S3 bucket SES delivers raw inbound MIME to. ses_inbound_topic_arn
+    # is the SNS topic the inbound notifications publish to — verified by
+    # the email adapter's signature gate (reuses the ses_events two-check
+    # trust gate: TopicArn allowlist + SigningCertURL host check). Empty
+    # defaults keep boot safe; the email adapter degrades to "do not
+    # enforce TopicArn" when ses_inbound_topic_arn is empty (dev / CI),
+    # exactly as ses_sns_topic_arn does for the feedback route.
+    mail_inbound_domain: str = ""
+    ses_inbound_bucket: str = ""
+    ses_inbound_topic_arn: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

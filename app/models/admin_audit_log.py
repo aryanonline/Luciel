@@ -530,6 +530,36 @@ ACTION_INSTANCE_CREATED = "instance_created"
 ACTION_TIER_RENAME_APPLIED = "tier_rename_applied"
 ACTION_LEGACY_FIXTURE_PURGED = "legacy_fixture_purged"
 
+# Arc 13 — channel adapters (email + SMS) lifecycle + runtime verbs.
+#
+# Channel-config mutations (enable/disable email or SMS on an Instance),
+# number provisioning/deprovisioning, and every store-and-forward
+# inbound/outbound event are auditable. Distinct verbs so a regulator
+# (and the deliverability reviewer) can reconstruct the channel story
+# at the verb level:
+#
+# ACTION_CHANNEL_ENABLED / ACTION_CHANNEL_DISABLED
+#     A user toggled a channel on/off for an Instance via the channel
+#     admin API. after_json carries {channel, enabled_channels}.
+# ACTION_CHANNEL_NUMBER_PROVISIONED / ACTION_CHANNEL_NUMBER_DEPROVISIONED
+#     The provisioning service bought+wired (or released) an SMS number.
+#     after_json carries {number, mode, provider}.
+# ACTION_CHANNEL_INBOUND_RECEIVED
+#     An authentic inbound email/SMS turn was accepted and routed.
+# ACTION_CHANNEL_INBOUND_DROPPED
+#     An authentic inbound turn could NOT be routed to a live Instance
+#     (UnresolvableInboundError) — recorded so the drop is never silent.
+# ACTION_CHANNEL_OUTBOUND_DELIVERED
+#     A reply was dispatched to the provider; after_json carries the
+#     DeliveryReceipt {provider_message_id, status, channel}.
+ACTION_CHANNEL_ENABLED = "channel_enabled"
+ACTION_CHANNEL_DISABLED = "channel_disabled"
+ACTION_CHANNEL_NUMBER_PROVISIONED = "channel_number_provisioned"
+ACTION_CHANNEL_NUMBER_DEPROVISIONED = "channel_number_deprovisioned"
+ACTION_CHANNEL_INBOUND_RECEIVED = "channel_inbound_received"
+ACTION_CHANNEL_INBOUND_DROPPED = "channel_inbound_dropped"
+ACTION_CHANNEL_OUTBOUND_DELIVERED = "channel_outbound_delivered"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -656,6 +686,14 @@ ALLOWED_ACTIONS = (
     ACTION_CUSTOM_ROLE_REVOKED,
     ACTION_USER_ROLE_ASSIGNED,
     ACTION_USER_ROLE_REVOKED,
+    # Arc 13 — channel adapters (email + SMS).
+    ACTION_CHANNEL_ENABLED,
+    ACTION_CHANNEL_DISABLED,
+    ACTION_CHANNEL_NUMBER_PROVISIONED,
+    ACTION_CHANNEL_NUMBER_DEPROVISIONED,
+    ACTION_CHANNEL_INBOUND_RECEIVED,
+    ACTION_CHANNEL_INBOUND_DROPPED,
+    ACTION_CHANNEL_OUTBOUND_DELIVERED,
 )
 
 
@@ -765,6 +803,15 @@ RESOURCE_INSTANCE_TOOL_AUTHORIZATION = "instance_tool_authorization"
 RESOURCE_CUSTOM_ROLE = "custom_role"
 RESOURCE_USER_ROLE_ASSIGNMENT = "user_role_assignment"
 
+# Arc 13 — channel routing + config. RESOURCE_CHANNEL_ROUTE is the
+# channel_routes row (inbound addressing → Instance); resource_pk =
+# channel_routes.id, resource_natural_id = the route_value (email
+# address or E.164). RESOURCE_INSTANCE_CHANNEL is the Instance's
+# channel-config surface (enabled_channels / sms_provisioned_number);
+# resource_pk = instances.id, resource_natural_id = the channel id.
+RESOURCE_CHANNEL_ROUTE = "channel_route"
+RESOURCE_INSTANCE_CHANNEL = "instance_channel"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -803,6 +850,9 @@ ALLOWED_RESOURCE_TYPES = (
     # Arc 12b — custom role + user role assignment.
     RESOURCE_CUSTOM_ROLE,
     RESOURCE_USER_ROLE_ASSIGNMENT,
+    # Arc 13 — channel routing + config.
+    RESOURCE_CHANNEL_ROUTE,
+    RESOURCE_INSTANCE_CHANNEL,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):
