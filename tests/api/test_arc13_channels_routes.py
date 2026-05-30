@@ -68,6 +68,7 @@ class TestArc13ChannelRoutes(unittest.TestCase):
         from app.models.instance import Instance
 
         admin_id = f"arc13rt-{uuid.uuid4().hex[:10]}"
+        self._admin_ids.append(admin_id)
         self.db.add(Admin(id=admin_id, name="arc13 rt", tier=tier, active=True))
         self.db.flush()
         inst = Instance(
@@ -81,10 +82,38 @@ class TestArc13ChannelRoutes(unittest.TestCase):
 
     def setUp(self) -> None:
         self.db = self.SessionLocal()
+        # Track admins this test creates. The route handlers under test
+        # call db.commit(), so the admin/instance/ChannelRoute rows they
+        # write are NOT undone by a tearDown rollback — they persist in the
+        # real DB. Left uncleaned, the committed sms ChannelRoute rows
+        # accumulate and break this suite's ``route_value == number``
+        # ``.one()`` queries on a second run. tearDown purges them in a
+        # fresh session (audit rows are append-only and intentionally kept).
+        self._admin_ids: list[str] = []
 
     def tearDown(self) -> None:
         self.db.rollback()
         self.db.close()
+        if self._admin_ids:
+            self._purge(self._admin_ids)
+
+    def _purge(self, admin_ids: list[str]) -> None:
+        from app.models.channel_route import ChannelRoute
+        from app.models.instance import Instance
+
+        cleanup = self.SessionLocal()
+        try:
+            cleanup.query(ChannelRoute).filter(
+                ChannelRoute.admin_id.in_(admin_ids)
+            ).delete(synchronize_session=False)
+            cleanup.query(Instance).filter(
+                Instance.admin_id.in_(admin_ids)
+            ).delete(synchronize_session=False)
+            cleanup.commit()
+        except Exception:
+            cleanup.rollback()
+        finally:
+            cleanup.close()
 
     def _instance_service(self):
         from app.services.instance_service import InstanceService

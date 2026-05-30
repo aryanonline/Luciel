@@ -30,6 +30,7 @@ flagged-not-implemented raise, never a silent fallthrough.
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
@@ -198,23 +199,43 @@ class TwilioPhoneNumberProvider:
 class FakePhoneNumberProvider:
     """Deterministic in-memory provider for tests / dev.
 
-    Mints synthetic E.164 numbers from a monotonic counter (seeded so
-    repeated provisions never collide) and records released numbers so a
-    test can assert release happened. Never touches the network — the
-    default provider whenever the platform live switch is off.
+    Mints synthetic E.164 numbers and records released numbers so a test
+    can assert release happened. Never touches the network — the default
+    provider whenever the platform live switch is off.
+
+    Numbers are drawn from a *process-wide* monotonic counter
+    (``_CLASS_COUNTER``), so two independent service instances — e.g. two
+    ``set_sms_channel`` calls that each construct their own provider and
+    *commit* their ChannelRoute — never mint the same E.164. A per-instance
+    counter (the old ``seed=0`` default) collided across committed runs and
+    broke ``ChannelRoute.route_value == number`` uniqueness queries. The
+    counter is seeded once per process from a random base so repeated test
+    runs against the same Postgres don't reuse a number a prior run
+    committed and left behind.
     """
 
     name = "fake"
 
-    def __init__(self, *, seed: int = 0) -> None:
-        self._counter = seed
+    # Process-wide so distinct instances don't collide; random base so a
+    # fresh process doesn't reuse numbers a prior run committed.
+    _CLASS_COUNTER = random.randint(1, 9_000_000)
+
+    def __init__(self, *, seed: int | None = None) -> None:
+        self._seed = seed
         self.released: list[str] = []
         self.provisioned: list[str] = []
 
+    def _next(self) -> int:
+        if self._seed is not None:
+            self._seed += 1
+            return self._seed
+        FakePhoneNumberProvider._CLASS_COUNTER += 1
+        return FakePhoneNumberProvider._CLASS_COUNTER
+
     def provision(self, *, webhook_url: str) -> ProvisionedNumber:
-        self._counter += 1
-        # +1555 0100 + zero-padded counter → a stable fake E.164.
-        e164 = f"+1555{self._counter:07d}"
+        n = self._next()
+        # +1555 + zero-padded counter → a stable, unique fake E.164.
+        e164 = f"+1555{n:07d}"
         self.provisioned.append(e164)
         logger.info(
             "FakePhoneNumberProvider: provisioned %s (webhook=%s)",
@@ -222,7 +243,7 @@ class FakePhoneNumberProvider:
             webhook_url,
         )
         return ProvisionedNumber(
-            e164=e164, provider=self.name, provider_sid=f"FAKE{self._counter:07d}"
+            e164=e164, provider=self.name, provider_sid=f"FAKE{n:07d}"
         )
 
     def release(self, *, e164: str, provider_sid: str | None = None) -> None:

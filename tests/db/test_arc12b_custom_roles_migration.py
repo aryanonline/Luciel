@@ -73,8 +73,12 @@ def test_alembic_head_is_arc12b(engine):
             text("SELECT version_num FROM alembic_version")
         ).scalars().all()
     assert len(rows) == 1
-    assert rows[0] == "arc12b_custom_roles_permission_model", (
-        f"expected arc12b head; got {rows[0]!r}"
+    # Single linear head. Arc 13 added arc13_a_channel_routes →
+    # arc13_b_instance_channel_fields on top of arc12b, so the live head
+    # is now arc13_b. This pin tracks the current head (one revision, no
+    # branch) rather than freezing it at arc12b.
+    assert rows[0] == "arc13_b_instance_channel_fields", (
+        f"expected arc13_b head; got {rows[0]!r}"
     )
 
 
