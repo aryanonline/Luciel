@@ -486,3 +486,94 @@ def per_key_api_rate_limit_rpm(
     if cap is None or int(cap) <= 0:
         return int(rpm)
     return max(1, int(rpm) // int(cap))
+
+
+# ---------------------------------------------------------------------
+# Arc 13 — channel-availability derivations.
+#
+# Per Vision §7 tier matrix, channel access is tier-gated:
+#   Free       : {widget}
+#   Pro        : {widget, email, sms}
+#   Enterprise : {widget, email, sms}
+#
+# The widget is the entitlement floor — every tier has it, and it needs
+# no provisioning (the embed key is the binding). Email + SMS unlock on
+# the paying tiers; whether a given Instance has them STRUCTURALLY
+# enabled is a separate question answered by the per-instance
+# enabled_channels column (Arc 13 D4) — this function answers only the
+# tier-level "is this channel allowed to be enabled at all?" gate.
+#
+# These are DERIVATIONS, not new TierEntitlement fields. The dataclass
+# is frozen (adding a field breaks every TierEntitlement(...) call-site
+# and the founder-locked surface), so the channel matrix lives here as
+# a function — same discipline as the per-bucket rate-limit derivations
+# above.
+
+CHANNEL_WIDGET = "widget"
+CHANNEL_EMAIL = "email"
+CHANNEL_SMS = "sms"
+
+# Static per-tier channel matrix (Vision §7). Frozen sets so the map is
+# fully immutable at module import.
+_CHANNELS_BY_TIER: dict[str, frozenset[str]] = {
+    TIER_FREE: frozenset({CHANNEL_WIDGET}),
+    TIER_PRO: frozenset({CHANNEL_WIDGET, CHANNEL_EMAIL, CHANNEL_SMS}),
+    TIER_ENTERPRISE: frozenset({CHANNEL_WIDGET, CHANNEL_EMAIL, CHANNEL_SMS}),
+}
+
+
+def channels_available(tier: str) -> frozenset[str]:
+    """Return the set of channel ids a tier is allowed to enable.
+
+    Vision §7 tier matrix:
+        * Free       -> {widget}
+        * Pro        -> {widget, email, sms}
+        * Enterprise -> {widget, email, sms}
+
+    This is the TIER gate (is the channel allowed at all on this tier?),
+    distinct from per-Instance structural enablement (the
+    ``instances.enabled_channels`` column read by
+    ``_instance_channels_enabled``): a Pro Admin *may* enable SMS, but a
+    specific Instance only routes SMS once a number is provisioned and
+    the channel id lands in its enabled_channels set.
+
+    Fail-closed: an unknown tier returns the Free set ({widget}) rather
+    than raising, so a mis-tagged Admin can never gain email/sms access
+    by accident. Mirrors the fail-closed-to-Free posture of
+    ``_resolve_admin_tier``.
+    """
+    return _CHANNELS_BY_TIER.get(tier, _CHANNELS_BY_TIER[TIER_FREE])
+
+
+def sms_dedicated_number_entitled(tier: str) -> bool:
+    """Whether a tier is entitled to a DEDICATED SMS number per Instance.
+
+    Vision §7 dedicated-number policy:
+        * Free       -> False (no SMS channel at all)
+        * Pro        -> True  (dedicated number per Instance when SMS is
+                              enabled)
+        * Enterprise -> True  (dedicated number per Instance; PLUS the
+                              deferred brokerage-routing flag — see
+                              ``sms_brokerage_routing_flag``)
+
+    Gates the ``sms_number_mode='dedicated'`` provisioning path. A tier
+    that returns False must not be handed a dedicated number; if it has
+    no SMS entitlement at all (Free) the question is moot but the
+    function still returns False for a single source of truth.
+    """
+    if CHANNEL_SMS not in channels_available(tier):
+        return False
+    return tier in (TIER_PRO, TIER_ENTERPRISE)
+
+
+def sms_brokerage_routing_flag(tier: str) -> bool:
+    """Whether a tier carries the (deferred) SMS brokerage-routing flag.
+
+    Enterprise-only. Brokerage routing — pooling/sharing numbers across
+    Instances with a routing broker — is DEFERRED in Arc 13: this is a
+    FLAG ONLY, surfaced so slice 2/3 and the provisioning UI can render
+    the Enterprise affordance, but no brokerage routing is implemented
+    yet. Pro gets dedicated-per-instance (flag False); Enterprise gets
+    dedicated PLUS this brokerage capability flag set True.
+    """
+    return tier == TIER_ENTERPRISE and sms_dedicated_number_entitled(tier)
