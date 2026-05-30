@@ -75,6 +75,12 @@ from app.api.widget_deps import (
     cors_response_headers,
     require_embed_key,
 )
+from app.channels.base import (
+    OutboundMessage,
+    SignatureVerificationError,
+    UnresolvableInboundError,
+)
+from app.channels.widget import WidgetChannelAdapter
 from app.core.config import settings
 from app.middleware.rate_limit import (
     get_embed_key_aware_key,
@@ -255,6 +261,35 @@ def widget_chat_stream(
                 **cors_response_headers(request, widget_config),
             },
         )
+
+    # Arc 13 D2 — express the inbound verification through the
+    # ChannelAdapter contract. The embed-key dependency
+    # (require_embed_key) is the widget's authenticity envelope and has
+    # already run; verify_inbound re-asserts the verified tenant/instance
+    # invariants and resolves the InstanceContext, raising the same
+    # channel-typed errors email + SMS will use. The inline 403 guards
+    # above remain the primary gate (and keep their canonical error
+    # codes); this call exercises the streaming surface against the
+    # shared contract so all three channels verify through one shape.
+    _widget_adapter = WidgetChannelAdapter()
+    try:
+        _instance_context = _widget_adapter.verify_inbound(request)
+    except SignatureVerificationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "embed_key_not_tenant_scoped",
+                "message": str(exc),
+            },
+        ) from exc
+    except UnresolvableInboundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "embed_key_not_instance_scoped",
+                "message": str(exc),
+            },
+        ) from exc
 
     # Step 31 sub-branch 1: emission 1 of 3 -- request entry.
     #
@@ -474,10 +509,41 @@ def widget_chat_stream(
         tokens_emitted = 0
         completion_logged = False
         try:
+            collected: list[str] = []
             for token in generator:
                 tokens_emitted += 1
+                collected.append(token)
                 yield f"data: {json.dumps({'token': token})}\n\n"
             yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
+            # Arc 13 D2 — express egress through the ChannelAdapter
+            # contract. The widget is the streaming member: the reply
+            # has already been delivered token-by-token over this open
+            # SSE socket, so send() is synchronous and the receipt
+            # carries provider_message_id=None / status="streamed". The
+            # receipt is recorded server-side (no client frame changes)
+            # so the widget's egress conforms to the same shape email +
+            # SMS dispatch through.
+            _receipt = _widget_adapter.send(
+                OutboundMessage(
+                    to=session_id,
+                    body="".join(collected),
+                    admin_id=admin_id,
+                    instance_id=luciel_instance_id,
+                    session_id=session_id,
+                    channel_metadata={"tokens_emitted": tokens_emitted},
+                )
+            )
+            logger.info(
+                "widget_chat_delivery_receipt",
+                extra={
+                    "event": "widget_chat_delivery_receipt",
+                    "admin_id": admin_id,
+                    "session_id": session_id,
+                    "channel": _receipt.channel,
+                    "status": _receipt.status,
+                    "provider_message_id": _receipt.provider_message_id,
+                },
+            )
             # Step 31 sub-branch 1: emission 3 of 3 -- turn completed
             # (successful-stream variant). Lands AFTER the final SSE
             # frame so latency_ms includes the full end-to-end stream
