@@ -34,6 +34,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -115,6 +116,30 @@ class Instance(Base):
         nullable=False,
         server_default=InstanceStatus.ACTIVE.value,
         index=True,
+    )
+
+    # Arc 13 — per-instance channel enablement. ``enabled_channels`` is
+    # the set of channel ids structurally enabled on this Instance
+    # (widget always present; email / sms added when provisioned).
+    # Read by the chat_widget gating + by admin_tools'
+    # _instance_channels_enabled chokepoint. Default {widget} backfills
+    # every row to the entitlement floor.
+    enabled_channels: Mapped[list[str]] = mapped_column(
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("ARRAY['widget']::text[]"),
+    )
+    # The E.164 number provisioned to this Instance for SMS (NULL until
+    # SMS enabled + bound). The channel_routes row (channel='sms') is
+    # the routing record; this is the instance-side reference.
+    sms_provisioned_number: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    # 'dedicated' | 'shared' — the SMS number provisioning mode. NULL
+    # until SMS is enabled. See app/policy/entitlements.py
+    # dedicated-number helper for the per-tier policy.
+    sms_number_mode: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
     )
 
     __table_args__ = (
