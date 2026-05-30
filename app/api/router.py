@@ -16,6 +16,7 @@ from app.api.v1 import admin_knowledge  # Arc 11 Step 7
 from app.api.v1 import admin_sibling_grants  # Arc 12 WU4
 from app.api.v1 import admin_tools  # Arc 12 WU2b
 from app.api.v1 import admin_custom_roles  # Arc 12b
+from app.api.v1 import twilio_webhook  # Arc 13 D4 -- inbound SMS webhook
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -39,3 +40,4 @@ api_router.include_router(admin_sibling_grants.router)  # Arc 12 WU4
 api_router.include_router(admin_tools.router)  # Arc 12 WU2b
 api_router.include_router(admin_custom_roles.roles_router)  # Arc 12b
 api_router.include_router(admin_custom_roles.assignments_router)  # Arc 12b
+api_router.include_router(twilio_webhook.router)  # Arc 13 D4 -- inbound SMS

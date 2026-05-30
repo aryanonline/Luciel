@@ -114,6 +114,11 @@ SKIP_AUTH_PATHS = {
     # SigningCertURL host check). The api-key middleware is the
     # wrong perimeter here.
     "/api/v1/ses-events",
+    # Arc 13 D4 -- inbound Twilio SMS webhook. Twilio POSTs here with no
+    # API key; the trust gate is the X-Twilio-Signature HMAC verified
+    # inside SmsChannelAdapter.verify_inbound. The api-key middleware is
+    # the wrong perimeter here.
+    "/api/v1/twilio",
 }
 
 # Step 31 sub-branch 3: dashboard reads are admin-side observability.
