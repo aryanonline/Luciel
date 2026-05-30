@@ -41,6 +41,7 @@ HTTP 403 with body::
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -57,12 +58,15 @@ from app.channels.provisioning import (
     PhoneNumberProvisioningService,
     TierNotEntitledError,
 )
+from app.core.config import settings
 from app.models.admin import Admin
 from app.models.admin_audit_log import (
     ACTION_CHANNEL_DISABLED,
     ACTION_CHANNEL_ENABLED,
     RESOURCE_INSTANCE_CHANNEL,
 )
+from app.models.channel_route import CHANNEL_EMAIL as ROUTE_CHANNEL_EMAIL
+from app.models.channel_route import ChannelRoute
 from app.models.instance import Instance
 from app.policy.entitlements import (
     CHANNEL_EMAIL,
@@ -86,6 +90,14 @@ router = APIRouter(
     prefix="/admin/instances/{instance_id}/channels",
     tags=["admin-channels"],
 )
+
+# Platform-default inbound mail domain used to derive an Instance's
+# default email address when ``settings.mail_inbound_domain`` is unset
+# (dev / CI boot-safe default is ""). This is the canonical platform
+# subdomain root documented in the ChannelRoute model / Architecture
+# §3.1.3 — deriving against it keeps email-enable boot-safe (the toggle
+# never fails for an empty setting) and the address deterministic.
+_DEFAULT_MAIL_INBOUND_DOMAIN = "luciel-mail.com"
 
 
 # =====================================================================
@@ -180,6 +192,124 @@ def _enabled_set(instance: Instance) -> set[str]:
     enabled = set(instance.enabled_channels or ())
     enabled.add(CHANNEL_WIDGET)  # widget is the structural floor
     return enabled
+
+
+def _default_email_address(*, admin_id: str, instance: Instance) -> str:
+    """Derive the platform-default inbound email address for an Instance.
+
+    Shape (Architecture §3.1.3): ``instance-slug@admin-slug.<domain>``.
+    ``admins.id`` IS the semantic admin slug; ``instance_slug`` is unique
+    within an Admin, so the pair is globally unique. The address is the
+    fully-qualified lowercase form stored in ``ChannelRoute.route_value``
+    — matching how the EmailChannelAdapter lowercases the inbound
+    recipient before lookup. When ``settings.mail_inbound_domain`` is
+    empty (dev/CI default), fall back to the canonical platform domain so
+    the toggle stays boot-safe and the address deterministic. Custom-domain
+    addresses are OUT OF SCOPE here (Connections layer, §3.8 / Arc 17).
+    """
+    domain = settings.mail_inbound_domain or _DEFAULT_MAIL_INBOUND_DOMAIN
+    return f"{instance.instance_slug}@{admin_id}.{domain}".lower()
+
+
+def _mint_default_email_route(
+    *, db, instance: Instance, admin_id: str
+) -> ChannelRoute:
+    """Mint (or reuse) the live default-address email ChannelRoute.
+
+    Idempotent and re-use-aware, mirroring how SMS handles ChannelRoute:
+      * a live route for this Instance at the default address → reuse it;
+      * a soft-revoked route at the default address owned by this
+        Instance → un-revoke it (clear ``revoked_at``) rather than insert
+        a duplicate;
+      * otherwise INSERT a fresh live route.
+
+    Uniqueness: the ``uq_channel_routes_live_value`` partial index allows
+    one live route per (channel, route_value). If a *different* Instance
+    already owns that exact live address, fail loudly (HTTP 409) rather
+    than silently steal it.
+    """
+    address = _default_email_address(admin_id=admin_id, instance=instance)
+
+    existing = (
+        db.query(ChannelRoute)
+        .filter(
+            ChannelRoute.channel == ROUTE_CHANNEL_EMAIL,
+            ChannelRoute.route_value == address,
+            ChannelRoute.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if existing is not None:
+        if existing.luciel_instance_id != instance.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "email_address_already_routed",
+                    "channel": CHANNEL_EMAIL,
+                    "address": address,
+                    "message": (
+                        f"Email address {address!r} is already routed to a "
+                        "different Instance."
+                    ),
+                },
+            )
+        return existing  # already live for this Instance — idempotent.
+
+    # Reuse a soft-revoked row for this Instance at the same address.
+    revoked = (
+        db.query(ChannelRoute)
+        .filter(
+            ChannelRoute.channel == ROUTE_CHANNEL_EMAIL,
+            ChannelRoute.route_value == address,
+            ChannelRoute.luciel_instance_id == instance.id,
+            ChannelRoute.admin_id == admin_id,
+            ChannelRoute.revoked_at.is_not(None),
+        )
+        .order_by(ChannelRoute.id.desc())
+        .first()
+    )
+    if revoked is not None:
+        revoked.revoked_at = None
+        db.flush()
+        return revoked
+
+    route = ChannelRoute(
+        admin_id=admin_id,
+        luciel_instance_id=instance.id,
+        channel=ROUTE_CHANNEL_EMAIL,
+        route_value=address,
+    )
+    db.add(route)
+    db.flush()
+    return route
+
+
+def _revoke_default_email_route(
+    *, db, instance: Instance, admin_id: str
+) -> ChannelRoute | None:
+    """Soft-revoke the live default-address email ChannelRoute, if any.
+
+    Mirrors SMS deprovision: set ``revoked_at`` so the historical row is
+    kept (append-only audit) but stops being live/unique. No-op when no
+    live route exists.
+    """
+    address = _default_email_address(admin_id=admin_id, instance=instance)
+    route = (
+        db.query(ChannelRoute)
+        .filter(
+            ChannelRoute.channel == ROUTE_CHANNEL_EMAIL,
+            ChannelRoute.route_value == address,
+            ChannelRoute.luciel_instance_id == instance.id,
+            ChannelRoute.admin_id == admin_id,
+            ChannelRoute.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if route is None:
+        return None
+    route.revoked_at = datetime.now(timezone.utc)
+    db.flush()
+    return route
 
 
 # =====================================================================
@@ -401,9 +531,12 @@ def _toggle_simple_channel(
     """Enable/disable a non-provisioned channel (email).
 
     Enable on a non-entitled tier is rejected with the same 403 shape as
-    SMS. No number provisioning — email needs only the enabled_channels
-    flag + the inbound ChannelRoute (which the operator wires when they
-    point an MX/SES rule at Luciel; not minted here).
+    SMS. No number provisioning, but email DOES need its inbound
+    ChannelRoute to be end-to-end: on enable we mint (or reuse) the
+    platform-default address route ``instance-slug@admin-slug.<domain>``
+    so an inbound email addressed there resolves to this Instance; on
+    disable we soft-revoke it. Custom-domain addresses stay out of scope
+    (Connections layer §3.8 / Arc 17).
     """
     if enabled and channel not in channels_available(admin_tier):
         raise HTTPException(
@@ -427,15 +560,38 @@ def _toggle_simple_channel(
         current.discard(channel)
     instance.enabled_channels = sorted(current)
 
+    route_address: str | None = None
+    route_pk: int | None = None
+    if channel == CHANNEL_EMAIL:
+        if enabled:
+            route = _mint_default_email_route(
+                db=db, instance=instance, admin_id=admin_id
+            )
+            route_address = route.route_value
+            route_pk = route.id
+        else:
+            revoked = _revoke_default_email_route(
+                db=db, instance=instance, admin_id=admin_id
+            )
+            if revoked is not None:
+                route_address = revoked.route_value
+                route_pk = revoked.id
+
+    payload = {"channel": channel, "enabled": enabled}
+    if route_address is not None:
+        payload["address"] = route_address
+
     audit = AdminAuditRepository(db)
     audit.record(
         ctx=audit_ctx,
         admin_id=admin_id,
         action=ACTION_CHANNEL_ENABLED if enabled else ACTION_CHANNEL_DISABLED,
         resource_type=RESOURCE_INSTANCE_CHANNEL,
+        resource_pk=route_pk,
         resource_natural_id=f"{instance.id}:{channel}",
         luciel_instance_id=instance.id,
-        after={"channel": channel, "enabled": enabled},
+        after=payload if enabled else None,
+        before=None if enabled else payload,
         note=f"{channel} channel {'enabled' if enabled else 'disabled'}.",
     )
 
