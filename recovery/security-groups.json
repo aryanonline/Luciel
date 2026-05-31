@@ -1,0 +1,302 @@
+{
+    "SecurityGroups": [
+        {
+            "GroupId": "sg-05901a66faa636ebb",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "VpcId": "vpc-04311aadf655620f0",
+            "SecurityGroupArn": "arn:aws:ec2:ca-central-1:729005488042:security-group/sg-05901a66faa636ebb",
+            "OwnerId": "729005488042",
+            "GroupName": "luciel-db-sg",
+            "Description": "Security group for Luciel RDS",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5432,
+                    "ToPort": 5432,
+                    "UserIdGroupPairs": [
+                        {
+                            "UserId": "729005488042",
+                            "GroupId": "sg-0f2e317f987925601"
+                        },
+                        {
+                            "Description": "luciel-worker-sg",
+                            "UserId": "729005488042",
+                            "GroupId": "sg-0f0d450006350f153"
+                        }
+                    ],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "10.0.0.0/16"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        },
+        {
+            "GroupId": "sg-0b5d426d83fa707c5",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "luciel-vpc-endpoint-sg"
+                },
+                {
+                    "Key": "Step",
+                    "Value": "27c-final"
+                }
+            ],
+            "VpcId": "vpc-04311aadf655620f0",
+            "SecurityGroupArn": "arn:aws:ec2:ca-central-1:729005488042:security-group/sg-0b5d426d83fa707c5",
+            "OwnerId": "729005488042",
+            "GroupName": "luciel-vpc-endpoint-sg",
+            "Description": "Ingress 443 from luciel ECS tasks for ssmmessages/ssm/ec2messages",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 443,
+                    "ToPort": 443,
+                    "UserIdGroupPairs": [
+                        {
+                            "UserId": "729005488042",
+                            "GroupId": "sg-0f2e317f987925601"
+                        },
+                        {
+                            "Description": "luciel-worker-sg",
+                            "UserId": "729005488042",
+                            "GroupId": "sg-0f0d450006350f153"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        },
+        {
+            "GroupId": "sg-0f0d450006350f153",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5432,
+                    "ToPort": 5432,
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "RDS luciel-db",
+                            "UserId": "729005488042",
+                            "GroupId": "sg-05901a66faa636ebb"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 6379,
+                    "ToPort": 6379,
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "ElastiCache luciel-redis",
+                            "UserId": "729005488042",
+                            "GroupId": "sg-0ccdf4414eaf30989"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 443,
+                    "ToPort": 443,
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "SSM/ssmmessages/ec2messages VPC endpoints",
+                            "UserId": "729005488042",
+                            "GroupId": "sg-0b5d426d83fa707c5"
+                        }
+                    ],
+                    "IpRanges": [
+                        {
+                            "Description": "SQS/SecretsManager/STS - IAM-bounded",
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "VpcId": "vpc-04311aadf655620f0",
+            "SecurityGroupArn": "arn:aws:ec2:ca-central-1:729005488042:security-group/sg-0f0d450006350f153",
+            "OwnerId": "729005488042",
+            "GroupName": "luciel-worker-sg",
+            "Description": "Dedicated SG for luciel-worker-service. Step 28 Phase 1 Commit 8.",
+            "IpPermissions": []
+        },
+        {
+            "GroupId": "sg-0f2e317f987925601",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "VpcId": "vpc-04311aadf655620f0",
+            "SecurityGroupArn": "arn:aws:ec2:ca-central-1:729005488042:security-group/sg-0f2e317f987925601",
+            "OwnerId": "729005488042",
+            "GroupName": "luciel-ecs-sg",
+            "Description": "Security group for Luciel ECS and ALB",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 80,
+                    "ToPort": 80,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 8000,
+                    "ToPort": 8000,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 443,
+                    "ToPort": 443,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        },
+        {
+            "GroupId": "sg-0ccdf4414eaf30989",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "VpcId": "vpc-04311aadf655620f0",
+            "SecurityGroupArn": "arn:aws:ec2:ca-central-1:729005488042:security-group/sg-0ccdf4414eaf30989",
+            "OwnerId": "729005488042",
+            "GroupName": "luciel-redis-sg",
+            "Description": "Redis access for Luciel ECS tasks",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 6379,
+                    "ToPort": 6379,
+                    "UserIdGroupPairs": [
+                        {
+                            "UserId": "729005488042",
+                            "GroupId": "sg-0f2e317f987925601"
+                        },
+                        {
+                            "Description": "luciel-worker-sg",
+                            "UserId": "729005488042",
+                            "GroupId": "sg-0f0d450006350f153"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        },
+        {
+            "GroupId": "sg-0f1d4a596c6e82d5d",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "VpcId": "vpc-04311aadf655620f0",
+            "SecurityGroupArn": "arn:aws:ec2:ca-central-1:729005488042:security-group/sg-0f1d4a596c6e82d5d",
+            "OwnerId": "729005488042",
+            "GroupName": "default",
+            "Description": "default VPC security group",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [
+                        {
+                            "UserId": "729005488042",
+                            "GroupId": "sg-0f1d4a596c6e82d5d"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,132 @@
+{
+    "Subnets": [
+        {
+            "AvailabilityZoneId": "cac1-az1",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "729005488042",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "luciel-private-1a"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ca-central-1:729005488042:subnet/subnet-0b315ad9ad4a8efb6",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-0b315ad9ad4a8efb6",
+            "State": "available",
+            "VpcId": "vpc-04311aadf655620f0",
+            "CidrBlock": "10.0.1.0/24",
+            "AvailableIpAddressCount": 249,
+            "AvailabilityZone": "ca-central-1a",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "cac1-az2",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "729005488042",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "luciel-private-1b"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ca-central-1:729005488042:subnet/subnet-0cd66d8e9229aa122",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-0cd66d8e9229aa122",
+            "State": "available",
+            "VpcId": "vpc-04311aadf655620f0",
+            "CidrBlock": "10.0.2.0/24",
+            "AvailableIpAddressCount": 250,
+            "AvailabilityZone": "ca-central-1b",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "cac1-az2",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "729005488042",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "luciel-public-1b"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ca-central-1:729005488042:subnet/subnet-0e54df62d1a4463bc",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-0e54df62d1a4463bc",
+            "State": "available",
+            "VpcId": "vpc-04311aadf655620f0",
+            "CidrBlock": "10.0.11.0/24",
+            "AvailableIpAddressCount": 246,
+            "AvailabilityZone": "ca-central-1b",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": true
+        },
+        {
+            "AvailabilityZoneId": "cac1-az1",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "729005488042",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "luciel-public-1a"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ca-central-1:729005488042:subnet/subnet-0e95d953fd553cbd1",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-0e95d953fd553cbd1",
+            "State": "available",
+            "VpcId": "vpc-04311aadf655620f0",
+            "CidrBlock": "10.0.10.0/24",
+            "AvailableIpAddressCount": 246,
+            "AvailabilityZone": "ca-central-1a",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": true
+        }
+    ]
+}

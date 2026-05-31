@@ -1,0 +1,192 @@
+{
+    "VpcEndpoints": [
+        {
+            "VpcEndpointId": "vpce-0b7a3f60da583577d",
+            "VpcEndpointType": "Interface",
+            "VpcId": "vpc-04311aadf655620f0",
+            "ServiceName": "com.amazonaws.ca-central-1.ssmmessages",
+            "State": "available",
+            "PolicyDocument": "{\n  \"Statement\": [\n    {\n      \"Action\": \"*\",\n      \"Effect\": \"Allow\",\n      \"Principal\": \"*\",\n      \"Resource\": \"*\"\n    }\n  ]\n}",
+            "RouteTableIds": [],
+            "SubnetIds": [
+                "subnet-0e54df62d1a4463bc",
+                "subnet-0e95d953fd553cbd1"
+            ],
+            "Groups": [
+                {
+                    "GroupId": "sg-0b5d426d83fa707c5",
+                    "GroupName": "luciel-vpc-endpoint-sg"
+                }
+            ],
+            "IpAddressType": "ipv4",
+            "DnsOptions": {
+                "DnsRecordIpType": "ipv4"
+            },
+            "PrivateDnsEnabled": true,
+            "RequesterManaged": false,
+            "NetworkInterfaceIds": [
+                "eni-0fb13061b81633d82",
+                "eni-0766f60f562ab49ea"
+            ],
+            "DnsEntries": [
+                {
+                    "DnsName": "vpce-0b7a3f60da583577d-e7wj3jq0.ssmmessages.ca-central-1.vpce.amazonaws.com",
+                    "HostedZoneId": "ZRCXCF510Y6P9"
+                },
+                {
+                    "DnsName": "vpce-0b7a3f60da583577d-e7wj3jq0-ca-central-1b.ssmmessages.ca-central-1.vpce.amazonaws.com",
+                    "HostedZoneId": "ZRCXCF510Y6P9"
+                },
+                {
+                    "DnsName": "vpce-0b7a3f60da583577d-e7wj3jq0-ca-central-1a.ssmmessages.ca-central-1.vpce.amazonaws.com",
+                    "HostedZoneId": "ZRCXCF510Y6P9"
+                },
+                {
+                    "DnsName": "ssmmessages.ca-central-1.amazonaws.com",
+                    "HostedZoneId": "Z0316467SHYN06E9MB7L"
+                },
+                {
+                    "DnsName": "ssmmessages.ca-central-1.api.aws",
+                    "HostedZoneId": "Z033930736PSIQP3VQDEI"
+                }
+            ],
+            "CreationTimestamp": "2026-04-26T04:41:51.337Z",
+            "Tags": [
+                {
+                    "Key": "Step",
+                    "Value": "27c-final"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "luciel-ssmmessages-endpoint"
+                }
+            ],
+            "OwnerId": "729005488042",
+            "ServiceRegion": "ca-central-1"
+        },
+        {
+            "VpcEndpointId": "vpce-06093c0f14f684302",
+            "VpcEndpointType": "Interface",
+            "VpcId": "vpc-04311aadf655620f0",
+            "ServiceName": "com.amazonaws.ca-central-1.ssm",
+            "State": "available",
+            "PolicyDocument": "{\n  \"Statement\": [\n    {\n      \"Action\": \"*\",\n      \"Effect\": \"Allow\",\n      \"Principal\": \"*\",\n      \"Resource\": \"*\"\n    }\n  ]\n}",
+            "RouteTableIds": [],
+            "SubnetIds": [
+                "subnet-0e54df62d1a4463bc",
+                "subnet-0e95d953fd553cbd1"
+            ],
+            "Groups": [
+                {
+                    "GroupId": "sg-0b5d426d83fa707c5",
+                    "GroupName": "luciel-vpc-endpoint-sg"
+                }
+            ],
+            "IpAddressType": "ipv4",
+            "DnsOptions": {
+                "DnsRecordIpType": "ipv4"
+            },
+            "PrivateDnsEnabled": true,
+            "RequesterManaged": false,
+            "NetworkInterfaceIds": [
+                "eni-09841e2ee146cec93",
+                "eni-0fd3b103226ae4c2b"
+            ],
+            "DnsEntries": [
+                {
+                    "DnsName": "vpce-06093c0f14f684302-zpypz7e2.ssm.ca-central-1.vpce.amazonaws.com",
+                    "HostedZoneId": "ZRCXCF510Y6P9"
+                },
+                {
+                    "DnsName": "vpce-06093c0f14f684302-zpypz7e2-ca-central-1b.ssm.ca-central-1.vpce.amazonaws.com",
+                    "HostedZoneId": "ZRCXCF510Y6P9"
+                },
+                {
+                    "DnsName": "vpce-06093c0f14f684302-zpypz7e2-ca-central-1a.ssm.ca-central-1.vpce.amazonaws.com",
+                    "HostedZoneId": "ZRCXCF510Y6P9"
+                },
+                {
+                    "DnsName": "ssm.ca-central-1.amazonaws.com",
+                    "HostedZoneId": "Z0077700SS2TZAIPQ28H"
+                },
+                {
+                    "DnsName": "ssm.ca-central-1.api.aws",
+                    "HostedZoneId": "Z00772011SNJ8FGGLMAI1"
+                }
+            ],
+            "CreationTimestamp": "2026-04-26T04:41:54.399Z",
+            "Tags": [
+                {
+                    "Key": "Step",
+                    "Value": "27c-final"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "luciel-ssm-endpoint"
+                }
+            ],
+            "OwnerId": "729005488042",
+            "ServiceRegion": "ca-central-1"
+        },
+        {
+            "VpcEndpointId": "vpce-0be5433471c632224",
+            "VpcEndpointType": "Interface",
+            "VpcId": "vpc-04311aadf655620f0",
+            "ServiceName": "com.amazonaws.ca-central-1.ec2messages",
+            "State": "available",
+            "PolicyDocument": "{\n  \"Statement\": [\n    {\n      \"Action\": \"*\",\n      \"Effect\": \"Allow\",\n      \"Principal\": \"*\",\n      \"Resource\": \"*\"\n    }\n  ]\n}",
+            "RouteTableIds": [],
+            "SubnetIds": [
+                "subnet-0e54df62d1a4463bc",
+                "subnet-0e95d953fd553cbd1"
+            ],
+            "Groups": [
+                {
+                    "GroupId": "sg-0b5d426d83fa707c5",
+                    "GroupName": "luciel-vpc-endpoint-sg"
+                }
+            ],
+            "IpAddressType": "ipv4",
+            "DnsOptions": {
+                "DnsRecordIpType": "ipv4"
+            },
+            "PrivateDnsEnabled": true,
+            "RequesterManaged": false,
+            "NetworkInterfaceIds": [
+                "eni-05a2b4d9f2e40f228",
+                "eni-012bb7dfb12b01211"
+            ],
+            "DnsEntries": [
+                {
+                    "DnsName": "vpce-0be5433471c632224-aigcbqvp.ec2messages.ca-central-1.vpce.amazonaws.com",
+                    "HostedZoneId": "ZRCXCF510Y6P9"
+                },
+                {
+                    "DnsName": "vpce-0be5433471c632224-aigcbqvp-ca-central-1b.ec2messages.ca-central-1.vpce.amazonaws.com",
+                    "HostedZoneId": "ZRCXCF510Y6P9"
+                },
+                {
+                    "DnsName": "vpce-0be5433471c632224-aigcbqvp-ca-central-1a.ec2messages.ca-central-1.vpce.amazonaws.com",
+                    "HostedZoneId": "ZRCXCF510Y6P9"
+                },
+                {
+                    "DnsName": "ec2messages.ca-central-1.amazonaws.com",
+                    "HostedZoneId": "Z03376001LUEOALH4Z0M2"
+                }
+            ],
+            "CreationTimestamp": "2026-04-26T04:41:57.287Z",
+            "Tags": [
+                {
+                    "Key": "Step",
+                    "Value": "27c-final"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "luciel-ec2messages-endpoint"
+                }
+            ],
+            "OwnerId": "729005488042",
+            "ServiceRegion": "ca-central-1"
+        }
+    ]
+}

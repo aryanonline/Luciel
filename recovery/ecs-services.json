@@ -1,0 +1,1195 @@
+{
+    "services": [
+        {
+            "serviceArn": "arn:aws:ecs:ca-central-1:729005488042:service/luciel-cluster/luciel-backend-service",
+            "serviceName": "luciel-backend-service",
+            "clusterArn": "arn:aws:ecs:ca-central-1:729005488042:cluster/luciel-cluster",
+            "loadBalancers": [
+                {
+                    "targetGroupArn": "arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba",
+                    "containerName": "luciel-backend",
+                    "containerPort": 8000
+                }
+            ],
+            "serviceRegistries": [],
+            "status": "ACTIVE",
+            "desiredCount": 1,
+            "runningCount": 1,
+            "pendingCount": 0,
+            "launchType": "FARGATE",
+            "platformVersion": "1.4.0",
+            "platformFamily": "Linux",
+            "taskDefinition": "arn:aws:ecs:ca-central-1:729005488042:task-definition/luciel-backend:128",
+            "deploymentConfiguration": {
+                "deploymentCircuitBreaker": {
+                    "enable": true,
+                    "rollback": true
+                },
+                "maximumPercent": 200,
+                "minimumHealthyPercent": 100,
+                "strategy": "ROLLING",
+                "bakeTimeInMinutes": 0
+            },
+            "deployments": [
+                {
+                    "id": "ecs-svc/2451669591082980747",
+                    "status": "PRIMARY",
+                    "taskDefinition": "arn:aws:ecs:ca-central-1:729005488042:task-definition/luciel-backend:128",
+                    "desiredCount": 1,
+                    "pendingCount": 0,
+                    "runningCount": 1,
+                    "failedTasks": 0,
+                    "createdAt": 1780082002.812,
+                    "updatedAt": 1780082166.822,
+                    "launchType": "FARGATE",
+                    "platformVersion": "1.4.0",
+                    "platformFamily": "Linux",
+                    "networkConfiguration": {
+                        "awsvpcConfiguration": {
+                            "subnets": [
+                                "subnet-0e54df62d1a4463bc",
+                                "subnet-0e95d953fd553cbd1"
+                            ],
+                            "securityGroups": [
+                                "sg-0f2e317f987925601"
+                            ],
+                            "assignPublicIp": "ENABLED"
+                        }
+                    },
+                    "rolloutState": "COMPLETED",
+                    "rolloutStateReason": "ECS deployment ecs-svc/2451669591082980747 completed."
+                }
+            ],
+            "roleArn": "arn:aws:iam::729005488042:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS",
+            "events": [
+                {
+                    "id": "fdf31080-1d92-4a98-9cfa-665b3f0ec171",
+                    "createdAt": 1780233570.663,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "4f8c652b-2c24-45e6-a180-f0170454b06d",
+                    "createdAt": 1780211962.496,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "db758f1b-26dc-410f-9587-dcdd577a0992",
+                    "createdAt": 1780190327.064,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "c857f804-418f-47a4-8bdd-560ab9eb8814",
+                    "createdAt": 1780168713.53,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "6c45ff1a-1964-4579-8215-d3cba22f56ed",
+                    "createdAt": 1780147088.064,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "7904a41c-2965-431a-8724-44af9c8b06b4",
+                    "createdAt": 1780125444.963,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "4ada3b3d-91aa-4f2a-abf1-2ba02bedc5a7",
+                    "createdAt": 1780103810.504,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "b4e47e52-e3d7-4f1b-8a4c-d4eca281d920",
+                    "createdAt": 1780082166.83,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "5377ac8c-59ca-4873-a981-ebc718c173eb",
+                    "createdAt": 1780082166.829,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/2451669591082980747) deployment completed."
+                },
+                {
+                    "id": "4072f3c0-d660-4b5b-89d2-92c6ab3120e5",
+                    "createdAt": 1780082106.227,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/8635794272996938633) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "79dec092-a299-435a-91d8-08a5f936b1a9",
+                    "createdAt": 1780082106.223,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "d4eb4de0-5d22-4128-8486-411ec48ea0e3",
+                    "createdAt": 1780082096.268,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task cc56838b9d9140858e98169c2c31b3bc)."
+                },
+                {
+                    "id": "c5e196ec-0f69-4a5f-8ddb-4632f9c4ac01",
+                    "createdAt": 1780082045.665,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "9174a26e-9328-4a59-b166-3c0f87c35bae",
+                    "createdAt": 1780082016.316,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task 6f7d14c2e1ce43779901174aba0a8043)."
+                },
+                {
+                    "id": "ff85defa-83d1-4b54-8b97-b07ecb2e6135",
+                    "createdAt": 1780065926.478,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "4f7673aa-a480-4508-9297-069ededabd4c",
+                    "createdAt": 1780044297.859,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "dbbdf027-6106-4f9f-a012-c89cf5b7207d",
+                    "createdAt": 1780022661.446,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "00ee2597-5a87-46c8-9382-7f02d067216f",
+                    "createdAt": 1780001046.377,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "3ad3c4fc-07d7-4d4c-b5ea-cecabdc9fcd9",
+                    "createdAt": 1780001046.376,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/8635794272996938633) deployment completed."
+                },
+                {
+                    "id": "1b6c5736-6055-4f4d-9493-e461c7fc5472",
+                    "createdAt": 1780000985.659,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/1810756269141921810) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "794d0b21-363b-40b4-bfc1-c738abef711e",
+                    "createdAt": 1780000985.654,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "17a1aa92-ec8b-40dc-a9f8-4fd19f5e4f77",
+                    "createdAt": 1780000976.258,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task 2bf1d7f6f20f42f78e9a65ee61f12b90)."
+                },
+                {
+                    "id": "72ecf1d5-c95d-4842-a894-fbb1bddd20e4",
+                    "createdAt": 1780000926.222,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "06eb0d0a-0ad4-46cc-8cea-fc0ed2ebe47d",
+                    "createdAt": 1780000886.133,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task cc56838b9d9140858e98169c2c31b3bc)."
+                },
+                {
+                    "id": "d43056d9-f6d9-4537-b300-0ae0bae47977",
+                    "createdAt": 1780000046.175,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "4d0e1fcd-8dc0-41e9-bdee-f1efae1efea2",
+                    "createdAt": 1780000046.174,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/1810756269141921810) deployment completed."
+                },
+                {
+                    "id": "b68f6a9d-a1a9-400d-aa0b-2fa7ee0e8bf7",
+                    "createdAt": 1779999995.547,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/9069197373235199909) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "f4b877f4-3bed-4bda-989f-7b3596122a32",
+                    "createdAt": 1779999995.543,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "0119c101-85ad-4cd4-9531-8c1e393026d5",
+                    "createdAt": 1779999984.614,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task e9905ddc75734e29a6be03b9ea60d616)."
+                },
+                {
+                    "id": "ec7dabcf-dd7a-4910-afe2-28d04360797a",
+                    "createdAt": 1779999934.555,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "745244dc-4c3f-44ee-bbc2-278503465c04",
+                    "createdAt": 1779999904.745,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task 2bf1d7f6f20f42f78e9a65ee61f12b90)."
+                },
+                {
+                    "id": "cdc9b96f-5cd0-4f3e-a573-bea8e32f2d75",
+                    "createdAt": 1779994725.122,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "0cc5b5a4-c185-4bd9-9ad9-74ca83715703",
+                    "createdAt": 1779994725.121,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/9069197373235199909) deployment completed."
+                },
+                {
+                    "id": "4995ba4c-88fc-477d-adac-303189e0ddf0",
+                    "createdAt": 1779994674.406,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/3513619076110447248) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "f8dc15ca-8a5c-4576-82c3-a36a8c9cb9e1",
+                    "createdAt": 1779994674.4,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "c0b1b2ae-9f1a-479f-b699-e6e194c3b255",
+                    "createdAt": 1779994663.222,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task 92e6d3fa8b91487eb18b4276f201d69f)."
+                },
+                {
+                    "id": "22196b7f-7371-4c61-a88f-ee70d7f4993d",
+                    "createdAt": 1779994613.943,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "9c58ada1-8016-4544-92bf-8599fa252c1a",
+                    "createdAt": 1779994584.141,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task e9905ddc75734e29a6be03b9ea60d616)."
+                },
+                {
+                    "id": "ea1f3e30-fccb-401c-ac83-96d42804e2ce",
+                    "createdAt": 1779992690.724,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "e89cf2d0-4e7d-456e-b1c6-ef3037139ab3",
+                    "createdAt": 1779992690.723,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/3513619076110447248) deployment completed."
+                },
+                {
+                    "id": "dd957d85-a1cb-4679-9322-3c4cfffae66d",
+                    "createdAt": 1779992630.413,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/4185773241905167466) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "83149235-9b48-4019-aaa8-03b742ead3cd",
+                    "createdAt": 1779992630.406,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "1ee41057-c1c3-4a83-8f93-12bf51778509",
+                    "createdAt": 1779992620.387,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task 9e70f90b328d42f8b6ba19dea6e38d9d)."
+                },
+                {
+                    "id": "6c7b1b81-09ec-42de-922a-7c99962fe820",
+                    "createdAt": 1779992560.516,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "56a2b903-344d-4949-a0c4-6b4b782e871d",
+                    "createdAt": 1779992520.164,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task 92e6d3fa8b91487eb18b4276f201d69f)."
+                },
+                {
+                    "id": "2dbab946-b26f-485f-b2b6-d2cf20693269",
+                    "createdAt": 1779984222.899,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "6569cd19-1647-453e-a93e-536158ad5156",
+                    "createdAt": 1779962619.607,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "5776d845-9573-4cf6-9a45-d2fa3dfb637c",
+                    "createdAt": 1779940986.176,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "9808b683-5047-4ea2-8b58-3f4a49364c84",
+                    "createdAt": 1779940986.175,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/4185773241905167466) deployment completed."
+                },
+                {
+                    "id": "e8f4c969-edcb-45bb-be9b-4b54a9f6d120",
+                    "createdAt": 1779940926.04,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/5986606858871550218) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "46429539-a9dc-4a35-9dfb-f3100f116123",
+                    "createdAt": 1779940926.035,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "fcaba99e-e2f9-47e3-851e-2abcb3e5e77f",
+                    "createdAt": 1779940915.336,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task 30e7a83b705247e6bc6eddd05dd57a15)."
+                },
+                {
+                    "id": "acdac971-871d-4238-bff3-8521fdc3e4cb",
+                    "createdAt": 1779940865.766,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "0971fd97-2588-42df-8c1a-95180eee571e",
+                    "createdAt": 1779940835.854,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task 9e70f90b328d42f8b6ba19dea6e38d9d)."
+                },
+                {
+                    "id": "51434225-261d-4724-a3d8-99a73bcbfa49",
+                    "createdAt": 1779931984.754,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "0101e36a-74b5-4dca-9cc4-2ef44d72fce9",
+                    "createdAt": 1779931984.753,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/5986606858871550218) deployment completed."
+                },
+                {
+                    "id": "3fa5ebb5-4a00-4168-ad9c-fcfa98c5de20",
+                    "createdAt": 1779931923.3,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/8884652874124593814) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "66909b98-1681-4762-9c54-cd953fd19f4b",
+                    "createdAt": 1779931923.295,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "28a9b5da-4982-4460-a60d-22b3aee085cb",
+                    "createdAt": 1779931913.756,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task c9569f8946104312abedbfc1f3ab1417)."
+                },
+                {
+                    "id": "26238b91-1bd4-4ebe-af7f-f30790e86e37",
+                    "createdAt": 1779931862.774,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "77bf6bd0-205d-4ed4-98f3-cf7be7e9a3ae",
+                    "createdAt": 1779931822.967,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task 30e7a83b705247e6bc6eddd05dd57a15)."
+                },
+                {
+                    "id": "922ea5a1-0202-4bda-af90-210660c7e435",
+                    "createdAt": 1779929819.604,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "e06859f0-2e2f-4490-9442-eb6c255817e9",
+                    "createdAt": 1779929819.603,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/8884652874124593814) deployment completed."
+                },
+                {
+                    "id": "f1838930-38ed-40a7-977b-20ca913e72ff",
+                    "createdAt": 1779929758.753,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/2669856737760148597) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "19a02627-a3e2-4987-bd9a-1903aba7a9e7",
+                    "createdAt": 1779929758.749,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "016021fc-643b-47a0-a396-89cfff044238",
+                    "createdAt": 1779929748.068,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task 8e977a826dfc4ad6a9e6672109831cd3)."
+                },
+                {
+                    "id": "e8d51d3b-60a0-45f9-b109-305ce3ddcd19",
+                    "createdAt": 1779929698.794,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "b7464e00-3078-4e53-95f8-1a91cc7bab15",
+                    "createdAt": 1779929668.088,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task c9569f8946104312abedbfc1f3ab1417)."
+                },
+                {
+                    "id": "60622f46-2f22-4f4e-b96e-04efb4ac60f2",
+                    "createdAt": 1779926065.166,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "bb2168a1-9ad4-41e9-bcc1-fa09e8af71d0",
+                    "createdAt": 1779926065.165,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/2669856737760148597) deployment completed."
+                },
+                {
+                    "id": "b558d7c8-31c0-4193-be27-202e60df5cb4",
+                    "createdAt": 1779925995.353,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/0900242224012248869) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "352eaa02-a4c2-40ad-882e-85eb7b56c0bc",
+                    "createdAt": 1779925995.331,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "1edf6e1a-d2a3-43d7-86ef-6c3922ff3d66",
+                    "createdAt": 1779925985.166,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task 1494a2a872304e44a7179fa297a12713)."
+                },
+                {
+                    "id": "8ead022e-ce0f-4e5f-a36f-7d1716ba1ff9",
+                    "createdAt": 1779925935.05,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "c2ab2dac-0986-45ca-9259-6da2aa9a78a8",
+                    "createdAt": 1779925894.637,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task 8e977a826dfc4ad6a9e6672109831cd3)."
+                },
+                {
+                    "id": "1c0db61c-684c-44ce-ac11-402cd3f0bd48",
+                    "createdAt": 1779914159.11,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "57dfaed1-99c3-456b-90a0-9a3b44050c0a",
+                    "createdAt": 1779914159.109,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/0900242224012248869) deployment completed."
+                },
+                {
+                    "id": "8f706ada-0335-44dd-b885-369b36528db5",
+                    "createdAt": 1779914097.869,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/9909595491782142758) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "aceeed53-90ec-41d5-9b28-7e2e9c96ac9f",
+                    "createdAt": 1779914097.864,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "eb75f234-5eb7-4200-bb4b-46b18fa4226d",
+                    "createdAt": 1779914088.19,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task 9a746790e99140cc95d9b864473726fb)."
+                },
+                {
+                    "id": "8a9c7253-10c0-46ab-a4e9-7b17ba68e2a4",
+                    "createdAt": 1779914038.62,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "9d9d5876-fc45-4886-ac86-461b9b539aa9",
+                    "createdAt": 1779913998.135,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task 1494a2a872304e44a7179fa297a12713)."
+                },
+                {
+                    "id": "8d14d8e7-9090-4f4a-928d-cd00fb297c9b",
+                    "createdAt": 1779912480.246,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "5a747f1a-fdf1-4e0a-b97c-25e09d3fede3",
+                    "createdAt": 1779912480.245,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/9909595491782142758) deployment completed."
+                },
+                {
+                    "id": "2f7c9f5d-155e-40ac-8870-2fedd428b901",
+                    "createdAt": 1779912418.619,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/7822225864192972445) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "c4b97bf1-923a-49a8-9d49-6b491b2b18c6",
+                    "createdAt": 1779912418.615,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "3ea2bc44-83ae-4284-b5bd-766543803e73",
+                    "createdAt": 1779912409.522,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task 98f0d0fdfd664bc387d1ebba5137d248)."
+                },
+                {
+                    "id": "6b658b00-bb39-425c-9b59-f25a8a15f339",
+                    "createdAt": 1779912358.944,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "0728b41c-75af-4a47-b715-fc319e1dddd0",
+                    "createdAt": 1779912318.736,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task 9a746790e99140cc95d9b864473726fb)."
+                },
+                {
+                    "id": "6e60f5f6-4688-41fd-80aa-d8ff40e4ac47",
+                    "createdAt": 1779910456.312,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "59f194a4-83b8-4aeb-a9fa-4c846a9eb0a5",
+                    "createdAt": 1779910456.311,
+                    "message": "(service luciel-backend-service) (deployment ecs-svc/7822225864192972445) deployment completed."
+                },
+                {
+                    "id": "bdbd2856-bcc3-491d-8501-ef2a13e672d0",
+                    "createdAt": 1779910395.497,
+                    "message": "(service luciel-backend-service, taskSet ecs-svc/5735594592928618979) has begun draining connections on 1 tasks."
+                },
+                {
+                    "id": "1d036349-a2c5-4876-a1a7-2e3407d1115b",
+                    "createdAt": 1779910395.493,
+                    "message": "(service luciel-backend-service) deregistered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "90127209-2c70-4d0c-b6c2-3685710b525b",
+                    "createdAt": 1779910386.474,
+                    "message": "(service luciel-backend-service) has stopped 1 running tasks: (task 799a2fe5337d4b18b2fb99cc1c76f4fe)."
+                },
+                {
+                    "id": "6a9579fc-61b0-4849-976d-8e79256dd550",
+                    "createdAt": 1779910335.225,
+                    "message": "(service luciel-backend-service) registered 1 targets in (target-group arn:aws:elasticloadbalancing:ca-central-1:729005488042:targetgroup/luciel-targets/c77038fb075247ba)"
+                },
+                {
+                    "id": "d371154b-aff1-472d-9eb2-6a36bf13b53b",
+                    "createdAt": 1779910295.911,
+                    "message": "(service luciel-backend-service) has started 1 tasks: (task 98f0d0fdfd664bc387d1ebba5137d248)."
+                },
+                {
+                    "id": "e86edf89-8d43-47ba-8a48-acb0608e5eb9",
+                    "createdAt": 1779910144.803,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "8b1f50fd-139f-405f-9122-a664205bf94e",
+                    "createdAt": 1779888535.569,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "7d9e46ec-cc75-4e42-96c1-10a37d874387",
+                    "createdAt": 1779866906.034,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                },
+                {
+                    "id": "46a5c47a-7216-4973-918c-25670a084290",
+                    "createdAt": 1779845277.942,
+                    "message": "(service luciel-backend-service) has reached a steady state."
+                }
+            ],
+            "createdAt": 1776028235.005,
+            "currentServiceRevisions": [
+                {
+                    "arn": "arn:aws:ecs:ca-central-1:729005488042:service-revision/luciel-cluster/luciel-backend-service/2451669591082980747",
+                    "requestedTaskCount": 1,
+                    "runningTaskCount": 1,
+                    "pendingTaskCount": 0
+                }
+            ],
+            "placementConstraints": [],
+            "placementStrategy": [],
+            "networkConfiguration": {
+                "awsvpcConfiguration": {
+                    "subnets": [
+                        "subnet-0e54df62d1a4463bc",
+                        "subnet-0e95d953fd553cbd1"
+                    ],
+                    "securityGroups": [
+                        "sg-0f2e317f987925601"
+                    ],
+                    "assignPublicIp": "ENABLED"
+                }
+            },
+            "healthCheckGracePeriodSeconds": 0,
+            "schedulingStrategy": "REPLICA",
+            "deploymentController": {
+                "type": "ECS"
+            },
+            "createdBy": "arn:aws:iam::729005488042:user/luciel-admin",
+            "enableECSManagedTags": false,
+            "propagateTags": "NONE",
+            "enableExecuteCommand": true,
+            "availabilityZoneRebalancing": "ENABLED",
+            "resourceManagementType": "CUSTOMER"
+        },
+        {
+            "serviceArn": "arn:aws:ecs:ca-central-1:729005488042:service/luciel-cluster/luciel-worker-service",
+            "serviceName": "luciel-worker-service",
+            "clusterArn": "arn:aws:ecs:ca-central-1:729005488042:cluster/luciel-cluster",
+            "loadBalancers": [],
+            "serviceRegistries": [],
+            "status": "ACTIVE",
+            "desiredCount": 1,
+            "runningCount": 1,
+            "pendingCount": 0,
+            "launchType": "FARGATE",
+            "platformVersion": "1.4.0",
+            "platformFamily": "Linux",
+            "taskDefinition": "arn:aws:ecs:ca-central-1:729005488042:task-definition/luciel-worker:63",
+            "deploymentConfiguration": {
+                "deploymentCircuitBreaker": {
+                    "enable": true,
+                    "rollback": true
+                },
+                "maximumPercent": 200,
+                "minimumHealthyPercent": 100,
+                "strategy": "ROLLING",
+                "bakeTimeInMinutes": 0
+            },
+            "deployments": [
+                {
+                    "id": "ecs-svc/8798172405601471471",
+                    "status": "PRIMARY",
+                    "taskDefinition": "arn:aws:ecs:ca-central-1:729005488042:task-definition/luciel-worker:63",
+                    "desiredCount": 1,
+                    "pendingCount": 0,
+                    "runningCount": 1,
+                    "failedTasks": 0,
+                    "createdAt": 1780082003.842,
+                    "updatedAt": 1780082168.367,
+                    "launchType": "FARGATE",
+                    "platformVersion": "1.4.0",
+                    "platformFamily": "Linux",
+                    "networkConfiguration": {
+                        "awsvpcConfiguration": {
+                            "subnets": [
+                                "subnet-0e54df62d1a4463bc",
+                                "subnet-0e95d953fd553cbd1"
+                            ],
+                            "securityGroups": [
+                                "sg-0f2e317f987925601"
+                            ],
+                            "assignPublicIp": "ENABLED"
+                        }
+                    },
+                    "rolloutState": "COMPLETED",
+                    "rolloutStateReason": "ECS deployment ecs-svc/8798172405601471471 completed."
+                }
+            ],
+            "roleArn": "arn:aws:iam::729005488042:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS",
+            "events": [
+                {
+                    "id": "3de09620-a5d2-463c-8402-503794d44e66",
+                    "createdAt": 1780233485.552,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "9cb0f1f0-ce27-4a36-b5e6-d82166e99321",
+                    "createdAt": 1780211872.901,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "2017107c-04ef-43b7-89b8-95dcb0f82cdf",
+                    "createdAt": 1780190269.863,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "8f8d4a75-9737-4770-8dd8-108946ed175e",
+                    "createdAt": 1780168650.558,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "53c6b86a-95be-425a-a0e1-483d92278ce5",
+                    "createdAt": 1780147029.414,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "04d82d1b-598b-45a6-b133-d59a1985ddb1",
+                    "createdAt": 1780125405.2,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "d338b36f-7eb5-4cb1-b0c6-50a28d9a6dc2",
+                    "createdAt": 1780103784.584,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "93468491-c5b0-4719-8e63-e9591b9cc3b9",
+                    "createdAt": 1780082168.374,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "5e6b8121-28af-4a70-9aa1-e4520af8de26",
+                    "createdAt": 1780082168.373,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/8798172405601471471) deployment completed."
+                },
+                {
+                    "id": "088165db-55a6-4f0a-814e-df01f4d68500",
+                    "createdAt": 1780082086.681,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task dc5ddd1b32a64331a5daddc6038e98e6)."
+                },
+                {
+                    "id": "6c6da368-7010-4171-9b76-674e5f1269d1",
+                    "createdAt": 1780082015.325,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 76787754f39b412cb031409c2fb3e1de)."
+                },
+                {
+                    "id": "c49c3ce2-c60b-4843-86b6-38fec91221a6",
+                    "createdAt": 1780065898.876,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "9eed1f1c-861a-437f-893c-cbc4052c4656",
+                    "createdAt": 1780044274.938,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "3b74c490-78c1-43e8-83bc-07142c706408",
+                    "createdAt": 1780022666.062,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "759e5485-a31f-4130-84f5-c2216f9b842f",
+                    "createdAt": 1780001065.52,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "8d172215-93fa-480c-a8b2-13bcb345cdfe",
+                    "createdAt": 1780001065.519,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/4608382529103855789) deployment completed."
+                },
+                {
+                    "id": "2ab824df-5918-4614-977b-513a200cbc7f",
+                    "createdAt": 1780000961.099,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task e3bff8ed1b05430fb739b8209738f940)."
+                },
+                {
+                    "id": "eb9d9584-2fff-441d-b4a0-902aa96179ed",
+                    "createdAt": 1780000889.748,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task dc5ddd1b32a64331a5daddc6038e98e6)."
+                },
+                {
+                    "id": "d611a5eb-f5c1-4861-aca5-2aa11336caaa",
+                    "createdAt": 1780000075.653,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "1d8b0905-034d-4e50-b48d-11f17d31050f",
+                    "createdAt": 1780000075.652,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/8781554005195990978) deployment completed."
+                },
+                {
+                    "id": "cc4a65a2-8915-40c1-ad01-eb96415921be",
+                    "createdAt": 1779999992.615,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task 120847be94624d8ab1136cead5d92f67)."
+                },
+                {
+                    "id": "9e7192f5-a669-4f1b-8fc9-9ecdc0cd8e8e",
+                    "createdAt": 1779999920.75,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task e3bff8ed1b05430fb739b8209738f940)."
+                },
+                {
+                    "id": "d4861213-abe1-44b1-8857-7aee2860b781",
+                    "createdAt": 1779995565.374,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "22123340-e290-4b97-b0fd-5ac1a45e4e7a",
+                    "createdAt": 1779995565.373,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/9196786434089225579) deployment completed."
+                },
+                {
+                    "id": "371b340f-4bba-4133-b082-b359344f6b0a",
+                    "createdAt": 1779995469.542,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task a5fa484400ec4223bc36877792d0bf8f)."
+                },
+                {
+                    "id": "ca444abc-033d-4e27-8f62-ec4c4fca5e6a",
+                    "createdAt": 1779995398.242,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 120847be94624d8ab1136cead5d92f67)."
+                },
+                {
+                    "id": "3fa97b44-b9ec-4bf2-af04-b11d3671e9c1",
+                    "createdAt": 1779995314.831,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "9a7937b4-24e1-4ec5-ad78-e31dee25bd2e",
+                    "createdAt": 1779995221.863,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task a5fa484400ec4223bc36877792d0bf8f)."
+                },
+                {
+                    "id": "d34c9165-fa39-40a8-8b7f-231a66217ab3",
+                    "createdAt": 1779995162.548,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task b6cf660b03a74690b63ca2f8faa6f94e)."
+                },
+                {
+                    "id": "e808770e-be13-4476-b6dc-1b92401a5edb",
+                    "createdAt": 1779995092.277,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 1471fb98344c41c49f5651cf92c045e3)."
+                },
+                {
+                    "id": "780dc127-2963-4ced-b65a-1876aa915856",
+                    "createdAt": 1779995023.344,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task e399145b706c4044934bf2959ad127fb)."
+                },
+                {
+                    "id": "157c6cc0-f436-4c89-ac02-efeea8525ddb",
+                    "createdAt": 1779994223.297,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "79809af3-8d98-4488-8e0c-72284afdce15",
+                    "createdAt": 1779994223.296,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/3731008344658684205) deployment completed."
+                },
+                {
+                    "id": "6bd80549-91fa-4656-a7c1-7167594dbdb2",
+                    "createdAt": 1779994141.22,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task 202c8ed3de97470382d81ceb56a353a4)."
+                },
+                {
+                    "id": "6d14ad6e-620c-4448-932e-598f758dbf0f",
+                    "createdAt": 1779994069.587,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 1c23f34f3eb742439fdf80fb1a3734fe)."
+                },
+                {
+                    "id": "2a787b9c-19cf-4c90-8a21-26f0f13bba58",
+                    "createdAt": 1779993636.651,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "fe188823-30e0-4df3-ad5b-823a4b6ca9ce",
+                    "createdAt": 1779993636.65,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/8006151282553268892) deployment completed."
+                },
+                {
+                    "id": "3f293512-796b-422b-8b71-98f166570054",
+                    "createdAt": 1779993563.454,
+                    "message": "(service luciel-worker-service) stopped 1 pending tasks."
+                },
+                {
+                    "id": "b61d9c5e-677d-4d6c-896c-43b67c231d17",
+                    "createdAt": 1779993557.564,
+                    "message": "(service luciel-worker-service) rolling back to deployment ecs-svc/8006151282553268892."
+                },
+                {
+                    "id": "75758bd8-7cbb-449b-bbca-63106e1c3f68",
+                    "createdAt": 1779993557.563,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/5934646907827431466) deployment failed: tasks failed to start."
+                },
+                {
+                    "id": "dc2434f8-f70d-4a96-85cd-478da33f8cb3",
+                    "createdAt": 1779993553.972,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 9d4574ab47264287a4cc4ece8a103ba5)."
+                },
+                {
+                    "id": "b7f0341e-3ae7-462c-bf45-f2e7d273a0e8",
+                    "createdAt": 1779993482.531,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task c06ccd10c38f40a6a8a77ed8bfe21fb1)."
+                },
+                {
+                    "id": "1c9688dd-9fa1-4597-8d7f-b0f5a210dcac",
+                    "createdAt": 1779993419.131,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task fe9a15e0be0f4ccf994d98059743875d)."
+                },
+                {
+                    "id": "66a101e2-3ec8-470e-a7fb-8c804253f116",
+                    "createdAt": 1779993347.089,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 807d918148894c6ba73ad723dd76a1e9)."
+                },
+                {
+                    "id": "a27a337e-7b60-42d7-99d5-2f1035e0a41a",
+                    "createdAt": 1779993235.274,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "8e73142a-0516-4086-88e7-df121225b831",
+                    "createdAt": 1779993235.273,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/8006151282553268892) deployment completed."
+                },
+                {
+                    "id": "59ef87e7-2d44-490f-9c1e-246959103249",
+                    "createdAt": 1779993121.519,
+                    "message": "(service luciel-worker-service) stopped 1 pending tasks."
+                },
+                {
+                    "id": "da0d4237-ba4c-4cdc-bba6-8ccaa61cc07e",
+                    "createdAt": 1779993120.454,
+                    "message": "(service luciel-worker-service) rolling back to deployment ecs-svc/8006151282553268892."
+                },
+                {
+                    "id": "0ffd31fa-7164-448f-95d3-e4ac767dd167",
+                    "createdAt": 1779993120.453,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/0000711673553576572) deployment failed: tasks failed to start."
+                },
+                {
+                    "id": "ae8e9748-d11f-4ccd-a4d7-4f903b592ba0",
+                    "createdAt": 1779993101.284,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 18801c9591464585857e2a1474b33bc5)."
+                },
+                {
+                    "id": "70343ba1-101c-4b9e-82a2-0cef3fe3515f",
+                    "createdAt": 1779993027.959,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task af8b7d4fbee64261b1c5735668c91735)."
+                },
+                {
+                    "id": "19550214-1476-4db2-88e9-90ea0a47078f",
+                    "createdAt": 1779992956.234,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 499d3952142d4b0580be34120259f4f8)."
+                },
+                {
+                    "id": "9312a223-f680-4c0a-9acd-cc5addedbc4d",
+                    "createdAt": 1779992894.396,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 3499fff1c8ef41be9a4526d963eaeb5b)."
+                },
+                {
+                    "id": "c3e705ee-3c45-4379-9ed6-095473715593",
+                    "createdAt": 1779992864.635,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "b2b9c00e-a4b3-4bd7-bc31-aa7db8d7e552",
+                    "createdAt": 1779992864.634,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/8006151282553268892) deployment completed."
+                },
+                {
+                    "id": "3539bc39-2671-45ed-82c6-12642b0cd02a",
+                    "createdAt": 1779992749.692,
+                    "message": "(service luciel-worker-service) stopped 1 pending tasks."
+                },
+                {
+                    "id": "34476e05-4c6e-4819-b493-ddff4fecbc5c",
+                    "createdAt": 1779992747.353,
+                    "message": "(service luciel-worker-service) rolling back to deployment ecs-svc/8006151282553268892."
+                },
+                {
+                    "id": "8c59976e-0291-4edc-a2fa-8cc0d6834ef2",
+                    "createdAt": 1779992747.352,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/7424549951671479633) deployment failed: tasks failed to start."
+                },
+                {
+                    "id": "a8e208bd-3823-4f11-a131-bd17099ba03c",
+                    "createdAt": 1779992740.174,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 04bf7de88e7042939759a3da5f8df50e)."
+                },
+                {
+                    "id": "c582772e-6410-4e7e-b3f4-bdbf390baa19",
+                    "createdAt": 1779992667.775,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task f1d5d4a407ce4a008e1b6f97b132d6a1)."
+                },
+                {
+                    "id": "307e4758-d3dd-449b-8199-f4e8e5ff50cf",
+                    "createdAt": 1779992596.425,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 39d455e5d09c4e97860849b6d2076de0)."
+                },
+                {
+                    "id": "b1590d58-b0da-4628-af01-11690f31da47",
+                    "createdAt": 1779992524.431,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 2eb038dfeac248f98e84acd04799b17b)."
+                },
+                {
+                    "id": "2a7a423c-cdcf-4a61-b953-73d799297421",
+                    "createdAt": 1779984212.494,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "61c64b4c-c721-4cfe-82e3-272930ff0ee0",
+                    "createdAt": 1779962601.391,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "ecc34b31-5686-459b-8172-bf3c93ec6efb",
+                    "createdAt": 1779941000.512,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "c0508a61-fc2a-4090-8ae5-591eecca896d",
+                    "createdAt": 1779941000.511,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/8006151282553268892) deployment completed."
+                },
+                {
+                    "id": "930663f4-d1c8-4904-b6c0-16b3ccba23a6",
+                    "createdAt": 1779940897.832,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task 9e38757d900b446ba9efb6da10b0bf2f)."
+                },
+                {
+                    "id": "7c0ca872-33bc-4082-88f9-59860c630df6",
+                    "createdAt": 1779940827.206,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 202c8ed3de97470382d81ceb56a353a4)."
+                },
+                {
+                    "id": "ba2071dd-47a1-4c5c-86cb-2da207da6c23",
+                    "createdAt": 1779931983.142,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "f1898200-feaf-42c1-8ca4-4bd1e0e2374f",
+                    "createdAt": 1779931983.141,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/0777296016128303500) deployment completed."
+                },
+                {
+                    "id": "934b27f6-07db-4e3b-a877-e76bf95f97fc",
+                    "createdAt": 1779931899.188,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task 45d4e42a8aa44d3ebbd0b9c8e7b00e62)."
+                },
+                {
+                    "id": "c8c1c170-f626-4f45-bcae-71fa523ba181",
+                    "createdAt": 1779931826.634,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 9e38757d900b446ba9efb6da10b0bf2f)."
+                },
+                {
+                    "id": "355b277c-4e62-41b3-986a-1304f6ea1eb8",
+                    "createdAt": 1779929826.646,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "ca190cc7-e38c-4dd4-9ea9-0aa32ee85c22",
+                    "createdAt": 1779929826.645,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/5710962992749575430) deployment completed."
+                },
+                {
+                    "id": "bfa76e77-eb31-454d-a50b-ec800573b35d",
+                    "createdAt": 1779929724.461,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task 8a20e8959ac049cfad392a03281d4103)."
+                },
+                {
+                    "id": "f7e16a9c-c751-440b-9f47-666551664db3",
+                    "createdAt": 1779929654.564,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 45d4e42a8aa44d3ebbd0b9c8e7b00e62)."
+                },
+                {
+                    "id": "961581a1-2932-48d5-b666-55c88442ee88",
+                    "createdAt": 1779926057.443,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "56213562-a988-476b-ab25-595186b4fa81",
+                    "createdAt": 1779926057.442,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/6684238233211113003) deployment completed."
+                },
+                {
+                    "id": "79ef50ba-5da2-4f24-9372-bcaf34a4205d",
+                    "createdAt": 1779925986.352,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task 6b440e2becd042308b6ffec7fc36f3a5)."
+                },
+                {
+                    "id": "752d49ce-f56f-4471-9cc1-504b467ea653",
+                    "createdAt": 1779925894.058,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 8a20e8959ac049cfad392a03281d4103)."
+                },
+                {
+                    "id": "00c3d999-af9f-4fdf-99d7-e204390b95d2",
+                    "createdAt": 1779917642.872,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "e012917b-7203-4fe4-bb03-6016ba3e793f",
+                    "createdAt": 1779917642.871,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/7903122011028960023) deployment completed."
+                },
+                {
+                    "id": "32fdaa38-7d35-4f31-816b-47f682cf7a20",
+                    "createdAt": 1779917562.377,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task 8dc0c6200b974e2f997bd4d33140158a)."
+                },
+                {
+                    "id": "2046b8bc-13cf-4a30-80f5-4894f3e01826",
+                    "createdAt": 1779917491.092,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 6b440e2becd042308b6ffec7fc36f3a5)."
+                },
+                {
+                    "id": "d1ff9108-af29-4030-88dd-ed16f432251b",
+                    "createdAt": 1779916986.35,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "03134861-c706-422f-9aa5-3d8e87c906c8",
+                    "createdAt": 1779916986.349,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/4595025175793361354) deployment completed."
+                },
+                {
+                    "id": "f65d02e1-d26b-4b0e-bb97-334a4320ecd6",
+                    "createdAt": 1779916902.413,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task 49dd45e6451541279747979bfe3a9089)."
+                },
+                {
+                    "id": "a8e89ea7-1945-416b-86d4-e3dee149526f",
+                    "createdAt": 1779916830.754,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 8dc0c6200b974e2f997bd4d33140158a)."
+                },
+                {
+                    "id": "8497b39e-9ce2-4389-a83a-c7fd6c0af0d0",
+                    "createdAt": 1779916368.94,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "3a0e5a3f-fe94-473f-adfe-fbe918835fa8",
+                    "createdAt": 1779916368.939,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/0993827936295203305) deployment completed."
+                },
+                {
+                    "id": "a5f97b9d-2a3f-47ca-a834-3bb5abd62d90",
+                    "createdAt": 1779916283.934,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task dfe78e7ecc554f81856c9b3f941bfa4c)."
+                },
+                {
+                    "id": "5bfae8ad-d5b4-4b73-93fc-e8ed076a36ce",
+                    "createdAt": 1779916212.922,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 49dd45e6451541279747979bfe3a9089)."
+                },
+                {
+                    "id": "cbacc398-cf5a-4740-8780-1598227e25b4",
+                    "createdAt": 1779915634.641,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "064fbd41-1eaa-47e8-857f-c8fa3b4c85ce",
+                    "createdAt": 1779915634.64,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/3563387754733541865) deployment completed."
+                },
+                {
+                    "id": "f04a1233-d5ff-4ec6-bc10-870ff64eaa62",
+                    "createdAt": 1779915553.061,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task 424bb73a17934953964e71d150eb2e5c)."
+                },
+                {
+                    "id": "f80a1633-5028-43cd-816f-fa9a4efec77b",
+                    "createdAt": 1779915481.087,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task dfe78e7ecc554f81856c9b3f941bfa4c)."
+                },
+                {
+                    "id": "db14e4fb-9e83-48e3-9f6c-633577584fcd",
+                    "createdAt": 1779914769.061,
+                    "message": "(service luciel-worker-service) has reached a steady state."
+                },
+                {
+                    "id": "fbc582ff-4c2a-4d15-9008-3e73df74169d",
+                    "createdAt": 1779914769.06,
+                    "message": "(service luciel-worker-service) (deployment ecs-svc/0440438650391747992) deployment completed."
+                },
+                {
+                    "id": "8e2d67ad-588d-4864-85da-dff70de3062e",
+                    "createdAt": 1779914687.847,
+                    "message": "(service luciel-worker-service) has stopped 1 running tasks: (task b65badd0d6a541ce911320e846cb213a)."
+                },
+                {
+                    "id": "a55006e2-8649-451c-a8f8-6e2cd0903e74",
+                    "createdAt": 1779914616.621,
+                    "message": "(service luciel-worker-service) has started 1 tasks: (task 424bb73a17934953964e71d150eb2e5c)."
+                }
+            ],
+            "createdAt": 1777140154.277,
+            "currentServiceRevisions": [
+                {
+                    "arn": "arn:aws:ecs:ca-central-1:729005488042:service-revision/luciel-cluster/luciel-worker-service/8798172405601471471",
+                    "requestedTaskCount": 1,
+                    "runningTaskCount": 1,
+                    "pendingTaskCount": 0
+                }
+            ],
+            "placementConstraints": [],
+            "placementStrategy": [],
+            "networkConfiguration": {
+                "awsvpcConfiguration": {
+                    "subnets": [
+                        "subnet-0e54df62d1a4463bc",
+                        "subnet-0e95d953fd553cbd1"
+                    ],
+                    "securityGroups": [
+                        "sg-0f2e317f987925601"
+                    ],
+                    "assignPublicIp": "ENABLED"
+                }
+            },
+            "healthCheckGracePeriodSeconds": 120,
+            "schedulingStrategy": "REPLICA",
+            "deploymentController": {
+                "type": "ECS"
+            },
+            "createdBy": "arn:aws:iam::729005488042:user/luciel-admin",
+            "enableECSManagedTags": false,
+            "propagateTags": "NONE",
+            "enableExecuteCommand": true,
+            "availabilityZoneRebalancing": "ENABLED",
+            "resourceManagementType": "CUSTOMER"
+        }
+    ],
+    "failures": []
+}

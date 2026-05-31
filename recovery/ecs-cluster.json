@@ -1,0 +1,24 @@
+{
+    "clusters": [
+        {
+            "clusterArn": "arn:aws:ecs:ca-central-1:729005488042:cluster/luciel-cluster",
+            "clusterName": "luciel-cluster",
+            "status": "ACTIVE",
+            "registeredContainerInstancesCount": 0,
+            "runningTasksCount": 2,
+            "pendingTasksCount": 0,
+            "activeServicesCount": 2,
+            "statistics": [],
+            "tags": [],
+            "settings": [
+                {
+                    "name": "containerInsights",
+                    "value": "enabled"
+                }
+            ],
+            "capacityProviders": [],
+            "defaultCapacityProviderStrategy": []
+        }
+    ],
+    "failures": []
+}

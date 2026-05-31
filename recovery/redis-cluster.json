@@ -1,0 +1,56 @@
+{
+    "CacheClusters": [
+        {
+            "CacheClusterId": "luciel-redis-0001-001",
+            "ClientDownloadLandingPage": "https://console.aws.amazon.com/elasticache/home#client-download:",
+            "CacheNodeType": "cache.t4g.micro",
+            "Engine": "redis",
+            "EngineVersion": "7.1.0",
+            "CacheClusterStatus": "available",
+            "NumCacheNodes": 1,
+            "PreferredAvailabilityZone": "ca-central-1a",
+            "CacheClusterCreateTime": "2026-04-15T20:26:48.921Z",
+            "PreferredMaintenanceWindow": "wed:03:30-wed:04:30",
+            "PendingModifiedValues": {},
+            "CacheSecurityGroups": [],
+            "CacheParameterGroup": {
+                "CacheParameterGroupName": "default.redis7.cluster.on",
+                "ParameterApplyStatus": "in-sync",
+                "CacheNodeIdsToReboot": []
+            },
+            "CacheSubnetGroupName": "luciel-redis-subnets",
+            "CacheNodes": [
+                {
+                    "CacheNodeId": "0001",
+                    "CacheNodeStatus": "available",
+                    "CacheNodeCreateTime": "2026-04-15T20:26:48.921Z",
+                    "Endpoint": {
+                        "Address": "luciel-redis-0001-001.luciel-redis.xzhato.cac1.cache.amazonaws.com",
+                        "Port": 6379
+                    },
+                    "ParameterGroupStatus": "in-sync",
+                    "CustomerAvailabilityZone": "ca-central-1a"
+                }
+            ],
+            "AutoMinorVersionUpgrade": true,
+            "SecurityGroups": [
+                {
+                    "SecurityGroupId": "sg-0ccdf4414eaf30989",
+                    "Status": "active"
+                }
+            ],
+            "ReplicationGroupId": "luciel-redis",
+            "SnapshotRetentionLimit": 0,
+            "SnapshotWindow": "04:30-05:30",
+            "AuthTokenEnabled": false,
+            "TransitEncryptionEnabled": true,
+            "AtRestEncryptionEnabled": true,
+            "ARN": "arn:aws:elasticache:ca-central-1:729005488042:cluster:luciel-redis-0001-001",
+            "ReplicationGroupLogDeliveryEnabled": false,
+            "LogDeliveryConfigurations": [],
+            "NetworkType": "ipv4",
+            "IpDiscovery": "ipv4",
+            "TransitEncryptionMode": "required"
+        }
+    ]
+}
