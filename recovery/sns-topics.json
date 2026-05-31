@@ -1,0 +1,13 @@
+{
+    "Topics": [
+        {
+            "TopicArn": "arn:aws:sns:ca-central-1:729005488042:luciel-prod-alerts"
+        },
+        {
+            "TopicArn": "arn:aws:sns:ca-central-1:729005488042:luciel-prod-pagerduty-high"
+        },
+        {
+            "TopicArn": "arn:aws:sns:ca-central-1:729005488042:luciel-ses-events"
+        }
+    ]
+}
