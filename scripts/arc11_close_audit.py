@@ -100,8 +100,10 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     # ``arc12b_custom_roles_permission_model``; Arc 13 then appends
     # ``arc13_a_channel_routes`` → ``arc13_b_instance_channel_fields``;
     # Arc 14 U2 appends ``arc14_u2_escalation_events`` (the §3.4.5
-    # escalation event store), advancing the single head to it.
-    expected_head = "arc14_u2_escalation_events"
+    # escalation event store); Arc 14 U4 then appends
+    # ``arc14_u4_leads`` (the §3.4.4 lead-capture / §3.4.7 summary
+    # table), advancing the single head to it.
+    expected_head = "arc14_u4_leads"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],

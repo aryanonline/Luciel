@@ -82,6 +82,8 @@ from app.models.escalation_event import (  # noqa: F401
     GATE_OUTCOME,
     ALLOWED_GATES,
 )
+# Arc 14 U4 — §3.4.4 lead capture + §3.4.7 summarization (cognition).
+from app.models.lead import Lead  # noqa: F401
 # Arc 12 WU6 — BYO webhook config + general-purpose tool execution log.
 from app.models.byo_webhook_endpoint import ByoWebhookEndpoint  # noqa: F401
 from app.models.tool_execution_log import (  # noqa: F401
@@ -166,6 +168,8 @@ __all__ = [
     "GATE_INTAKE",
     "GATE_OUTCOME",
     "ALLOWED_GATES",
+    # Arc 14 U4 -- §3.4.4 lead capture + §3.4.7 summarization.
+    "Lead",
     # Arc 12 WU6 -- BYO webhook config + tool execution log.
     "ByoWebhookEndpoint",
     "ToolExecutionLog",

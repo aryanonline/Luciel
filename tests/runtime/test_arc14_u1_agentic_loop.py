@@ -229,25 +229,35 @@ class TestToolDispatch(unittest.TestCase):
                 _plan_json(
                     reply="looking that up",
                     tool_calls=[{"tool": "lookup_property", "parameters": {"id": 5}}],
-                )
+                ),
+                # Synthesis pass: no tool, so the loop stops after one
+                # dispatch (otherwise the scripted router would re-issue
+                # the same tool call and dispatch again).
+                _plan_json(reply="here is what I found", confidence=0.9),
             ]
         )
         broker = _RecordingBroker()
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=broker
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=broker,
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
 
         # The loop dispatched through the broker (the fake stands in for
-        # gates 1+2) and the trace records the tool name.
+        # gates 1+2) exactly once, and the trace records the tool name.
         self.assertEqual(broker.dispatched, [("lookup_property", {"id": 5})])
         self.assertTrue(resp.tool_called)
         self.assertEqual(resp.tool_name, "lookup_property")
 
     def test_tool_context_carries_admin_and_instance(self):
         router = _ScriptedRouter(
-            [_plan_json(tool_calls=[{"tool": "send_sms", "parameters": {}}])]
+            [
+                _plan_json(tool_calls=[{"tool": "send_sms", "parameters": {}}]),
+                _plan_json(reply="sent", confidence=0.9),
+            ]
         )
 
         seen = {}
@@ -258,7 +268,10 @@ class TestToolDispatch(unittest.TestCase):
                 return ToolResult(success=True, output="ok")
 
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=_CtxBroker()
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=_CtxBroker(),
+            escalation_judge=_neutral_judge(),
         )
         _run(orch, _request(instance_id=7))
 
@@ -310,12 +323,23 @@ class TestToolDispatch(unittest.TestCase):
         second_prompt = router.calls[1].messages[0].content
         self.assertIn("not authorised", second_prompt)
 
-    def test_successful_tool_does_not_trigger_reflect_reentry(self):
+    def test_successful_tool_triggers_one_synthesis_pass(self):
+        # U4 carry-forward (behaviour legitimately moved from U1): a
+        # SUCCESSFUL tool now triggers exactly ONE synthesis PLAN pass so
+        # the emitted reply incorporates the tool output (the U1 pre-tool
+        # draft was composed before the tool ran). The synthesis reply
+        # carries no tool_calls, so the loop stops after the 2nd pass.
         router = _ScriptedRouter(
-            [_plan_json(tool_calls=[{"tool": "lookup_property", "parameters": {}}])]
+            [
+                _plan_json(
+                    reply="let me look that up",
+                    tool_calls=[{"tool": "lookup_property", "parameters": {}}],
+                ),
+                _plan_json(reply="The property is listed at $500k.", confidence=0.9),
+            ]
         )
         broker = _RecordingBroker(
-            {"lookup_property": ToolResult(success=True, output="found")}
+            {"lookup_property": ToolResult(success=True, output="price=$500k")}
         )
         orch = LucielOrchestrator(
             trace_service=_StubTrace(),
@@ -326,9 +350,14 @@ class TestToolDispatch(unittest.TestCase):
 
         resp = _run(orch, _request())
 
-        # Tool succeeded → answer satisfactory → no re-entry. 1 PLAN call.
-        self.assertEqual(len(router.calls), 1)
-        self.assertEqual(resp.iterations, 1)
+        # 2 PLAN calls (initial + synthesis), 2 iterations, final reply is
+        # the synthesised answer that wove in the tool output.
+        self.assertEqual(len(router.calls), 2)
+        self.assertEqual(resp.iterations, 2)
+        self.assertEqual(resp.message, "The property is listed at $500k.")
+        # The successful tool output was fed back into the synthesis prompt.
+        synthesis_prompt = router.calls[1].messages[0].content
+        self.assertIn("price=$500k", synthesis_prompt)
 
 
 # =====================================================================
@@ -414,7 +443,10 @@ class TestTraceFinalization(unittest.TestCase):
 
     def test_trace_records_tool_called_and_name(self):
         router = _ScriptedRouter(
-            [_plan_json(tool_calls=[{"tool": "book_appointment", "parameters": {}}])],
+            [
+                _plan_json(tool_calls=[{"tool": "book_appointment", "parameters": {}}]),
+                _plan_json(reply="booked for you", confidence=0.9),
+            ],
             provider="openai",
             model="gpt-x",
         )
@@ -425,6 +457,7 @@ class TestTraceFinalization(unittest.TestCase):
             tool_broker=_RecordingBroker(
                 {"book_appointment": ToolResult(success=True, output="booked")}
             ),
+            escalation_judge=_neutral_judge(),
         )
 
         _run(orch, _request())

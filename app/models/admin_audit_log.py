@@ -577,6 +577,21 @@ ACTION_CHANNEL_OUTBOUND_DELIVERED = "channel_outbound_delivered"
 #   audit-significant (a customer turn was handed to a human).
 ACTION_ESCALATION_FIRED = "escalation_fired"
 
+# Arc 14 U4 — §3.4.4 lead capture (cognition, always-on every tier).
+#
+# ACTION_LEAD_CAPTURED -- emitted by the orchestrator's COGNITION
+#   FINALIZATION step when a conversation crosses the §3.4.4 lead
+#   threshold (contact info given, specific-listing intent, budget
+#   mentioned, or otherwise sales-qualified) and VantageMind writes its
+#   own structured lead row. Distinct from ACTION_ESCALATION_FIRED:
+#   capturing a lead is not a handoff (most leads never escalate), and
+#   distinct from any push_to_crm tool verb (push_to_crm extends a
+#   captured lead OUTWARD — lead capture writes VantageMind's own row).
+#   resource_type = RESOURCE_LEAD; resource_pk = leads.id;
+#   resource_natural_id = the session_id. §5.1 audit-significant because
+#   a lead row carries customer contact/PII the operator can act on.
+ACTION_LEAD_CAPTURED = "lead_captured"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -713,6 +728,8 @@ ALLOWED_ACTIONS = (
     ACTION_CHANNEL_OUTBOUND_DELIVERED,
     # Arc 14 U2 — §3.4.5 escalation judgment.
     ACTION_ESCALATION_FIRED,
+    # Arc 14 U4 — §3.4.4 lead capture cognition.
+    ACTION_LEAD_CAPTURED,
 )
 
 
@@ -837,6 +854,12 @@ RESOURCE_INSTANCE_CHANNEL = "instance_channel"
 # escalation for this conversation" with a single filter.
 RESOURCE_ESCALATION_EVENT = "escalation_event"
 
+# Arc 14 U4 — leads row (§3.4.4). The auditable resource for
+# ACTION_LEAD_CAPTURED. resource_pk = leads.id; resource_natural_id =
+# the session_id so an auditor can answer "every lead captured in this
+# conversation" with a single filter.
+RESOURCE_LEAD = "lead"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -880,6 +903,8 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_INSTANCE_CHANNEL,
     # Arc 14 U2 — escalation judgment event store.
     RESOURCE_ESCALATION_EVENT,
+    # Arc 14 U4 — lead capture cognition.
+    RESOURCE_LEAD,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):

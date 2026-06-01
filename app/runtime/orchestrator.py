@@ -91,11 +91,16 @@ class LucielOrchestrator:
         escalation_judge=None,
         escalation_service=None,
         channel_arbiter=None,
+        cognition_finalizer=None,
     ) -> None:
         self.context = ContextAssembler()
         self._trace_service = trace_service
         self._model_router = model_router
         self._tool_broker = tool_broker
+        # Arc 14 U4 — §3.4.4/§3.4.6/§3.4.7 COGNITION FINALIZATION (lead
+        # capture + summary + live handoff). Always-on cognition; built
+        # lazily so pre-U4 call sites keep working. Injectable for tests.
+        self._cognition_finalizer = cognition_finalizer
         # Arc 14 U3 — the §3.4.2 channel arbiter (pure decision). The
         # RESPOND step calls it to pick the outbound channel. Injectable
         # for tests; built lazily (it has no dependencies).
@@ -166,7 +171,8 @@ class LucielOrchestrator:
         )
 
         # 7. COGNITION FINALIZATION — fill the trace fields the stub
-        #    left None/False. (Folding CognitionService behaviours is U4.)
+        #    left None/False, then run always-on cognition (§3.4.4 lead
+        #    capture + §3.4.7 summary + §3.4.6 live handoff).
         trace_id = self._record_trace_best_effort(
             req=req,
             assistant_reply=message,
@@ -176,6 +182,12 @@ class LucielOrchestrator:
             tool_called=loop.tool_called,
             tool_name=loop.tool_name,
             escalated=escalation_flag,
+        )
+        self._finalize_cognition(
+            req=req,
+            assistant_reply=message,
+            escalation_fired=escalation_flag,
+            escalation_decision=outcome_decision,
         )
 
         return RuntimeResponse(
@@ -389,6 +401,17 @@ class LucielOrchestrator:
             tool_name=None,
             escalated=True,
         )
+        # COGNITION FINALIZATION on the short-circuit path too: a Gate-1
+        # escalation IS an escalation, so lead capture + summary still
+        # run and a live handoff bundle is built (Gate-1 fires on an
+        # explicit human request or strong negative sentiment — both
+        # warrant a real-time takeover).
+        self._finalize_cognition(
+            req=req,
+            assistant_reply=message,
+            escalation_fired=True,
+            escalation_decision=decision,
+        )
         return RuntimeResponse(
             message=message,
             trace_id=trace_id,
@@ -424,6 +447,82 @@ class LucielOrchestrator:
                 "on the turn but side-effects degraded",
                 type(exc).__name__,
             )
+
+    # ------------------------------------------------------------------
+    # COGNITION FINALIZATION — Arc 14 U4 (§3.4.4 / §3.4.6 / §3.4.7)
+    # ------------------------------------------------------------------
+
+    def _finalize_cognition(
+        self,
+        *,
+        req: RuntimeRequest,
+        assistant_reply: str,
+        escalation_fired: bool,
+        escalation_decision,
+    ) -> None:
+        """Run always-on COGNITION FINALIZATION (lead + summary + handoff).
+
+        Best-effort: never raises. The reply has already been chosen and
+        the trace already written; this is a pure side-effect half (§5.1)
+        — a failure degrades to a warning rather than crashing the turn.
+
+        ``handoff_requested`` (the §3.4.6 real-time takeover signal) is
+        derived from the firing escalation signal: an EXPLICIT HUMAN
+        REQUEST always warrants a live takeover; the other signals flag
+        the conversation for follow-up but do not by themselves pull the
+        customer into a live transfer. When nothing escalated there is no
+        handoff regardless.
+        """
+        try:
+            handoff_requested = self._handoff_warranted(escalation_decision)
+            self._finalizer().finalize(
+                admin_id=req.admin_id,
+                session_id=req.session_id,
+                luciel_instance_id=req.luciel_instance_id,
+                user_id=req.user_id,
+                current_message=req.message,
+                prior_customer_messages=req.recent_customer_messages,
+                assistant_reply=assistant_reply,
+                inbound_channel=req.channel,
+                escalation_fired=escalation_fired,
+                handoff_requested=handoff_requested,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "cognition finalization failed: exc_class=%s — turn unaffected",
+                type(exc).__name__,
+            )
+
+    @staticmethod
+    def _handoff_warranted(escalation_decision) -> bool:
+        """Decide whether the firing escalation warrants a live takeover.
+
+        §3.4.6: a live human handoff happens when the customer asked for
+        a person OR Luciel decided a real-time takeover is needed. We map
+        that to the EXPLICIT HUMAN REQUEST signal (the customer asking),
+        which is the unambiguous takeover trigger today. Other signals
+        (negative sentiment, low confidence, high-value lead) flag the
+        lead for human follow-up but do not force a live transfer. Never
+        raises — an unreadable decision degrades to "no live handoff."
+        """
+        if escalation_decision is None:
+            return False
+        try:
+            from app.models.escalation_event import (
+                SIGNAL_EXPLICIT_HUMAN_REQUEST,
+            )
+
+            return escalation_decision.signal == SIGNAL_EXPLICIT_HUMAN_REQUEST
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _finalizer(self):
+        """Return the injected CognitionFinalizer, or build one lazily."""
+        if self._cognition_finalizer is None:
+            from app.cognition.finalizer import CognitionFinalizer
+
+            self._cognition_finalizer = CognitionFinalizer()
+        return self._cognition_finalizer
 
     # ------------------------------------------------------------------
     # PLAN → ACT → REFLECT
@@ -466,19 +565,32 @@ class LucielOrchestrator:
             tool_results = self._act(req, plan, result)
 
             # REFLECT — decide whether to re-enter PLAN.
-            any_failure = any(not r.success for r in tool_results)
-            if not plan.tool_calls or not any_failure:
-                # Either nothing to act on, or every tool succeeded:
-                # the answer is taken as satisfactory. Stop.
+            if not plan.tool_calls:
+                # Nothing to act on: the PLAN reply is the answer. Stop.
                 break
 
             if iteration >= MAX_LOOP_ITERATIONS:
-                # Hard cost-control stop. NOT an escalation trigger.
+                # Hard cost-control stop. NOT an escalation trigger
+                # (§3.4.1 locked #17) — applies whether the trigger to
+                # re-enter was a failure OR a pending success-synthesis.
                 result.bound_hit = True
                 break
 
-            # Re-enter PLAN with the tool outcomes appended so the next
-            # plan can reason about the (gate-2 or execution) failures.
+            # Tools ran. Re-enter PLAN with the tool outcomes appended so
+            # the next pass can react. This covers BOTH axes of "answer
+            # satisfactory?":
+            #   * FAILURE  — the plan reasons about the (gate-2 or
+            #                execution) error and revises.
+            #   * SUCCESS  — the SYNTHESIS pass (U4 carry-forward): the
+            #                pre-tool draft was composed BEFORE the tool
+            #                ran, so it cannot reflect the tool output.
+            #                Feed the successful TOOL_RESULTS back and ask
+            #                the model to weave them into the final reply.
+            # The success path runs the synthesis pass exactly ONCE: the
+            # synthesised reply carries no tool_calls (the model answers
+            # from the results), so the next iteration's `not plan.tool_calls`
+            # branch stops the loop. Synthesis is NOT exempt from the
+            # 5-iteration bound (the iteration>=MAX guard above caps it).
             prompt = base_prompt + self._render_tool_feedback(tool_results)
 
         return result
