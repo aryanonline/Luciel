@@ -23,12 +23,16 @@ behaviours plus the pre-existing ``CognitionService`` behaviours:
 Behaviour-equivalence with ``CognitionService`` (§ the fold)
 ------------------------------------------------------------
 ``CognitionService`` (escalate / save_memory / get_session_summary)
-remains intact and its ``chat_service`` call site is unchanged — the
-legacy chat path keeps working verbatim. The orchestrator loop does NOT
-go through ``CognitionService``; instead this finalizer reproduces the
-two cognition behaviours that belong in the agentic-loop finalization:
-  * summarization — ``summarizer.summarize`` produces the SAME recap
-    shape as ``CognitionService._handle_session_summary``;
+remains the LIVE chat-path implementation and its ``chat_service`` call
+site is unchanged — that path keeps working verbatim. The orchestrator
+loop does NOT go through ``CognitionService.process_turn``; instead this
+finalizer composes the cognition behaviours that belong in the
+agentic-loop finalization, and SHARES one implementation for the
+overlapping bit rather than duplicating it (Arc 14 U5 de-dup):
+  * summarization — ``summarizer.summarize`` DELEGATES to
+    ``CognitionService.format_session_summary`` (the single source), so
+    the recap is byte-identical to the folded ``get_session_summary``
+    output; there is no second copy of the formatting to drift;
   * escalation side-effect — already fired by the loop's escalation
     gates via ``EscalationService.record_escalation`` (the U2 flow), so
     the finalizer does not re-fire it; it only adds the live-handoff

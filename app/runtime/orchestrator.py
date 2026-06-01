@@ -661,10 +661,21 @@ class LucielOrchestrator:
 
         from app.tools.base import ToolContext
 
+        # Arc 14 U5 — thread the Admin's tier + the per-instance enabled
+        # channel set onto the ToolContext so the broker's gate-1
+        # dispatch-time re-check (§3.3.3 hardening) can fully enforce.
+        # Both are already resolved by the loop (tier for the OUTCOME
+        # grounding floor; channels for the arbiter); reusing them here
+        # closes the dispatch-time re-check seam in ToolAuthorizer
+        # without any new lookup. Resolvers never raise (best-effort), so a failure
+        # degrades to the WU2 skip-the-check baseline rather than the
+        # turn crashing.
         context = ToolContext(
             admin_id=req.admin_id,
             instance_id=req.luciel_instance_id or 0,
             inbound_message_id=req.session_id,
+            admin_tier=self._resolve_tier(req),
+            enabled_channels=frozenset(self._resolve_enabled_channels(req)),
         )
 
         tool_results = []

@@ -5,49 +5,30 @@ orchestrator's COGNITION FINALIZATION step persists a structured summary
 alongside the captured lead row so the operator who picks the lead up
 has the conversation recap inline.
 
-Why deterministic
------------------
-Like ``lead_capture.detect``, this is deterministic (no LLM call) so it
-is hermetic + free in tests and a stable, assertable boundary. It mirrors
-the pre-WU7 ``SessionSummaryTool`` shape that ``CognitionService.
-_handle_session_summary`` preserves (role-prefixed, 150-char preview per
-message) so the summary the lead row carries is the SAME recap shape the
-folded ``get_session_summary`` behaviour produces. A richer LLM-backed
-summarizer is a later hook — it can replace ``summarize`` without
-touching the finalizer or the lead row shape.
+Single source of truth (Arc 14 U5 — the fold de-dup)
+----------------------------------------------------
+The recap formatting lives in exactly ONE place:
+``app.cognition.service.format_session_summary``. Both the live chat-path
+behaviour (``CognitionService._handle_session_summary``) and this
+finalizer-facing entry point delegate to it, so the summary the lead row
+carries is BYTE-IDENTICAL to the folded ``get_session_summary`` output —
+behaviour-equivalence by construction, not by two copies kept in sync.
+
+This module stays as the finalizer's import seam (``summarize``) so a
+richer LLM-backed summarizer could later replace the delegation here
+without touching the finalizer or the lead row shape.
 """
 from __future__ import annotations
 
-_PREVIEW_CHARS = 150
+from app.cognition.service import format_session_summary
 
 
 def summarize(messages: list[dict] | None) -> str:
     """Return a structured recap of the conversation messages.
 
     ``messages`` is the role/content turn list (``{"role", "content"}``),
-    oldest→newest. Matches the pre-WU7 ``SessionSummaryTool`` formatting
-    exactly (uppercased role prefix, 150-char preview per message) so the
-    persisted summary equals the folded ``get_session_summary`` output.
-
-    Never raises — a malformed turn list degrades to the empty-session
-    line rather than crashing finalization.
+    oldest→newest. Delegates to the single ``format_session_summary``
+    implementation so the persisted summary equals the folded
+    ``get_session_summary`` output exactly. Never raises.
     """
-    try:
-        if not messages:
-            return "No messages in this session yet."
-
-        parts = []
-        for msg in messages:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "") or ""
-            preview = (
-                content[:_PREVIEW_CHARS] + "..."
-                if len(content) > _PREVIEW_CHARS
-                else content
-            )
-            parts.append(f"{role.upper()}: {preview}")
-
-        body = "\n".join(parts)
-        return f"Session summary ({len(messages)} messages):\n{body}"
-    except Exception:  # noqa: BLE001 — never crash finalization over a summary
-        return "No messages in this session yet."
+    return format_session_summary(messages)

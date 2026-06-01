@@ -278,6 +278,44 @@ class TestToolDispatch(unittest.TestCase):
         self.assertEqual(seen["context"].admin_id, "admin-1")
         self.assertEqual(seen["context"].instance_id, 7)
 
+    def test_tool_context_carries_tier_and_enabled_channels(self):
+        # Arc 14 U5 — the ACT step threads the Admin's tier and the
+        # per-instance enabled-channel set onto ToolContext so the
+        # broker's §3.3.3 dispatch-time re-check can fully enforce.
+        router = _ScriptedRouter(
+            [
+                _plan_json(tool_calls=[{"tool": "send_sms", "parameters": {}}]),
+                _plan_json(reply="sent", confidence=0.9),
+            ]
+        )
+
+        seen = {}
+
+        class _CtxBroker(_RecordingBroker):
+            def execute_tool(self, tool_name, parameters=None, *, context=None, **extra):
+                seen["context"] = context
+                return ToolResult(success=True, output="ok")
+
+        orch = LucielOrchestrator(
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=_CtxBroker(),
+            escalation_judge=_neutral_judge(),
+        )
+        # Patch the loop's already-existing resolvers so the test is
+        # isolated from DB state — we assert the THREADING, not the
+        # (separately-tested) resolution.
+        with patch.object(orch, "_resolve_tier", return_value="pro"), \
+             patch.object(
+                 orch, "_resolve_enabled_channels", return_value={"sms", "email"}
+             ):
+            _run(orch, _request(instance_id=7))
+
+        self.assertEqual(seen["context"].admin_tier, "pro")
+        self.assertEqual(
+            seen["context"].enabled_channels, frozenset({"sms", "email"})
+        )
+
     def test_gate2_refusal_is_reasoned_about_and_reflects(self):
         # Gate-2 refusal shape: ToolResult(success=False) with an
         # authorization-denied metadata payload (same shape the real

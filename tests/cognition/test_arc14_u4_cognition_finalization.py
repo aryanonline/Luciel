@@ -147,6 +147,48 @@ class TestSummarizer(unittest.TestCase):
 
 
 # =====================================================================
+# Arc 14 U5 — single-source de-dup: the loop's summary (summarizer.
+# summarize, used by the finalizer) and the live chat-path summary
+# (CognitionService.get_session_summary) MUST be byte-identical because
+# both now delegate to ONE implementation (format_session_summary). This
+# proves Finding 1's behaviour-equivalence: summary logic in one place.
+# =====================================================================
+
+
+class TestSummarySingleSourceEquivalence(unittest.TestCase):
+    def _cases(self):
+        return [
+            [],
+            [{"role": "user", "content": "hello"}],
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hey there"},
+                {"role": "user", "content": "z" * 300},
+            ],
+            [{"role": "user", "content": ""}],
+        ]
+
+    def test_finalizer_summary_equals_chat_path_summary(self):
+        from app.cognition.service import (
+            CognitionService,
+            format_session_summary,
+        )
+
+        svc = CognitionService()
+        for messages in self._cases():
+            loop_summary = summarize(messages)
+            shared = format_session_summary(messages)
+            # Loop summary == single source.
+            self.assertEqual(loop_summary, shared)
+            # Chat-path summary == single source (non-empty case routes
+            # through the same function; empty case returns the same
+            # literal the function returns).
+            outcome = svc._handle_session_summary(messages=messages)
+            self.assertEqual(outcome.output, shared)
+            self.assertEqual(loop_summary, outcome.output)
+
+
+# =====================================================================
 # §3.4.4 + §3.4.7 — finalizer persists lead row + summary.
 # =====================================================================
 

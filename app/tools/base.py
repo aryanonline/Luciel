@@ -178,6 +178,22 @@ class ToolContext:
         composition tree for this inbound message. Backward-
         compatible: WU1/WU2/WU3 contexts that never enter the
         sibling dispatch path leave this ``None`` and never touch it.
+    admin_tier : Optional[str]
+        The Admin's subscription tier for the dispatch-time tier
+        re-check (Architecture §3.3.3 — the "Arc 14 hardening OPTION").
+        When present, ``ToolAuthorizer._check_tier`` compares it against
+        ``tool.requires_tier`` and refuses on mismatch; when ``None``
+        the check is SKIPPED (the WU2 baseline), so call sites that do
+        not know the tier are unaffected. Arc 14 U5 threads this from
+        the orchestrator's ACT step, which already resolves the tier for
+        the OUTCOME grounding floor.
+    enabled_channels : Optional[frozenset[str]]
+        The per-instance enabled-channel set for the dispatch-time
+        channel re-check (§3.3.3). When present,
+        ``ToolAuthorizer._check_channels`` refuses a tool whose
+        ``requires_channels`` are not all enabled; when ``None`` the
+        check is SKIPPED (WU2 baseline). Arc 14 U5 threads this from the
+        ACT step, which already resolves the set for the channel arbiter.
     """
 
     admin_id: str
@@ -186,6 +202,8 @@ class ToolContext:
     inbound_message_id: Optional[str] = None
     caller_instance_id: Optional[int] = None
     composition_state: Optional["SiblingCompositionState"] = None
+    admin_tier: Optional[str] = None
+    enabled_channels: Optional[frozenset[str]] = None
 
 
 # =====================================================================
