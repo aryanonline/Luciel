@@ -38,6 +38,13 @@ class RuntimeRequest:
     # current message alone. A caller that has session history can
     # supply the trailing customer turns here.
     recent_customer_messages: list[str] = field(default_factory=list)
+    # Arc 14 U3 — §3.4.2 channel arbiter. When the customer explicitly
+    # asks to switch channel ("text me", "email me instead"), the
+    # resolved channel id lands here and the arbiter's customer-initiated
+    # switch rule honours it (always wins, subject to enablement).
+    # Defaults None so every existing call site keeps working: no
+    # explicit request ⇒ the arbiter falls through to its other rules.
+    customer_requested_channel: str | None = None
 
 
 @dataclass
@@ -72,3 +79,13 @@ class RuntimeResponse:
     tool_name: str | None = None
     iterations: int = 0
     bound_hit: bool = False
+    # Arc 14 U3 — §3.4.2 channel arbiter outcome. ``response_channel`` is
+    # the channel the RESPOND step emitted on (the arbiter's pick, which
+    # defaults to the inbound channel). ``prompt_channel_switch`` is the
+    # permission-prompt marker: True only when a long SMS reply was moved
+    # to email and the customer should be asked before delivery on the
+    # new channel. Additive with defaults so existing call sites keep
+    # working; ``response_channel`` None means the arbiter did not run
+    # (e.g. a pre-loop short-circuit path that has no inbound channel).
+    response_channel: str | None = None
+    prompt_channel_switch: bool = False

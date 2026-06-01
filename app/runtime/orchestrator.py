@@ -90,11 +90,16 @@ class LucielOrchestrator:
         tool_broker=None,
         escalation_judge=None,
         escalation_service=None,
+        channel_arbiter=None,
     ) -> None:
         self.context = ContextAssembler()
         self._trace_service = trace_service
         self._model_router = model_router
         self._tool_broker = tool_broker
+        # Arc 14 U3 — the §3.4.2 channel arbiter (pure decision). The
+        # RESPOND step calls it to pick the outbound channel. Injectable
+        # for tests; built lazily (it has no dependencies).
+        self._channel_arbiter = channel_arbiter
         # Arc 14 U2 — the §3.4.5 judge (pure decision) and the
         # escalation side-effect service (event store + routing + audit).
         # Injectable so tests drive deterministic fakes; built lazily so
@@ -151,9 +156,14 @@ class LucielOrchestrator:
         if outcome_decision is not None:
             self._record_escalation_best_effort(outcome_decision)
 
-        # 6. RESPOND — U1 emits on the inbound channel; the §3.4.2
-        #    channel arbiter is U3.
+        # 6. RESPOND — the §3.4.2 channel arbiter picks the outbound
+        #    channel (replaces U1's "emit on inbound channel"). The pick
+        #    defaults safely to the inbound channel when channel info is
+        #    sparse, so this never breaks the turn.
         message = loop.reply
+        choice = self._arbitrate_channel(
+            req, reply=message, escalation_fired=escalation_flag
+        )
 
         # 7. COGNITION FINALIZATION — fill the trace fields the stub
         #    left None/False. (Folding CognitionService behaviours is U4.)
@@ -182,7 +192,87 @@ class LucielOrchestrator:
             tool_name=loop.tool_name,
             iterations=loop.iterations,
             bound_hit=loop.bound_hit,
+            response_channel=choice.channel,
+            prompt_channel_switch=choice.prompt_channel_switch,
         )
+
+    # ------------------------------------------------------------------
+    # Channel arbiter — Arc 14 U3 (§3.4.2)
+    # ------------------------------------------------------------------
+
+    def _arbitrate_channel(
+        self, req: RuntimeRequest, *, reply: str, escalation_fired: bool
+    ):
+        """RESPOND step — §3.4.2 channel arbiter pick.
+
+        Resolves the instance's enabled-channel set and runs the
+        decision tree. Never raises: any failure degrades to the inbound
+        channel so the turn always emits somewhere safe."""
+        from app.runtime.channel_arbiter import ArbiterInput, ChannelChoice
+
+        try:
+            enabled = self._resolve_enabled_channels(req)
+            return self._arbiter().pick(
+                ArbiterInput(
+                    inbound_channel=req.channel,
+                    enabled_channels=enabled,
+                    response_length=len(reply or ""),
+                    escalation_fired=escalation_fired,
+                    customer_requested_channel=req.customer_requested_channel,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "channel arbiter failed: exc_class=%s — defaulting to inbound "
+                "channel",
+                type(exc).__name__,
+            )
+            return ChannelChoice(
+                channel=req.channel, reason="arbiter_error_fallback_inbound"
+            )
+
+    def _resolve_enabled_channels(self, req: RuntimeRequest) -> set[str]:
+        """Read the per-Instance enabled-channel set (ARC 13
+        ``instances.enabled_channels`` + the widget floor).
+
+        Best-effort: when no instance id is on the request, or the lookup
+        fails, return just the inbound channel so the arbiter degrades to
+        a same-channel reply rather than crashing the turn. The arbiter
+        also adds the widget floor + inbound channel defensively."""
+        from app.policy.entitlements import CHANNEL_WIDGET
+
+        if req.luciel_instance_id is None:
+            return {req.channel, CHANNEL_WIDGET}
+
+        try:
+            from app.db.session import SessionLocal
+            from app.models.instance import Instance
+
+            db = SessionLocal()
+            try:
+                instance = db.get(Instance, req.luciel_instance_id)
+                if instance is None:
+                    return {req.channel, CHANNEL_WIDGET}
+                enabled = set(instance.enabled_channels or ())
+                enabled.add(CHANNEL_WIDGET)
+                return enabled
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "enabled-channel resolution failed: exc_class=%s — defaulting "
+                "to inbound channel only",
+                type(exc).__name__,
+            )
+            return {req.channel, CHANNEL_WIDGET}
+
+    def _arbiter(self):
+        """Return the injected ChannelArbiter, or build one lazily."""
+        if self._channel_arbiter is None:
+            from app.runtime.channel_arbiter import ChannelArbiter
+
+            self._channel_arbiter = ChannelArbiter()
+        return self._channel_arbiter
 
     # ------------------------------------------------------------------
     # Escalation gates — Arc 14 U2 (§3.4.5)
@@ -283,6 +373,12 @@ class LucielOrchestrator:
         self._record_escalation_best_effort(decision)
 
         message = handoff_acknowledgement()
+        # Gate-1 IS an escalation: let the arbiter pick the outbound
+        # channel for the handoff acknowledgement too (escalation rule →
+        # highest-priority enabled channel, fallback inbound).
+        choice = self._arbitrate_channel(
+            req, reply=message, escalation_fired=True
+        )
         trace_id = self._record_trace_best_effort(
             req=req,
             assistant_reply=message,
@@ -311,6 +407,8 @@ class LucielOrchestrator:
             tool_name=None,
             iterations=0,
             bound_hit=False,
+            response_channel=choice.channel,
+            prompt_channel_switch=choice.prompt_channel_switch,
         )
 
     def _record_escalation_best_effort(self, decision) -> None:
