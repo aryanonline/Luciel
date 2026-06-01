@@ -30,10 +30,40 @@ import unittest
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
+from app.integrations.llm.base import LLMResponse
 from app.knowledge.retriever import RetrievedChunk
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.contracts import RuntimeRequest, RuntimeResponse
 from app.runtime.orchestrator import LucielOrchestrator
+
+
+class _FakeRouter:
+    """Deterministic ModelRouter stand-in for the ARC 11 wiring tests.
+
+    Arc 14 U1 turned ``run`` into a real agentic loop that makes a PLAN
+    call. These ARC 11 tests never cared about the LLM (they assert
+    retriever + trace wiring), so we inject a fake router that returns
+    a fixed PLAN JSON with NO tool calls — keeping the tests hermetic
+    (founder decision #2: no network, no API cost) and fast, while every
+    original retriever/trace assertion is preserved unchanged.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def generate(self, request, *, preferred_provider=None) -> LLMResponse:
+        self.calls.append(request)
+        return LLMResponse(
+            content='{"reply": "ok", "tool_calls": [], "confidence": 0.8}',
+            model="fake-model",
+            provider="fake",
+        )
+
+
+def _orch(trace=None):
+    """Build an orchestrator with a deterministic fake LLM router so the
+    ARC 11 wiring tests never touch a live provider."""
+    return LucielOrchestrator(trace_service=trace, model_router=_FakeRouter())
 
 
 def _chunk(
@@ -89,7 +119,7 @@ class TestW1FlagOff(unittest.TestCase):
 
     def test_w1_retriever_not_called_when_flag_off(self):
         trace = _StubTraceService()
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         with patch(
             "app.runtime.orchestrator.LucielOrchestrator._retrieve",
@@ -104,7 +134,7 @@ class TestW1FlagOff(unittest.TestCase):
 
     def test_w1_trace_recorded_with_empty_array_when_flag_off(self):
         trace = _StubTraceService()
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         with patch(
             "app.core.config.settings.knowledge_retrieval_enabled", False,
@@ -125,7 +155,7 @@ class TestW2FlagOnHappyPath(unittest.TestCase):
     def test_w2_retriever_called_once_and_source_pks_flow_through(self):
         chunks = [_chunk(42), _chunk(99, chunk_id=2)]
         trace = _StubTraceService()
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         with patch(
             "app.runtime.orchestrator.LucielOrchestrator._retrieve",
@@ -144,7 +174,7 @@ class TestW2FlagOnHappyPath(unittest.TestCase):
         chunks = [_chunk(42)]
         trace = _StubTraceService()
         trace.next_trace_id = "trace-zzz"
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         with patch(
             "app.runtime.orchestrator.LucielOrchestrator._retrieve",
@@ -166,7 +196,7 @@ class TestW3NoInstanceId(unittest.TestCase):
 
     def test_w3_retriever_not_called_when_instance_id_none(self):
         trace = _StubTraceService()
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         with patch(
             "app.runtime.orchestrator.LucielOrchestrator._retrieve",
@@ -195,7 +225,7 @@ class TestW4RetrieverRaises(unittest.TestCase):
         # Patch the underlying KnowledgeRetriever.retrieve_with_sources
         # so the orchestrator's own _retrieve catches and returns [].
         trace = _StubTraceService()
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         # The retriever module is lazy-imported inside _retrieve, so
         # we patch the call site's KnowledgeRetriever class indirectly
@@ -222,7 +252,7 @@ class TestW4RetrieverRaises(unittest.TestCase):
         ``retrieve_with_sources``."""
         from app.knowledge.retriever import KnowledgeRetriever
 
-        orch = LucielOrchestrator(trace_service=_StubTraceService())
+        orch = _orch(_StubTraceService())
 
         # Build a fake retriever class whose .retrieve_with_sources
         # raises. Patch the symbol the orchestrator's _retrieve
@@ -266,7 +296,7 @@ class TestW5RecordTraceRaises(unittest.TestCase):
 
     def test_w5_response_returned_with_fresh_uuid_when_trace_fails(self):
         trace = _StubTraceService(raise_on_record=True)
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         with patch(
             "app.runtime.orchestrator.LucielOrchestrator._retrieve",
@@ -294,7 +324,7 @@ class TestW5RecordTraceRaises(unittest.TestCase):
         in-memory caller still sees what would have been recorded."""
         chunks = [_chunk(7)]
         trace = _StubTraceService(raise_on_record=True)
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         with patch(
             "app.runtime.orchestrator.LucielOrchestrator._retrieve",
@@ -376,7 +406,7 @@ class TestW7TraceServiceDi(unittest.TestCase):
 
     def test_w7_injected_trace_service_is_used_directly(self):
         trace = _StubTraceService()
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         with patch(
             "app.core.config.settings.knowledge_retrieval_enabled", False,
@@ -389,7 +419,10 @@ class TestW7TraceServiceDi(unittest.TestCase):
         """When no trace_service is injected, the orchestrator
         builds one via the resolve helper. Mock the resolver to
         prove the lazy path fires."""
-        orch = LucielOrchestrator()  # no kwarg
+        # No trace_service kwarg — exercise the lazy trace path. Inject
+        # a fake LLM router so the PLAN call stays offline (the lazy
+        # ModelRouter is not what this test is about).
+        orch = LucielOrchestrator(model_router=_FakeRouter())
         lazy_stub = _StubTraceService()
 
         with patch.object(
@@ -415,7 +448,7 @@ class TestW8CollectSourcePks(unittest.TestCase):
         an int (the source_id FK is NOT NULL). The orchestrator
         wiring just dedupes + preserves insertion order."""
         trace = _StubTraceService()
-        orch = LucielOrchestrator(trace_service=trace)
+        orch = _orch(trace)
 
         chunks = [
             _chunk(10, chunk_id=1),

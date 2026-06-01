@@ -45,3 +45,22 @@ class RuntimeResponse:
     # retriever ran; ``[]`` otherwise. Same value is written into
     # ``traces.source_ids_used`` via TraceService.record_trace.
     source_ids_used: list[int] = field(default_factory=list)
+    # Arc 14 U1 — agentic-loop observability. Additive with defaults so
+    # every existing positional/keyword call site keeps working.
+    #
+    #   llm_provider / llm_model — which provider+model the PLAN call
+    #       resolved to (None when the loop degraded without an LLM
+    #       call, e.g. no provider configured in a unit test).
+    #   tool_called / tool_name  — whether ACT dispatched at least one
+    #       tool through the broker this turn, and the last tool id.
+    #   iterations               — how many PLAN→ACT→REFLECT passes ran
+    #       (1..MAX). Bounded by the doctrinal cap of 5 (§3.4.1).
+    #   bound_hit                — True iff the loop stopped because it
+    #       reached the iteration cap. This is cost-control ONLY and is
+    #       explicitly NOT an escalation trigger (§3.4.1 locked #17).
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    tool_called: bool = False
+    tool_name: str | None = None
+    iterations: int = 0
+    bound_hit: bool = False
