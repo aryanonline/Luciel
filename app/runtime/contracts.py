@@ -30,6 +30,14 @@ class RuntimeRequest:
     # When None the orchestrator skips the Retrieve step regardless
     # of the feature flag (no instance ⇒ nothing to retrieve from).
     luciel_instance_id: int | None = None
+    # Arc 14 U2 — trailing customer-message window for the §3.4.5
+    # strong-negative-sentiment intake signal, oldest→newest, NOT
+    # including the current ``message``. Defaults empty so every
+    # existing call site (which has no history surface yet) keeps
+    # working: with an empty window the sentiment signal evaluates the
+    # current message alone. A caller that has session history can
+    # supply the trailing customer turns here.
+    recent_customer_messages: list[str] = field(default_factory=list)
 
 
 @dataclass

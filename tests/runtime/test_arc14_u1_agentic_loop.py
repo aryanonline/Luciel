@@ -79,6 +79,33 @@ class _StubTrace:
         return "trace-fixed-id"
 
 
+# Neutral judge for loop-focused tests: the INTAKE gate must not consume
+# router calls or fire while we're asserting loop behaviour. Injecting a
+# judge with fake non-firing classifiers keeps these tests about the loop
+# (the §3.4.5 signal behaviour has its own dedicated U2 suite).
+class _NeutralIntent:
+    def classify_intent(self, message):
+        from app.runtime.classifiers import INTENT_OTHER, IntentResult
+
+        return IntentResult(intent_class=INTENT_OTHER, confidence=0.0)
+
+
+class _NeutralSentiment:
+    def score_sentiment(self, message):
+        from app.runtime.classifiers import SentimentResult
+
+        return SentimentResult(score=0.0)
+
+
+def _neutral_judge():
+    from app.runtime.escalation_judge import EscalationJudge
+
+    return EscalationJudge(
+        intent_classifier=_NeutralIntent(),
+        sentiment_classifier=_NeutralSentiment(),
+    )
+
+
 def _request(message="hello", instance_id=7):
     return RuntimeRequest(
         message=message,
@@ -122,7 +149,10 @@ class TestLoopEndToEnd(unittest.TestCase):
         router = _ScriptedRouter([_plan_json(reply="Hi there", confidence=0.91)])
         trace = _StubTrace()
         orch = LucielOrchestrator(
-            trace_service=trace, model_router=router, tool_broker=_RecordingBroker()
+            trace_service=trace,
+            model_router=router,
+            tool_broker=_RecordingBroker(),
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
@@ -155,21 +185,35 @@ class TestLoopEndToEnd(unittest.TestCase):
             def generate(self, request, *, preferred_provider=None):
                 raise RuntimeError("all providers failed")
 
+        # Inject a fake escalation service so the (now-firing) U2 OUTCOME
+        # gate touches no DB.
+        class _FakeEscalationSvc:
+            def __init__(self):
+                self.recorded = []
+
+            def record_escalation(self, decision):
+                self.recorded.append(decision)
+
+        esc = _FakeEscalationSvc()
         orch = LucielOrchestrator(
             trace_service=_StubTrace(),
             model_router=_BoomRouter(),
             tool_broker=_RecordingBroker(),
+            escalation_service=esc,
         )
 
         resp = _run(orch, _request())
 
         # Turn survives: a customer-facing reply is produced, confidence
-        # floors at 0.0, no tool dispatched, no escalation (gate is U1
-        # pass-through).
+        # floors at 0.0, no tool dispatched. The boom router degrades the
+        # intake classifiers to neutral (no live call, no intake fire),
+        # but a 0.0-confidence ungrounded answer DOES fire the U2 OUTCOME
+        # cannot-confidently-answer signal — which is correct doctrine.
         self.assertTrue(resp.message)
         self.assertEqual(resp.confidence, 0.0)
         self.assertFalse(resp.tool_called)
-        self.assertFalse(resp.escalation_flag)
+        self.assertTrue(resp.escalation_flag)
+        self.assertEqual(esc.recorded[0].signal, "cannot_confidently_answer")
 
 
 # =====================================================================
@@ -248,7 +292,10 @@ class TestToolDispatch(unittest.TestCase):
         )
         broker = _RecordingBroker({"push_to_crm": refusal})
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=broker
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=broker,
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
@@ -271,7 +318,10 @@ class TestToolDispatch(unittest.TestCase):
             {"lookup_property": ToolResult(success=True, output="found")}
         )
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=broker
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=broker,
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
@@ -300,7 +350,10 @@ class TestIterationBound(unittest.TestCase):
         )
         broker = _RecordingBroker({"push_to_crm": failing})
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=broker
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=broker,
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
@@ -402,13 +455,26 @@ class TestTraceFinalization(unittest.TestCase):
 
 
 # =====================================================================
-# Escalation gates are PASS-THROUGH in U1
+# Escalation gates with NO classifier signal — U2 drop-in still passes
+# through cleanly when nothing fires.
+#
+# These were U1 pass-through pins. U2 replaces the pass-through with the
+# real §3.4.5 gates; the gates are wired to the SAME injected router as
+# PLAN, so a scripted/boom router that returns plan-shaped (not
+# classifier-shaped) JSON yields a neutral classification and the INTAKE
+# gate does NOT fire — proving the gate is signal-driven, not a blanket
+# short-circuit. The detailed signal-boundary + firing behaviour lives
+# in the dedicated U2 suite (test_arc14_u2_escalation_*).
 # =====================================================================
 
 
-class TestEscalationGatesPassThrough(unittest.TestCase):
+class TestEscalationGatesNeutralPassThrough(unittest.TestCase):
 
-    def test_intake_gate_does_not_short_circuit_plan(self):
+    def test_intake_gate_neutral_signal_does_not_short_circuit_plan(self):
+        # The injected scripted router returns PLAN-shaped JSON for every
+        # call, including the intent classifier's call. That parses to a
+        # neutral intent ("other") so the explicit-human-request signal
+        # does NOT fire and PLAN runs normally.
         router = _ScriptedRouter([_plan_json(reply="planned")])
         orch = LucielOrchestrator(
             trace_service=_StubTrace(),
@@ -418,25 +484,37 @@ class TestEscalationGatesPassThrough(unittest.TestCase):
 
         resp = _run(orch, _request(message="I want a human right now!!"))
 
-        # U1 intake gate is pass-through: PLAN still ran (1 call) and the
-        # reply is the planned one, NOT a handoff acknowledgement.
-        self.assertEqual(len(router.calls), 1)
         self.assertEqual(resp.message, "planned")
         self.assertFalse(resp.escalation_flag)
 
-    def test_outcome_gate_does_not_escalate_even_on_low_confidence(self):
+    def test_outcome_low_confidence_with_no_retrieval_now_escalates(self):
+        # U2 behaviour change (observable, not silent): a low-confidence
+        # answer with NO grounding (retrieval flag off ⇒ grounding None ⇒
+        # treated as below every tier floor) fires the cannot-confidently-
+        # answer OUTCOME signal. The customer-facing reply is still
+        # emitted; escalation is an additive side-effect on the turn.
         router = _ScriptedRouter([_plan_json(reply="unsure", confidence=0.1)])
+        # Inject a fake escalation service so no DB is touched and we can
+        # assert the decision was recorded.
+        recorded: list = []
+
+        class _FakeEscalationSvc:
+            def record_escalation(self, decision):
+                recorded.append(decision)
+
         orch = LucielOrchestrator(
             trace_service=_StubTrace(),
             model_router=router,
             tool_broker=_RecordingBroker(),
+            escalation_service=_FakeEscalationSvc(),
         )
 
         resp = _run(orch, _request())
 
-        # Low confidence would fire the U2 outcome signal, but U1's gate
-        # is pass-through.
-        self.assertFalse(resp.escalation_flag)
+        self.assertTrue(resp.escalation_flag)
+        self.assertEqual(resp.message, "unsure")
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0].signal, "cannot_confidently_answer")
 
 
 if __name__ == "__main__":  # pragma: no cover
