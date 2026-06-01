@@ -1,11 +1,24 @@
-"""Cognition service — interim host for the three always-on behaviours.
+"""Cognition service — the LIVE host for the three always-on behaviours
+on the chat path (escalate / save_memory / get_session_summary).
 
-TODO(ARC14): This module is the interim host for cognition.
-Absorbed into ``LucielOrchestrator.run`` at Arc 14 (the agentic
-loop). Behaviour PRESERVED from the pre-WU7 tool implementations
-(``EscalateTool``, ``SaveMemoryTool``, ``SessionSummaryTool``)
-exactly as-is — no extension, no redesign. See ``app/cognition/
-__init__.py`` for the founder-ruling header.
+Arc 14 reality (corrected at U5 closeout)
+-----------------------------------------
+The pre-U5 header here claimed this module was "Absorbed into
+``LucielOrchestrator.run`` at Arc 14". That was only PARTIALLY true and
+is corrected: Arc 14's agentic loop did NOT retire ``CognitionService``.
+The chat path (``ChatService.respond`` → ``/v1/chat``, ``chat_widget``,
+``twilio_webhook``) is still wired to this service via
+``app.api.deps.get_chat_service`` and remains the live runtime entry for
+those surfaces. So this module IS a live implementation, not a stub
+pending removal.
+
+What Arc 14 DID change: the §3.4.7 session-summary FORMATTING is now a
+single function, ``format_session_summary`` below. The agentic-loop
+finalizer (``app.cognition.summarizer.summarize`` →
+``CognitionFinalizer``) delegates to it too, so the recap shape exists in
+exactly ONE place instead of being duplicated across two modules. The
+escalation side-effect for the loop is fired by the U2 escalation gates
+(``EscalationService.record_escalation``), not re-fired here.
 
 Intent recognition mirrors the pre-WU7 substring/TOOL_CALL chain
 literally so the same LLM outputs that fired cognition before
@@ -41,6 +54,43 @@ _COGNITION_INTENTS = frozenset({
     INTENT_SAVE_MEMORY,
     INTENT_SESSION_SUMMARY,
 })
+
+_SUMMARY_PREVIEW_CHARS = 150
+
+
+def format_session_summary(messages: list[dict] | None) -> str:
+    """Render the §3.4.7 structured session recap — the SINGLE source.
+
+    This is the one implementation of the recap formatting. Both the live
+    chat-path behaviour (``CognitionService._handle_session_summary``) and
+    the agentic-loop finalizer (``app.cognition.summarizer.summarize``)
+    call THIS function, so the recap shape exists in exactly one place
+    (Arc 14 U5 — the fold's de-duplication; see the module header).
+
+    Shape: ``Session summary (N messages):`` followed by one
+    ``ROLE: <150-char preview>`` line per message, oldest→newest. Empty /
+    malformed input degrades to the empty-session line rather than raising
+    (finalization must never crash the turn — §5.1).
+    """
+    try:
+        if not messages:
+            return "No messages in this session yet."
+
+        parts = []
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "") or ""
+            preview = (
+                content[:_SUMMARY_PREVIEW_CHARS] + "..."
+                if len(content) > _SUMMARY_PREVIEW_CHARS
+                else content
+            )
+            parts.append(f"{role.upper()}: {preview}")
+
+        body = "\n".join(parts)
+        return f"Session summary ({len(messages)} messages):\n{body}"
+    except Exception:  # noqa: BLE001 — never crash over a summary
+        return "No messages in this session yet."
 
 
 @dataclass
@@ -345,17 +395,8 @@ class CognitionService:
                 metadata={"success": True, "output": output},
             )
 
-        summary_parts = []
-        for msg in messages:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            preview = (
-                content[:150] + "..." if len(content) > 150 else content
-            )
-            summary_parts.append(f"{role.upper()}: {preview}")
-
-        summary = "\n".join(summary_parts)
-        output = f"Session summary ({len(messages)} messages):\n{summary}"
+        # Single source of the recap shape (Arc 14 U5 de-dup).
+        output = format_session_summary(messages)
         return CognitionOutcome(
             intent=INTENT_SESSION_SUMMARY,
             handled=True,

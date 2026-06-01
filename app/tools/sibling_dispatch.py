@@ -22,7 +22,7 @@ Implements the §3.3.4 "Runtime dispatch path" five-check sequence for
      ``tool_execution_log`` row (§3.3.4 -- every tool dispatch lands
      here; WU6 reuse), then construct a DERIVED ToolContext naming
      BOTH instances. Hand off to the Arc 14 agentic-loop
-     orchestrator (see :data:`_ARC14_SEAM`).
+     orchestrator (see :data:`_SIBLING_ROUNDTRIP_SEAM`).
 
 Decision #19 lock
 -----------------
@@ -42,15 +42,19 @@ UI. The single source of truth for the budget default lives in this
 module as :data:`SIBLING_FAN_OUT_BUDGET`. Tests assert this isolation
 explicitly so a future change cannot silently leak it.
 
-Arc 14 seam
------------
+Sibling round-trip seam (post-Arc-14 — see §3.3.4)
+--------------------------------------------------
 The orchestrator round-trip (the calling Luciel ASKS the callee
-Luciel a question and gets an ANSWER) is the Arc 14 agentic loop
-deliverable. WU5 performs the FIVE checks REALLY — the audit row
-is REAL, the derived context is REAL, the guard logic is REAL —
-and returns a structured ``authorized_and_dispatched`` payload at
-the single seam marked :data:`_ARC14_SEAM`. When Arc 14 lands, the
-seam swaps the structured payload for an
+Luciel a question and gets an ANSWER) is NOT delivered by Arc 14.
+Arc 14 built the agentic loop, but its ACT step does not dispatch a
+sibling round-trip through this seam — so this remains genuinely
+deferred work and is labelled accordingly (no longer claiming Arc 14
+ownership of something Arc 14 did not finish — Arc 14 U5 closeout).
+WU5 performs the FIVE checks REALLY — the audit row is REAL, the
+derived context is REAL, the guard logic is REAL — and returns a
+structured ``authorized_and_dispatched`` payload at the single seam
+marked :data:`_SIBLING_ROUNDTRIP_SEAM`. When the round-trip is
+built, the seam swaps the structured payload for an
 ``orchestrator.run(derived_request)`` call without touching the
 guardrail logic.
 """
@@ -89,10 +93,13 @@ logger = logging.getLogger(__name__)
 SIBLING_FAN_OUT_BUDGET: int = 12
 
 
-#: The single seam where Arc 14's orchestrator round-trip will plug
-#: in. Grep target. See module docstring "Arc 14 seam" section and
-#: :func:`dispatch_sibling_call` body.
-_ARC14_SEAM: str = "TODO(ARC14): sibling-orchestrator round-trip"
+#: The single seam where the sibling-orchestrator round-trip will plug
+#: in. Grep target. See module docstring "Sibling round-trip seam"
+#: section and :func:`dispatch_sibling_call` body. Deferred past Arc 14
+#: (the Arc 14 loop does not dispatch this round-trip).
+_SIBLING_ROUNDTRIP_SEAM: str = (
+    "TODO(post-ARC14, §3.3.4): sibling-orchestrator round-trip"
+)
 
 
 # =====================================================================
@@ -480,10 +487,10 @@ def _dispatch_sibling_call_inner(
         )
 
         # ------------------------------------------------------------------
-        # _ARC14_SEAM: the orchestrator round-trip plugs in HERE.
+        # _SIBLING_ROUNDTRIP_SEAM: the orchestrator round-trip plugs in HERE.
         # ------------------------------------------------------------------
-        # When Arc 14 lands, replace the structured response below
-        # with:
+        # When the round-trip is built (post-Arc-14), replace the
+        # structured response below with:
         #
         #     from app.runtime.orchestrator import LucielOrchestrator
         #     orchestrator = LucielOrchestrator(...)
@@ -502,14 +509,15 @@ def _dispatch_sibling_call_inner(
         #
         # All guardrails above stay exactly as they are. The seam is
         # this single block.
-        # TODO(ARC14): plug in the orchestrator round-trip.
+        # TODO(post-ARC14, §3.3.4): plug in the orchestrator round-trip
+        # — deferred, not built by the Arc 14 loop.
         return {
             "success": True,
             "output": (
-                f"Sibling call authorised and dispatched. The Arc 14 "
-                f"orchestrator round-trip is the interim seam — the "
-                f"callee Luciel's reply will be returned here when "
-                f"Arc 14 lands."
+                "Sibling call authorised and dispatched. The "
+                "orchestrator round-trip is the interim seam — the "
+                "callee Luciel's reply will be returned here once the "
+                "round-trip is built (deferred past Arc 14, §3.3.4)."
             ),
             "callee_instance_id": callee_instance_id,
             "caller_instance_id": caller_instance_id,

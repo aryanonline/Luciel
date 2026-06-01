@@ -70,6 +70,20 @@ from app.models.permission_model import (  # noqa: F401
     SCOPE_TYPE_INSTANCE_SPECIFIC,
     ALL_SCOPE_TYPES,
 )
+# Arc 14 U2 — §3.4.5 escalation judgment event store.
+from app.models.escalation_event import (  # noqa: F401
+    EscalationEvent,
+    SIGNAL_EXPLICIT_HUMAN_REQUEST,
+    SIGNAL_STRONG_NEGATIVE_SENTIMENT,
+    SIGNAL_CANNOT_CONFIDENTLY_ANSWER,
+    SIGNAL_HIGH_VALUE_LEAD,
+    ALLOWED_SIGNALS,
+    GATE_INTAKE,
+    GATE_OUTCOME,
+    ALLOWED_GATES,
+)
+# Arc 14 U4 — §3.4.4 lead capture + §3.4.7 summarization (cognition).
+from app.models.lead import Lead  # noqa: F401
 # Arc 12 WU6 — BYO webhook config + general-purpose tool execution log.
 from app.models.byo_webhook_endpoint import ByoWebhookEndpoint  # noqa: F401
 from app.models.tool_execution_log import (  # noqa: F401
@@ -144,6 +158,18 @@ __all__ = [
     "APPROVAL_STATE_PENDING",
     "APPROVAL_STATE_REVOKED",
     "ALLOWED_APPROVAL_STATES",
+    # Arc 14 U2 -- escalation judgment event store.
+    "EscalationEvent",
+    "SIGNAL_EXPLICIT_HUMAN_REQUEST",
+    "SIGNAL_STRONG_NEGATIVE_SENTIMENT",
+    "SIGNAL_CANNOT_CONFIDENTLY_ANSWER",
+    "SIGNAL_HIGH_VALUE_LEAD",
+    "ALLOWED_SIGNALS",
+    "GATE_INTAKE",
+    "GATE_OUTCOME",
+    "ALLOWED_GATES",
+    # Arc 14 U4 -- §3.4.4 lead capture + §3.4.7 summarization.
+    "Lead",
     # Arc 12 WU6 -- BYO webhook config + tool execution log.
     "ByoWebhookEndpoint",
     "ToolExecutionLog",

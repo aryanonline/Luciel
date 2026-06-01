@@ -42,22 +42,29 @@ Tier + channel structural checks (WU2 founder ruling)
 
 The WU2 brief asks the broker to enforce ``requires_tier`` and
 ``requires_channels`` at this gate if the data is available, and to
-leave a clearly-marked ``TODO(ARC14)`` if it is not. ``ToolContext``
-WU1-as-shipped does NOT carry the admin's tier or the enabled
-channel set. We therefore:
+leave a clearly-marked marker if it is not. WU2-as-shipped did not yet
+carry the admin's tier or the enabled channel set on ``ToolContext``.
+We therefore:
 
   * Implement the *structural* check points here so the wiring is in
     place — methods ``_check_tier`` and ``_check_channels`` are
-    plumbed through ``authorize`` and gated on the (currently absent)
-    context fields.
-  * When the data is absent (the WU2 baseline), tier and channel
-    enforcement *skip* and emit a debug log message so a maintainer
-    knows the gate is structurally live but data-blind. The
-    authorisation-row check (the load-bearing part of WU2) is
-    enforced unconditionally.
-  * The relevant TODOs anchor at ``TODO(ARC14)`` — when Arc 14
-    threads admin tier and enabled channels onto the ``ToolContext``
-    (or onto the authorisation row itself), the checks switch on.
+    plumbed through ``authorize`` and gated on the context fields.
+  * When the data is absent, tier and channel enforcement *skip* and
+    emit a debug log message so a maintainer knows the gate is
+    structurally live but data-blind. The authorisation-row check
+    (the load-bearing part of WU2) is enforced unconditionally.
+
+Arc 14 U5 — dispatch-time re-check threaded (§3.3.3)
+----------------------------------------------------
+The §3.3.3 "Arc 14 hardening OPTION" is now taken: the orchestrator's
+ACT step threads ``admin_tier`` + ``enabled_channels`` onto the
+``ToolContext`` (reusing the tier/channel values the loop already
+resolves for the grounding floor + arbiter). So on the agentic-loop
+dispatch path BOTH structural checks now run with real data — the
+belt-and-suspenders gate-1 re-check is live. The skip branches remain
+ONLY for call sites that still construct a context without these fields
+(e.g. legacy/unit-test contexts); they are an intentional
+backward-compatible default, not unfinished Arc 14 work.
 """
 from __future__ import annotations
 
@@ -174,20 +181,17 @@ class DefaultDenyToolAuthorizer:
         if not row_decision.allowed:
             return row_decision
 
-        # 2. Structural check point: tier enforcement.
-        #    TODO(ARC14): wire the admin's tier into ToolContext (or
-        #    surface it on the authorisation row payload) so this
-        #    check can switch on. Until then the check skips with a
-        #    debug log — see module docstring.
+        # 2. Tier enforcement (§3.3.3). Arc 14 U5 threads ``admin_tier``
+        #    onto ToolContext from the ACT step, so on the agentic-loop
+        #    path this runs with real data. Contexts without the field
+        #    (legacy/test) skip with a debug log — see module docstring.
         tier_decision = self._check_tier(tool, context)
         if not tier_decision.allowed:
             return tier_decision
 
-        # 3. Structural check point: channel enforcement.
-        #    TODO(ARC14): wire the per-instance enabled-channel set
-        #    into ToolContext (or onto the authorisation row config)
-        #    so this check can switch on. Until then the check skips
-        #    on instances with no channel data — see module docstring.
+        # 3. Channel enforcement (§3.3.3). Arc 14 U5 threads
+        #    ``enabled_channels`` onto ToolContext from the ACT step;
+        #    contexts without the field skip — see module docstring.
         channel_decision = self._check_channels(tool, context)
         if not channel_decision.allowed:
             return channel_decision
@@ -282,22 +286,22 @@ class DefaultDenyToolAuthorizer:
         return AuthorizationDecision.allow()
 
     # ------------------------------------------------------------------
-    # Step 2 — tier check (structural point, data-blind in WU2)
+    # Step 2 — tier check (§3.3.3 dispatch-time re-check)
     # ------------------------------------------------------------------
 
     def _check_tier(
         self, tool: LucielTool, context: ToolContext
     ) -> AuthorizationDecision:
-        # TODO(ARC14): when the admin's tier is threaded onto
-        # ``ToolContext`` (or onto the authorisation row payload),
-        # compare it against ``tool.requires_tier`` and refuse on
-        # mismatch with ``failure_kind="tier_not_permitted"``.
+        # Arc 14 U5 threads ``admin_tier`` onto ToolContext from the
+        # orchestrator ACT step, so this re-check runs with real data on
+        # the agentic-loop path. Contexts that omit the field (legacy /
+        # unit-test) skip the re-check — an intentional backward-compat
+        # default, not unfinished work.
         admin_tier = getattr(context, "admin_tier", None)
         if not admin_tier:
             logger.debug(
-                "Tool authorisation: tier check SKIPPED — admin_tier "
-                "not present on ToolContext (TODO(ARC14)). "
-                "tool=%s requires_tier=%s",
+                "Tool authorisation: tier re-check SKIPPED — admin_tier "
+                "not present on ToolContext. tool=%s requires_tier=%s",
                 tool.tool_id, tool.requires_tier,
             )
             return AuthorizationDecision.allow()
@@ -314,16 +318,16 @@ class DefaultDenyToolAuthorizer:
         return AuthorizationDecision.allow()
 
     # ------------------------------------------------------------------
-    # Step 3 — channel check (structural point, data-blind in WU2)
+    # Step 3 — channel check (§3.3.3 dispatch-time re-check)
     # ------------------------------------------------------------------
 
     def _check_channels(
         self, tool: LucielTool, context: ToolContext
     ) -> AuthorizationDecision:
-        # TODO(ARC14): when the per-instance enabled-channel set is
-        # threaded onto ``ToolContext`` (or persisted on the
-        # authorisation row config), refuse here on missing channels
-        # with ``failure_kind="channel_not_enabled"``.
+        # Arc 14 U5 threads ``enabled_channels`` onto ToolContext from
+        # the orchestrator ACT step, so this re-check runs with real data
+        # on the agentic-loop path. Contexts that omit the field skip the
+        # re-check — backward-compat default, not unfinished work.
         required = tool.requires_channels
         if not required:
             return AuthorizationDecision.allow()
@@ -331,9 +335,9 @@ class DefaultDenyToolAuthorizer:
         enabled_channels = getattr(context, "enabled_channels", None)
         if enabled_channels is None:
             logger.debug(
-                "Tool authorisation: channel check SKIPPED — "
-                "enabled_channels not present on ToolContext "
-                "(TODO(ARC14)). tool=%s requires_channels=%s",
+                "Tool authorisation: channel re-check SKIPPED — "
+                "enabled_channels not present on ToolContext. "
+                "tool=%s requires_channels=%s",
                 tool.tool_id, required,
             )
             return AuthorizationDecision.allow()

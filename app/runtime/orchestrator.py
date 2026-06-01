@@ -88,11 +88,31 @@ class LucielOrchestrator:
         trace_service=None,
         model_router=None,
         tool_broker=None,
+        escalation_judge=None,
+        escalation_service=None,
+        channel_arbiter=None,
+        cognition_finalizer=None,
     ) -> None:
         self.context = ContextAssembler()
         self._trace_service = trace_service
         self._model_router = model_router
         self._tool_broker = tool_broker
+        # Arc 14 U4 — §3.4.4/§3.4.6/§3.4.7 COGNITION FINALIZATION (lead
+        # capture + summary + live handoff). Always-on cognition; built
+        # lazily so pre-U4 call sites keep working. Injectable for tests.
+        self._cognition_finalizer = cognition_finalizer
+        # Arc 14 U3 — the §3.4.2 channel arbiter (pure decision). The
+        # RESPOND step calls it to pick the outbound channel. Injectable
+        # for tests; built lazily (it has no dependencies).
+        self._channel_arbiter = channel_arbiter
+        # Arc 14 U2 — the §3.4.5 judge (pure decision) and the
+        # escalation side-effect service (event store + routing + audit).
+        # Injectable so tests drive deterministic fakes; built lazily so
+        # pre-ARC-14 call sites keep working. A judge with no classifiers
+        # and no configured LLM provider degrades to non-firing, so a
+        # missing provider NEVER invents an escalation.
+        self._escalation_judge = escalation_judge
+        self._escalation_service = escalation_service
 
     # ------------------------------------------------------------------
     # Public entry point — the §3.4.1 agentic loop
@@ -103,33 +123,56 @@ class LucielOrchestrator:
         # 2. CONTEXT ASSEMBLY — flag-gated Retrieve + prompt composition.
         chunks: list = []
         source_ids: list[int] = []
+        retrieval_attempted = False
         if (
             settings.knowledge_retrieval_enabled
             and req.luciel_instance_id is not None
         ):
+            retrieval_attempted = True
             chunks = self._retrieve(req)
             source_ids = self._collect_source_pks(chunks)
 
         base_prompt = self.context.build_prompt(req, retrieved_chunks=chunks)
 
-        # 3. ESCALATION GATE 1 — INTAKE (pre-PLAN). PASS-THROUGH in U1.
-        if self._intake_gate(req):  # pragma: no cover — always False in U1
-            # U2 fills this branch: emit a Gate-1 handoff acknowledgement
-            # (templated per persona preset) and SKIP plan/act/reflect.
-            pass
+        # 3. ESCALATION GATE 1 — INTAKE (pre-PLAN). §3.4.5 signals (a)+(b).
+        #    If it fires we SKIP plan/act/reflect and emit a templated
+        #    handoff acknowledgement instead of an LLM-generated reply
+        #    (the LLM may be exactly what's failing the customer).
+        intake_decision = self._intake_gate(req)
+        if intake_decision is not None:
+            return self._finalize_intake_escalation(
+                req=req, decision=intake_decision, source_ids=source_ids
+            )
 
         # 4. PLAN → ACT → REFLECT — bounded at MAX_LOOP_ITERATIONS.
         loop = self._run_plan_act_reflect(req, base_prompt)
 
-        # 5. ESCALATION GATE 2 — OUTCOME (post-REFLECT). PASS-THROUGH.
-        escalation_flag = self._outcome_gate(req, loop)
+        # Thread the CONTEXT-step retrieval outcome onto the loop result
+        # so the OUTCOME gate can read grounding + retrieval-failure
+        # (spec item 5). retrieval_failed = retrieval RAN but yielded no
+        # usable chunks; grounding derived from best cosine distance.
+        loop.retrieval_failed = retrieval_attempted and not chunks
+        loop.grounding_score = self._grounding_from_chunks(chunks)
 
-        # 6. RESPOND — U1 emits on the inbound channel; the §3.4.2
-        #    channel arbiter is U3.
+        # 5. ESCALATION GATE 2 — OUTCOME (post-REFLECT). §3.4.5 (c)+(d).
+        #    NEVER reads loop.bound_hit (§3.4.1 locked #17).
+        outcome_decision = self._outcome_gate(req, loop)
+        escalation_flag = outcome_decision is not None
+        if outcome_decision is not None:
+            self._record_escalation_best_effort(outcome_decision)
+
+        # 6. RESPOND — the §3.4.2 channel arbiter picks the outbound
+        #    channel (replaces U1's "emit on inbound channel"). The pick
+        #    defaults safely to the inbound channel when channel info is
+        #    sparse, so this never breaks the turn.
         message = loop.reply
+        choice = self._arbitrate_channel(
+            req, reply=message, escalation_fired=escalation_flag
+        )
 
         # 7. COGNITION FINALIZATION — fill the trace fields the stub
-        #    left None/False. (Folding CognitionService behaviours is U4.)
+        #    left None/False, then run always-on cognition (§3.4.4 lead
+        #    capture + §3.4.7 summary + §3.4.6 live handoff).
         trace_id = self._record_trace_best_effort(
             req=req,
             assistant_reply=message,
@@ -139,6 +182,12 @@ class LucielOrchestrator:
             tool_called=loop.tool_called,
             tool_name=loop.tool_name,
             escalated=escalation_flag,
+        )
+        self._finalize_cognition(
+            req=req,
+            assistant_reply=message,
+            escalation_fired=escalation_flag,
+            escalation_decision=outcome_decision,
         )
 
         return RuntimeResponse(
@@ -155,37 +204,325 @@ class LucielOrchestrator:
             tool_name=loop.tool_name,
             iterations=loop.iterations,
             bound_hit=loop.bound_hit,
+            response_channel=choice.channel,
+            prompt_channel_switch=choice.prompt_channel_switch,
         )
 
     # ------------------------------------------------------------------
-    # Escalation gate seams — PASS-THROUGH in U1, U2 fills them
+    # Channel arbiter — Arc 14 U3 (§3.4.2)
     # ------------------------------------------------------------------
 
-    def _intake_gate(self, req: RuntimeRequest) -> bool:
+    def _arbitrate_channel(
+        self, req: RuntimeRequest, *, reply: str, escalation_fired: bool
+    ):
+        """RESPOND step — §3.4.2 channel arbiter pick.
+
+        Resolves the instance's enabled-channel set and runs the
+        decision tree. Never raises: any failure degrades to the inbound
+        channel so the turn always emits somewhere safe."""
+        from app.runtime.channel_arbiter import ArbiterInput, ChannelChoice
+
+        try:
+            enabled = self._resolve_enabled_channels(req)
+            return self._arbiter().pick(
+                ArbiterInput(
+                    inbound_channel=req.channel,
+                    enabled_channels=enabled,
+                    response_length=len(reply or ""),
+                    escalation_fired=escalation_fired,
+                    customer_requested_channel=req.customer_requested_channel,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "channel arbiter failed: exc_class=%s — defaulting to inbound "
+                "channel",
+                type(exc).__name__,
+            )
+            return ChannelChoice(
+                channel=req.channel, reason="arbiter_error_fallback_inbound"
+            )
+
+    def _resolve_enabled_channels(self, req: RuntimeRequest) -> set[str]:
+        """Read the per-Instance enabled-channel set (ARC 13
+        ``instances.enabled_channels`` + the widget floor).
+
+        Best-effort: when no instance id is on the request, or the lookup
+        fails, return just the inbound channel so the arbiter degrades to
+        a same-channel reply rather than crashing the turn. The arbiter
+        also adds the widget floor + inbound channel defensively."""
+        from app.policy.entitlements import CHANNEL_WIDGET
+
+        if req.luciel_instance_id is None:
+            return {req.channel, CHANNEL_WIDGET}
+
+        try:
+            from app.db.session import SessionLocal
+            from app.models.instance import Instance
+
+            db = SessionLocal()
+            try:
+                instance = db.get(Instance, req.luciel_instance_id)
+                if instance is None:
+                    return {req.channel, CHANNEL_WIDGET}
+                enabled = set(instance.enabled_channels or ())
+                enabled.add(CHANNEL_WIDGET)
+                return enabled
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "enabled-channel resolution failed: exc_class=%s — defaulting "
+                "to inbound channel only",
+                type(exc).__name__,
+            )
+            return {req.channel, CHANNEL_WIDGET}
+
+    def _arbiter(self):
+        """Return the injected ChannelArbiter, or build one lazily."""
+        if self._channel_arbiter is None:
+            from app.runtime.channel_arbiter import ChannelArbiter
+
+            self._channel_arbiter = ChannelArbiter()
+        return self._channel_arbiter
+
+    # ------------------------------------------------------------------
+    # Escalation gates — Arc 14 U2 (§3.4.5)
+    # ------------------------------------------------------------------
+
+    def _intake_gate(self, req: RuntimeRequest):
         """ESCALATION GATE 1 — INTAKE (pre-PLAN). §3.4.1 step 3.
 
         Evaluates the two signals knowable from the inbound message
-        alone (explicit human request; strong negative sentiment).
-        PASS-THROUGH in U1 (always returns False); U2 wires the real
-        NLU + sentiment classifiers. Returning False means "do not
-        short-circuit — proceed into PLAN".
+        alone (explicit human request; strong negative sentiment) via
+        the §3.4.5 judge. Returns the firing ``EscalationDecision`` (the
+        caller short-circuits plan/act/reflect) or ``None`` to proceed
+        into PLAN. Never raises — a judge failure degrades to None (no
+        escalation) so the turn proceeds rather than crashing.
         """
-        return False
+        try:
+            return self._judge().evaluate_intake(req)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "intake gate evaluation failed: exc_class=%s — proceeding to PLAN",
+                type(exc).__name__,
+            )
+            return None
 
-    def _outcome_gate(self, req: RuntimeRequest, loop: "_LoopResult") -> bool:
+    def _outcome_gate(self, req: RuntimeRequest, loop: "_LoopResult"):
         """ESCALATION GATE 2 — OUTCOME (post-REFLECT). §3.4.1 step 5.
 
         Evaluates the two signals needing loop output (cannot
-        confidently answer; high-value lead). PASS-THROUGH in U1
-        (always returns False). U2 wires the real signals and the
-        escalation flow.
+        confidently answer; high-value lead) via the §3.4.5 judge.
+        Returns the firing ``EscalationDecision`` or ``None``.
 
         Doctrine guard (§3.4.1 locked #17): hitting the iteration bound
-        is cost-control, NOT an escalation trigger. This stub returns
-        False regardless of ``loop.bound_hit`` so the invariant holds
-        from U1 onward and U2 inherits it.
+        is cost-control, NOT an escalation trigger. The ``OutcomeContext``
+        built here NEVER carries ``loop.bound_hit`` and the judge never
+        reads it, so the invariant holds. Never raises — a judge failure
+        degrades to None.
         """
-        return False
+        from app.runtime.escalation_judge import OutcomeContext
+
+        try:
+            outcome = OutcomeContext(
+                confidence=loop.confidence,
+                tier=self._resolve_tier(req),
+                grounding_score=loop.grounding_score,
+                retrieval_failed=loop.retrieval_failed,
+                lead_value=loop.lead_value,
+            )
+            return self._judge().evaluate_outcome(req, outcome)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "outcome gate evaluation failed: exc_class=%s — no escalation",
+                type(exc).__name__,
+            )
+            return None
+
+    def _resolve_tier(self, req: RuntimeRequest) -> str:
+        """Resolve the Admin's tier for the OUTCOME grounding floor.
+
+        Reuses the escalation-routing contact resolution (tier-only,
+        fail-closed to Free), so the grounding floor and the
+        notification channel set agree on the tier. Never raises.
+        """
+        from app.policy.entitlements import TIER_FREE
+
+        try:
+            from app.db.session import SessionLocal
+            from app.policy.escalation_routing import resolve_contact
+
+            db = SessionLocal()
+            try:
+                contact = resolve_contact(
+                    db,
+                    admin_id=req.admin_id,
+                    luciel_instance_id=req.luciel_instance_id,
+                )
+                return contact.tier
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tier resolution failed: exc_class=%s — defaulting to Free floor",
+                type(exc).__name__,
+            )
+            return TIER_FREE
+
+    def _finalize_intake_escalation(
+        self,
+        *,
+        req: RuntimeRequest,
+        decision,
+        source_ids: list[int],
+    ) -> RuntimeResponse:
+        """Build the Gate-1 short-circuit response: record the
+        escalation (best-effort) and emit a templated handoff
+        acknowledgement INSTEAD of running plan/act/reflect."""
+        from app.runtime.handoff_ack import handoff_acknowledgement
+
+        self._record_escalation_best_effort(decision)
+
+        message = handoff_acknowledgement()
+        # Gate-1 IS an escalation: let the arbiter pick the outbound
+        # channel for the handoff acknowledgement too (escalation rule →
+        # highest-priority enabled channel, fallback inbound).
+        choice = self._arbitrate_channel(
+            req, reply=message, escalation_fired=True
+        )
+        trace_id = self._record_trace_best_effort(
+            req=req,
+            assistant_reply=message,
+            source_ids=source_ids,
+            llm_provider=None,
+            llm_model=None,
+            tool_called=False,
+            tool_name=None,
+            escalated=True,
+        )
+        # COGNITION FINALIZATION on the short-circuit path too: a Gate-1
+        # escalation IS an escalation, so lead capture + summary still
+        # run and a live handoff bundle is built (Gate-1 fires on an
+        # explicit human request or strong negative sentiment — both
+        # warrant a real-time takeover).
+        self._finalize_cognition(
+            req=req,
+            assistant_reply=message,
+            escalation_fired=True,
+            escalation_decision=decision,
+        )
+        return RuntimeResponse(
+            message=message,
+            trace_id=trace_id,
+            # Gate-1 fired pre-PLAN: the loop never ran, so confidence is
+            # the signal confidence (or 1.0 for an explicit human request
+            # with no probabilistic score) — but we report 0 iterations
+            # and no provider to make the short-circuit observable.
+            confidence=decision.signal_confidence or 0.0,
+            session_id=req.session_id,
+            intent_summary="Initial user intent captured",
+            escalation_flag=True,
+            source_ids_used=source_ids,
+            llm_provider=None,
+            llm_model=None,
+            tool_called=False,
+            tool_name=None,
+            iterations=0,
+            bound_hit=False,
+            response_channel=choice.channel,
+            prompt_channel_switch=choice.prompt_channel_switch,
+        )
+
+    def _record_escalation_best_effort(self, decision) -> None:
+        """Record an escalation via EscalationService. Best-effort: the
+        decision to escalate has already been made; persistence + notify
+        are observability/delivery side-effects and must never crash the
+        turn (Architecture §5.1)."""
+        try:
+            self._escalation_svc().record_escalation(decision)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "record_escalation failed: exc_class=%s — escalation flagged "
+                "on the turn but side-effects degraded",
+                type(exc).__name__,
+            )
+
+    # ------------------------------------------------------------------
+    # COGNITION FINALIZATION — Arc 14 U4 (§3.4.4 / §3.4.6 / §3.4.7)
+    # ------------------------------------------------------------------
+
+    def _finalize_cognition(
+        self,
+        *,
+        req: RuntimeRequest,
+        assistant_reply: str,
+        escalation_fired: bool,
+        escalation_decision,
+    ) -> None:
+        """Run always-on COGNITION FINALIZATION (lead + summary + handoff).
+
+        Best-effort: never raises. The reply has already been chosen and
+        the trace already written; this is a pure side-effect half (§5.1)
+        — a failure degrades to a warning rather than crashing the turn.
+
+        ``handoff_requested`` (the §3.4.6 real-time takeover signal) is
+        derived from the firing escalation signal: an EXPLICIT HUMAN
+        REQUEST always warrants a live takeover; the other signals flag
+        the conversation for follow-up but do not by themselves pull the
+        customer into a live transfer. When nothing escalated there is no
+        handoff regardless.
+        """
+        try:
+            handoff_requested = self._handoff_warranted(escalation_decision)
+            self._finalizer().finalize(
+                admin_id=req.admin_id,
+                session_id=req.session_id,
+                luciel_instance_id=req.luciel_instance_id,
+                user_id=req.user_id,
+                current_message=req.message,
+                prior_customer_messages=req.recent_customer_messages,
+                assistant_reply=assistant_reply,
+                inbound_channel=req.channel,
+                escalation_fired=escalation_fired,
+                handoff_requested=handoff_requested,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "cognition finalization failed: exc_class=%s — turn unaffected",
+                type(exc).__name__,
+            )
+
+    @staticmethod
+    def _handoff_warranted(escalation_decision) -> bool:
+        """Decide whether the firing escalation warrants a live takeover.
+
+        §3.4.6: a live human handoff happens when the customer asked for
+        a person OR Luciel decided a real-time takeover is needed. We map
+        that to the EXPLICIT HUMAN REQUEST signal (the customer asking),
+        which is the unambiguous takeover trigger today. Other signals
+        (negative sentiment, low confidence, high-value lead) flag the
+        lead for human follow-up but do not force a live transfer. Never
+        raises — an unreadable decision degrades to "no live handoff."
+        """
+        if escalation_decision is None:
+            return False
+        try:
+            from app.models.escalation_event import (
+                SIGNAL_EXPLICIT_HUMAN_REQUEST,
+            )
+
+            return escalation_decision.signal == SIGNAL_EXPLICIT_HUMAN_REQUEST
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _finalizer(self):
+        """Return the injected CognitionFinalizer, or build one lazily."""
+        if self._cognition_finalizer is None:
+            from app.cognition.finalizer import CognitionFinalizer
+
+            self._cognition_finalizer = CognitionFinalizer()
+        return self._cognition_finalizer
 
     # ------------------------------------------------------------------
     # PLAN → ACT → REFLECT
@@ -228,19 +565,32 @@ class LucielOrchestrator:
             tool_results = self._act(req, plan, result)
 
             # REFLECT — decide whether to re-enter PLAN.
-            any_failure = any(not r.success for r in tool_results)
-            if not plan.tool_calls or not any_failure:
-                # Either nothing to act on, or every tool succeeded:
-                # the answer is taken as satisfactory. Stop.
+            if not plan.tool_calls:
+                # Nothing to act on: the PLAN reply is the answer. Stop.
                 break
 
             if iteration >= MAX_LOOP_ITERATIONS:
-                # Hard cost-control stop. NOT an escalation trigger.
+                # Hard cost-control stop. NOT an escalation trigger
+                # (§3.4.1 locked #17) — applies whether the trigger to
+                # re-enter was a failure OR a pending success-synthesis.
                 result.bound_hit = True
                 break
 
-            # Re-enter PLAN with the tool outcomes appended so the next
-            # plan can reason about the (gate-2 or execution) failures.
+            # Tools ran. Re-enter PLAN with the tool outcomes appended so
+            # the next pass can react. This covers BOTH axes of "answer
+            # satisfactory?":
+            #   * FAILURE  — the plan reasons about the (gate-2 or
+            #                execution) error and revises.
+            #   * SUCCESS  — the SYNTHESIS pass (U4 carry-forward): the
+            #                pre-tool draft was composed BEFORE the tool
+            #                ran, so it cannot reflect the tool output.
+            #                Feed the successful TOOL_RESULTS back and ask
+            #                the model to weave them into the final reply.
+            # The success path runs the synthesis pass exactly ONCE: the
+            # synthesised reply carries no tool_calls (the model answers
+            # from the results), so the next iteration's `not plan.tool_calls`
+            # branch stops the loop. Synthesis is NOT exempt from the
+            # 5-iteration bound (the iteration>=MAX guard above caps it).
             prompt = base_prompt + self._render_tool_feedback(tool_results)
 
         return result
@@ -311,10 +661,21 @@ class LucielOrchestrator:
 
         from app.tools.base import ToolContext
 
+        # Arc 14 U5 — thread the Admin's tier + the per-instance enabled
+        # channel set onto the ToolContext so the broker's gate-1
+        # dispatch-time re-check (§3.3.3 hardening) can fully enforce.
+        # Both are already resolved by the loop (tier for the OUTCOME
+        # grounding floor; channels for the arbiter); reusing them here
+        # closes the dispatch-time re-check seam in ToolAuthorizer
+        # without any new lookup. Resolvers never raise (best-effort), so a failure
+        # degrades to the WU2 skip-the-check baseline rather than the
+        # turn crashing.
         context = ToolContext(
             admin_id=req.admin_id,
             instance_id=req.luciel_instance_id or 0,
             inbound_message_id=req.session_id,
+            admin_tier=self._resolve_tier(req),
+            enabled_channels=frozenset(self._resolve_enabled_channels(req)),
         )
 
         tool_results = []
@@ -373,6 +734,30 @@ class LucielOrchestrator:
             self._tool_broker = ToolBroker(ToolRegistry())
         return self._tool_broker
 
+    def _judge(self):
+        """Return the injected EscalationJudge, or build one lazily.
+
+        A lazily-built judge has no injected classifiers; its LLM-backed
+        classifiers degrade to neutral (non-firing) when no provider is
+        configured, so a missing provider never invents an escalation."""
+        if self._escalation_judge is None:
+            from app.runtime.escalation_judge import EscalationJudge
+
+            # Share the orchestrator's router so the judge's lazily-built
+            # classifiers ride the SAME provider channel as PLAN. In a
+            # test that injects a stub/boom router this guarantees no
+            # live API call from the judge (boom → neutral → no fire).
+            self._escalation_judge = EscalationJudge(model_router=self._router())
+        return self._escalation_judge
+
+    def _escalation_svc(self):
+        """Return the injected EscalationService, or build one lazily."""
+        if self._escalation_service is None:
+            from app.policy.escalation import EscalationService
+
+            self._escalation_service = EscalationService()
+        return self._escalation_service
+
     # ------------------------------------------------------------------
     # Retrieve step (ARC 11 Step 8 — preserved verbatim)
     # ------------------------------------------------------------------
@@ -430,6 +815,41 @@ class LucielOrchestrator:
                 type(exc).__name__, admin_prefix, req.luciel_instance_id,
             )
             return []
+
+    @staticmethod
+    def _grounding_from_chunks(chunks: Sequence) -> float | None:
+        """Derive a [0,1] grounding score from retrieved chunks.
+
+        Returns ``None`` when nothing was retrieved (the OUTCOME gate
+        treats None as below every floor only in concert with the
+        retrieval-failed flag). When chunks exist, grounding is
+        ``1 - best_cosine_distance`` (best = smallest distance =
+        closest match), clamped to [0,1]. Chunks with no distance are
+        ignored; if none carry a distance, grounding is unknown (None).
+
+        This is a minimal, dependency-free grounding proxy — a richer
+        grounding scorer (answer-vs-source overlap) is a later unit's
+        hook. It never raises: a malformed chunk degrades to None.
+        """
+        if not chunks:
+            return None
+        try:
+            distances = [
+                c.distance
+                for c in chunks
+                if getattr(c, "distance", None) is not None
+            ]
+        except Exception:  # noqa: BLE001
+            return None
+        if not distances:
+            return None
+        best = min(distances)
+        grounding = 1.0 - float(best)
+        if grounding < 0.0:
+            return 0.0
+        if grounding > 1.0:
+            return 1.0
+        return grounding
 
     @staticmethod
     def _collect_source_pks(chunks: Sequence) -> list[int]:
@@ -559,6 +979,12 @@ class _LoopResult:
         "tool_name",
         "iterations",
         "bound_hit",
+        # Arc 14 U2 — inputs the §3.4.5 OUTCOME gate reads. NONE of
+        # these is bound_hit: hitting the iteration cap is cost-control,
+        # never an escalation trigger (§3.4.1 locked #17).
+        "grounding_score",
+        "retrieval_failed",
+        "lead_value",
     )
 
     def __init__(self, *, reply: str) -> None:
@@ -570,3 +996,10 @@ class _LoopResult:
         self.tool_name: str | None = None
         self.iterations: int = 0
         self.bound_hit: bool = False
+        # §3.4.5 OUTCOME-gate inputs. grounding_score None = retrieval
+        # did not run; retrieval_failed True = CONTEXT-step Retrieve leg
+        # errored or returned nothing (spec item 5 contributing signal);
+        # lead_value = extracted high-value-lead value (e.g. budget).
+        self.grounding_score: float | None = None
+        self.retrieval_failed: bool = False
+        self.lead_value: float | None = None

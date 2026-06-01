@@ -79,6 +79,33 @@ class _StubTrace:
         return "trace-fixed-id"
 
 
+# Neutral judge for loop-focused tests: the INTAKE gate must not consume
+# router calls or fire while we're asserting loop behaviour. Injecting a
+# judge with fake non-firing classifiers keeps these tests about the loop
+# (the §3.4.5 signal behaviour has its own dedicated U2 suite).
+class _NeutralIntent:
+    def classify_intent(self, message):
+        from app.runtime.classifiers import INTENT_OTHER, IntentResult
+
+        return IntentResult(intent_class=INTENT_OTHER, confidence=0.0)
+
+
+class _NeutralSentiment:
+    def score_sentiment(self, message):
+        from app.runtime.classifiers import SentimentResult
+
+        return SentimentResult(score=0.0)
+
+
+def _neutral_judge():
+    from app.runtime.escalation_judge import EscalationJudge
+
+    return EscalationJudge(
+        intent_classifier=_NeutralIntent(),
+        sentiment_classifier=_NeutralSentiment(),
+    )
+
+
 def _request(message="hello", instance_id=7):
     return RuntimeRequest(
         message=message,
@@ -122,7 +149,10 @@ class TestLoopEndToEnd(unittest.TestCase):
         router = _ScriptedRouter([_plan_json(reply="Hi there", confidence=0.91)])
         trace = _StubTrace()
         orch = LucielOrchestrator(
-            trace_service=trace, model_router=router, tool_broker=_RecordingBroker()
+            trace_service=trace,
+            model_router=router,
+            tool_broker=_RecordingBroker(),
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
@@ -155,21 +185,35 @@ class TestLoopEndToEnd(unittest.TestCase):
             def generate(self, request, *, preferred_provider=None):
                 raise RuntimeError("all providers failed")
 
+        # Inject a fake escalation service so the (now-firing) U2 OUTCOME
+        # gate touches no DB.
+        class _FakeEscalationSvc:
+            def __init__(self):
+                self.recorded = []
+
+            def record_escalation(self, decision):
+                self.recorded.append(decision)
+
+        esc = _FakeEscalationSvc()
         orch = LucielOrchestrator(
             trace_service=_StubTrace(),
             model_router=_BoomRouter(),
             tool_broker=_RecordingBroker(),
+            escalation_service=esc,
         )
 
         resp = _run(orch, _request())
 
         # Turn survives: a customer-facing reply is produced, confidence
-        # floors at 0.0, no tool dispatched, no escalation (gate is U1
-        # pass-through).
+        # floors at 0.0, no tool dispatched. The boom router degrades the
+        # intake classifiers to neutral (no live call, no intake fire),
+        # but a 0.0-confidence ungrounded answer DOES fire the U2 OUTCOME
+        # cannot-confidently-answer signal — which is correct doctrine.
         self.assertTrue(resp.message)
         self.assertEqual(resp.confidence, 0.0)
         self.assertFalse(resp.tool_called)
-        self.assertFalse(resp.escalation_flag)
+        self.assertTrue(resp.escalation_flag)
+        self.assertEqual(esc.recorded[0].signal, "cannot_confidently_answer")
 
 
 # =====================================================================
@@ -185,25 +229,35 @@ class TestToolDispatch(unittest.TestCase):
                 _plan_json(
                     reply="looking that up",
                     tool_calls=[{"tool": "lookup_property", "parameters": {"id": 5}}],
-                )
+                ),
+                # Synthesis pass: no tool, so the loop stops after one
+                # dispatch (otherwise the scripted router would re-issue
+                # the same tool call and dispatch again).
+                _plan_json(reply="here is what I found", confidence=0.9),
             ]
         )
         broker = _RecordingBroker()
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=broker
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=broker,
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
 
         # The loop dispatched through the broker (the fake stands in for
-        # gates 1+2) and the trace records the tool name.
+        # gates 1+2) exactly once, and the trace records the tool name.
         self.assertEqual(broker.dispatched, [("lookup_property", {"id": 5})])
         self.assertTrue(resp.tool_called)
         self.assertEqual(resp.tool_name, "lookup_property")
 
     def test_tool_context_carries_admin_and_instance(self):
         router = _ScriptedRouter(
-            [_plan_json(tool_calls=[{"tool": "send_sms", "parameters": {}}])]
+            [
+                _plan_json(tool_calls=[{"tool": "send_sms", "parameters": {}}]),
+                _plan_json(reply="sent", confidence=0.9),
+            ]
         )
 
         seen = {}
@@ -214,12 +268,53 @@ class TestToolDispatch(unittest.TestCase):
                 return ToolResult(success=True, output="ok")
 
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=_CtxBroker()
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=_CtxBroker(),
+            escalation_judge=_neutral_judge(),
         )
         _run(orch, _request(instance_id=7))
 
         self.assertEqual(seen["context"].admin_id, "admin-1")
         self.assertEqual(seen["context"].instance_id, 7)
+
+    def test_tool_context_carries_tier_and_enabled_channels(self):
+        # Arc 14 U5 — the ACT step threads the Admin's tier and the
+        # per-instance enabled-channel set onto ToolContext so the
+        # broker's §3.3.3 dispatch-time re-check can fully enforce.
+        router = _ScriptedRouter(
+            [
+                _plan_json(tool_calls=[{"tool": "send_sms", "parameters": {}}]),
+                _plan_json(reply="sent", confidence=0.9),
+            ]
+        )
+
+        seen = {}
+
+        class _CtxBroker(_RecordingBroker):
+            def execute_tool(self, tool_name, parameters=None, *, context=None, **extra):
+                seen["context"] = context
+                return ToolResult(success=True, output="ok")
+
+        orch = LucielOrchestrator(
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=_CtxBroker(),
+            escalation_judge=_neutral_judge(),
+        )
+        # Patch the loop's already-existing resolvers so the test is
+        # isolated from DB state — we assert the THREADING, not the
+        # (separately-tested) resolution.
+        with patch.object(orch, "_resolve_tier", return_value="pro"), \
+             patch.object(
+                 orch, "_resolve_enabled_channels", return_value={"sms", "email"}
+             ):
+            _run(orch, _request(instance_id=7))
+
+        self.assertEqual(seen["context"].admin_tier, "pro")
+        self.assertEqual(
+            seen["context"].enabled_channels, frozenset({"sms", "email"})
+        )
 
     def test_gate2_refusal_is_reasoned_about_and_reflects(self):
         # Gate-2 refusal shape: ToolResult(success=False) with an
@@ -248,7 +343,10 @@ class TestToolDispatch(unittest.TestCase):
         )
         broker = _RecordingBroker({"push_to_crm": refusal})
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=broker
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=broker,
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
@@ -263,22 +361,41 @@ class TestToolDispatch(unittest.TestCase):
         second_prompt = router.calls[1].messages[0].content
         self.assertIn("not authorised", second_prompt)
 
-    def test_successful_tool_does_not_trigger_reflect_reentry(self):
+    def test_successful_tool_triggers_one_synthesis_pass(self):
+        # U4 carry-forward (behaviour legitimately moved from U1): a
+        # SUCCESSFUL tool now triggers exactly ONE synthesis PLAN pass so
+        # the emitted reply incorporates the tool output (the U1 pre-tool
+        # draft was composed before the tool ran). The synthesis reply
+        # carries no tool_calls, so the loop stops after the 2nd pass.
         router = _ScriptedRouter(
-            [_plan_json(tool_calls=[{"tool": "lookup_property", "parameters": {}}])]
+            [
+                _plan_json(
+                    reply="let me look that up",
+                    tool_calls=[{"tool": "lookup_property", "parameters": {}}],
+                ),
+                _plan_json(reply="The property is listed at $500k.", confidence=0.9),
+            ]
         )
         broker = _RecordingBroker(
-            {"lookup_property": ToolResult(success=True, output="found")}
+            {"lookup_property": ToolResult(success=True, output="price=$500k")}
         )
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=broker
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=broker,
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
 
-        # Tool succeeded → answer satisfactory → no re-entry. 1 PLAN call.
-        self.assertEqual(len(router.calls), 1)
-        self.assertEqual(resp.iterations, 1)
+        # 2 PLAN calls (initial + synthesis), 2 iterations, final reply is
+        # the synthesised answer that wove in the tool output.
+        self.assertEqual(len(router.calls), 2)
+        self.assertEqual(resp.iterations, 2)
+        self.assertEqual(resp.message, "The property is listed at $500k.")
+        # The successful tool output was fed back into the synthesis prompt.
+        synthesis_prompt = router.calls[1].messages[0].content
+        self.assertIn("price=$500k", synthesis_prompt)
 
 
 # =====================================================================
@@ -300,7 +417,10 @@ class TestIterationBound(unittest.TestCase):
         )
         broker = _RecordingBroker({"push_to_crm": failing})
         orch = LucielOrchestrator(
-            trace_service=_StubTrace(), model_router=router, tool_broker=broker
+            trace_service=_StubTrace(),
+            model_router=router,
+            tool_broker=broker,
+            escalation_judge=_neutral_judge(),
         )
 
         resp = _run(orch, _request())
@@ -361,7 +481,10 @@ class TestTraceFinalization(unittest.TestCase):
 
     def test_trace_records_tool_called_and_name(self):
         router = _ScriptedRouter(
-            [_plan_json(tool_calls=[{"tool": "book_appointment", "parameters": {}}])],
+            [
+                _plan_json(tool_calls=[{"tool": "book_appointment", "parameters": {}}]),
+                _plan_json(reply="booked for you", confidence=0.9),
+            ],
             provider="openai",
             model="gpt-x",
         )
@@ -372,6 +495,7 @@ class TestTraceFinalization(unittest.TestCase):
             tool_broker=_RecordingBroker(
                 {"book_appointment": ToolResult(success=True, output="booked")}
             ),
+            escalation_judge=_neutral_judge(),
         )
 
         _run(orch, _request())
@@ -402,13 +526,26 @@ class TestTraceFinalization(unittest.TestCase):
 
 
 # =====================================================================
-# Escalation gates are PASS-THROUGH in U1
+# Escalation gates with NO classifier signal — U2 drop-in still passes
+# through cleanly when nothing fires.
+#
+# These were U1 pass-through pins. U2 replaces the pass-through with the
+# real §3.4.5 gates; the gates are wired to the SAME injected router as
+# PLAN, so a scripted/boom router that returns plan-shaped (not
+# classifier-shaped) JSON yields a neutral classification and the INTAKE
+# gate does NOT fire — proving the gate is signal-driven, not a blanket
+# short-circuit. The detailed signal-boundary + firing behaviour lives
+# in the dedicated U2 suite (test_arc14_u2_escalation_*).
 # =====================================================================
 
 
-class TestEscalationGatesPassThrough(unittest.TestCase):
+class TestEscalationGatesNeutralPassThrough(unittest.TestCase):
 
-    def test_intake_gate_does_not_short_circuit_plan(self):
+    def test_intake_gate_neutral_signal_does_not_short_circuit_plan(self):
+        # The injected scripted router returns PLAN-shaped JSON for every
+        # call, including the intent classifier's call. That parses to a
+        # neutral intent ("other") so the explicit-human-request signal
+        # does NOT fire and PLAN runs normally.
         router = _ScriptedRouter([_plan_json(reply="planned")])
         orch = LucielOrchestrator(
             trace_service=_StubTrace(),
@@ -418,25 +555,37 @@ class TestEscalationGatesPassThrough(unittest.TestCase):
 
         resp = _run(orch, _request(message="I want a human right now!!"))
 
-        # U1 intake gate is pass-through: PLAN still ran (1 call) and the
-        # reply is the planned one, NOT a handoff acknowledgement.
-        self.assertEqual(len(router.calls), 1)
         self.assertEqual(resp.message, "planned")
         self.assertFalse(resp.escalation_flag)
 
-    def test_outcome_gate_does_not_escalate_even_on_low_confidence(self):
+    def test_outcome_low_confidence_with_no_retrieval_now_escalates(self):
+        # U2 behaviour change (observable, not silent): a low-confidence
+        # answer with NO grounding (retrieval flag off ⇒ grounding None ⇒
+        # treated as below every tier floor) fires the cannot-confidently-
+        # answer OUTCOME signal. The customer-facing reply is still
+        # emitted; escalation is an additive side-effect on the turn.
         router = _ScriptedRouter([_plan_json(reply="unsure", confidence=0.1)])
+        # Inject a fake escalation service so no DB is touched and we can
+        # assert the decision was recorded.
+        recorded: list = []
+
+        class _FakeEscalationSvc:
+            def record_escalation(self, decision):
+                recorded.append(decision)
+
         orch = LucielOrchestrator(
             trace_service=_StubTrace(),
             model_router=router,
             tool_broker=_RecordingBroker(),
+            escalation_service=_FakeEscalationSvc(),
         )
 
         resp = _run(orch, _request())
 
-        # Low confidence would fire the U2 outcome signal, but U1's gate
-        # is pass-through.
-        self.assertFalse(resp.escalation_flag)
+        self.assertTrue(resp.escalation_flag)
+        self.assertEqual(resp.message, "unsure")
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0].signal, "cannot_confidently_answer")
 
 
 if __name__ == "__main__":  # pragma: no cover
