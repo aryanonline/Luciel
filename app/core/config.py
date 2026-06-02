@@ -166,8 +166,8 @@ class Settings(BaseSettings):
     # cap on a flat-recurring customer punishes success without
     # protecting any surface rate-limiting does not already cover.):
     #   Free        — $0 CAD, CAPTCHA-gated signup, no Stripe row at all.
-    #   Pro         — flat-rate self-serve. $349 CAD/mo or $2,990 CAD/yr
-    #                 (~28% annual discount). Stripe Checkout via
+    #   Pro         — flat-rate self-serve. $149 CAD/mo or $1,432 CAD/yr
+    #                 (~20% annual discount: 1,432 vs 149×12=1,788). Stripe Checkout via
     #                 ``stripe_price_pro_monthly`` / ``stripe_price_pro_annual``.
     #                 First-time buyers additionally get the intro fee
     #                 (``stripe_price_intro_fee``) appended as a second
@@ -220,7 +220,7 @@ class Settings(BaseSettings):
     # --- Enterprise tier recurring Prices (flat-rate, self-serve via
     # Checkout — symmetric with Pro since Arc 7 Commit 1 retired the
     # hybrid/metered shape). $2,800 CAD/mo or $24,000 CAD/yr (28.6%
-    # annual discount mirroring Pro's $349/$2,990 ratio). Empty defaults
+    # annual discount). Empty defaults
     # keep boot safe: a missing slot causes the (enterprise, *) row in
     # ``PRICE_ID_KEY`` to resolve to BillingNotConfiguredError → 501. ---
     stripe_price_enterprise_monthly: str = ""
