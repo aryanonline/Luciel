@@ -57,17 +57,6 @@ class Instance(Base):
     instance_slug: Mapped[str] = mapped_column(String(100), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
-    # DEPRECATED (Arc 15 WU1) — free-text raw-prompt authoring violates
-    # Vision §3.5 / Architecture §3.5.1 ("never raw prompt authoring").
-    # The Arc 15 persona composer (app/persona/composer.py) no longer
-    # reads this column; the personality API never writes it. It is
-    # retained (NOT dropped) this arc to avoid breaking the legacy
-    # 4-layer composer mid-flight for any instance still relying on it.
-    # TODO(ARC16+): drop this column once no instance carries a
-    # non-NULL value and the legacy composer path is fully retired.
-    system_prompt_additions: Mapped[str | None] = mapped_column(
-        Text, nullable=True
-    )
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
     )

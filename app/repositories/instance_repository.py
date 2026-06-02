@@ -78,7 +78,6 @@ class InstanceRepository:
         description: str | None = None,
         active: bool = True,
         created_by: str | None = None,
-        system_prompt_additions: str | None = None,
         website: str | None = None,
         personality_preset: str | None = None,
         personality_axes: dict | None = None,
@@ -104,7 +103,6 @@ class InstanceRepository:
             display_name=display_name,
             description=description,
             active=active,
-            system_prompt_additions=system_prompt_additions,
             website=website,
             personality_axes=personality_axes,
             business_context=business_context,
@@ -140,7 +138,6 @@ class InstanceRepository:
                     "display_name": display_name,
                     "description": description,
                     "active": active,
-                    "system_prompt_additions_set": system_prompt_additions is not None,
                 },
                 autocommit=False,
             )
@@ -229,7 +226,6 @@ class InstanceRepository:
             "display_name",
             "description",
             "active",
-            "system_prompt_additions",
             # Arc 15 WU1 — instance configuration pillars. Tier-conditional
             # validation (custom preset, business_context length,
             # lead_routing presence) happens at the API layer BEFORE the

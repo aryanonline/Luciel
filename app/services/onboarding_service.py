@@ -12,15 +12,15 @@ everything rolls back. No partial Admins.
 Step 23 origin; Arc 5 Path A collapsed the Domain layer; Arc 6
 Commit 8 (2026-05-23) rewrote the Admin() kwargs to match the V2
 schema after the kwarg drift (display_name, description,
-escalation_contact, system_prompt_additions, created_by, allowed_domains
-were all stale post-Arc-5-B8) was discovered as a P0 during the
-unified-signup design. The function now accepts a ``tier`` parameter
-(V2 vocabulary) and writes ONLY the V2 Admin columns:
-``id, name, tier, tier_source, active``. Legacy kwargs are RETAINED on
-the signature for source-compat with the platform_admin route + the
-Stripe webhook caller, but they are NO LONGER written to the Admin row
-— they are passed through to retention defaults, api-key labelling,
-and audit metadata only.
+escalation_contact, created_by, allowed_domains were all stale
+post-Arc-5-B8) was discovered as a P0 during the unified-signup
+design. The function now accepts a ``tier`` parameter (V2 vocabulary)
+and writes ONLY the V2 Admin columns:
+``id, name, tier, tier_source, active``. The remaining legacy kwargs
+(description, escalation_contact) are RETAINED on the signature for
+source-compat with the platform_admin route + the Stripe webhook
+caller, but they are NO LONGER written to the Admin row — they thread
+into audit metadata only.
 """
 from __future__ import annotations
 
@@ -81,10 +81,6 @@ class OnboardingService:
         tier_source: str = TIER_SOURCE_STRIPE_WEBHOOK,
         description: str | None = None,
         escalation_contact: str | None = None,
-        system_prompt_additions: str | None = None,
-        default_domain_id: str = "general",
-        default_domain_display_name: str = "General Assistant",
-        default_domain_description: str | None = "Default domain created during onboarding",
         api_key_display_name: str = "Default onboarding key",
         api_key_permissions: list[str] | None = None,
         api_key_rate_limit: int = 1000,
@@ -99,22 +95,22 @@ class OnboardingService:
         """
         Create everything an Admin needs in one atomic transaction.
 
-        Returns a dict with: tenant (Admin), default_domain (always None
-        post-Arc-5), admin_api_key, admin_raw_key, retention_policies.
+        Returns a dict with: tenant (Admin), admin_api_key,
+        admin_raw_key, retention_policies.
 
         Raises ValueError if Admin already exists or ``tier`` is not in
         the V2 allowed-tier set.
 
         Arc 6 Commit 8 (2026-05-23): rewrote the Admin() kwargs to use
-        ONLY V2 columns (id, name, tier, tier_source, active). Legacy
-        kwargs (description, escalation_contact, system_prompt_additions,
-        created_by, allowed_domains) are RETAINED on the signature for
-        source-compat with admin.py + the Stripe webhook caller but they
-        are NO LONGER written to the Admin row -- they thread through to
-        audit metadata + api-key naming only. ``tier`` defaults to PRO so
-        the Stripe webhook caller (which does NOT pass tier today) keeps
-        its current behavior; the unified-signup caller passes
-        ``tier="free"`` + ``tier_source="free_signup"`` explicitly.
+        ONLY V2 columns (id, name, tier, tier_source, active). The
+        remaining legacy kwargs (description, escalation_contact) are
+        RETAINED on the signature for source-compat with admin.py + the
+        Stripe webhook caller but they are NO LONGER written to the
+        Admin row -- they thread through to audit metadata only.
+        ``tier`` defaults to PRO so the Stripe webhook caller (which
+        does NOT pass tier today) keeps its current behavior; the
+        unified-signup caller passes ``tier="free"`` +
+        ``tier_source="free_signup"`` explicitly.
         """
         if api_key_permissions is None:
             api_key_permissions = ["chat", "sessions"]
@@ -188,10 +184,8 @@ class OnboardingService:
             )
             _set_admin(admin_id)
 
-            # 2. Default DomainConfig: REMOVED (Arc 5 Path A).
-            # V2 has no Domain layer; ``default_domain_id`` is retained
-            # only as a label inside the audit-row payload below.
-            domain = None
+            # 2. Default DomainConfig: REMOVED (Arc 5 Path A). V2 has no
+            # Domain layer; no domain_config row is created at onboarding.
 
             # 3. Create default retention policies. Cleanup A renamed
             # the knowledge data_category to "knowledge_chunks".
@@ -265,19 +259,18 @@ class OnboardingService:
                 resource_natural_id=admin_id,
                 after={
                     # Arc 6 / Commit 8 -- audit row mirrors the V2 Admin
-                    # write. Legacy fields (description,
-                    # escalation_contact, allowed_domains) are retained
-                    # in the after-snapshot as call-site metadata (the
-                    # caller intended them as descriptive context)
-                    # rather than as column values, so platform_admin
-                    # forensic queries against admin_audit_log keep
-                    # the same shape during the transition.
+                    # write. Legacy descriptive fields (description,
+                    # escalation_contact) are retained in the
+                    # after-snapshot as call-site metadata (the caller
+                    # intended them as descriptive context) rather than
+                    # as column values, so platform_admin forensic
+                    # queries against admin_audit_log keep the same
+                    # shape during the transition.
                     "name": display_name,
                     "tier": tier,
                     "tier_source": tier_source,
                     "description": description,
                     "escalation_contact": escalation_contact,
-                    "allowed_domains": [default_domain_id],
                 },
                 note="onboard_tenant: created admin (V2 vocab)",
             )
@@ -318,7 +311,6 @@ class OnboardingService:
             logger.info("Onboard: tenant %s fully onboarded", admin_id)
             return {
                 "tenant": tenant,
-                "default_domain": domain,
                 "admin_api_key": admin_key,
                 "admin_raw_key": admin_raw,
                 "retention_policies": retention_policies,

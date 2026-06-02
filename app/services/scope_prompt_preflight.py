@@ -2,15 +2,13 @@
 Scope-prompt preflight for embed-key issuance.
 
 Arc 5 Path A (V2 collapse): the Domain layer was eliminated. The
-issuance-time guardrail historically verified that the target
-``domain_configs`` row had a non-empty ``system_prompt_additions``
-value before a domain-scoped embed key could be minted.
+issuance-time guardrail historically verified a domain-scoped prompt
+condition before a domain-scoped embed key could be minted.
 
 In V2, widget keys are scoped to an ``Instance`` (under an ``Admin``)
-instead of a Domain. Instances are required to have a system prompt at
-provisioning time (see ``TierProvisioningService``), so this preflight
-is no longer the bottleneck — the issuance routes already validate the
-target ``admin_id`` / ``instance_slug`` directly.
+instead of a Domain, so this preflight is no longer the bottleneck —
+the issuance routes already validate the target ``admin_id`` /
+``instance_slug`` directly.
 
 This module is preserved as a no-op shim so any caller that still
 imports ``ScopePromptPreflight`` / ``ScopePromptMissingError``

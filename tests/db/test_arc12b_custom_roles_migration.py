@@ -76,11 +76,12 @@ def test_alembic_head_is_arc12b(engine):
     # Single linear head. Successive arcs append on top of arc12b:
     # Arc 13 (arc13_a_channel_routes → arc13_b_instance_channel_fields),
     # Arc 14 (arc14_u2_escalation_events → arc14_u4_leads), Arc 15
-    # (arc15_a_instance_config_pillars → arc15_b_instance_connections),
-    # so the live head is now arc15_b. This pin tracks the current head
-    # (one revision, no branch) rather than freezing it at arc12b.
-    assert rows[0] == "arc15_b_instance_connections", (
-        f"expected arc15_b head; got {rows[0]!r}"
+    # (arc15_a_instance_config_pillars → arc15_b_instance_connections →
+    # arc15_c_drop_system_prompt_additions), so the live head is now
+    # arc15_c. This pin tracks the current head (one revision, no
+    # branch) rather than freezing it at arc12b.
+    assert rows[0] == "arc15_c_drop_system_prompt_additions", (
+        f"expected arc15_c head; got {rows[0]!r}"
     )
 
 

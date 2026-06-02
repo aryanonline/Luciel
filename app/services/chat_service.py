@@ -4,7 +4,8 @@ ChatService coordinates one full chat turn.
 Single Admin→Instance boundary (Architecture §3.7.2). Per-turn
 context:
   1. Luciel Core persona (fixed, optionally renamed by instance)
-  2. Instance.system_prompt_additions (optional persona layer)
+  2. Composed PRESET + BUSINESS_CONTEXT stanzas (§3.5.1; from the
+     structured instance pillars — never raw customer prompt)
   3. Retrieved knowledge (Arc 11, scope-inherited)
   4. User memories (consent-gated)
   5. Tool descriptions — for the 8-tool v1 catalog (WU3), filtered
@@ -69,14 +70,6 @@ class LucielContext:
     Single Admin→Instance shape post-WU7. The chat path no longer
     threads a Domain or Agent layer.
     """
-
-    # Instance persona / additions, appended onto the Luciel Core
-    # persona. None when no instance binding is active.
-    # DEPRECATED (Arc 15 WU2): superseded by preset_stanza +
-    # business_context_stanza below. Retained so any path that still
-    # reads it compiles; the composer no longer threads it into the
-    # system prompt.
-    instance_prompt: str | None = None
 
     # Arc 15 WU2 — platform-composed persona stanzas (§3.5.1). Derived
     # from instance.personality_preset (+ personality_axes when custom)
@@ -144,9 +137,10 @@ class ChatService:
         ``luciel_instance_id`` is set AND the row is active AND
         belongs to the same admin, we layer:
 
-          * instance.system_prompt_additions → ``instance_prompt``
-          * instance.display_name           → ``assistant_name``
-          * instance.preferred_provider     → ``preferred_provider``
+          * instance.personality_preset/_axes → ``preset_stanza``
+          * instance.business_context        → ``business_context_stanza``
+          * instance.display_name            → ``assistant_name``
+          * instance.preferred_provider      → ``preferred_provider``
 
         When the instance is missing / inactive / cross-tenant, we
         fall back to defaults and log a warning. Never 500 the chat
@@ -308,9 +302,6 @@ class ChatService:
         system_prompt = build_system_prompt(
             memories=memories if memories else None,
             tool_descriptions=tool_descriptions if tool_descriptions else None,
-            tenant_prompt=None,
-            domain_prompt=None,
-            agent_prompt=None,
             preset_stanza=ctx.preset_stanza,
             business_context_stanza=ctx.business_context_stanza,
             knowledge=knowledge if knowledge else None,
@@ -551,9 +542,6 @@ class ChatService:
         system_prompt = build_system_prompt(
             memories=memories if memories else None,
             tool_descriptions=tool_descriptions if tool_descriptions else None,
-            tenant_prompt=None,
-            domain_prompt=None,
-            agent_prompt=None,
             preset_stanza=ctx.preset_stanza,
             business_context_stanza=ctx.business_context_stanza,
             knowledge=knowledge if knowledge else None,

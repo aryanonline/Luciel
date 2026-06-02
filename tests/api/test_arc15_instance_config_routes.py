@@ -131,7 +131,7 @@ def test_repository_updatable_fields_include_pillars() -> None:
 
 
 # ---------------------------------------------------------------------
-# Model carries the columns + deprecation note for system_prompt_additions.
+# Model carries the pillar columns; system_prompt_additions is removed.
 # ---------------------------------------------------------------------
 
 
@@ -148,7 +148,9 @@ def test_model_carries_pillar_columns() -> None:
         assert col in src, col
 
 
-def test_model_keeps_system_prompt_additions_deprecated_not_removed() -> None:
+def test_model_drops_system_prompt_additions() -> None:
+    # Arc 15 doctrine cleanup — the free-text raw-prompt column is GONE
+    # from the model end-to-end (Vision §3.5 / Architecture §3.5.1
+    # "never raw prompt authoring"). The structured pillars replace it.
     src = _read(MODEL_PATH)
-    assert "system_prompt_additions" in src
-    assert "DEPRECATED" in src
+    assert "system_prompt_additions" not in src

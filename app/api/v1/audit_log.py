@@ -123,9 +123,8 @@ _SAFE_DIFF_KEYS: dict[str, frozenset[str]] = {
         "display_name",
         "description",
         "allowed_domains",
-        # NOTE: escalation_contact, system_prompt_additions are
-        # intentionally NOT here — escalation_contact is a contact
-        # email (PII), system_prompt_additions can be anything.
+        # NOTE: escalation_contact is intentionally NOT here — it is a
+        # contact email (PII) and must not surface in diff projections.
     },
     RESOURCE_DOMAIN: _COMMON_SAFE_KEYS | {
         "admin_id",

@@ -230,14 +230,14 @@ def test_restore_handler_surfaces_new_embed_key():
 
 
 # ---------------------------------------------------------------------
-# Schema — LucielInstanceRead must carry instance_status + soft_deleted_at.
+# Schema — InstanceRead must carry instance_status + soft_deleted_at.
 # ---------------------------------------------------------------------
 
 
 def test_instance_read_schema_carries_instance_status():
     src = _read(SCHEMA_PATH)
     assert "instance_status" in src, (
-        "LucielInstanceRead must include instance_status."
+        "InstanceRead must include instance_status."
     )
 
 
@@ -249,7 +249,7 @@ def test_instance_read_schema_carries_soft_deleted_at():
 def test_instance_read_schema_carries_new_embed_key():
     src = _read(SCHEMA_PATH)
     assert "new_embed_key" in src, (
-        "LucielInstanceRead must carry new_embed_key for the restore response."
+        "InstanceRead must carry new_embed_key for the restore response."
     )
 
 

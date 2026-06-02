@@ -424,14 +424,25 @@ def test_chat_service_luciel_context_is_admin_instance_only() -> None:
         ):
             field_names.add(body_node.target.id)
 
-    forbidden = {"tenant_prompt", "domain_prompt", "agent_prompt"}
+    # Arc 15 doctrine cleanup — the free-text prompt fields are GONE.
+    # ``instance_prompt`` was the LucielContext carrier for the dead
+    # ``system_prompt_additions`` layer (Vision §3.5 / Architecture
+    # §3.5.1 "never raw prompt authoring"); it is removed alongside the
+    # superseded tenant/domain/agent layers.
+    forbidden = {
+        "tenant_prompt",
+        "domain_prompt",
+        "agent_prompt",
+        "instance_prompt",
+    }
     assert not (field_names & forbidden), (
-        f"LucielContext must not carry the superseded three-layer "
-        f"prompt fields. Got {field_names & forbidden!r}."
+        f"LucielContext must not carry any free-text prompt field. "
+        f"Got {field_names & forbidden!r}."
     )
-    # The instance prompt layer survives — it's the Admin→Instance
-    # boundary contributor (§3.7.2).
-    assert "instance_prompt" in field_names
+    # The Admin→Instance boundary contributes via the platform-composed
+    # stanzas (§3.5.1), not a raw prompt string.
+    assert "preset_stanza" in field_names
+    assert "business_context_stanza" in field_names
 
 
 def test_registry_has_exactly_the_eight_catalog_tools() -> None:

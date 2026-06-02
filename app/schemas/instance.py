@@ -133,12 +133,6 @@ class InstanceCreate(BaseModel):
     active: bool = Field(default=True)
     created_by: str | None = Field(default=None, max_length=100)
 
-    # DEPRECATED (Arc 15 WU1) — retained on the create surface for
-    # backward compatibility only. New instances should configure the
-    # structured pillars below; the persona composer no longer reads
-    # this field.
-    system_prompt_additions: str | None = Field(default=None, max_length=8000)
-
     # --- Arc 15 WU1 — instance configuration pillars (Vision §3.5) ---
     website: str | None = Field(default=None, max_length=255)
     personality_preset: PersonalityPreset = "warm_concierge"
@@ -175,7 +169,6 @@ class InstanceUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)
     active: bool | None = None
-    system_prompt_additions: str | None = Field(default=None, max_length=8000)
 
     # --- Arc 15 WU1 — instance configuration pillars (Vision §3.5) ---
     website: str | None = Field(default=None, max_length=255)
@@ -216,7 +209,6 @@ class InstanceRead(BaseModel):
     description: str | None = None
 
     active: bool
-    system_prompt_additions: str | None = None
 
     # --- Arc 15 WU1 — instance configuration pillars (Vision §3.5) ---
     website: str | None = None
@@ -264,18 +256,3 @@ class InstanceSummary(BaseModel):
     instance_slug: str
     display_name: str
     active: bool
-
-
-# ---------------------------------------------------------------------
-# Transitional legacy aliases — DELETED at B1 when route bodies finish
-# their V2 rewrite. These exist solely so admin.py and the two test
-# files that still import the legacy class names (
-# LucielInstanceCreate / LucielInstanceRead / LucielInstanceUpdate /
-# LucielInstanceSummary) compile through B1. New code must NEVER
-# import the legacy names.
-# ---------------------------------------------------------------------
-
-LucielInstanceCreate = InstanceCreate
-LucielInstanceUpdate = InstanceUpdate
-LucielInstanceRead = InstanceRead
-LucielInstanceSummary = InstanceSummary
