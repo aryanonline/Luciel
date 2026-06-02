@@ -315,7 +315,7 @@ class BillingWebhookService:
             # like Enterprise would (Enterprise has unlimited Instance
             # cap), and (b) it does not under-provision like Free would
             # (Free is a $0 tier and downgrading a paid subscriber to
-            # Free would silently disable paid features). Pro's $349/mo
+            # Free would silently disable paid features). Pro's $149/mo
             # rate has already been authorized via the Stripe event we
             # are processing, so we hand the buyer the matching surface.
             logger.error(
