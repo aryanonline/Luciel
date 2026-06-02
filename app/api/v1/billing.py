@@ -47,6 +47,7 @@ from fastapi.responses import JSONResponse
 from app.api.deps import DbSession
 from app.core.config import settings
 from app.integrations.stripe import StripeSignatureError, get_stripe_client
+from app.models.subscription import TIER_ENTERPRISE
 from app.models.user import User
 from app.schemas.billing import (
     CheckoutSessionRequest,
@@ -149,23 +150,77 @@ def _set_session_cookie(response: Response, token: str) -> None:
 # POST /checkout
 # ---------------------------------------------------------------------
 
+# Stable identifier the marketing site keys its "Talk to sales" copy off
+# (mirrors the detail-string-as-identifier convention the pilot-refund
+# errors use). Returned as the ``reason`` field of the 422 body so the
+# frontend can branch without parsing English.
+ENTERPRISE_CONTACT_SALES_REASON = "contact_sales"
+
+
 @router.post(
     "/checkout",
     response_model=CheckoutSessionResponse,
     status_code=status.HTTP_200_OK,
 )
-def create_checkout(payload: CheckoutSessionRequest, db: DbSession) -> CheckoutSessionResponse:
-    """Begin a Stripe Checkout session.
+def create_checkout(
+    payload: CheckoutSessionRequest,
+    request: Request,
+    db: DbSession,
+) -> CheckoutSessionResponse:
+    """Begin a Stripe Checkout session — Customer-Journey-aligned.
 
-    Anonymous endpoint. Rate limiting happens at the edge (CloudFront /
-    ALB); we do not need a per-route limiter inside the backend because
-    each call is a Stripe API call and Stripe imposes its own limits.
+    Funnel alignment (Arc 15, VANTAGEMIND_CUSTOMER_JOURNEY_v1 Phase 2):
+
+      * Pro is a FREE-THEN-UPGRADE flow. "Marcus signs up the same way
+        Sarah did — $0, no card ... clicks Upgrade to Pro ... taken to
+        Stripe Checkout." So there is NO anonymous paid-at-signup Pro
+        path: a Pro checkout requires an authenticated (cookied) Free
+        admin. An anonymous Pro attempt is rejected 401 (no/invalid
+        session cookie) so the marketing Pricing CTA routes the user
+        through Free signup → dashboard "Upgrade to Pro" first.
+
+      * Enterprise is PROCUREMENT-LED. "Dana will not click 'Start free'
+        ... Enterprise signup is a process, not a click ... MSA + DPA ...
+        Once paid the Enterprise admin record is provisioned" back-office
+        via the existing contract/webhook path. The API therefore cannot
+        self-provision Enterprise: a tier=enterprise checkout attempt
+        returns 422 with ``reason="contact_sales"`` as the primary (and
+        only) outcome. No Stripe session is created.
+
+    The authenticated Pro path reuses ``BillingService.create_checkout``
+    unchanged so the $100/90-day first-time pilot (and its refund
+    eligibility, which keys on the ``luciel_intro_applied`` metadata this
+    method stamps) is preserved EXACTLY — it simply now runs from the
+    in-dashboard upgrade surface instead of an anonymous signup page.
+
+    Rate limiting happens at the edge (CloudFront / ALB); each call is a
+    Stripe API call and Stripe imposes its own limits.
     """
+    # Enterprise can never be self-served. This is the primary/only
+    # response for a tier=enterprise checkout attempt.
+    if payload.tier == TIER_ENTERPRISE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "reason": ENTERPRISE_CONTACT_SALES_REASON,
+                "message": (
+                    "Enterprise is provisioned through sales after an MSA "
+                    "and security review, not self-serve checkout. Please "
+                    "contact sales."
+                ),
+            },
+        )
+
+    # Pro requires an authenticated Free admin (free-then-upgrade). An
+    # anonymous caller has no Free account yet and must sign up first.
+    cookie = request.cookies.get(settings.session_cookie_name)
+    user = _resolve_cookied_user(db=db, session_cookie=cookie)
+
     svc = _service(db)
     try:
         result = svc.create_checkout(
-            email=str(payload.email),
-            display_name=payload.display_name,
+            email=user.email,
+            display_name=user.display_name or user.email,
             tier=payload.tier,
             billing_cadence=payload.billing_cadence,
         )
@@ -798,6 +853,26 @@ def upgrade_tier(
     payment (proration is handled by Stripe's standard immediate-
     proration semantics; we do not compute credits ourselves).
     """
+    # Funnel alignment (Arc 15): Enterprise is procurement-led and can
+    # never be self-served — not from anonymous /checkout, and not from
+    # an authenticated in-dashboard /upgrade either. A tier=enterprise
+    # upgrade attempt returns the same 422 contact_sales shape as
+    # /checkout, before any Stripe session is created. The Enterprise
+    # admin record is provisioned back-office after MSA/DPA + payment
+    # via the contract/webhook path (see create_checkout docstring).
+    if payload.target_tier == TIER_ENTERPRISE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "reason": ENTERPRISE_CONTACT_SALES_REASON,
+                "message": (
+                    "Enterprise is provisioned through sales after an MSA "
+                    "and security review, not self-serve checkout. Please "
+                    "contact sales."
+                ),
+            },
+        )
+
     cookie = request.cookies.get(settings.session_cookie_name)
     user = _resolve_cookied_user(db=db, session_cookie=cookie)
 

@@ -56,14 +56,23 @@ class CheckoutSessionRequest(BaseModel):
       cross-tenant flow can route onto an existing tenant without an
       API change.
     """
-    email: EmailStr = Field(
-        ..., description="Email of the buyer. Becomes the User.email "
-                        "and Subscription.customer_email."
+    # Arc 15 funnel alignment: checkout is now an AUTHENTICATED
+    # free→pro upgrade. The buyer's identity comes from the session
+    # cookie (the cookied Free admin), NOT from the request body, so
+    # ``email`` / ``display_name`` are no longer required or read by
+    # the route. They are retained as optional/ignored fields purely so
+    # any stale client that still posts them does not 422 at the schema
+    # boundary. The route derives email + display_name from the cookied
+    # User row server-side.
+    email: EmailStr | None = Field(
+        default=None,
+        description="DEPRECATED / ignored. Identity is taken from the "
+                    "session cookie. Retained optional for back-compat.",
     )
-    display_name: str = Field(
-        ..., min_length=1, max_length=200,
-        description="Buyer's name. Carried into the Stripe customer "
-                    "object and onto the eventual TenantConfig.",
+    display_name: str | None = Field(
+        default=None, max_length=200,
+        description="DEPRECATED / ignored. Identity is taken from the "
+                    "session cookie. Retained optional for back-compat.",
     )
     tier: Literal["pro", "enterprise"] = Field(
         default="pro",
