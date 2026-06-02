@@ -112,11 +112,11 @@ class TestArc11KnowledgeRls(unittest.TestCase):
             for aid in (cls.admin_a, cls.admin_b):
                 cur.execute(
                     """
-                    INSERT INTO admins (id, email, tier, active)
+                    INSERT INTO admins (id, name, tier, active)
                     VALUES (%s, %s, 'free', true)
                     ON CONFLICT (id) DO NOTHING
                     """,
-                    (aid, f"{aid}@example.test"),
+                    (aid, f"Admin {aid}"),
                 )
 
             # Create one instance per admin.
@@ -176,6 +176,14 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         if parts.port:
             netloc += f":{parts.port}"
         cls.app_url = urlunparse(parts._replace(netloc=netloc))
+        # SQLAlchemy variant: force the psycopg (v3) dialect the app
+        # uses. A bare ``postgresql://`` URL makes create_engine reach
+        # for psycopg2 (not installed); ``postgresql+psycopg://`` binds
+        # the same driver app/db/session.py uses in production.
+        sa_parts = parts._replace(
+            scheme="postgresql+psycopg", netloc=netloc
+        )
+        cls.app_url_sa = urlunparse(sa_parts)
 
         # Seed: one source + N chunks under Admin A. Done as the
         # OWNER (admin_conn) because admin_conn can bypass FORCE on
@@ -184,7 +192,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         cls.chunk_a_ids: list[int] = []
 
         with cls.admin_conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (cls.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, true)", (cls.admin_a,))
             cur.execute(
                 """
                 INSERT INTO knowledge_sources
@@ -233,7 +241,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         with cls.admin_conn.cursor() as cur:
             # Drop our chunks + source. Admin GUC so RLS lets us
             # touch our own rows.
-            cur.execute("SET LOCAL app.admin_id = %s", (cls.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, true)", (cls.admin_a,))
             cur.execute(
                 "DELETE FROM knowledge_chunks WHERE admin_id = %s",
                 (cls.admin_a,),
@@ -308,7 +316,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         with self.admin_conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT polname, tablename
+                SELECT policyname, tablename
                   FROM pg_policies
                  WHERE schemaname = 'public'
                    AND tablename IN ('knowledge_sources', 'knowledge_chunks')
@@ -347,7 +355,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
     def test_admin_b_sees_no_knowledge_sources(self):
         """Direct SELECT under Admin B's GUC returns no Admin-A rows."""
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_b,))
+            cur.execute("SELECT set_config('app.admin_id', %s, true)", (self.admin_b,))
             cur.execute(
                 "SELECT id FROM knowledge_sources WHERE admin_id = %s",
                 (self.admin_a,),
@@ -361,7 +369,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
     def test_admin_b_sees_no_knowledge_chunks(self):
         """Direct SELECT under Admin B's GUC returns no Admin-A chunks."""
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_b,))
+            cur.execute("SELECT set_config('app.admin_id', %s, true)", (self.admin_b,))
             cur.execute(
                 "SELECT id FROM knowledge_chunks WHERE admin_id = %s",
                 (self.admin_a,),
@@ -375,9 +383,17 @@ class TestArc11KnowledgeRls(unittest.TestCase):
     def test_admin_a_sees_their_own_sources_and_chunks(self):
         """Positive control: Admin A under Admin A's GUC DOES see
         their own rows. Otherwise the "0 rows for B" result would
-        be ambiguous between "RLS denied" and "table empty"."""
+        be ambiguous between "RLS denied" and "table empty".
+
+        Binds BOTH walls (app.admin_id + app.instance_id) — the
+        production ``bind_tenant_scope`` contract. knowledge_chunks
+        carries a RESTRICTIVE tenant fence AND a PERMISSIVE instance
+        fence (luciel_instance_id = app.instance_id); chunk reads
+        require both GUCs, so admin_id alone returns zero chunks.
+        """
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, true)", (self.admin_a,))
+            cur.execute("SELECT set_config('app.instance_id', %s, true)", (str(self.instance_a),))
             cur.execute("SELECT id FROM knowledge_sources")
             sources = cur.fetchall()
             cur.execute("SELECT id FROM knowledge_chunks")
@@ -400,7 +416,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
     def test_reset_guc_returns_zero_rows_knowledge_sources(self):
         """RESET clears the GUC; reads must still fail-closed."""
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, true)", (self.admin_a,))
             cur.execute("RESET app.admin_id")
             cur.execute("SELECT id FROM knowledge_sources")
             rows = cur.fetchall()
@@ -415,7 +431,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         with Admin B's admin_id. The RESTRICTIVE WITH CHECK fence
         denies the write; PG raises ``insufficient_privilege``."""
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, true)", (self.admin_a,))
             with self.assertRaises(self.psycopg.errors.InsufficientPrivilege):
                 cur.execute(
                     """
@@ -450,18 +466,27 @@ class TestArc11KnowledgeRls(unittest.TestCase):
             KnowledgeRepository,
         )
 
-        engine = create_engine(
-            self.app_url, future=True, isolation_level="AUTOCOMMIT",
-        )
+        # NOT AUTOCOMMIT: set_config(..., is_local=true) is
+        # transaction-scoped, and SQLAlchemy only emits the "begin"
+        # event (where the listener binds the GUCs) when a real
+        # transaction is opened. AUTOCOMMIT suppresses "begin", so the
+        # GUCs would never bind and the retriever would see zero rows.
+        engine = create_engine(self.app_url_sa, future=True)
 
         # Install a SET-LOCAL listener so every BEGIN binds the GUC.
         # This is the same posture as ``app/db/tenant_context.py``
         # (Arc 9 C2 / C4.1 listener doctrine).
         @event.listens_for(engine, "begin")
         def _begin_bind_admin(conn):  # noqa: ANN001 — SA event sig
+            # Bind BOTH walls, as production bind_tenant_scope does.
             conn.execute(
-                sa_text("SET LOCAL app.admin_id = :aid").bindparams(
+                sa_text("SELECT set_config('app.admin_id', :aid, true)").bindparams(
                     aid=self.admin_b
+                )
+            )
+            conn.execute(
+                sa_text("SELECT set_config('app.instance_id', :iid, true)").bindparams(
+                    iid=str(self.instance_b)
                 )
             )
 
@@ -485,11 +510,13 @@ class TestArc11KnowledgeRls(unittest.TestCase):
             engine.dispose()
 
         # The retriever returns a list of dicts; admin_id on each
-        # row MUST equal admin_b or be NULL (legacy platform rows,
-        # which are not under test here).
+        # row MUST equal admin_b. Arc 16 (a) removed the cross-tenant
+        # NULL-admin platform tier (Vision §3.3 hard isolation), so a
+        # NULL admin_id in a tenant-scoped result would itself be a
+        # leak — the tolerance for None is gone.
         leaked = [
             r for r in results
-            if r.get("admin_id") not in (self.admin_b, None)
+            if r.get("admin_id") != self.admin_b
         ]
         self.assertEqual(
             leaked, [],
@@ -516,15 +543,21 @@ class TestArc11KnowledgeRls(unittest.TestCase):
             KnowledgeRepository,
         )
 
-        engine = create_engine(
-            self.app_url, future=True, isolation_level="AUTOCOMMIT",
-        )
+        # NOT AUTOCOMMIT — see the no-leak test for the rationale: the
+        # GUC-binding "begin" listener only fires inside a real txn.
+        engine = create_engine(self.app_url_sa, future=True)
 
         @event.listens_for(engine, "begin")
         def _begin_bind_admin(conn):  # noqa: ANN001
+            # Bind BOTH walls, as production bind_tenant_scope does.
             conn.execute(
-                sa_text("SET LOCAL app.admin_id = :aid").bindparams(
+                sa_text("SELECT set_config('app.admin_id', :aid, true)").bindparams(
                     aid=self.admin_a
+                )
+            )
+            conn.execute(
+                sa_text("SELECT set_config('app.instance_id', :iid, true)").bindparams(
+                    iid=str(self.instance_a)
                 )
             )
 
@@ -551,3 +584,98 @@ class TestArc11KnowledgeRls(unittest.TestCase):
                 f"see seeded chunk id={cid}. Investigate before "
                 f"trusting the JOIN-RLS denial test.",
             )
+
+    # ------------------------------------------------------------------
+    # ARC 16 retrieval contract (#4): every retrieved chunk carries the
+    # full scope triple (admin_id, instance_id, source_id), and it
+    # matches the bound tenant. Isolation is verifiable at the output,
+    # not only at the RLS fence. Exercises the full RetrievedChunk path
+    # (retrieve_with_sources), not just the repository dicts.
+    # ------------------------------------------------------------------
+
+    def test_arc16_retrieved_chunks_carry_scope_triple(self):
+        # Embedder-independent by design: retrieve_with_sources would
+        # need a live OpenAI key (and return [] on a placeholder, making
+        # the assertions vacuous). Instead we drive search_similar with
+        # the same hand-built vector the positive control uses — real
+        # rows, real RLS, no network — and run them through the EXACT
+        # RetrievedChunk construction the retriever uses, asserting the
+        # scope triple is threaded onto every chunk. This proves the
+        # ARC 16 #4 contract deterministically.
+        from sqlalchemy import create_engine, event, text as sa_text
+        from sqlalchemy.orm import sessionmaker
+
+        from app.knowledge.retriever import RetrievedChunk
+        from app.repositories.knowledge_repository import (
+            KnowledgeRepository,
+        )
+
+        engine = create_engine(self.app_url_sa, future=True)
+
+        @event.listens_for(engine, "begin")
+        def _begin_bind(conn):  # noqa: ANN001
+            conn.execute(
+                sa_text("SELECT set_config('app.admin_id', :aid, true)").bindparams(
+                    aid=self.admin_a
+                )
+            )
+            conn.execute(
+                sa_text("SELECT set_config('app.instance_id', :iid, true)").bindparams(
+                    iid=str(self.instance_a)
+                )
+            )
+
+        Session = sessionmaker(bind=engine, future=True)
+        try:
+            with Session() as session:
+                repo = KnowledgeRepository(session)
+                rows = repo.search_similar(
+                    query_embedding=[0.0001] * 1536,
+                    admin_id=self.admin_a,
+                    luciel_instance_id=self.instance_a,
+                    limit=10,
+                )
+        finally:
+            engine.dispose()
+
+        # Must have real rows (otherwise the contract assertion below is
+        # vacuous — guard against the green-by-empty trap).
+        self.assertGreater(
+            len(rows), 0,
+            "search_similar returned no rows under Admin A — cannot "
+            "verify the scope-triple contract on an empty set.",
+        )
+
+        # Map through the retriever's RetrievedChunk construction and
+        # assert every chunk carries the full, correct scope triple.
+        chunks = [
+            RetrievedChunk(
+                content=r["content"],
+                knowledge_type=r["knowledge_type"],
+                title=r.get("title"),
+                distance=r.get("distance"),
+                chunk_id=r["id"],
+                source_identifier=int(r["source_id"]),
+                formatted="",
+                admin_id=r.get("admin_id"),
+                luciel_instance_id=r.get("luciel_instance_id"),
+            )
+            for r in rows
+        ]
+        for c in chunks:
+            self.assertEqual(
+                c.admin_id, self.admin_a,
+                f"chunk {c.chunk_id} carries admin_id={c.admin_id!r}, "
+                f"expected bound tenant {self.admin_a!r} — scope-triple "
+                f"contract (ARC 16 #4) violated",
+            )
+            self.assertEqual(
+                c.luciel_instance_id, self.instance_a,
+                f"chunk {c.chunk_id} carries instance_id="
+                f"{c.luciel_instance_id!r}, expected {self.instance_a!r}",
+            )
+            self.assertIsInstance(
+                c.source_identifier, int,
+                "source_identifier must be the int knowledge_sources FK",
+            )
+            self.assertGreater(c.source_identifier, 0)

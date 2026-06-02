@@ -77,11 +77,14 @@ def test_alembic_head_is_arc12b(engine):
     # Arc 13 (arc13_a_channel_routes → arc13_b_instance_channel_fields),
     # Arc 14 (arc14_u2_escalation_events → arc14_u4_leads), Arc 15
     # (arc15_a_instance_config_pillars → arc15_b_instance_connections →
-    # arc15_c_drop_system_prompt_additions), so the live head is now
-    # arc15_c. This pin tracks the current head (one revision, no
-    # branch) rather than freezing it at arc12b.
-    assert rows[0] == "arc15_c_drop_system_prompt_additions", (
-        f"expected arc15_c head; got {rows[0]!r}"
+    # arc15_c_drop_system_prompt_additions), Arc 16
+    # (arc16_a_knowledge_chunks_strict_tenant →
+    # arc16_b_knowledge_sources_permissive_fix →
+    # arc16_c_knowledge_graph_store), so the live head is now arc16_c.
+    # This pin tracks the current head (one revision, no branch) rather
+    # than freezing it at arc12b.
+    assert rows[0] == "arc16_c_knowledge_graph_store", (
+        f"expected arc16_c head; got {rows[0]!r}"
     )
 
 

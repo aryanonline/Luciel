@@ -73,6 +73,23 @@ class RetrievedChunk:
     the existing chat path. Pre-computed so callers that just want
     the strings don't need to know the format."""
 
+    # ---- Scope triple (ARC 16 retrieval contract) ----
+    # Architecture §3.7 isolation walls + ARC 16 Behavioral Contract #4:
+    # every chunk handed to the LLM must carry its full deterministic
+    # scope, so isolation is *verifiable at the retrieval output*, not
+    # only enforced upstream at the RLS fence + query filter. The
+    # hybrid path (graph + vector) MUST preserve these on every merged
+    # chunk. ``search_similar`` already selects all three; pre-ARC-16
+    # they were dropped at this construction layer.
+    admin_id: str | None = None
+    """Owning tenant (Wall 1). May be None only for the legacy
+    platform-curated tier, which ARC 16 (a) removed for knowledge_chunks
+    — under the current RESTRICTIVE policy a retrieved chunk always
+    carries a non-null admin_id matching the bound app.admin_id."""
+    luciel_instance_id: int | None = None
+    """Owning instance (Wall 3). Non-null for instance-private chunks;
+    None for the tenant-shared tier (admin_id set, instance_id NULL)."""
+
 
 class KnowledgeRetriever:
     """Thin wrapper over embedder + ``KnowledgeRepository.search_similar``."""
@@ -168,6 +185,12 @@ class KnowledgeRetriever:
                     chunk_id=r["id"],
                     source_identifier=ident,
                     formatted=formatted,
+                    # ARC 16 retrieval contract: carry the full scope
+                    # triple (admin_id, instance_id, source_id) on every
+                    # returned chunk. search_similar already selects
+                    # admin_id + luciel_instance_id; thread them through.
+                    admin_id=r.get("admin_id"),
+                    luciel_instance_id=r.get("luciel_instance_id"),
                 )
             )
 

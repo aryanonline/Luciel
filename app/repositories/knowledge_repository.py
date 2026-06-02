@@ -139,9 +139,16 @@ class KnowledgeRepository:
         Returns active chunks visible to this scope:
             - chunks bound to this luciel_instance_id  (instance-private)
             - chunks at this admin_id with luciel_instance_id IS NULL
-              (tenant-shared)
-            - chunks with both (admin_id, luciel_instance_id) NULL
-              (global)
+              (tenant-shared, within the same Admin)
+
+        Arc 16 (a): the cross-tenant ``global`` leg (admin_id IS NULL,
+        readable by every tenant) is removed. Vision §3.3 mandates hard
+        tenant isolation ("Across Admins: never"); the NULL-admin RLS
+        carve-out it relied on was dropped in
+        ``arc16_a_knowledge_chunks_strict_tenant`` (knowledge_chunks is
+        now RESTRICTIVE strict-tenant, matching knowledge_sources). A
+        global-leg clause here would now match zero rows under RLS, so
+        it is removed rather than left as dead, contradictory code.
 
         Arc 12 EX3: the legacy ``domain_id`` leg is gone — v2 scopes
         knowledge by ``(admin_id, luciel_instance_id)`` only.
@@ -155,13 +162,9 @@ class KnowledgeRepository:
             KnowledgeChunk.luciel_instance_id.is_(None),
             KnowledgeChunk.admin_id == admin_id,
         ) if admin_id is not None else None
-        global_clause = and_(
-            KnowledgeChunk.luciel_instance_id.is_(None),
-            KnowledgeChunk.admin_id.is_(None),
-        )
 
         union_parts = [
-            c for c in (instance_clause, tenant_clause, global_clause)
+            c for c in (instance_clause, tenant_clause)
             if c is not None
         ]
         if not union_parts:
@@ -232,8 +235,14 @@ class KnowledgeRepository:
 
         Visibility (union of):
           - luciel_instance_id == given  (instance-private)
-          - luciel_instance_id IS NULL AND admin_id match (tenant-shared)
-          - admin_id IS NULL  (global)
+          - luciel_instance_id IS NULL AND admin_id match (tenant-shared,
+            within the same Admin)
+
+        Arc 16 (a): the cross-tenant ``global`` leg (admin_id IS NULL,
+        readable by every tenant) is removed — Vision §3.3 hard tenant
+        isolation. The NULL-admin RLS carve-out it relied on was dropped
+        in ``arc16_a_knowledge_chunks_strict_tenant``; a global clause
+        here would match zero rows under the new RESTRICTIVE policy.
 
         Arc 12 EX3: the legacy ``domain_id`` leg is gone — v2 scopes
         knowledge by ``(admin_id, luciel_instance_id)`` only.
@@ -276,12 +285,12 @@ class KnowledgeRepository:
                     KnowledgeChunk.admin_id == admin_id,
                 )
             )
-        clauses.append(
-            and_(
-                KnowledgeChunk.luciel_instance_id.is_(None),
-                KnowledgeChunk.admin_id.is_(None),
-            )
-        )
+        # Arc 16 (a): no cross-tenant ``admin_id IS NULL`` global leg.
+        # Hard tenant isolation (Vision §3.3) is enforced by the
+        # RESTRICTIVE RLS policy; this app-side union must not reach for
+        # a tier the fence no longer permits.
+        if not clauses:
+            return []
 
         from sqlalchemy import literal_column
         from sqlalchemy.orm import aliased

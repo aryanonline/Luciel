@@ -32,6 +32,67 @@ from unittest.mock import MagicMock
 _PG_URL = os.environ.get("LUCIEL_LIVE_POSTGRES_URL")
 
 
+def _have_live_embedder() -> bool:
+    """True only when a REAL OpenAI key is configured.
+
+    The L1/L2 tests call the live ``internal_retrieve`` handler, which
+    embeds the query via ``embed_single`` (OpenAI text-embedding-3-small).
+    Founder decision #2 (no live API cost in CI) means we must NOT fail
+    on a placeholder key — we skip honestly. A real key is non-empty and
+    not one of the obvious test placeholders.
+    """
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not key:
+        return False
+    placeholders = {"sk-test", "test", "sk-fake", "dummy", "none"}
+    return key.lower() not in placeholders
+
+
+_LIVE_EMBEDDER_REASON = (
+    "Set a real OPENAI_API_KEY to run the live internal-retrieve "
+    "verification (embeds the query via OpenAI; founder decision #2 "
+    "forbids failing on a placeholder key — skip instead)."
+)
+
+
+def _make_platform_admin_request():
+    """Build a real Starlette Request carrying platform_admin perms.
+
+    The ``internal_retrieve`` handler is decorated with slowapi's
+    ``@limiter.limit`` which requires a genuine Starlette Request — a
+    SimpleNamespace is rejected ("parameter `request` must be an
+    instance of starlette.requests.Request"). Mirrors the helper in
+    tests/api/test_internal_retrieve.py.
+    """
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/internal/v1/retrieve",
+        "headers": [(b"host", b"test")],
+        "query_string": b"",
+        "client": ("127.0.0.1", 0),
+    }
+    req = Request(scope)
+    req.state.permissions = ["platform_admin"]
+    req.state.admin_id = None
+    return req
+
+
+def _sa_url(url: str | None) -> str | None:
+    """Force the psycopg (v3) dialect for SQLAlchemy create_engine.
+
+    A bare ``postgresql://`` URL routes to psycopg2 (not installed);
+    ``postgresql+psycopg://`` binds the same driver app/db/session.py
+    uses in production. psycopg.connect() (used directly elsewhere in
+    this file) takes the plain URL unchanged.
+    """
+    if url and url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
+
+
 @unittest.skipUnless(
     _PG_URL,
     "Set LUCIEL_LIVE_POSTGRES_URL=postgresql://... to run live "
@@ -53,11 +114,11 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
             for aid in (cls.admin_a, cls.admin_b):
                 cur.execute(
                     """
-                    INSERT INTO admins (id, email, tier, active)
+                    INSERT INTO admins (id, name, tier, active)
                     VALUES (%s, %s, 'free', true)
                     ON CONFLICT (id) DO NOTHING
                     """,
-                    (aid, f"{aid}@example.test"),
+                    (aid, f"Admin {aid}"),
                 )
 
             # Seed instances + sources + chunks for both admins.
@@ -65,7 +126,7 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
             cls.source_pks: dict[str, int] = {}
             for aid in (cls.admin_a, cls.admin_b):
                 cur.execute(
-                    "SET LOCAL app.admin_id = %s", (aid,),
+                    "SELECT set_config('app.admin_id', %s, true)", (aid,),
                 )
                 cur.execute(
                     """
@@ -116,7 +177,7 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
     def tearDownClass(cls) -> None:
         with cls.conn.cursor() as cur:
             for aid in (cls.admin_a, cls.admin_b):
-                cur.execute("SET LOCAL app.admin_id = %s", (aid,))
+                cur.execute("SELECT set_config('app.admin_id', %s, true)", (aid,))
                 cur.execute(
                     "DELETE FROM knowledge_chunks WHERE admin_id = %s", (aid,),
                 )
@@ -136,6 +197,7 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
         cls.conn.close()
 
     # ----- L1 -----
+    @unittest.skipUnless(_have_live_embedder(), _LIVE_EMBEDDER_REASON)
     def test_l1_platform_admin_scoped_query_returns_only_target_tenant(self):
         """The handler binds ``payload.admin_id`` via bind_tenant_scope;
         even though the caller is platform_admin and the request has
@@ -146,16 +208,11 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
         from app.api.v1 import admin_knowledge as ak
 
         engine = create_engine(
-            _PG_URL, future=True, isolation_level="AUTOCOMMIT",
+            _sa_url(_PG_URL), future=True, isolation_level="AUTOCOMMIT",
         )
         SessionLocal = sessionmaker(bind=engine, future=True)
 
-        platform_admin_request = SimpleNamespace(
-            state=SimpleNamespace(
-                permissions=["platform_admin"],
-                admin_id=None,
-            )
-        )
+        platform_admin_request = _make_platform_admin_request()
 
         try:
             with SessionLocal() as session:
@@ -195,6 +252,7 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
         )
 
     # ----- L2 -----
+    @unittest.skipUnless(_have_live_embedder(), _LIVE_EMBEDDER_REASON)
     def test_l2_explain_text_includes_recognizable_plan_signature(self):
         """The EXPLAIN ANALYZE output should mention either ``Index Scan``
         (sequential scan fallback when pgvector index is small) or
@@ -206,13 +264,11 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
         from app.api.v1 import admin_knowledge as ak
 
         engine = create_engine(
-            _PG_URL, future=True, isolation_level="AUTOCOMMIT",
+            _sa_url(_PG_URL), future=True, isolation_level="AUTOCOMMIT",
         )
         SessionLocal = sessionmaker(bind=engine, future=True)
 
-        platform_admin_request = SimpleNamespace(
-            state=SimpleNamespace(permissions=["platform_admin"], admin_id=None)
-        )
+        platform_admin_request = _make_platform_admin_request()
 
         try:
             with SessionLocal() as session:
