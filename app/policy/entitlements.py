@@ -577,3 +577,101 @@ def sms_brokerage_routing_flag(tier: str) -> bool:
     dedicated PLUS this brokerage capability flag set True.
     """
     return tier == TIER_ENTERPRISE and sms_dedicated_number_entitled(tier)
+
+
+# ---------------------------------------------------------------------
+# Arc 15 — instance-config-pillar derivations (Vision §3.5 / §3.4).
+#
+# Same discipline as the channel + rate-limit derivations above: the
+# TierEntitlement dataclass is frozen, so the per-tier policy for the
+# Arc 15 configuration pillars lives here as functions rather than as
+# new frozen fields. These answer the tier-gating questions the
+# personality + escalation + create APIs ask.
+# ---------------------------------------------------------------------
+
+# business_context length cap (Vision §3.5): 280 chars Free+Pro,
+# 2000 chars Enterprise. Capped at the API/Pydantic boundary, NOT the DB.
+_BUSINESS_CONTEXT_CAP_BY_TIER: dict[str, int] = {
+    TIER_FREE: 280,
+    TIER_PRO: 280,
+    TIER_ENTERPRISE: 2000,
+}
+
+
+def business_context_max_chars(tier: str) -> int:
+    """Return the max ``business_context`` length for a tier.
+
+    Fail-closed: an unknown tier gets the Free cap (280) so a mis-tagged
+    Admin can never write the longer Enterprise context by accident.
+    """
+    return _BUSINESS_CONTEXT_CAP_BY_TIER.get(
+        tier, _BUSINESS_CONTEXT_CAP_BY_TIER[TIER_FREE]
+    )
+
+
+def custom_personality_enabled(tier: str) -> bool:
+    """Whether a tier may use the ``custom`` personality preset.
+
+    Vision §3.5: all four NAMED presets are available on every tier;
+    ``custom`` (direct axis authoring) is Pro/Enterprise only. Free is
+    refused at the API with a 403. Fail-closed for unknown tiers.
+    """
+    return tier in (TIER_PRO, TIER_ENTERPRISE)
+
+
+def lead_routing_enabled(tier: str) -> bool:
+    """Whether a tier may configure ``lead_routing``.
+
+    Journey Phase 3 (Marcus, Pro): lead routing is Pro/Enterprise only;
+    Free instances leave it null. Fail-closed for unknown tiers.
+    """
+    return tier in (TIER_PRO, TIER_ENTERPRISE)
+
+
+# Admin-notification channels for escalation contacts, per tier
+# (Vision §3.4): Free=email; Pro=email+sms; Ent=+slack+custom.
+ESCALATION_NOTIFY_EMAIL = "email"
+ESCALATION_NOTIFY_SMS = "sms"
+ESCALATION_NOTIFY_SLACK = "slack"
+ESCALATION_NOTIFY_CUSTOM = "custom"
+
+_ESCALATION_NOTIFY_CHANNELS_BY_TIER: dict[str, frozenset[str]] = {
+    TIER_FREE: frozenset({ESCALATION_NOTIFY_EMAIL}),
+    TIER_PRO: frozenset({ESCALATION_NOTIFY_EMAIL, ESCALATION_NOTIFY_SMS}),
+    TIER_ENTERPRISE: frozenset(
+        {
+            ESCALATION_NOTIFY_EMAIL,
+            ESCALATION_NOTIFY_SMS,
+            ESCALATION_NOTIFY_SLACK,
+            ESCALATION_NOTIFY_CUSTOM,
+        }
+    ),
+}
+
+
+def escalation_notify_channels(tier: str) -> frozenset[str]:
+    """Return the admin-notification channels a tier may route escalation
+    contacts through (Vision §3.4).
+
+        * Free       -> {email}
+        * Pro        -> {email, sms}
+        * Enterprise -> {email, sms, slack, custom}
+
+    Fail-closed: unknown tier returns the Free set.
+    """
+    return _ESCALATION_NOTIFY_CHANNELS_BY_TIER.get(
+        tier, _ESCALATION_NOTIFY_CHANNELS_BY_TIER[TIER_FREE]
+    )
+
+
+def escalation_secondary_contact_enabled(tier: str) -> bool:
+    """Whether a tier may configure a secondary escalation contact +
+    per-signal routing rules (Pro/Enterprise; Free is primary_email only).
+    """
+    return tier in (TIER_PRO, TIER_ENTERPRISE)
+
+
+def escalation_chains_enabled(tier: str) -> bool:
+    """Whether a tier may configure ordered escalation chains with SLA
+    minutes (Enterprise only — Vision §3.4)."""
+    return tier == TIER_ENTERPRISE

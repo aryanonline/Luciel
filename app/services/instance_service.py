@@ -145,6 +145,11 @@ class InstanceService:
         active: bool = True,
         created_by: str | None = None,
         system_prompt_additions: str | None = None,
+        website: str | None = None,
+        personality_preset: str | None = None,
+        personality_axes: dict | None = None,
+        business_context: str | None = None,
+        lead_routing: dict | None = None,
     ) -> Instance:
         """Create a new Instance atomically.
 
@@ -167,6 +172,11 @@ class InstanceService:
                 active=active,
                 created_by=created_by,
                 system_prompt_additions=system_prompt_additions,
+                website=website,
+                personality_preset=personality_preset,
+                personality_axes=personality_axes,
+                business_context=business_context,
+                lead_routing=lead_routing,
                 autocommit=False,
                 audit_ctx=audit_ctx,
             )

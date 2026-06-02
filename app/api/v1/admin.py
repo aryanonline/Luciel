@@ -52,6 +52,8 @@ from app.services.instance_service import (
 )
 
 from app.policy.scope import ScopePolicy
+from app.policy.entitlements import TIER_ENTITLEMENTS, TIER_FREE
+from app.policy.instance_config import validate_pillars_for_tier
 from app.schemas.onboarding import (
     TenantOnboardRequest,
     TenantOnboardResponse,
@@ -732,6 +734,22 @@ def deactivate_memory_item(
 # Route order: static paths before any path-parameter route.
 # =====================================================================
 
+def _resolve_admin_tier_for_pillars(db, *, admin_id: str) -> str:
+    """Resolve an Admin's subscription tier for pillar validation.
+
+    Fail-closed to Free when the row is missing or the tier value is not
+    a recognised tier — mirrors ``admin_channels._resolve_admin_tier``.
+    """
+    from sqlalchemy import select
+
+    from app.models.admin import Admin
+
+    row = db.execute(
+        select(Admin.tier).where(Admin.id == admin_id)
+    ).scalar_one_or_none()
+    return row if row in TIER_ENTITLEMENTS else TIER_FREE
+
+
 @router.post(
     "/instances",
     response_model=LucielInstanceRead,
@@ -762,6 +780,32 @@ def create_luciel_instance(
                     "reason": exc.reason,
                 },
             ) from exc
+    # Arc 15 WU1 — tier-conditional validation for the config pillars.
+    # Structural validity is already enforced by the Pydantic schema;
+    # here we apply the per-tier rules (custom preset Pro/Ent-only,
+    # business_context length cap, lead_routing Pro/Ent-only) that need
+    # the server-resolved tier. platform_admin keys bypass cap/tier
+    # enforcement above but the pillar caps are content limits, not
+    # billing limits, so we still apply them against the resolved tier.
+    admin_tier = _resolve_admin_tier_for_pillars(
+        service.db, admin_id=payload.admin_id
+    )
+    pillar_problems = validate_pillars_for_tier(
+        tier=admin_tier,
+        personality_preset=payload.personality_preset,
+        business_context=payload.business_context,
+        lead_routing=payload.lead_routing,
+    )
+    if pillar_problems:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "instance_config_invalid_for_tier",
+                "tier": admin_tier,
+                "problems": pillar_problems,
+            },
+        )
+
     try:
         instance = service.create_instance(
             audit_ctx=audit_ctx,
@@ -772,6 +816,11 @@ def create_luciel_instance(
             active=payload.active,
             created_by=payload.created_by,
             system_prompt_additions=payload.system_prompt_additions,
+            website=payload.website,
+            personality_preset=payload.personality_preset,
+            personality_axes=payload.personality_axes,
+            business_context=payload.business_context,
+            lead_routing=payload.lead_routing,
         )
     except DuplicateInstanceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1227,6 +1276,87 @@ def update_luciel_instance(
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
         return LucielInstanceRead.model_validate(instance)
+
+    # Arc 15 WU1 — validate the config pillars against the MERGED row
+    # (stored value where the PATCH did not supply one) so a partial
+    # update is checked correctly. Two checks:
+    #   (a) custom-axes cross-field rule against the effective preset
+    #       (the schema can only check this when the preset is in the
+    #       body; here we resolve it against the stored preset too).
+    #   (b) tier-conditional rules (custom preset, business_context
+    #       length, lead_routing presence).
+    eff_preset = updates.get(
+        "personality_preset", instance.personality_preset
+    )
+    eff_axes = (
+        updates["personality_axes"]
+        if "personality_axes" in updates
+        else instance.personality_axes
+    )
+    from app.persona.presets import PRESET_CUSTOM, validate_custom_axes
+
+    axes_problems: list[dict] = []
+    if eff_preset == PRESET_CUSTOM:
+        if not eff_axes:
+            axes_problems.append(
+                {
+                    "field": "personality_axes",
+                    "reason": "axes_required_for_custom",
+                    "message": (
+                        "personality_axes is required when "
+                        "personality_preset is 'custom'."
+                    ),
+                }
+            )
+        else:
+            for problem in validate_custom_axes(eff_axes):
+                axes_problems.append(
+                    {
+                        "field": "personality_axes",
+                        "reason": "invalid_axes",
+                        "message": problem,
+                    }
+                )
+    elif eff_axes:
+        axes_problems.append(
+            {
+                "field": "personality_axes",
+                "reason": "axes_not_allowed_for_named_preset",
+                "message": (
+                    "personality_axes may only be set when "
+                    "personality_preset is 'custom'."
+                ),
+            }
+        )
+
+    admin_tier = _resolve_admin_tier_for_pillars(
+        service.db, admin_id=instance.admin_id
+    )
+    eff_business_context = (
+        updates["business_context"]
+        if "business_context" in updates
+        else instance.business_context
+    )
+    eff_lead_routing = (
+        updates["lead_routing"]
+        if "lead_routing" in updates
+        else instance.lead_routing
+    )
+    pillar_problems = axes_problems + validate_pillars_for_tier(
+        tier=admin_tier,
+        personality_preset=eff_preset,
+        business_context=eff_business_context,
+        lead_routing=eff_lead_routing,
+    )
+    if pillar_problems:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "instance_config_invalid_for_tier",
+                "tier": admin_tier,
+                "problems": pillar_problems,
+            },
+        )
 
     updated = service.repo.update(instance, audit_ctx=audit_ctx, **updates)
     return LucielInstanceRead.model_validate(updated)

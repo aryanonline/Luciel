@@ -34,11 +34,12 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 from app.models.instance_status import InstanceStatus
+from app.persona.presets import ALL_PRESETS, DEFAULT_PRESET
 
 
 class Instance(Base):
@@ -56,11 +57,14 @@ class Instance(Base):
     instance_slug: Mapped[str] = mapped_column(String(100), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
-    # Arc 9 C17 — per-Instance persona / system prompt addition.
-    # Composed by app.services.chat_service into the four-layer prompt:
-    #   Luciel Core → tenant additions → domain additions → instance additions.
-    # NULL = no instance-level additions; chat falls back to upstream layers.
-    # Bounded at 8000 chars at the Pydantic layer (see app/schemas/instance.py).
+    # DEPRECATED (Arc 15 WU1) — free-text raw-prompt authoring violates
+    # Vision §3.5 / Architecture §3.5.1 ("never raw prompt authoring").
+    # The Arc 15 persona composer (app/persona/composer.py) no longer
+    # reads this column; the personality API never writes it. It is
+    # retained (NOT dropped) this arc to avoid breaking the legacy
+    # 4-layer composer mid-flight for any instance still relying on it.
+    # TODO(ARC16+): drop this column once no instance carries a
+    # non-NULL value and the legacy composer path is fully retired.
     system_prompt_additions: Mapped[str | None] = mapped_column(
         Text, nullable=True
     )
@@ -140,6 +144,47 @@ class Instance(Base):
     # dedicated-number helper for the per-tier policy.
     sms_number_mode: Mapped[str | None] = mapped_column(
         String(16), nullable=True
+    )
+
+    # --- Arc 15 WU1 — instance configuration pillars (Vision §3.5) ---
+    # The website the instance's widget will live on (Journey Phase 3).
+    website: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Personality preset name. PG enum ``personality_preset`` with values
+    # from app.persona.presets.ALL_PRESETS; default warm_concierge. The
+    # ``custom`` value is Pro/Enterprise-only, enforced at the API layer
+    # (NOT at the DB — the enum admits ``custom`` on every tier).
+    personality_preset: Mapped[str] = mapped_column(
+        SAEnum(
+            *ALL_PRESETS,
+            name="personality_preset",
+            create_type=False,
+            native_enum=True,
+        ),
+        nullable=False,
+        server_default=DEFAULT_PRESET,
+    )
+    # Custom axis values ``{tone, verbosity, formality, pace}``. Populated
+    # ONLY when personality_preset == 'custom'; NULL for named presets
+    # (their axis tuple lives in app.persona.presets.PRESET_AXES).
+    personality_axes: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    # Business context — composed verbatim into the BUSINESS_CONTEXT
+    # stanza (WU2 composer). Tier-capped at the Pydantic boundary
+    # (280 Free/Pro, 2000 Enterprise — Vision §3.5); NOT capped at DB.
+    business_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Lead routing config. Shape:
+    #   {"strategy": "round_robin|geographic|specialty_match|single_contact",
+    #    "rules": [...]}
+    # Pro/Enterprise only (enforced at API); Free instances leave NULL.
+    lead_routing: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Arc 15 WU3 — escalation CONTACT + ROUTING config (Vision §3.4).
+    # Stores WHO is notified and HOW, per fixed runtime signal — NEVER
+    # the trigger conditions themselves (the four escalation signals are
+    # runtime cognition, not admin-configurable). Tier-shaped at the API.
+    # NULL = no escalation contact configured yet.
+    escalation_config: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True
     )
 
     __table_args__ = (
