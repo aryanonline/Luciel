@@ -69,20 +69,36 @@ def build_system_prompt(
     tenant_prompt: str | None = None,
     domain_prompt: str | None = None,
     agent_prompt: str | None = None,
+    preset_stanza: str | None = None,
+    business_context_stanza: str | None = None,
     knowledge: list[str] | None = None,
     assistant_name: str = "Luciel",
 ) -> str:
     """
     Returns the full Luciel system prompt assembled from all context layers.
 
+    Arc 15 §3.5.1 stanza order:
+      LUCIEL_CORE_PROMPT + INSTANCE_NAME + PRESET + BUSINESS_CONTEXT
+        + KNOWLEDGE_CONTEXT + (history) + TOOLS_AVAILABLE
+        + (channels / escalation handled elsewhere)
+
+    The ``preset_stanza`` and ``business_context_stanza`` are
+    platform-COMPOSED by ``app.persona.composer`` from the structured
+    instance pillars — they replace the deprecated free-text
+    ``agent_prompt`` (``system_prompt_additions``) layer. ``agent_prompt``
+    is retained only so legacy callers compile; new callers pass the two
+    composed stanzas instead and leave ``agent_prompt`` as ``None``.
+
     Layer order (most general to most specific):
       1. Luciel Core identity (always present, with custom name)
       2. Tenant-wide rules (if tenant config exists)
       3. Domain/role instructions (if domain config exists)
-      4. Agent-specific instructions (if agent config exists)
-      5. Retrieved knowledge (from vector DB)
-      6. User memories (from memory_items)
-      7. Tool descriptions (if tools are available)
+      4. Agent-specific instructions (DEPRECATED — legacy free text)
+      5. PRESET stanza (composed personality voice profile)
+      6. BUSINESS_CONTEXT stanza (composed, tier-capped background)
+      7. Retrieved knowledge (from vector DB)
+      8. User memories (from memory_items)
+      9. Tool descriptions (if tools are available)
     """
     prompt = LUCIEL_SYSTEM_PROMPT.format(assistant_name=assistant_name)
 
@@ -104,7 +120,11 @@ You are operating in a specific role. Follow these instructions in addition to y
 {domain_prompt}
 """
 
-    # --- Layer 4: Agent-specific instructions ---
+    # --- Layer 4: Agent-specific instructions (DEPRECATED Arc 15 WU2) ---
+    # Free-text system_prompt_additions violates §3.5.1 "never raw prompt
+    # authoring". New callers pass preset_stanza + business_context_stanza
+    # instead; this branch survives only for any legacy caller still
+    # threading agent_prompt through.
     if agent_prompt:
         prompt += f"""
 === Agent Instructions ===
@@ -113,7 +133,15 @@ The following instructions are specific to this agent. They take priority over t
 {agent_prompt}
 """
 
-    # --- Layer 5: Retrieved knowledge ---
+    # --- Layer 5: PRESET stanza (composed personality voice profile) ---
+    if preset_stanza:
+        prompt += "\n" + preset_stanza + "\n"
+
+    # --- Layer 6: BUSINESS_CONTEXT stanza (composed, tier-capped) ---
+    if business_context_stanza:
+        prompt += "\n" + business_context_stanza + "\n"
+
+    # --- Layer 7: Retrieved knowledge ---
     if knowledge:
         knowledge_block = "\n".join(f"- {k}" for k in knowledge)
         prompt += f"""
