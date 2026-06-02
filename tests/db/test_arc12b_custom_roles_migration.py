@@ -73,12 +73,14 @@ def test_alembic_head_is_arc12b(engine):
             text("SELECT version_num FROM alembic_version")
         ).scalars().all()
     assert len(rows) == 1
-    # Single linear head. Arc 13 added arc13_a_channel_routes →
-    # arc13_b_instance_channel_fields on top of arc12b, so the live head
-    # is now arc13_b. This pin tracks the current head (one revision, no
-    # branch) rather than freezing it at arc12b.
-    assert rows[0] == "arc13_b_instance_channel_fields", (
-        f"expected arc13_b head; got {rows[0]!r}"
+    # Single linear head. Successive arcs append on top of arc12b:
+    # Arc 13 (arc13_a_channel_routes → arc13_b_instance_channel_fields),
+    # Arc 14 (arc14_u2_escalation_events → arc14_u4_leads), Arc 15
+    # (arc15_a_instance_config_pillars → arc15_b_instance_connections),
+    # so the live head is now arc15_b. This pin tracks the current head
+    # (one revision, no branch) rather than freezing it at arc12b.
+    assert rows[0] == "arc15_b_instance_connections", (
+        f"expected arc15_b head; got {rows[0]!r}"
     )
 
 
