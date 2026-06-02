@@ -20,7 +20,6 @@ class TenantConfigCreate(BaseModel):
     description: str | None = None
     escalation_contact: str | None = None
     allowed_domains: list[str] | None = None
-    system_prompt_additions: str | None = None
     created_by: str | None = None
 
 
@@ -29,8 +28,7 @@ class TenantConfigUpdate(BaseModel):
     description: str | None = None
     escalation_contact: str | None = None
     allowed_domains: list[str] | None = None
-    system_prompt_additions: str | None = None
-    active: bool | None = None       # <-- ADD THIS
+    active: bool | None = None
     updated_by: str | None = None
 
 

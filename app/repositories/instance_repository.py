@@ -78,7 +78,11 @@ class InstanceRepository:
         description: str | None = None,
         active: bool = True,
         created_by: str | None = None,
-        system_prompt_additions: str | None = None,
+        website: str | None = None,
+        personality_preset: str | None = None,
+        personality_axes: dict | None = None,
+        business_context: str | None = None,
+        lead_routing: dict | None = None,
         autocommit: bool = True,
         audit_ctx: AuditContext | None = None,
     ) -> Instance:
@@ -93,14 +97,22 @@ class InstanceRepository:
         ``audit_ctx``, when provided, writes an ``admin_audit_logs`` row
         in the same transaction (Pattern E — audit-in-txn).
         """
-        instance = Instance(
+        instance_kwargs: dict[str, object] = dict(
             admin_id=admin_id,
             instance_slug=instance_slug,
             display_name=display_name,
             description=description,
             active=active,
-            system_prompt_additions=system_prompt_additions,
+            website=website,
+            personality_axes=personality_axes,
+            business_context=business_context,
+            lead_routing=lead_routing,
         )
+        # Let the DB server_default (warm_concierge) stand when the
+        # caller did not specify a preset, rather than forcing NULL.
+        if personality_preset is not None:
+            instance_kwargs["personality_preset"] = personality_preset
+        instance = Instance(**instance_kwargs)
         self.db.add(instance)
         self.db.flush()  # assigns instance.id
 
@@ -126,7 +138,6 @@ class InstanceRepository:
                     "display_name": display_name,
                     "description": description,
                     "active": active,
-                    "system_prompt_additions_set": system_prompt_additions is not None,
                 },
                 autocommit=False,
             )
@@ -215,7 +226,17 @@ class InstanceRepository:
             "display_name",
             "description",
             "active",
-            "system_prompt_additions",
+            # Arc 15 WU1 — instance configuration pillars. Tier-conditional
+            # validation (custom preset, business_context length,
+            # lead_routing presence) happens at the API layer BEFORE the
+            # update call; this repo only persists the validated values.
+            "website",
+            "personality_preset",
+            "personality_axes",
+            "business_context",
+            "lead_routing",
+            # Arc 15 WU3 — escalation contact + routing config.
+            "escalation_config",
         }
     )
 

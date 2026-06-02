@@ -38,9 +38,9 @@ from app.repositories.admin_audit_repository import AdminAuditRepository, AuditC
 # with ``object`` so the FastAPI dependency resolver still parses; the
 # B1 route-body sweep rewrites that route to not depend on AgentRepository.
 from app.schemas.instance import (
-    LucielInstanceCreate,
-    LucielInstanceRead,
-    LucielInstanceUpdate,
+    InstanceCreate,
+    InstanceRead,
+    InstanceUpdate,
 )
 from app.services.instance_service import (
     DuplicateInstanceError,
@@ -52,11 +52,12 @@ from app.services.instance_service import (
 )
 
 from app.policy.scope import ScopePolicy
+from app.policy.entitlements import TIER_ENTITLEMENTS, TIER_FREE
+from app.policy.instance_config import validate_pillars_for_tier
 from app.schemas.onboarding import (
     TenantOnboardRequest,
     TenantOnboardResponse,
     OnboardedTenantSummary,
-    OnboardedDomainSummary,
     OnboardedApiKeySummary,
     OnboardedRetentionSummary,
 )
@@ -164,10 +165,6 @@ def onboard_tenant(
             tier_source=payload.tier_source,
             description=payload.description,
             escalation_contact=payload.escalation_contact,
-            system_prompt_additions=payload.system_prompt_additions,
-            default_domain_id=payload.default_domain_id,
-            default_domain_display_name=payload.default_domain_display_name,
-            default_domain_description=payload.default_domain_description,
             api_key_display_name=payload.api_key_display_name,
             api_key_permissions=payload.api_key_permissions,
             api_key_rate_limit=payload.api_key_rate_limit,
@@ -186,13 +183,6 @@ def onboard_tenant(
         ) from exc
 
     tenant = result["tenant"]
-    # Arc 5 Path A: default_domain is always None post-Domain-collapse;
-    # leave the field null on the response. Pre-Arc-5 API clients that
-    # read it tolerate the null (the schema marks the field Optional).
-    domain = result["default_domain"]
-    # api_key = result["api_key"]
-    # raw_key = result["raw_api_key"]
-    # policies = result["retention_policies"]
 
     return TenantOnboardResponse(
         # Arc 6 Commit 8 -- explicit V2 -> legacy-wire mapping. The V2
@@ -208,11 +198,6 @@ def onboard_tenant(
             tier_source=tenant.tier_source,
             active=tenant.active,
             created_at=tenant.created_at,
-        ),
-        default_domain=(
-            OnboardedDomainSummary.model_validate(domain)
-            if domain is not None
-            else None
         ),
         admin_api_key=OnboardedApiKeySummary(
             key_prefix=result["admin_api_key"].key_prefix,
@@ -732,18 +717,34 @@ def deactivate_memory_item(
 # Route order: static paths before any path-parameter route.
 # =====================================================================
 
+def _resolve_admin_tier_for_pillars(db, *, admin_id: str) -> str:
+    """Resolve an Admin's subscription tier for pillar validation.
+
+    Fail-closed to Free when the row is missing or the tier value is not
+    a recognised tier — mirrors ``admin_channels._resolve_admin_tier``.
+    """
+    from sqlalchemy import select
+
+    from app.models.admin import Admin
+
+    row = db.execute(
+        select(Admin.tier).where(Admin.id == admin_id)
+    ).scalar_one_or_none()
+    return row if row in TIER_ENTITLEMENTS else TIER_FREE
+
+
 @router.post(
     "/instances",
-    response_model=LucielInstanceRead,
+    response_model=InstanceRead,
     status_code=status.HTTP_201_CREATED,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def create_luciel_instance(
     request: Request,
-    payload: LucielInstanceCreate,
+    payload: InstanceCreate,
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> LucielInstanceRead:
+) -> InstanceRead:
     # Arc 5 Path A — V2-collapsed body. Path renamed to
     # /admin/instances at B3; the legacy teammate_email overload was
     # removed at Step 30a.5 (invitations flow through POST /admin/invites).
@@ -762,6 +763,32 @@ def create_luciel_instance(
                     "reason": exc.reason,
                 },
             ) from exc
+    # Arc 15 WU1 — tier-conditional validation for the config pillars.
+    # Structural validity is already enforced by the Pydantic schema;
+    # here we apply the per-tier rules (custom preset Pro/Ent-only,
+    # business_context length cap, lead_routing Pro/Ent-only) that need
+    # the server-resolved tier. platform_admin keys bypass cap/tier
+    # enforcement above but the pillar caps are content limits, not
+    # billing limits, so we still apply them against the resolved tier.
+    admin_tier = _resolve_admin_tier_for_pillars(
+        service.db, admin_id=payload.admin_id
+    )
+    pillar_problems = validate_pillars_for_tier(
+        tier=admin_tier,
+        personality_preset=payload.personality_preset,
+        business_context=payload.business_context,
+        lead_routing=payload.lead_routing,
+    )
+    if pillar_problems:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "instance_config_invalid_for_tier",
+                "tier": admin_tier,
+                "problems": pillar_problems,
+            },
+        )
+
     try:
         instance = service.create_instance(
             audit_ctx=audit_ctx,
@@ -771,12 +798,16 @@ def create_luciel_instance(
             description=payload.description,
             active=payload.active,
             created_by=payload.created_by,
-            system_prompt_additions=payload.system_prompt_additions,
+            website=payload.website,
+            personality_preset=payload.personality_preset,
+            personality_axes=payload.personality_axes,
+            business_context=payload.business_context,
+            lead_routing=payload.lead_routing,
         )
     except DuplicateInstanceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    return LucielInstanceRead.model_validate(instance)
+    return InstanceRead.model_validate(instance)
 
 
 # =====================================================================
@@ -1160,7 +1191,7 @@ def revoke_invite_route(
 
 @router.get(
     "/instances",
-    response_model=list[LucielInstanceRead],
+    response_model=list[InstanceRead],
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def list_luciel_instances(
@@ -1168,7 +1199,7 @@ def list_luciel_instances(
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     admin_id: str | None = Query(default=None),
     active_only: bool = Query(default=False),
-) -> list[LucielInstanceRead]:
+) -> list[InstanceRead]:
     # Arc 9 C22 -- Arc 5 Path A collapsed the tenant/domain/agent
     # hierarchy into a single admin scope. "admin_id" here is the
     # caller's admin_id and is the only scope axis the service
@@ -1187,38 +1218,38 @@ def list_luciel_instances(
         admin_id=admin_id,
         active_only=active_only,
     )
-    return [LucielInstanceRead.model_validate(i) for i in instances]
+    return [InstanceRead.model_validate(i) for i in instances]
 
 
 @router.get(
     "/instances/{pk}",
-    response_model=LucielInstanceRead,
+    response_model=InstanceRead,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def get_luciel_instance(
     request: Request,
     pk: int,
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
-) -> LucielInstanceRead:
+) -> InstanceRead:
     instance = service.get_by_pk(pk)
     if instance is None:
         raise HTTPException(status_code=404, detail=f"LucielInstance pk={pk} not found.")
     ScopePolicy.enforce_luciel_instance_scope(request, instance)
-    return LucielInstanceRead.model_validate(instance)
+    return InstanceRead.model_validate(instance)
 
 
 @router.patch(
     "/instances/{pk}",
-    response_model=LucielInstanceRead,
+    response_model=InstanceRead,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def update_luciel_instance(
     request: Request,
     pk: int,
-    payload: LucielInstanceUpdate,
+    payload: InstanceUpdate,
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> LucielInstanceRead:
+) -> InstanceRead:
     instance = service.get_by_pk(pk)
     if instance is None:
         raise HTTPException(status_code=404, detail=f"LucielInstance pk={pk} not found.")
@@ -1226,10 +1257,91 @@ def update_luciel_instance(
 
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
-        return LucielInstanceRead.model_validate(instance)
+        return InstanceRead.model_validate(instance)
+
+    # Arc 15 WU1 — validate the config pillars against the MERGED row
+    # (stored value where the PATCH did not supply one) so a partial
+    # update is checked correctly. Two checks:
+    #   (a) custom-axes cross-field rule against the effective preset
+    #       (the schema can only check this when the preset is in the
+    #       body; here we resolve it against the stored preset too).
+    #   (b) tier-conditional rules (custom preset, business_context
+    #       length, lead_routing presence).
+    eff_preset = updates.get(
+        "personality_preset", instance.personality_preset
+    )
+    eff_axes = (
+        updates["personality_axes"]
+        if "personality_axes" in updates
+        else instance.personality_axes
+    )
+    from app.persona.presets import PRESET_CUSTOM, validate_custom_axes
+
+    axes_problems: list[dict] = []
+    if eff_preset == PRESET_CUSTOM:
+        if not eff_axes:
+            axes_problems.append(
+                {
+                    "field": "personality_axes",
+                    "reason": "axes_required_for_custom",
+                    "message": (
+                        "personality_axes is required when "
+                        "personality_preset is 'custom'."
+                    ),
+                }
+            )
+        else:
+            for problem in validate_custom_axes(eff_axes):
+                axes_problems.append(
+                    {
+                        "field": "personality_axes",
+                        "reason": "invalid_axes",
+                        "message": problem,
+                    }
+                )
+    elif eff_axes:
+        axes_problems.append(
+            {
+                "field": "personality_axes",
+                "reason": "axes_not_allowed_for_named_preset",
+                "message": (
+                    "personality_axes may only be set when "
+                    "personality_preset is 'custom'."
+                ),
+            }
+        )
+
+    admin_tier = _resolve_admin_tier_for_pillars(
+        service.db, admin_id=instance.admin_id
+    )
+    eff_business_context = (
+        updates["business_context"]
+        if "business_context" in updates
+        else instance.business_context
+    )
+    eff_lead_routing = (
+        updates["lead_routing"]
+        if "lead_routing" in updates
+        else instance.lead_routing
+    )
+    pillar_problems = axes_problems + validate_pillars_for_tier(
+        tier=admin_tier,
+        personality_preset=eff_preset,
+        business_context=eff_business_context,
+        lead_routing=eff_lead_routing,
+    )
+    if pillar_problems:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "instance_config_invalid_for_tier",
+                "tier": admin_tier,
+                "problems": pillar_problems,
+            },
+        )
 
     updated = service.repo.update(instance, audit_ctx=audit_ctx, **updates)
-    return LucielInstanceRead.model_validate(updated)
+    return InstanceRead.model_validate(updated)
 
 
 # ---------------------------------------------------------------------
@@ -1270,7 +1382,7 @@ def _lifecycle_cascade_memory_items(
 
 @router.post(
     "/instances/{pk}/pause",
-    response_model=LucielInstanceRead,
+    response_model=InstanceRead,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def pause_luciel_instance(
@@ -1279,7 +1391,7 @@ def pause_luciel_instance(
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
     db: DbSession,
-) -> LucielInstanceRead:
+) -> InstanceRead:
     """Pause an instance (Customer Journey §4.5 Phase 8 "Pause my Luciel").
 
     Widget begins returning 204 (empty <div>); knowledge + sessions are
@@ -1318,12 +1430,12 @@ def pause_luciel_instance(
                 "current_status": exc.current_status,
             },
         ) from exc
-    return LucielInstanceRead.model_validate(paused)
+    return InstanceRead.model_validate(paused)
 
 
 @router.post(
     "/instances/{pk}/resume",
-    response_model=LucielInstanceRead,
+    response_model=InstanceRead,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def resume_luciel_instance(
@@ -1331,7 +1443,7 @@ def resume_luciel_instance(
     pk: int,
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
-) -> LucielInstanceRead:
+) -> InstanceRead:
     """Resume a paused instance.
 
     Widget begins serving again. No key rotation (Pause was operational,
@@ -1360,12 +1472,12 @@ def resume_luciel_instance(
                 "current_status": exc.current_status,
             },
         ) from exc
-    return LucielInstanceRead.model_validate(resumed)
+    return InstanceRead.model_validate(resumed)
 
 
 @router.delete(
     "/instances/{pk}",
-    response_model=LucielInstanceRead,
+    response_model=InstanceRead,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def delete_luciel_instance(
@@ -1374,7 +1486,7 @@ def delete_luciel_instance(
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
     db: DbSession,
-) -> LucielInstanceRead:
+) -> InstanceRead:
     """Soft-delete an instance (Customer Journey §4.5 Phase 8 "Delete
     this instance"). Stamps ``soft_deleted_at`` and opens the 30-day
     grace window per Architecture §3.6.1. The retention worker
@@ -1404,12 +1516,12 @@ def delete_luciel_instance(
         )
     except InstanceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return LucielInstanceRead.model_validate(deleted)
+    return InstanceRead.model_validate(deleted)
 
 
 @router.post(
     "/instances/{pk}/restore",
-    response_model=LucielInstanceRead,
+    response_model=InstanceRead,
 )
 @limiter.limit(get_tier_rate_limit_for_key, key_func=get_tier_aware_key)
 def restore_luciel_instance(
@@ -1418,7 +1530,7 @@ def restore_luciel_instance(
     service: Annotated[InstanceService, Depends(get_luciel_instance_service)],
     audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
     db: DbSession,
-) -> LucielInstanceRead:
+) -> InstanceRead:
     """Restore a soft-deleted instance within the 30-day grace window.
 
     Per Vision §6.4 Reactivation: knowledge + conversations are
@@ -1461,7 +1573,7 @@ def restore_luciel_instance(
             },
         ) from exc
 
-    payload = LucielInstanceRead.model_validate(restored)
+    payload = InstanceRead.model_validate(restored)
     if new_embed_key is not None:
         payload = payload.model_copy(update={"new_embed_key": new_embed_key})
     return payload

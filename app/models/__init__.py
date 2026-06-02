@@ -47,6 +47,12 @@ from app.models.channel_route import ChannelRoute  # noqa: F401
 from app.models.instance_tool_authorization import (  # noqa: F401
     InstanceToolAuthorization,
 )
+# Arc 15 WU4 — per-instance external-system connections (Arc 17 slice).
+from app.models.instance_connection import (  # noqa: F401
+    InstanceConnection,
+    CONNECTION_TYPES,
+    CONNECTION_STATUSES,
+)
 # Arc 12 WU4 — sibling-Luciel composition grants (§3.3.4).
 from app.models.sibling_call_grant import (  # noqa: F401
     SiblingCallGrant,
@@ -152,6 +158,10 @@ __all__ = [
     "ChannelRoute",
     # Arc 12 WU2 -- per-instance tool authorisation.
     "InstanceToolAuthorization",
+    # Arc 15 WU4 -- per-instance external-system connections.
+    "InstanceConnection",
+    "CONNECTION_TYPES",
+    "CONNECTION_STATUSES",
     # Arc 12 WU4 -- sibling-Luciel composition grants.
     "SiblingCallGrant",
     "APPROVAL_STATE_LIVE",

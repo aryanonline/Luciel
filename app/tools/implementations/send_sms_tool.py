@@ -30,6 +30,9 @@ class SendSmsTool(LucielTool):
 
     requires_channels = frozenset({"sms"})
 
+    # Arc 15 WU4/WU5 — connection-contract gate (§3.3.2).
+    requires_connection = "sms_sender"
+
     @property
     def tool_id(self) -> str:
         return "send_sms"

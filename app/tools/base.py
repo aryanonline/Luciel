@@ -247,6 +247,22 @@ class LucielTool(ABC):
     # override this in WU3.
     requires_channels: frozenset[str] = frozenset()
 
+    # Arc 15 WU4/WU5 — Arc 17 connection-contract gate (§3.3.2/§3.3.3).
+    # The ``connection_type`` an external-system tool needs a LIVE,
+    # status='connected' ``instance_connections`` row for before the
+    # broker will dispatch it (gate 3). ``None`` means the tool needs
+    # no external connection and skips the gate entirely. The six
+    # connection-bearing v1 tools override this per §3.3.2:
+    #   book_appointment -> "calendar"
+    #   send_email       -> "email_sender"
+    #   send_sms         -> "sms_sender"
+    #   lookup_property  -> "property_source"
+    #   push_to_crm      -> "crm"
+    #   bring_your_own_webhook -> "outbound_webhook"
+    # schedule_callback + call_sibling_luciel stay ``None`` (no external
+    # system — callback is an internal queue; sibling is intra-platform).
+    requires_connection: str | None = None
+
     # ------------------------------------------------------------------
     # §3.3.1 surface — required on every subclass
     # ------------------------------------------------------------------

@@ -100,6 +100,12 @@ class BringYourOwnWebhookTool(LucielTool):
 
     declared_tier = ActionTier.APPROVAL_REQUIRED
 
+    # Arc 15 WU4/WU5 — connection-contract gate (§3.3.2). The
+    # ``outbound_webhook`` connector connects LIVE in this slice (the
+    # webhook URL is non-secret config), so a configured endpoint yields
+    # a ``connected`` row and the WU5 gate admits dispatch.
+    requires_connection = "outbound_webhook"
+
     @property
     def tool_id(self) -> str:
         return "bring_your_own_webhook"

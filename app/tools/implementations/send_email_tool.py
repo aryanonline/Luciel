@@ -32,6 +32,9 @@ class SendEmailTool(LucielTool):
 
     requires_channels = frozenset({"email"})
 
+    # Arc 15 WU4/WU5 — connection-contract gate (§3.3.2).
+    requires_connection = "email_sender"
+
     @property
     def tool_id(self) -> str:
         return "send_email"

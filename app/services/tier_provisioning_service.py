@@ -398,10 +398,10 @@ class TierProvisioningService:
             "tier": tier,
             # Arc 9 C18 — we no longer pre-mint an Instance at signup
             # for ANY tier. The buyer creates their first Luciel
-            # themselves with their persona/system_prompt_additions
-            # filled in (C17). Returning ``None`` preserves the legacy
-            # response shape so existing webhook + billing callers
-            # remain forward-compatible without a co-deploy.
+            # themselves with their structured config pillars filled in.
+            # Returning ``None`` preserves the legacy response shape so
+            # existing webhook + billing callers remain
+            # forward-compatible without a co-deploy.
             "instance": None,
             # Arc 8 Commit 2 -- deliverability outcome surfaced on the
             # return dict for the webhook (today: observability only;
@@ -434,12 +434,12 @@ class TierProvisioningService:
         #          can create their real Luciel,
         #      (b) confuses the dashboard with a "VantageMind Demo
         #          Luciel" the buyer never asked for, and
-        #      (c) bypasses the C17 persona contract (a placeholder has
-        #          no system_prompt_additions).
+        #      (c) bypasses the persona contract (a placeholder has no
+        #          configured personality / business-context pillars).
         #
         #    The first-Luciel flow is now: dashboard empty-state CTA →
         #    POST /api/v1/admin/instances with display_name, description,
-        #    and system_prompt_additions filled in by the buyer.
+        #    and the structured config pillars filled in by the buyer.
         #
         #    ApiKey + RetentionPolicy continue to be provisioned by
         #    sibling helpers; ScopeAssignment above is unchanged.

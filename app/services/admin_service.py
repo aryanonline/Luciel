@@ -49,7 +49,6 @@ class AdminService:
           * ``description`` -> dropped        (no home on admins; V2 lives on instances)
           * ``escalation_contact`` -> dropped (legacy contact column removed Arc 5)
           * ``allowed_domains`` -> dropped    (Domain layer removed Arc 5 Path A)
-          * ``system_prompt_additions`` -> dropped (now Instance-level, Arc 9 C17)
           * ``created_by`` -> dropped         (audit lives in admin_audit_logs)
           * ``updated_by`` -> dropped         (idem)
 
@@ -68,7 +67,6 @@ class AdminService:
             "description",
             "escalation_contact",
             "allowed_domains",
-            "system_prompt_additions",
             "created_by",
             "updated_by",
         ):

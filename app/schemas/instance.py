@@ -16,9 +16,15 @@ valid.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.persona.presets import (
+    ALL_PRESETS,
+    PRESET_CUSTOM,
+    validate_custom_axes,
+)
 
 
 # ---------------------------------------------------------------------
@@ -30,6 +36,65 @@ from pydantic import BaseModel, ConfigDict, Field
 # at the schema boundary so callers get a 422 rather than an FK error.
 _ADMIN_ID_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 _SLUG_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+
+PersonalityPreset = Literal[
+    "warm_concierge",
+    "professional_advisor",
+    "friendly_expert",
+    "trusted_authority",
+    "custom",
+]
+
+_LEAD_ROUTING_STRATEGIES = frozenset(
+    {"round_robin", "geographic", "specialty_match", "single_contact"}
+)
+
+
+def _validate_lead_routing_shape(value: dict[str, Any]) -> None:
+    """Structural validation for the lead_routing JSONB shape.
+
+    Raises ``ValueError`` (→ 422 via Pydantic) on a malformed object.
+    Tier gating (Pro/Ent only) is enforced separately at the API layer
+    where the resolved tier is known.
+    """
+    if not isinstance(value, dict):
+        raise ValueError("lead_routing must be an object.")
+    strategy = value.get("strategy")
+    if strategy not in _LEAD_ROUTING_STRATEGIES:
+        raise ValueError(
+            "lead_routing.strategy must be one of "
+            f"{sorted(_LEAD_ROUTING_STRATEGIES)}."
+        )
+    rules = value.get("rules", [])
+    if rules is not None and not isinstance(rules, list):
+        raise ValueError("lead_routing.rules must be a list when present.")
+
+
+def _validate_axes_for_preset(
+    preset: str | None,
+    axes: dict[str, Any] | None,
+) -> None:
+    """Structural cross-field check: personality_axes is permitted ONLY
+    when preset == custom, and must carry a valid four-axis shape then.
+
+    Raises ``ValueError`` (→ 422). Tier gating (custom on Free → 403) is
+    enforced at the API layer.
+    """
+    if preset == PRESET_CUSTOM:
+        if not axes:
+            raise ValueError(
+                "personality_axes is required when "
+                "personality_preset is 'custom'."
+            )
+        problems = validate_custom_axes(axes)
+        if problems:
+            raise ValueError(" ".join(problems))
+    else:
+        if axes:
+            raise ValueError(
+                "personality_axes may only be set when "
+                "personality_preset is 'custom'."
+            )
 
 
 # ---------------------------------------------------------------------
@@ -68,12 +133,24 @@ class InstanceCreate(BaseModel):
     active: bool = Field(default=True)
     created_by: str | None = Field(default=None, max_length=100)
 
-    # Arc 9 C17 — per-Instance persona/system_prompt_additions. Composed
-    # by chat_service into the four-layer system prompt (Luciel Core →
-    # tenant → domain → instance). 8 000 chars is the hard ceiling so a
-    # full persona + few-shot examples fit comfortably while leaving
-    # headroom inside model context windows.
-    system_prompt_additions: str | None = Field(default=None, max_length=8000)
+    # --- Arc 15 WU1 — instance configuration pillars (Vision §3.5) ---
+    website: str | None = Field(default=None, max_length=255)
+    personality_preset: PersonalityPreset = "warm_concierge"
+    personality_axes: dict[str, str] | None = None
+    # business_context is tier-capped (280 Free/Pro, 2000 Ent) at the
+    # API layer where the tier is known. The 2000 ceiling here is the
+    # structural max; the route applies the tighter per-tier cap.
+    business_context: str | None = Field(default=None, max_length=2000)
+    # lead_routing is Pro/Enterprise only (gated at the API). Structural
+    # shape validated below.
+    lead_routing: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _check_pillars(self) -> "InstanceCreate":
+        _validate_axes_for_preset(self.personality_preset, self.personality_axes)
+        if self.lead_routing is not None:
+            _validate_lead_routing_shape(self.lead_routing)
+        return self
 
 
 # ---------------------------------------------------------------------
@@ -92,7 +169,28 @@ class InstanceUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)
     active: bool | None = None
-    system_prompt_additions: str | None = Field(default=None, max_length=8000)
+
+    # --- Arc 15 WU1 — instance configuration pillars (Vision §3.5) ---
+    website: str | None = Field(default=None, max_length=255)
+    personality_preset: PersonalityPreset | None = None
+    personality_axes: dict[str, str] | None = None
+    business_context: str | None = Field(default=None, max_length=2000)
+    lead_routing: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _check_pillars(self) -> "InstanceUpdate":
+        # On PATCH, only cross-validate axes when a preset is supplied.
+        # A partial update that sets axes without a preset cannot decide
+        # the cross-field rule here (the stored preset is unknown to the
+        # schema), so that case is enforced at the API layer against the
+        # merged row.
+        if self.personality_preset is not None:
+            _validate_axes_for_preset(
+                self.personality_preset, self.personality_axes
+            )
+        if self.lead_routing is not None:
+            _validate_lead_routing_shape(self.lead_routing)
+        return self
 
 
 # ---------------------------------------------------------------------
@@ -111,7 +209,15 @@ class InstanceRead(BaseModel):
     description: str | None = None
 
     active: bool
-    system_prompt_additions: str | None = None
+
+    # --- Arc 15 WU1 — instance configuration pillars (Vision §3.5) ---
+    website: str | None = None
+    personality_preset: PersonalityPreset = "warm_concierge"
+    personality_axes: dict[str, str] | None = None
+    business_context: str | None = None
+    lead_routing: dict[str, Any] | None = None
+    # Arc 15 WU3 — escalation contact + routing config (contact only).
+    escalation_config: dict[str, Any] | None = None
 
     # Arc 11 Closeout PR-A — instance lifecycle status per Customer
     # Journey §4.5 Phase 8 + Architecture §3.6.1. Source of truth for
@@ -150,18 +256,3 @@ class InstanceSummary(BaseModel):
     instance_slug: str
     display_name: str
     active: bool
-
-
-# ---------------------------------------------------------------------
-# Transitional legacy aliases — DELETED at B1 when route bodies finish
-# their V2 rewrite. These exist solely so admin.py and the two test
-# files that still import the legacy class names (
-# LucielInstanceCreate / LucielInstanceRead / LucielInstanceUpdate /
-# LucielInstanceSummary) compile through B1. New code must NEVER
-# import the legacy names.
-# ---------------------------------------------------------------------
-
-LucielInstanceCreate = InstanceCreate
-LucielInstanceUpdate = InstanceUpdate
-LucielInstanceRead = InstanceRead
-LucielInstanceSummary = InstanceSummary

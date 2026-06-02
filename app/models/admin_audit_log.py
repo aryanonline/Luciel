@@ -592,6 +592,50 @@ ACTION_ESCALATION_FIRED = "escalation_fired"
 #   a lead row carries customer contact/PII the operator can act on.
 ACTION_LEAD_CAPTURED = "lead_captured"
 
+# Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
+#
+# ACTION_PERSONALITY_UPDATED -- a user changed an Instance's structured
+#   personality pillars via the personality admin API (PUT). after_json
+#   carries {personality_preset, personality_axes?, business_context_len}
+#   — never the raw business_context body (that lives on the instances
+#   row; the audit chain records WHAT pillar changed, not a copy of the
+#   free text). before_json carries the prior preset/axes for diffability.
+#   resource_type = RESOURCE_INSTANCE_PERSONALITY; resource_pk =
+#   instances.id. Distinct from ACTION_UPDATE (generic instance mutation)
+#   so a config-drift dashboard can isolate persona-voice changes — these
+#   directly shape every customer-facing turn and are §5.1 significant.
+#
+# ACTION_ESCALATION_CONFIG_UPDATED -- a user changed an Instance's
+#   escalation CONTACT + ROUTING config via the escalation-contact admin
+#   API (PUT). after_json carries the sanitized escalation_config
+#   (contacts + routing_rules + chains) — NEVER any escalation-trigger
+#   data, because the four trigger signals are runtime-fixed and not
+#   admin-configurable (§3.4.5). Distinct from ACTION_ESCALATION_FIRED
+#   (a runtime handoff event) — this verb is the admin-mutation of WHO
+#   gets contacted, never WHEN escalation happens.
+ACTION_PERSONALITY_UPDATED = "personality_updated"
+ACTION_ESCALATION_CONFIG_UPDATED = "escalation_config_updated"
+
+# Arc 15 WU4 — Arc 17 connection-contract slice (Architecture §3.8.2).
+#
+# ACTION_CONNECTION_CONFIGURED -- a user configured (created) an
+#   external-system connection for an Instance via the connections admin
+#   API (POST). after_json carries {connection_type, provider, status}
+#   — NEVER config_json secrets (config_json holds non-secret config
+#   only, and the audit row records the connection's shape, not its
+#   payload). resource_type = RESOURCE_INSTANCE_CONNECTION; resource_pk
+#   = instance_connections.id; resource_natural_id =
+#   "{instance_id}:{connection_type}". Distinct from ACTION_CREATE so a
+#   dashboard can isolate connection-wiring events: a connection that
+#   lands status='connected' is a live capability gain (CSV/webhook),
+#   while status='unconfigured' is a deferred connector awaiting Arc 17.
+# ACTION_CONNECTION_DISCONNECTED -- the symmetric verb for the
+#   soft-revoke of a live connection row (DELETE). before_json carries
+#   the prior {connection_type, provider, status}; after_json carries
+#   {revoked_at}. Idempotent against missing rows (404, not an emission).
+ACTION_CONNECTION_CONFIGURED = "connection_configured"
+ACTION_CONNECTION_DISCONNECTED = "connection_disconnected"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -730,6 +774,12 @@ ALLOWED_ACTIONS = (
     ACTION_ESCALATION_FIRED,
     # Arc 14 U4 — §3.4.4 lead capture cognition.
     ACTION_LEAD_CAPTURED,
+    # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
+    ACTION_PERSONALITY_UPDATED,
+    ACTION_ESCALATION_CONFIG_UPDATED,
+    # Arc 15 WU4 — Arc 17 connection-contract slice (§3.8.2).
+    ACTION_CONNECTION_CONFIGURED,
+    ACTION_CONNECTION_DISCONNECTED,
 )
 
 
@@ -860,6 +910,26 @@ RESOURCE_ESCALATION_EVENT = "escalation_event"
 # conversation" with a single filter.
 RESOURCE_LEAD = "lead"
 
+# Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1). Both target
+# the instances row but carry distinct resource types so an auditor can
+# isolate persona-voice changes from escalation-contact changes at the
+# resource-type level. resource_pk = instances.id; resource_natural_id =
+# the instance's public id.
+#   RESOURCE_INSTANCE_PERSONALITY -- structured personality pillars
+#     (preset / axes / business_context). Never raw prompt text.
+#   RESOURCE_INSTANCE_ESCALATION -- escalation CONTACT + ROUTING config
+#     only. Never escalation triggers (those are runtime-fixed, §3.4.5).
+RESOURCE_INSTANCE_PERSONALITY = "instance_personality"
+RESOURCE_INSTANCE_ESCALATION = "instance_escalation"
+
+# Arc 15 WU4 — instance_connections row (Architecture §3.8.2). The
+# auditable resource for the connection configure/disconnect admin API.
+# resource_pk = instance_connections.id; resource_natural_id =
+# "{instance_id}:{connection_type}" so an auditor can answer "every
+# connection event for the calendar wiring on Instance Y" with a single
+# filter.
+RESOURCE_INSTANCE_CONNECTION = "instance_connection"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -905,6 +975,11 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_ESCALATION_EVENT,
     # Arc 14 U4 — lead capture cognition.
     RESOURCE_LEAD,
+    # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
+    RESOURCE_INSTANCE_PERSONALITY,
+    RESOURCE_INSTANCE_ESCALATION,
+    # Arc 15 WU4 — Arc 17 connection-contract slice (§3.8.2).
+    RESOURCE_INSTANCE_CONNECTION,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):

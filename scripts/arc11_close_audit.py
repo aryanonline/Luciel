@@ -102,8 +102,15 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     # Arc 14 U2 appends ``arc14_u2_escalation_events`` (the §3.4.5
     # escalation event store); Arc 14 U4 then appends
     # ``arc14_u4_leads`` (the §3.4.4 lead-capture / §3.4.7 summary
-    # table), advancing the single head to it.
-    expected_head = "arc14_u4_leads"
+    # table). Arc 15 then appends ``arc15_a_instance_config_pillars``
+    # (Vision §3.5 / Journey Phase 3-4 config pillars) and
+    # ``arc15_b_instance_connections`` (the Arc 17 connection-contract
+    # slice). Arc 15 doctrine cleanup then appends
+    # ``arc15_c_drop_system_prompt_additions`` (Vision §3.5 / Arch
+    # §3.5.1 "never raw prompt authoring" — drops the dead free-text
+    # column), advancing the single head to it. This pin tracks the
+    # current head; each arc that adds a migration bumps it.
+    expected_head = "arc15_c_drop_system_prompt_additions"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],

@@ -66,54 +66,46 @@ def build_system_prompt(
     *,
     memories: list[str] | None = None,
     tool_descriptions: str | None = None,
-    tenant_prompt: str | None = None,
-    domain_prompt: str | None = None,
-    agent_prompt: str | None = None,
+    preset_stanza: str | None = None,
+    business_context_stanza: str | None = None,
     knowledge: list[str] | None = None,
     assistant_name: str = "Luciel",
 ) -> str:
     """
     Returns the full Luciel system prompt assembled from all context layers.
 
+    Arc 15 §3.5.1 stanza order:
+      LUCIEL_CORE_PROMPT + INSTANCE_NAME + PRESET + BUSINESS_CONTEXT
+        + KNOWLEDGE_CONTEXT + (history) + TOOLS_AVAILABLE
+        + (channels / escalation handled elsewhere)
+
+    The ``preset_stanza`` and ``business_context_stanza`` are
+    platform-COMPOSED by ``app.persona.composer`` from the structured
+    instance pillars. Per Vision §3.5 / Architecture §3.5.1 ("never raw
+    prompt authoring") there is no free-text customer-authored prompt
+    layer; the single Admin→Instance boundary (§3.7.2) means there is
+    no Tenant / Domain / Agent prompt layer either (those were
+    eliminated at Arc 5 Path A).
+
     Layer order (most general to most specific):
       1. Luciel Core identity (always present, with custom name)
-      2. Tenant-wide rules (if tenant config exists)
-      3. Domain/role instructions (if domain config exists)
-      4. Agent-specific instructions (if agent config exists)
-      5. Retrieved knowledge (from vector DB)
-      6. User memories (from memory_items)
-      7. Tool descriptions (if tools are available)
+      2. PRESET stanza (composed personality voice profile)
+      3. BUSINESS_CONTEXT stanza (composed, tier-capped background)
+      4. Retrieved knowledge (from vector DB)
+      5. User memories (from memory_items)
+      6. Tool descriptions (if tools are available)
     """
     prompt = LUCIEL_SYSTEM_PROMPT.format(assistant_name=assistant_name)
 
-    # --- Layer 2: Tenant-wide rules ---
-    if tenant_prompt:
-        prompt += f"""
-=== Tenant Context ===
-The following rules apply to all interactions for this tenant. Follow them consistently.
+    # --- Layer 2: PRESET stanza (composed personality voice profile) ---
+    if preset_stanza:
+        prompt += "\n" + preset_stanza + "\n"
 
-{tenant_prompt}
-"""
+    # --- Layer 3: BUSINESS_CONTEXT stanza (composed, tier-capped) ---
+    if business_context_stanza:
+        prompt += "\n" + business_context_stanza + "\n"
 
-    # --- Layer 3: Domain/role-specific instructions ---
-    if domain_prompt:
-        prompt += f"""
-=== Role Instructions ===
-You are operating in a specific role. Follow these instructions in addition to your core principles.
-
-{domain_prompt}
-"""
-
-    # --- Layer 4: Agent-specific instructions ---
-    if agent_prompt:
-        prompt += f"""
-=== Agent Instructions ===
-The following instructions are specific to this agent. They take priority over tenant and domain defaults where they conflict.
-
-{agent_prompt}
-"""
-
-    # --- Layer 5: Retrieved knowledge ---
+    # --- Layer 4: Retrieved knowledge ---
     if knowledge:
         knowledge_block = "\n".join(f"- {k}" for k in knowledge)
         prompt += f"""
@@ -125,7 +117,7 @@ Do not make up information beyond what is provided here and in your training.
 {knowledge_block}
 """
 
-    # --- Layer 6: User memories ---
+    # --- Layer 5: User memories ---
     if memories:
         memory_block = "\n".join(f"- {m}" for m in memories)
         prompt += f"""
@@ -137,7 +129,7 @@ Do not contradict them unless the user explicitly corrects something.
 {memory_block}
 """
 
-    # --- Layer 7: Tools ---
+    # --- Layer 6: Tools ---
     if tool_descriptions:
         prompt += TOOL_INSTRUCTIONS + tool_descriptions
 

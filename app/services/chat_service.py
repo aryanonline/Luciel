@@ -4,7 +4,8 @@ ChatService coordinates one full chat turn.
 Single Admin→Instance boundary (Architecture §3.7.2). Per-turn
 context:
   1. Luciel Core persona (fixed, optionally renamed by instance)
-  2. Instance.system_prompt_additions (optional persona layer)
+  2. Composed PRESET + BUSINESS_CONTEXT stanzas (§3.5.1; from the
+     structured instance pillars — never raw customer prompt)
   3. Retrieved knowledge (Arc 11, scope-inherited)
   4. User memories (consent-gated)
   5. Tool descriptions — for the 8-tool v1 catalog (WU3), filtered
@@ -45,6 +46,10 @@ from app.integrations.llm.base import LLMMessage, LLMRequest
 from app.integrations.llm.router import ModelRouter
 from app.knowledge.retriever import KnowledgeRetriever
 from app.memory.service import MemoryService
+from app.persona.composer import (
+    compose_business_context_stanza,
+    compose_preset_stanza,
+)
 from app.persona.luciel_core import build_system_prompt
 from app.policy.consent import ConsentPolicy
 from app.policy.engine import PolicyEngine
@@ -66,9 +71,12 @@ class LucielContext:
     threads a Domain or Agent layer.
     """
 
-    # Instance persona / additions, appended onto the Luciel Core
-    # persona. None when no instance binding is active.
-    instance_prompt: str | None = None
+    # Arc 15 WU2 — platform-composed persona stanzas (§3.5.1). Derived
+    # from instance.personality_preset (+ personality_axes when custom)
+    # and instance.business_context. None when no instance binding is
+    # active or the pillar is unset.
+    preset_stanza: str | None = None
+    business_context_stanza: str | None = None
 
     # LLM provider preference. Instance.preferred_provider when set,
     # else caller-supplied.
@@ -129,9 +137,10 @@ class ChatService:
         ``luciel_instance_id`` is set AND the row is active AND
         belongs to the same admin, we layer:
 
-          * instance.system_prompt_additions → ``instance_prompt``
-          * instance.display_name           → ``assistant_name``
-          * instance.preferred_provider     → ``preferred_provider``
+          * instance.personality_preset/_axes → ``preset_stanza``
+          * instance.business_context        → ``business_context_stanza``
+          * instance.display_name            → ``assistant_name``
+          * instance.preferred_provider      → ``preferred_provider``
 
         When the instance is missing / inactive / cross-tenant, we
         fall back to defaults and log a warning. Never 500 the chat
@@ -169,9 +178,6 @@ class ChatService:
             return ctx
 
         ctx.luciel_instance_id = instance.id
-        ctx.instance_prompt = getattr(
-            instance, "system_prompt_additions", None,
-        )
         ctx.assistant_name = (
             getattr(instance, "display_name", None) or ctx.assistant_name
         )
@@ -179,7 +185,47 @@ class ChatService:
         if preferred_provider:
             ctx.preferred_provider = preferred_provider
 
+        # Arc 15 WU2 — compose the PRESET + BUSINESS_CONTEXT stanzas from
+        # the structured instance pillars (§3.5.1). This replaces the
+        # deprecated free-text system_prompt_additions layer entirely.
+        ctx.preset_stanza = compose_preset_stanza(
+            personality_preset=getattr(instance, "personality_preset", None),
+            personality_axes=getattr(instance, "personality_axes", None),
+        )
+        business_context = getattr(instance, "business_context", None)
+        if business_context:
+            tier = self._resolve_admin_tier(admin_id)
+            ctx.business_context_stanza = compose_business_context_stanza(
+                business_context=business_context,
+                tier=tier,
+            )
+
         return ctx
+
+    def _resolve_admin_tier(self, admin_id: str) -> str:
+        """Resolve the owning Admin's tier for tier-capped composition.
+
+        Fail-closed to Free when the row / tier is unrecognised — the
+        same posture as the route layer's pillar-tier resolver. A wrong
+        tier here only affects the defensive business_context truncation
+        ceiling; the API layer already enforced the real cap on write.
+        """
+        from sqlalchemy import select
+
+        from app.models.admin import Admin
+        from app.policy.entitlements import TIER_ENTITLEMENTS, TIER_FREE
+
+        try:
+            row = self.instance_repository.db.execute(
+                select(Admin.tier).where(Admin.id == admin_id)
+            ).scalar_one_or_none()
+        except Exception:
+            logger.warning(
+                "tier resolution failed for admin_id=%s; defaulting to free",
+                admin_id,
+            )
+            return TIER_FREE
+        return row if row in TIER_ENTITLEMENTS else TIER_FREE
 
     # ------------------------------------------------------------------
     # Public API
@@ -256,9 +302,8 @@ class ChatService:
         system_prompt = build_system_prompt(
             memories=memories if memories else None,
             tool_descriptions=tool_descriptions if tool_descriptions else None,
-            tenant_prompt=None,
-            domain_prompt=None,
-            agent_prompt=ctx.instance_prompt,
+            preset_stanza=ctx.preset_stanza,
+            business_context_stanza=ctx.business_context_stanza,
             knowledge=knowledge if knowledge else None,
             assistant_name=ctx.assistant_name,
         )
@@ -497,9 +542,8 @@ class ChatService:
         system_prompt = build_system_prompt(
             memories=memories if memories else None,
             tool_descriptions=tool_descriptions if tool_descriptions else None,
-            tenant_prompt=None,
-            domain_prompt=None,
-            agent_prompt=ctx.instance_prompt,
+            preset_stanza=ctx.preset_stanza,
+            business_context_stanza=ctx.business_context_stanza,
             knowledge=knowledge if knowledge else None,
             assistant_name=ctx.assistant_name,
         )
