@@ -28,10 +28,12 @@ Returns an ``AuthorizationDecision``:
                                 tool-error metadata.
 * ``message: str``            — admin-facing description.
 * ``failure_kind: str``       — one of:
-    - ``"unauthorized"``         (no live row / disabled / revoked)
-    - ``"tier_not_permitted"``   (tool.requires_tier rejects admin tier)
-    - ``"channel_not_enabled"``  (tool.requires_channels not satisfied)
-    - ``""``                     (when ``allowed=True``)
+    - ``"unauthorized"``              (no live row / disabled / revoked)
+    - ``"tier_not_permitted"``        (tool.requires_tier rejects tier)
+    - ``"channel_not_enabled"``       (tool.requires_channels unmet)
+    - ``"connection_not_configured"`` (Arc 15 WU5 — tool.requires_connection
+                                       has no live ``connected`` row)
+    - ``""``                          (when ``allowed=True``)
 
 Arc 14 will compose additional checks (cycle detection for
 ``call_sibling_luciel``, fan-out budget across the composition tree)
@@ -196,6 +198,15 @@ class DefaultDenyToolAuthorizer:
         if not channel_decision.allowed:
             return channel_decision
 
+        # 4. Connection enforcement (§3.3.3 third dispatch gate, Arc 15
+        #    WU5). For a tool that declares ``requires_connection`` the
+        #    broker requires a live ``instance_connections`` row with
+        #    ``status == 'connected'``. Tools with ``requires_connection
+        #    is None`` skip this gate. NEVER a silent failure.
+        connection_decision = self._check_connection(tool, context)
+        if not connection_decision.allowed:
+            return connection_decision
+
         return AuthorizationDecision.allow()
 
     # ------------------------------------------------------------------
@@ -353,6 +364,93 @@ class DefaultDenyToolAuthorizer:
                 ),
                 failure_kind="channel_not_enabled",
             )
+        return AuthorizationDecision.allow()
+
+    # ------------------------------------------------------------------
+    # Step 4 — connection check (§3.3.3 third dispatch gate, Arc 15 WU5)
+    # ------------------------------------------------------------------
+
+    def _check_connection(
+        self, tool: LucielTool, context: ToolContext
+    ) -> AuthorizationDecision:
+        """Refuse a connection-bearing tool that has no live ``connected``
+        ``instance_connections`` row.
+
+        Tools with ``requires_connection is None`` skip the gate. When a
+        connection IS required the gate is load-bearing: like ``_check_row``
+        it refuses if it cannot reach a DB session — there is no
+        silent-allow path. A missing/non-``connected`` row yields a
+        structured deny with ``failure_kind="connection_not_configured"``,
+        the same shape as the default-deny refusal so the agentic loop
+        reasons uniformly.
+        """
+        required_connection = getattr(tool, "requires_connection", None)
+        if required_connection is None:
+            return AuthorizationDecision.allow()
+
+        session = context.session
+        owns_session = False
+        if session is None and self._session_factory is not None:
+            session = self._session_factory()
+            owns_session = True
+        if session is None:
+            logger.warning(
+                "DefaultDenyToolAuthorizer: no DB session available for "
+                "connection check admin=%s instance=%s tool=%s — refusing.",
+                context.admin_id, context.instance_id, tool.tool_id,
+            )
+            return AuthorizationDecision.deny(
+                reason="no_db_session",
+                message=(
+                    "Tool dispatch refused: connection lookup could not "
+                    "access a database session."
+                ),
+                failure_kind="connection_not_configured",
+            )
+
+        try:
+            from app.repositories.instance_connection_repository import (
+                InstanceConnectionRepository,
+            )
+            repo = InstanceConnectionRepository(session)
+            row = repo.get_live_by_type(
+                admin_id=context.admin_id,
+                instance_id=context.instance_id,
+                connection_type=required_connection,
+            )
+        finally:
+            if owns_session:
+                try:
+                    session.close()
+                except Exception:  # pragma: no cover
+                    logger.exception(
+                        "DefaultDenyToolAuthorizer: session.close() raised"
+                    )
+
+        if row is None:
+            return AuthorizationDecision.deny(
+                reason="connection_not_configured",
+                message=(
+                    f"Tool '{tool.tool_id}' requires a live "
+                    f"'{required_connection}' connection, but none is "
+                    "configured on this instance. Configure it under "
+                    "Connections before this tool can run."
+                ),
+                failure_kind="connection_not_configured",
+            )
+
+        if row.status != "connected":
+            return AuthorizationDecision.deny(
+                reason="connection_not_connected",
+                message=(
+                    f"Tool '{tool.tool_id}' requires a 'connected' "
+                    f"'{required_connection}' connection; the configured "
+                    f"connection is '{row.status}'. Reconnect it before "
+                    "this tool can run."
+                ),
+                failure_kind="connection_not_configured",
+            )
+
         return AuthorizationDecision.allow()
 
 
