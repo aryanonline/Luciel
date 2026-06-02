@@ -145,26 +145,29 @@ def test_preflight_from_disallowed_origin_omits_acao() -> None:
 def test_actual_post_from_allowed_origin_still_hits_route() -> None:
     """Defense in depth: middleware order did not swallow the real POST.
 
-    We submit a deliberately invalid body so the route's pydantic schema
-    raises 422. The point is NOT that 422 is the right code for a real
-    customer; the point is that 422 came from the route handler (i.e.
-    the request traversed every middleware and reached FastAPI's
-    validation layer). If the CORSMiddleware were mis-ordered such that
-    it ate the real request, we'd see 405 or 400 from the middleware
-    instead of 422 from the schema.
+    Arc 15 funnel alignment: /checkout is now an AUTHENTICATED Pro
+    upgrade. An anonymous POST (no session cookie) deterministically
+    returns 401 from the route handler's ``_resolve_cookied_user``
+    guard. The point is NOT that 401 is the right code for a real
+    customer; the point is that 401 came from the route handler (i.e.
+    the request traversed every middleware and reached FastAPI), not
+    from a mis-ordered CORSMiddleware (which would surface 405 or a
+    CORS-400 instead). We send a valid Pro body so pydantic does not
+    short-circuit before the handler's auth guard runs.
     """
     client = TestClient(app)
     response = client.post(
         "/api/v1/billing/checkout",
-        json={},  # empty body -> pydantic schema 422
+        json={"tier": "pro", "billing_cadence": "monthly"},
         headers={"Origin": ALLOWED_ORIGIN, "Content-Type": "application/json"},
     )
-    # 422 = pydantic schema rejected the missing fields, proving the
-    # request reached the route handler. Anything 4xx/5xx that ISN'T
-    # 405 / 400-from-CORS proves the same thing; we pin 422 because
-    # that is the deterministic schema response for an empty body.
-    assert response.status_code == 422, (
-        f"Expected 422 from the route's pydantic schema after CORS "
+    # 401 = the route's auth guard rejected the cookie-less request,
+    # proving the request reached the route handler. Anything 4xx/5xx
+    # that ISN'T 405 / 400-from-CORS proves the same thing; we pin 401
+    # because that is the deterministic response for an anonymous Pro
+    # checkout under the funnel-aligned contract.
+    assert response.status_code == 401, (
+        f"Expected 401 from the route's auth guard after CORS "
         f"middleware traversal; got {response.status_code}. "
         f"Body: {response.text}"
     )

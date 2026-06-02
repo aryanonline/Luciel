@@ -521,29 +521,45 @@ class Settings(BaseSettings):
     # --- Arc 9 C2: In-app RLS connection-pool wrapper ---
     # Master feature flag for the Layer-3 tenant-context wiring that
     # issues ``SET LOCAL app.admin_id = '<uuid>'`` on every DB
-    # connection at request entry. When False (v1 default), the
-    # ContextVar still tracks the current admin_id (cheap, in-process
-    # only) but the engine checkout listener does NOT push it to
-    # PostgreSQL. This means RLS policies (Arc 9 C3) cannot enforce
-    # tenant isolation -- so this flag MUST be flipped to True in
-    # lockstep with the matching per-table RLS policy deploy.
+    # connection at request entry. When True, the engine ``after_begin``
+    # listener pushes the in-process admin_id (and instance_id) GUC to
+    # PostgreSQL so the per-table RLS policies (Arc 9 C3..C9) actually
+    # enforce tenant isolation. When False the ContextVar still tracks
+    # the current admin_id (cheap, in-process only) but the listener is
+    # a no-op and RLS has nothing to compare against.
     #
-    # Rollout order (see ARC9_RUNBOOK):
+    # DEFAULT FLIPPED TO TRUE (ARC 15 — Vision §3.3 / §5 hard tenant
+    # isolation). The full Arc 9 rollout has landed: every customer-data
+    # table carries an ENABLE + FORCE ROW LEVEL SECURITY policy keyed on
+    # ``current_setting('app.admin_id', true)`` (arc9_c3_*, arc9_c4_3*,
+    # arc9_c5_*, arc9_c10_a_force_rls, arc9_c11_tenant_restrictive,
+    # arc11_d1/d2, arc12b_custom_roles_rls), the runtime app role
+    # (arc9_c10_b_luciel_app_role) is non-superuser so FORCE RLS applies,
+    # and the SECURITY DEFINER bootstrap helpers (arc9_c20..c22) resolve
+    # tenancy without bypassing the fence. The live-Postgres integration
+    # test (tests/db/test_c9_5_live_rls_integration.py) proves the GUC +
+    # policies deny cross-tenant reads, deny unset-GUC reads, and deny
+    # mismatched-tenant INSERT/UPDATE with the flag on. Isolation is now
+    # ON unless an operator explicitly sets RLS_TENANT_CONTEXT_ENABLED=0
+    # (e.g. a forensic break-glass session against a non-RLS replica).
+    #
+    # Historical rollout order (see ARC9_RUNBOOK):
     #   1. C2 lands flag=False everywhere -- code path exists but
     #      no behaviour change. Tests verify ContextVar plumbing.
-    #   2. C3 lands the first per-table RLS policy (admin_audit_logs)
-    #      AND flips this flag True in the same deploy. Now SET LOCAL
-    #      fires and the one table actually enforces.
-    #   3. C3 lands remaining 11 tables incrementally. Each deploy
-    #      adds one ENABLE ROW LEVEL SECURITY -- the flag stays True.
-    #   4. C9 lands FORCE ROW LEVEL SECURITY on the final table and
+    #   2. C3 lands the first per-table RLS policy (admin_audit_logs);
+    #      flag flipped per-environment as policies landed per-table.
+    #   3. C3 lands remaining tables incrementally (ENABLE RLS each).
+    #   4. C9 lands FORCE ROW LEVEL SECURITY + the luciel_app role and
     #      tags arc-9-tenant-isolation-complete.
+    #   5. Arc 15 flips this source-level default True so a deploy that
+    #      loses its env-var injection still fails closed (isolation on)
+    #      rather than open.
     #
-    # Closes the structural gap C1 surfaced: 18/19 customer-data
-    # tables already filter at L1, but a single forgotten WHERE
-    # clause in a future repository method would leak cross-admin
-    # rows. L3 + L2 together make that impossible.
-    rls_tenant_context_enabled: bool = False
+    # Closes the structural gap C1 surfaced: customer-data tables filter
+    # at L1, but a single forgotten WHERE clause in a future repository
+    # method would leak cross-admin rows. L3 + L2 together make that
+    # impossible -- and with the default True they are active by default.
+    rls_tenant_context_enabled: bool = True
 
     # Arc 11 Step 8 — knowledge retrieval feature flag.
     #
