@@ -235,6 +235,18 @@ def put_personality_config(
             },
         )
 
+    # Re-bind the Instance to the RLS-scoped request session (``db``).
+    # ``_load_active_instance`` loads via ``instance_service`` which is
+    # constructed on a SEPARATE ``get_db`` session; mutating that copy and
+    # then committing/refreshing on ``db`` (TenantScopedDbSession) writes
+    # to the wrong unit-of-work (the mutation is silently lost) and the
+    # subsequent ``db.refresh`` raises "not persistent within this
+    # Session". Re-fetching on ``db`` makes load + mutate + commit + refresh
+    # share one session. Scope/tier/active checks already passed above.
+    instance = db.execute(
+        select(Instance).where(Instance.id == instance_id)
+    ).scalar_one()
+
     before = {
         "personality_preset": instance.personality_preset,
         "personality_axes": instance.personality_axes,

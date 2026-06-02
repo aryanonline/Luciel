@@ -212,6 +212,17 @@ def put_escalation_config(
             },
         )
 
+    # Re-bind the Instance to the RLS-scoped request session (``db``).
+    # ``_load_active_instance`` loads via ``instance_service`` (a SEPARATE
+    # get_db session); mutating that copy then committing/refreshing on
+    # ``db`` (TenantScopedDbSession) silently loses the write and makes
+    # ``db.refresh`` raise "not persistent within this Session". Re-fetch
+    # on ``db`` so load + mutate + commit + refresh share one session.
+    # Scope/tier/active checks already passed above.
+    instance = db.execute(
+        select(Instance).where(Instance.id == instance_id)
+    ).scalar_one()
+
     before = instance.escalation_config
     instance.escalation_config = body.config or None
 
