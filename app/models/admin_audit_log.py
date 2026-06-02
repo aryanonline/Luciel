@@ -616,6 +616,26 @@ ACTION_LEAD_CAPTURED = "lead_captured"
 ACTION_PERSONALITY_UPDATED = "personality_updated"
 ACTION_ESCALATION_CONFIG_UPDATED = "escalation_config_updated"
 
+# Arc 15 WU4 — Arc 17 connection-contract slice (Architecture §3.8.2).
+#
+# ACTION_CONNECTION_CONFIGURED -- a user configured (created) an
+#   external-system connection for an Instance via the connections admin
+#   API (POST). after_json carries {connection_type, provider, status}
+#   — NEVER config_json secrets (config_json holds non-secret config
+#   only, and the audit row records the connection's shape, not its
+#   payload). resource_type = RESOURCE_INSTANCE_CONNECTION; resource_pk
+#   = instance_connections.id; resource_natural_id =
+#   "{instance_id}:{connection_type}". Distinct from ACTION_CREATE so a
+#   dashboard can isolate connection-wiring events: a connection that
+#   lands status='connected' is a live capability gain (CSV/webhook),
+#   while status='unconfigured' is a deferred connector awaiting Arc 17.
+# ACTION_CONNECTION_DISCONNECTED -- the symmetric verb for the
+#   soft-revoke of a live connection row (DELETE). before_json carries
+#   the prior {connection_type, provider, status}; after_json carries
+#   {revoked_at}. Idempotent against missing rows (404, not an emission).
+ACTION_CONNECTION_CONFIGURED = "connection_configured"
+ACTION_CONNECTION_DISCONNECTED = "connection_disconnected"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -757,6 +777,9 @@ ALLOWED_ACTIONS = (
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
     ACTION_PERSONALITY_UPDATED,
     ACTION_ESCALATION_CONFIG_UPDATED,
+    # Arc 15 WU4 — Arc 17 connection-contract slice (§3.8.2).
+    ACTION_CONNECTION_CONFIGURED,
+    ACTION_CONNECTION_DISCONNECTED,
 )
 
 
@@ -899,6 +922,14 @@ RESOURCE_LEAD = "lead"
 RESOURCE_INSTANCE_PERSONALITY = "instance_personality"
 RESOURCE_INSTANCE_ESCALATION = "instance_escalation"
 
+# Arc 15 WU4 — instance_connections row (Architecture §3.8.2). The
+# auditable resource for the connection configure/disconnect admin API.
+# resource_pk = instance_connections.id; resource_natural_id =
+# "{instance_id}:{connection_type}" so an auditor can answer "every
+# connection event for the calendar wiring on Instance Y" with a single
+# filter.
+RESOURCE_INSTANCE_CONNECTION = "instance_connection"
+
 ALLOWED_RESOURCE_TYPES = (
     RESOURCE_TENANT,
     RESOURCE_DOMAIN,
@@ -947,6 +978,8 @@ ALLOWED_RESOURCE_TYPES = (
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
     RESOURCE_INSTANCE_PERSONALITY,
     RESOURCE_INSTANCE_ESCALATION,
+    # Arc 15 WU4 — Arc 17 connection-contract slice (§3.8.2).
+    RESOURCE_INSTANCE_CONNECTION,
 )
 
 # Step 29.y gap-fix C2 (D-audit-note-length-unbounded-2026-05-07):

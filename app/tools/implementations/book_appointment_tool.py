@@ -35,6 +35,12 @@ class BookAppointmentTool(LucielTool):
 
     declared_tier = ActionTier.NOTIFY_AND_PROCEED
 
+    # Arc 15 WU4/WU5 — connection-contract gate (§3.3.2). Booking needs
+    # a LIVE calendar connection. calendar is a DEFERRED connector in
+    # this slice: configuring it lands an ``unconfigured`` row, so the
+    # WU5 gate will refuse dispatch until Arc 17 ships the real backing.
+    requires_connection = "calendar"
+
     @property
     def tool_id(self) -> str:
         return "book_appointment"

@@ -39,6 +39,12 @@ class LookupPropertyTool(LucielTool):
 
     declared_tier = ActionTier.ROUTINE
 
+    # Arc 15 WU4/WU5 — connection-contract gate (§3.3.2). The
+    # ``property_source`` connector (admin CSV upload) connects LIVE in
+    # this slice, so a configured CSV source yields a ``connected`` row
+    # and the WU5 gate admits dispatch.
+    requires_connection = "property_source"
+
     @property
     def tool_id(self) -> str:
         return "lookup_property"

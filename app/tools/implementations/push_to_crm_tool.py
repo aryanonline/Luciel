@@ -38,6 +38,11 @@ class PushToCrmTool(LucielTool):
 
     declared_tier = ActionTier.NOTIFY_AND_PROCEED
 
+    # Arc 15 WU4/WU5 — connection-contract gate (§3.3.2). crm is a
+    # DEFERRED connector in this slice (lands ``unconfigured``); the WU5
+    # gate refuses until Arc 17 ships the real backing.
+    requires_connection = "crm"
+
     @property
     def tool_id(self) -> str:
         return "push_to_crm"

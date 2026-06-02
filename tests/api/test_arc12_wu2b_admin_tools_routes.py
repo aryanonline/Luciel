@@ -207,6 +207,41 @@ def _build_sqlite_session():
         ),
         Column("revoked_at", DateTime(timezone=True), nullable=True),
     )
+    # Arc 15 WU4 — the tools GET route now reads live connection statuses
+    # per instance to drive the ToolView connection chip. Mirror the
+    # instance_connections table shape (enums rendered as TEXT) so the
+    # route's lookup resolves against this SQLite session.
+    Table(
+        "instance_connections",
+        md,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column(
+            "admin_id", String(100),
+            ForeignKey("admins.id"), nullable=False, index=True,
+        ),
+        Column(
+            "instance_id", Integer,
+            ForeignKey("instances.id"), nullable=False, index=True,
+        ),
+        Column("connection_type", String(32), nullable=False),
+        Column("provider", String(64), nullable=False),
+        Column("config_json", JSON, nullable=True),
+        Column("credential_ref", String(255), nullable=True),
+        Column(
+            "status", String(32),
+            nullable=False, server_default="unconfigured",
+        ),
+        Column("last_verified_at", DateTime(timezone=True), nullable=True),
+        Column(
+            "created_at", DateTime(timezone=True),
+            nullable=False, server_default=func.now(),
+        ),
+        Column(
+            "updated_at", DateTime(timezone=True),
+            nullable=False, server_default=func.now(),
+        ),
+        Column("revoked_at", DateTime(timezone=True), nullable=True),
+    )
     # Minimal admin_audit_logs schema -- the AdminAuditRepository
     # writes these columns through the ORM. The full prod table has
     # row_hash + prev_row_hash + many more columns; the SQLite mirror

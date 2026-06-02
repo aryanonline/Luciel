@@ -111,6 +111,9 @@ from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
 )
+from app.repositories.instance_connection_repository import (
+    InstanceConnectionRepository,
+)
 from app.services.instance_service import InstanceService
 from app.services.instance_tool_authorization_service import (
     InstanceToolAuthorizationService,
@@ -182,6 +185,19 @@ class ToolView(BaseModel):
     # channel adapter is not connected.
     tier_available: bool
     channels_available: bool
+
+    # Arc 15 WU4 — connection-contract status (Arc 17 slice). For a tool
+    # that declares ``requires_connection`` the UI renders a chip driven
+    # by the live ``instance_connections`` row:
+    #   no row / unconfigured → "action_needed"  ("Action needed: connect X")
+    #   connected             → "connected"      ("Connected")
+    #   error / expired       → "reconnect_needed" ("Reconnect needed")
+    # A tool with ``requires_connection == None`` carries both fields
+    # ``None`` (no chip).
+    connection_type: str | None
+    connection_status: (
+        Literal["action_needed", "connected", "reconnect_needed"] | None
+    )
 
 
 class ToolListResponse(BaseModel):
@@ -313,18 +329,55 @@ def _registry() -> ToolRegistry:
     return ToolRegistry()
 
 
+def _connection_status_for(
+    *, requires_connection: str | None, live_status: str | None
+) -> str | None:
+    """Map a tool's connection requirement + the live row status onto the
+    three-state UI chip (spec §92-96).
+
+    ``requires_connection is None`` → no chip (return None). Otherwise:
+      no row / unconfigured → "action_needed"
+      connected             → "connected"
+      error / expired       → "reconnect_needed"
+    """
+    if requires_connection is None:
+        return None
+    if live_status is None or live_status == "unconfigured":
+        return "action_needed"
+    if live_status == "connected":
+        return "connected"
+    # error / expired (and any future non-connected status) → reconnect.
+    return "reconnect_needed"
+
+
 def _serialize_tool_view(
     *,
     tool,
     authorization,
     admin_tier: str,
     instance_channels: frozenset[str],
+    live_status_by_type: dict[str, str] | None = None,
 ) -> ToolView:
     """Build one ToolView from a registry tool + optional live
     authorization row + tier/channel context.
+
+    ``live_status_by_type`` maps ``connection_type -> status`` for the
+    instance's live ``instance_connections`` rows; it drives the
+    connection chip for any tool that declares ``requires_connection``.
     """
     requires_tier = list(tool.requires_tier)
     requires_channels = sorted(tool.requires_channels)
+    requires_connection = getattr(tool, "requires_connection", None)
+
+    status_map = live_status_by_type or {}
+    live_status = (
+        status_map.get(requires_connection)
+        if requires_connection is not None
+        else None
+    )
+    connection_status = _connection_status_for(
+        requires_connection=requires_connection, live_status=live_status
+    )
 
     tier_available = admin_tier in requires_tier
     if requires_channels:
@@ -358,6 +411,8 @@ def _serialize_tool_view(
         authorized_by_user_id=authorized_by_user_id,
         tier_available=tier_available,
         channels_available=channels_available,
+        connection_type=requires_connection,
+        connection_status=connection_status,
     )
 
 
@@ -422,6 +477,14 @@ def list_tools_for_instance(
     )
     live_by_tool: dict[str, object] = {row.tool_id: row for row in live_rows}
 
+    # Arc 15 WU4 — one query for the instance's live connection statuses,
+    # keyed by connection_type, so the per-tool connection chip needs no
+    # N+1 lookup.
+    conn_repo = InstanceConnectionRepository(db)
+    live_status_by_type = conn_repo.live_status_by_type(
+        admin_id=admin_id, instance_id=instance.id,
+    )
+
     registry = _registry()
     tools_view = [
         _serialize_tool_view(
@@ -429,6 +492,7 @@ def list_tools_for_instance(
             authorization=live_by_tool.get(t.tool_id),
             admin_tier=admin_tier,
             instance_channels=instance_channels,
+            live_status_by_type=live_status_by_type,
         )
         for t in registry.list_tools()
     ]
