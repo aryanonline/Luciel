@@ -202,8 +202,6 @@ def main() -> int:
         svc = ApiKeyService(db)
         api_key, raw_key = svc.create_key(
             admin_id=sentinel_admin_id,
-            domain_id=None,
-            agent_id=None,
             luciel_instance_id=sentinel_instance_pk,
             display_name="CI E2E platform-admin (Arc 9.2 PR #99)",
             permissions=["chat", "sessions", "admin", "platform_admin"],
