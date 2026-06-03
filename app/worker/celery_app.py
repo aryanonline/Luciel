@@ -189,6 +189,8 @@ celery_app = Celery(
         "app.worker.tasks.retention",
         # Arc 11 Closeout PR-A -- per-instance hard-purge worker.
         "app.worker.tasks.instance_retention",
+        # Arc 17 Task 5c -- connection token-refresh + secret-cleanup drain.
+        "app.worker.tasks.refresh_connections",
         # Arc 10 -- lifecycle subsystem tasks.
         "app.worker.tasks.data_export",
         "app.worker.tasks.audit_retention",
@@ -317,6 +319,23 @@ celery_app.conf.update(
         "data-export-expire-signed-urls": {
             "task": "app.worker.tasks.data_export.expire_old_signed_urls",
             "schedule": crontab(hour=10, minute=0),
+            "options": {"queue": "luciel-memory-tasks"},
+        },
+        # Arc 17 Task 5c -- nightly OAuth connection token refresh.
+        # Runs after the retention sweeps so it does not contend for the
+        # worker's single prefetch slot. DEPLOY-GATED: OAuth refreshes are
+        # no-ops until client creds are populated (honest unconfigured).
+        "connection-token-refresh-nightly": {
+            "task": "app.worker.tasks.refresh_connections.run_connection_token_refresh",
+            "schedule": crontab(hour=10, minute=30),
+            "options": {"queue": "luciel-memory-tasks"},
+        },
+        # Arc 17 Task 4/5c -- drain the secret-cleanup outbox (delete the
+        # secrets behind revoked connections). DEPLOY-GATED: AWS deletion
+        # runs only when connections_live_secrets_enabled.
+        "secret-cleanup-drain-nightly": {
+            "task": "app.worker.tasks.refresh_connections.run_secret_cleanup_drain",
+            "schedule": crontab(hour=11, minute=0),
             "options": {"queue": "luciel-memory-tasks"},
         },
     },
