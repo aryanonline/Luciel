@@ -29,8 +29,8 @@ from app.tools.implementations.bring_your_own_webhook_tool import (
 from app.tools.implementations.call_sibling_luciel_tool import (
     CallSiblingLucielTool,
 )
-from app.tools.implementations.lookup_property_tool import (
-    LookupPropertyTool,
+from app.tools.implementations.lookup_record_tool import (
+    LookupRecordTool,
 )
 from app.tools.implementations.push_to_crm_tool import PushToCrmTool
 from app.tools.implementations.schedule_callback_tool import (
@@ -66,7 +66,7 @@ class ToolRegistry:
         self.register(BookAppointmentTool())
         self.register(SendEmailTool())
         self.register(SendSmsTool())
-        self.register(LookupPropertyTool())
+        self.register(LookupRecordTool())
         self.register(ScheduleCallbackTool())
         self.register(PushToCrmTool())
         self.register(CallSiblingLucielTool())

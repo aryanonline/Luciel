@@ -456,7 +456,7 @@ def test_registry_has_exactly_the_eight_catalog_tools() -> None:
         "book_appointment",
         "send_email",
         "send_sms",
-        "lookup_property",
+        "lookup_record",
         "schedule_callback",
         "push_to_crm",
         "call_sibling_luciel",

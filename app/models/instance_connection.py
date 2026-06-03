@@ -21,6 +21,11 @@ Honesty invariants (Architecture §3.8.2):
 * ``status == 'connected'`` is only ever written for a connection with
   a real backing (CSV / webhook in this slice). Deferred connectors
   (calendar / crm) land as ``unconfigured`` — never a fake ``connected``.
+
+Domain-agnostic naming (Locked Decision #5): the connector category is
+``record_source`` (admin CSV upload / generic record provider), NOT a
+vertical-specific ``property_source``. ``last_health_check_at`` is the
+timestamp of the last successful health check / verification.
 """
 from __future__ import annotations
 
@@ -39,7 +44,7 @@ CONNECTION_TYPES = (
     "email_sender",
     "sms_sender",
     "crm",
-    "property_source",
+    "record_source",
     "outbound_webhook",
 )
 CONNECTION_STATUSES = (
@@ -88,7 +93,7 @@ class InstanceConnection(Base):
         nullable=False,
         server_default="unconfigured",
     )
-    last_verified_at: Mapped[datetime | None] = mapped_column(
+    last_health_check_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(

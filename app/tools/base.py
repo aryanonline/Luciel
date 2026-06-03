@@ -156,7 +156,7 @@ class ToolContext:
     session : Optional[Session]
         DB session/scope handle. Optional so unit tests can construct
         a context without spinning up a DB. Tools that need DB access
-        (e.g. lookup_property) read it from here.
+        (e.g. lookup_record) read it from here.
     inbound_message_id : Optional[str]
         Identifier for the current inbound message. WU5 uses this to
         scope cycle-detection state and the per-inbound fan-out
@@ -256,7 +256,7 @@ class LucielTool(ABC):
     #   book_appointment -> "calendar"
     #   send_email       -> "email_sender"
     #   send_sms         -> "sms_sender"
-    #   lookup_property  -> "property_source"
+    #   lookup_record    -> "record_source"
     #   push_to_crm      -> "crm"
     #   bring_your_own_webhook -> "outbound_webhook"
     # schedule_callback + call_sibling_luciel stay ``None`` (no external

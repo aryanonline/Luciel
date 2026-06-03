@@ -97,14 +97,14 @@ def test_post_honesty_fork_no_fake_connected() -> None:
 
 
 def test_live_vs_deferred_partition_is_honest() -> None:
-    # property_source + outbound_webhook are the ONLY live connectors.
+    # record_source + outbound_webhook are the ONLY live connectors.
     from app.schemas.connection import (
         DEFERRED_CONNECTION_TYPES,
         LIVE_CONNECTION_TYPES,
     )
 
     assert LIVE_CONNECTION_TYPES == frozenset(
-        {"property_source", "outbound_webhook"}
+        {"record_source", "outbound_webhook"}
     )
     assert "calendar" in DEFERRED_CONNECTION_TYPES
     assert "crm" in DEFERRED_CONNECTION_TYPES

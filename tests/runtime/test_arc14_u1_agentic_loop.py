@@ -228,7 +228,7 @@ class TestToolDispatch(unittest.TestCase):
             [
                 _plan_json(
                     reply="looking that up",
-                    tool_calls=[{"tool": "lookup_property", "parameters": {"id": 5}}],
+                    tool_calls=[{"tool": "lookup_record", "parameters": {"id": 5}}],
                 ),
                 # Synthesis pass: no tool, so the loop stops after one
                 # dispatch (otherwise the scripted router would re-issue
@@ -248,9 +248,9 @@ class TestToolDispatch(unittest.TestCase):
 
         # The loop dispatched through the broker (the fake stands in for
         # gates 1+2) exactly once, and the trace records the tool name.
-        self.assertEqual(broker.dispatched, [("lookup_property", {"id": 5})])
+        self.assertEqual(broker.dispatched, [("lookup_record", {"id": 5})])
         self.assertTrue(resp.tool_called)
-        self.assertEqual(resp.tool_name, "lookup_property")
+        self.assertEqual(resp.tool_name, "lookup_record")
 
     def test_tool_context_carries_admin_and_instance(self):
         router = _ScriptedRouter(
@@ -371,13 +371,13 @@ class TestToolDispatch(unittest.TestCase):
             [
                 _plan_json(
                     reply="let me look that up",
-                    tool_calls=[{"tool": "lookup_property", "parameters": {}}],
+                    tool_calls=[{"tool": "lookup_record", "parameters": {}}],
                 ),
                 _plan_json(reply="The property is listed at $500k.", confidence=0.9),
             ]
         )
         broker = _RecordingBroker(
-            {"lookup_property": ToolResult(success=True, output="price=$500k")}
+            {"lookup_record": ToolResult(success=True, output="price=$500k")}
         )
         orch = LucielOrchestrator(
             trace_service=_StubTrace(),
