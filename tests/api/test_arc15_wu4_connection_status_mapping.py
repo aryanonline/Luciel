@@ -27,9 +27,9 @@ from app.api.v1.admin_tools import _connection_status_for, _serialize_tool_view
     [
         ("calendar", None, "action_needed"),
         ("calendar", "unconfigured", "action_needed"),
-        ("property_source", "connected", "connected"),
-        ("property_source", "error", "reconnect_needed"),
-        ("property_source", "expired", "reconnect_needed"),
+        ("record_source", "connected", "connected"),
+        ("record_source", "error", "reconnect_needed"),
+        ("record_source", "expired", "reconnect_needed"),
         (None, None, None),
         (None, "connected", None),  # None requirement → never a chip.
     ],
@@ -58,15 +58,15 @@ def _fake_tool(*, tool_id, requires_connection):
 
 
 def test_serialize_threads_status_from_map():
-    tool = _fake_tool(tool_id="lookup_property", requires_connection="property_source")
+    tool = _fake_tool(tool_id="lookup_record", requires_connection="record_source")
     view = _serialize_tool_view(
         tool=tool,
         authorization=None,
         admin_tier="pro",
         instance_channels=frozenset(),
-        live_status_by_type={"property_source": "connected"},
+        live_status_by_type={"record_source": "connected"},
     )
-    assert view.connection_type == "property_source"
+    assert view.connection_type == "record_source"
     assert view.connection_status == "connected"
 
 
@@ -77,7 +77,7 @@ def test_serialize_no_connection_tool_has_null_chip():
         authorization=None,
         admin_tier="pro",
         instance_channels=frozenset(),
-        live_status_by_type={"property_source": "connected"},
+        live_status_by_type={"record_source": "connected"},
     )
     assert view.connection_type is None
     assert view.connection_status is None

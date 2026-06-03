@@ -700,6 +700,31 @@ class Settings(BaseSettings):
     ses_inbound_bucket: str = ""
     ses_inbound_topic_arn: str = ""
 
+    # -----------------------------------------------------------------
+    # Arc 17 — Connections layer secret store + OAuth (DEPLOY-GATED)
+    # -----------------------------------------------------------------
+    #
+    # connections_live_secrets_enabled is the master gate selecting the
+    # real AWS Secrets Manager store vs the in-memory LocalFakeSecretStore.
+    # When False (the boot-safe default) get_secret_store() returns the
+    # fake — NO boto3 client is constructed and NO AWS call is ever made,
+    # so dev / CI / tests can exercise the full connection code path
+    # without AWS creds. Production flips this True in lockstep with the
+    # IAM secretsmanager:* grant. See app/integrations/secrets/.
+    connections_live_secrets_enabled: bool = False
+
+    # Google OAuth client credentials for the calendar connector (the
+    # Arc 17 reference OAuth provider). Sourced in prod from SSM under
+    # /luciel/production/. Empty defaults keep boot safe AND keep the
+    # connector HONEST: when either is empty the OAuth provider reports
+    # itself unconfigured and the connector round-trips as an honest
+    # 'unconfigured' + arc17_pending marker — it NEVER fakes 'connected'.
+    # The flip to 'connected' is DEPLOY-GATED on these being populated.
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    # Redirect URI the OAuth consent screen returns the auth code to.
+    google_oauth_redirect_uri: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

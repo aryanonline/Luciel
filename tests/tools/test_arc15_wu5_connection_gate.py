@@ -90,7 +90,7 @@ def _build_sqlite_session():
             "status", String(32),
             nullable=False, server_default="unconfigured",
         ),
-        Column("last_verified_at", DateTime(timezone=True), nullable=True),
+        Column("last_health_check_at", DateTime(timezone=True), nullable=True),
         Column(
             "created_at", DateTime(timezone=True),
             nullable=False, server_default=func.now(),
@@ -138,7 +138,7 @@ def _seed_connection(
         provider="test_provider",
         status=status,
         config_json={"store_ref": "s3://x"} if status == "connected" else None,
-        last_verified_at=datetime.now(timezone.utc),
+        last_health_check_at=datetime.now(timezone.utc),
     )
 
 
@@ -210,9 +210,9 @@ def test_connected_admits() -> None:
     _seed_admin_instance(session, admin_id="a", instance_id=1)
     _seed_connection(
         session, admin_id="a", instance_id=1,
-        connection_type="property_source", status="connected",
+        connection_type="record_source", status="connected",
     )
-    tool = _make_connection_tool(requires_connection="property_source")
+    tool = _make_connection_tool(requires_connection="record_source")
     decision = _authorizer()._check_connection(
         tool, _ctx(admin_id="a", instance_id=1, session=session)
     )
@@ -239,9 +239,9 @@ def test_expired_denies() -> None:
     _seed_admin_instance(session, admin_id="a", instance_id=1)
     _seed_connection(
         session, admin_id="a", instance_id=1,
-        connection_type="property_source", status="expired",
+        connection_type="record_source", status="expired",
     )
-    tool = _make_connection_tool(requires_connection="property_source")
+    tool = _make_connection_tool(requires_connection="record_source")
     decision = _authorizer()._check_connection(
         tool, _ctx(admin_id="a", instance_id=1, session=session)
     )
@@ -255,9 +255,9 @@ def test_error_status_denies() -> None:
     _seed_admin_instance(session, admin_id="a", instance_id=1)
     _seed_connection(
         session, admin_id="a", instance_id=1,
-        connection_type="property_source", status="error",
+        connection_type="record_source", status="error",
     )
-    tool = _make_connection_tool(requires_connection="property_source")
+    tool = _make_connection_tool(requires_connection="record_source")
     decision = _authorizer()._check_connection(
         tool, _ctx(admin_id="a", instance_id=1, session=session)
     )
@@ -268,7 +268,7 @@ def test_error_status_denies() -> None:
 def test_no_row_denies() -> None:
     session = _build_sqlite_session()
     _seed_admin_instance(session, admin_id="a", instance_id=1)
-    tool = _make_connection_tool(requires_connection="property_source")
+    tool = _make_connection_tool(requires_connection="record_source")
     decision = _authorizer()._check_connection(
         tool, _ctx(admin_id="a", instance_id=1, session=session)
     )
@@ -290,7 +290,7 @@ def test_no_connection_required_skips_gate_even_without_session() -> None:
 def test_requires_connection_but_no_session_refuses() -> None:
     """Load-bearing: a connection-bearing tool with no reachable DB
     session is REFUSED — never a silent allow."""
-    tool = _make_connection_tool(requires_connection="property_source")
+    tool = _make_connection_tool(requires_connection="record_source")
     decision = _authorizer()._check_connection(
         tool, _ctx(admin_id="a", instance_id=1, session=None)
     )
@@ -305,9 +305,9 @@ def test_full_authorize_chain_gate3_after_row(monkeypatch) -> None:
     _seed_admin_instance(session, admin_id="a", instance_id=1)
     _seed_connection(
         session, admin_id="a", instance_id=1,
-        connection_type="property_source", status="unconfigured",
+        connection_type="record_source", status="unconfigured",
     )
-    tool = _make_connection_tool(requires_connection="property_source")
+    tool = _make_connection_tool(requires_connection="record_source")
     authz = _authorizer()
 
     # Stub out the first three gates so we isolate gate 3 in authorize().

@@ -108,9 +108,13 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     # slice). Arc 15 doctrine cleanup then appends
     # ``arc15_c_drop_system_prompt_additions`` (Vision §3.5 / Arch
     # §3.5.1 "never raw prompt authoring" — drops the dead free-text
-    # column), advancing the single head to it. This pin tracks the
+    # column). Arc 17 then appends
+    # ``arc17_a_connection_domain_agnostic_renames`` (the domain-agnostic
+    # connection_type renames + last_health_check_at) and
+    # ``arc17_b_secret_cleanup_outbox`` (the secret-cleanup outbox table),
+    # advancing the single head to the latter. This pin tracks the
     # current head; each arc that adds a migration bumps it.
-    expected_head = "arc15_c_drop_system_prompt_additions"
+    expected_head = "arc17_b_secret_cleanup_outbox"
     try:
         proc = subprocess.run(
             ["alembic", "heads"],

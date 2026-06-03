@@ -636,6 +636,31 @@ ACTION_ESCALATION_CONFIG_UPDATED = "escalation_config_updated"
 ACTION_CONNECTION_CONFIGURED = "connection_configured"
 ACTION_CONNECTION_DISCONNECTED = "connection_disconnected"
 
+# Arc 17 — connection completion verbs (refresh endpoint + worker + cascade).
+#
+# ACTION_CONNECTION_REFRESHED -- a user manually triggered a re-auth /
+#   health check via POST /admin/connections/{id}/refresh. after_json
+#   carries {connection_type, status, arc17_pending} — the HONEST
+#   post-check status, never a fabricated 'connected'. Distinct from
+#   ACTION_CONNECTION_CONFIGURED so a dashboard can tell a fresh wiring
+#   apart from a re-verification of an existing one.
+# ACTION_CONNECTION_TOKEN_REFRESHED -- the token-refresh Celery worker
+#   silently refreshed (or failed to refresh) an OAuth connector's
+#   access token. after_json carries {connection_type, status} where
+#   status is 'connected' on a real successful refresh or 'expired' on
+#   a rejected refresh token. The actor is the system worker context
+#   (actor_key_prefix NULL), matching the other ACTION_WORKER_* rows.
+# ACTION_CONNECTION_REVOKED -- a connection row was soft-revoked by the
+#   Arc 10 lifecycle cascade (instance deactivation / account closure),
+#   NOT by an explicit operator DELETE. Distinct from
+#   ACTION_CONNECTION_DISCONNECTED so an auditor can tell an operator
+#   teardown apart from an automatic lifecycle cascade. before_json
+#   carries {connection_type, status, had_credential_ref}; after_json
+#   carries {revoked_at, secret_cleanup_enqueued, cascade_source}.
+ACTION_CONNECTION_REFRESHED = "connection_refreshed"
+ACTION_CONNECTION_TOKEN_REFRESHED = "connection_token_refreshed"
+ACTION_CONNECTION_REVOKED = "connection_revoked"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -780,6 +805,10 @@ ALLOWED_ACTIONS = (
     # Arc 15 WU4 — Arc 17 connection-contract slice (§3.8.2).
     ACTION_CONNECTION_CONFIGURED,
     ACTION_CONNECTION_DISCONNECTED,
+    # Arc 17 — connection completion (refresh endpoint + worker + cascade).
+    ACTION_CONNECTION_REFRESHED,
+    ACTION_CONNECTION_TOKEN_REFRESHED,
+    ACTION_CONNECTION_REVOKED,
 )
 
 

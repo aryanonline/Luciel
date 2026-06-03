@@ -33,7 +33,7 @@ ConnectionType = Literal[
     "email_sender",
     "sms_sender",
     "crm",
-    "property_source",
+    "record_source",
     "outbound_webhook",
 ]
 ConnectionStatus = Literal[
@@ -48,7 +48,7 @@ ConnectionStatus = Literal[
 # route consults these sets; they are the single source of truth for the
 # "no fake connected" honesty invariant.
 LIVE_CONNECTION_TYPES: frozenset[str] = frozenset(
-    {"property_source", "outbound_webhook"}
+    {"record_source", "outbound_webhook"}
 )
 DEFERRED_CONNECTION_TYPES: frozenset[str] = frozenset(
     {"calendar", "crm", "email_sender", "sms_sender"}
@@ -85,7 +85,7 @@ class ConnectionView(BaseModel):
     provider: str
     status: ConnectionStatus
     config_json: Optional[dict[str, Any]]
-    last_verified_at: Optional[datetime]
+    last_health_check_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
 
@@ -120,6 +120,22 @@ class ConnectionCreateResponse(BaseModel):
     arc17_pending: Optional[Arc17Pending] = None
 
 
+class ConnectionRefreshResponse(BaseModel):
+    """POST .../refresh response — the re-verified row plus an optional
+    deferral marker.
+
+    The embedded ``connection`` view carries the HONEST post-check
+    ``status`` and updated ``last_health_check_at``. ``arc17_pending`` is
+    populated (and ``status`` stays ``unconfigured``) for a deferred OAuth
+    connector whose live flow is deploy-gated — the endpoint NEVER fakes
+    ``connected``. ``detail`` is a short human-readable outcome line.
+    """
+
+    connection: ConnectionView
+    arc17_pending: Optional[Arc17Pending] = None
+    detail: str = ""
+
+
 class ConnectionDeleteResponse(BaseModel):
     """DELETE response — soft-delete acknowledgement."""
 
@@ -138,6 +154,7 @@ __all__ = [
     "ConnectionListResponse",
     "Arc17Pending",
     "ConnectionCreateResponse",
+    "ConnectionRefreshResponse",
     "ConnectionDeleteResponse",
     "CONNECTION_TYPES",
     "CONNECTION_STATUSES",

@@ -231,7 +231,7 @@ def _build_sqlite_session():
             "status", String(32),
             nullable=False, server_default="unconfigured",
         ),
-        Column("last_verified_at", DateTime(timezone=True), nullable=True),
+        Column("last_health_check_at", DateTime(timezone=True), nullable=True),
         Column(
             "created_at", DateTime(timezone=True),
             nullable=False, server_default=func.now(),
@@ -479,7 +479,7 @@ def test_get_returns_8_v1_catalog_tools_no_cognition() -> None:
         "book_appointment",
         "send_email",
         "send_sms",
-        "lookup_property",
+        "lookup_record",
         "schedule_callback",
         "push_to_crm",
         "call_sibling_luciel",

@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.models.admin_audit_log import (
     ACTION_CASCADE_DEACTIVATE,
+    ACTION_CONNECTION_REVOKED,
     ACTION_CREATE,
     ACTION_DEACTIVATE,
     ACTION_INSTANCE_DELETED,
@@ -41,6 +42,7 @@ from app.models.admin_audit_log import (
     ACTION_INSTANCE_RESUMED,
     ACTION_UPDATE,
     RESOURCE_INSTANCE,
+    RESOURCE_INSTANCE_CONNECTION,
 )
 from app.models.instance import Instance
 from app.models.instance_status import InstanceStatus
@@ -510,6 +512,17 @@ class InstanceRepository:
                     len(revoked_grants), instance.id, instance.admin_id,
                 )
 
+            # Arc 17 Task 4 — connection cascade. In the same transaction
+            # as the soft-delete, revoke every live instance_connections
+            # row for this instance, audit each, and enqueue secret
+            # cleanup for any non-null credential_ref. Mirrors the
+            # sibling-grant cascade above (lazy import to avoid a cycle).
+            self._cascade_revoke_connections(
+                admin_id=instance.admin_id,
+                instance_id=instance.id,
+                audit_ctx=audit_ctx,
+            )
+
         self.db.commit()
         self.db.refresh(instance)
         logger.info(
@@ -521,6 +534,117 @@ class InstanceRepository:
             now.isoformat(),
         )
         return instance
+
+    # ------------------------------------------------------------------
+    # Arc 17 Task 4 — connection cascade (instance delete + account
+    # closure). Revoke live instance_connections rows, audit each, and
+    # enqueue secret cleanup for any non-null credential_ref. Shared by
+    # delete_by_pk (one instance) and the closure path (admin-wide).
+    # ------------------------------------------------------------------
+
+    def cascade_revoke_connections_for_admin(
+        self,
+        *,
+        admin_id: str,
+        audit_ctx: AuditContext,
+    ) -> int:
+        """Public entry for the account-closure destructive cascade.
+
+        Revokes EVERY live connection across the admin's instances +
+        enqueues secret cleanup, all in the caller's transaction. Called
+        by :class:`app.services.closure_service.ClosureService` — the
+        destructive-intent path. Operational admin-deactivation (Pause)
+        does NOT call this: paused instances retain their connection
+        rows (data-retained semantics).
+        """
+        return self._cascade_revoke_connections(
+            admin_id=admin_id,
+            audit_ctx=audit_ctx,
+            instance_id=None,
+        )
+
+    def _cascade_revoke_connections(
+        self,
+        *,
+        admin_id: str,
+        audit_ctx: AuditContext,
+        instance_id: int | None = None,
+    ) -> int:
+        """Soft-revoke connections + enqueue secret cleanup, in-txn.
+
+        Scope: a single instance when ``instance_id`` is given, else
+        every connection across the admin's instances (account closure).
+        Returns the number of rows revoked. Imports lazily to avoid a
+        circular import (the connection repo / outbox model import back
+        into this module's model graph).
+        """
+        from app.repositories.instance_connection_repository import (
+            InstanceConnectionRepository,
+        )
+        from app.repositories.secret_cleanup_outbox_repository import (
+            SecretCleanupOutboxRepository,
+        )
+
+        conn_repo = InstanceConnectionRepository(self.db)
+        if instance_id is not None:
+            revoked = conn_repo.revoke_all_for_instance(
+                admin_id=admin_id,
+                instance_id=instance_id,
+                autocommit=False,
+            )
+        else:
+            revoked = conn_repo.revoke_all_for_admin(
+                admin_id=admin_id,
+                autocommit=False,
+            )
+        if not revoked:
+            return 0
+
+        audit_repo = AdminAuditRepository(self.db)
+        outbox = SecretCleanupOutboxRepository(self.db)
+        for conn in revoked:
+            audit_repo.record(
+                ctx=audit_ctx,
+                admin_id=admin_id,
+                action=ACTION_CONNECTION_REVOKED,
+                resource_type=RESOURCE_INSTANCE_CONNECTION,
+                resource_pk=conn.id,
+                resource_natural_id=f"{conn.instance_id}:{conn.connection_type}",
+                luciel_instance_id=conn.instance_id,
+                before={
+                    "connection_type": conn.connection_type,
+                    "status": conn.status,
+                },
+                after={"revoked": True},
+                note=(
+                    "Connection revoked by lifecycle cascade "
+                    f"({'instance_delete' if instance_id is not None else 'account_closure'})."
+                ),
+                autocommit=False,
+            )
+            # Enqueue secret cleanup ONLY when a real secret pointer
+            # exists. credential_ref is NULL in this slice (no live
+            # credential-bearing connectors), so this is a no-op today —
+            # but the real enqueue path is exercised when full Arc 17
+            # populates credential_ref. We enqueue the POINTER only,
+            # never a secret value (Locked Decision #18).
+            if conn.credential_ref:
+                outbox.enqueue(
+                    admin_id=admin_id,
+                    credential_ref=conn.credential_ref,
+                    instance_id=conn.instance_id,
+                    connection_id=conn.id,
+                    autocommit=False,
+                )
+
+        logger.info(
+            "Connection cascade revoked %d connection(s) admin=%s "
+            "scope=%s",
+            len(revoked),
+            admin_id,
+            f"instance:{instance_id}" if instance_id is not None else "admin",
+        )
+        return len(revoked)
 
     def restore_by_pk(
         self,

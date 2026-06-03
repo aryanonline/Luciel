@@ -53,6 +53,11 @@ from app.models.instance_connection import (  # noqa: F401
     CONNECTION_TYPES,
     CONNECTION_STATUSES,
 )
+# Arc 17 — lifecycle secret-cleanup transactional outbox.
+from app.models.secret_cleanup_outbox import (  # noqa: F401
+    SecretCleanupOutbox,
+    OUTBOX_STATUSES,
+)
 # Arc 12 WU4 — sibling-Luciel composition grants (§3.3.4).
 from app.models.sibling_call_grant import (  # noqa: F401
     SiblingCallGrant,
@@ -162,6 +167,9 @@ __all__ = [
     "InstanceConnection",
     "CONNECTION_TYPES",
     "CONNECTION_STATUSES",
+    # Arc 17 -- lifecycle secret-cleanup outbox.
+    "SecretCleanupOutbox",
+    "OUTBOX_STATUSES",
     # Arc 12 WU4 -- sibling-Luciel composition grants.
     "SiblingCallGrant",
     "APPROVAL_STATE_LIVE",

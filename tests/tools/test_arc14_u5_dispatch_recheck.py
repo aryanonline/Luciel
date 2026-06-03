@@ -113,5 +113,5 @@ def test_channel_recheck_skips_when_set_absent():
 
 def test_no_required_channels_always_allows():
     auth = DefaultDenyToolAuthorizer()
-    tool = _FakeTool(tool_id="lookup_property")  # no requires_channels
+    tool = _FakeTool(tool_id="lookup_record")  # no requires_channels
     assert auth._check_channels(tool, _ctx(enabled_channels=None)).allowed is True

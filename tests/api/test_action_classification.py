@@ -466,7 +466,7 @@ def test_registry_does_not_register_cognition_after_wu7() -> None:
         "book_appointment",
         "send_email",
         "send_sms",
-        "lookup_property",
+        "lookup_record",
         "schedule_callback",
         "push_to_crm",
         "call_sibling_luciel",

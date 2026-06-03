@@ -12,7 +12,7 @@ Covers the WU3 binding-spec assertions:
   5. Each tool's input/output JSON Schema validates a representative
      payload via app/tools/schema.py (the WU1 validator).
   6. Interim-body tools (send_email, send_sms, book_appointment,
-     lookup_property, schedule_callback, push_to_crm,
+     lookup_record, schedule_callback, push_to_crm,
      call_sibling_luciel, bring_your_own_webhook) return the
      structured "not yet available" dict and perform NO side effect.
   7. A tool dispatched without an authorisation row is default-denied
@@ -42,7 +42,7 @@ _CATALOG_TOOL_IDS = {
     "book_appointment",
     "send_email",
     "send_sms",
-    "lookup_property",
+    "lookup_record",
     "schedule_callback",
     "push_to_crm",
     "call_sibling_luciel",
@@ -69,8 +69,8 @@ _REPRESENTATIVE_INPUTS = {
         "to": "+15555550100",
         "body": "Confirming your callback at 3pm.",
     },
-    "lookup_property": {
-        "address": "123 Main St",
+    "lookup_record": {
+        "record_id": "rec_123",
     },
     "schedule_callback": {
         "callback_at": "2026-06-01T15:00:00Z",
@@ -149,7 +149,7 @@ _EXPECTED_CHANNELS = {
     "book_appointment": frozenset(),
     "send_email": frozenset({"email"}),
     "send_sms": frozenset({"sms"}),
-    "lookup_property": frozenset(),
+    "lookup_record": frozenset(),
     "schedule_callback": frozenset(),
     "push_to_crm": frozenset(),
     "call_sibling_luciel": frozenset(),
@@ -176,7 +176,7 @@ _EXPECTED_EXECUTION_MODE = {
     "book_appointment": "in_process",
     "send_email": "in_process",
     "send_sms": "in_process",
-    "lookup_property": "in_process",
+    "lookup_record": "in_process",
     "schedule_callback": "in_process",
     "push_to_crm": "in_process",
     "call_sibling_luciel": "in_process",
@@ -261,7 +261,7 @@ _INTERIM_TOOLS = {
     "book_appointment": "ARC13",
     "send_email": "ARC13",
     "send_sms": "ARC13",
-    "lookup_property": "UNASSIGNED",
+    "lookup_record": "UNASSIGNED",
     "schedule_callback": "ARC13",
     "push_to_crm": "ARC12_WU6",
     # call_sibling_luciel: Arc 12 WU5 SHIPPED — guardrails + audit are
@@ -331,7 +331,7 @@ def test_interim_bodies_carry_greppable_todo_arc_comments() -> None:
         "book_appointment_tool.py": "TODO(ARC13)",
         "send_email_tool.py": "TODO(ARC13)",
         "send_sms_tool.py": "TODO(ARC13)",
-        "lookup_property_tool.py": "TODO(ARC-UNASSIGNED)",
+        "lookup_record_tool.py": "TODO(ARC-UNASSIGNED)",
         "schedule_callback_tool.py": "TODO(ARC13)",
         "push_to_crm_tool.py": "TODO(ARC12_WU6)",
         # call_sibling_luciel: Arc 12 WU5 shipped — guardrails/audit
