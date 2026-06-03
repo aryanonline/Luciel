@@ -661,6 +661,27 @@ ACTION_CONNECTION_REFRESHED = "connection_refreshed"
 ACTION_CONNECTION_TOKEN_REFRESHED = "connection_token_refreshed"
 ACTION_CONNECTION_REVOKED = "connection_revoked"
 
+# Arc 17 — OAuth callback completion (initiate + callback endpoints).
+#
+# ACTION_CONNECTION_OAUTH_INITIATED -- a user started the OAuth consent
+#   flow via POST /admin/instances/{id}/connections/oauth/{type}/initiate.
+#   The endpoint minted a signed state and returned the provider consent
+#   URL; the connection row is ensured in status 'unconfigured' (pending
+#   consent). after_json carries {connection_type, provider, status}. No
+#   secret is touched yet — this records the INTENT, distinct from the
+#   actual connect that the callback performs.
+# ACTION_CONNECTION_OAUTH_CONNECTED -- the OAuth callback exchanged a real
+#   auth code with the provider, stored the refresh token via the
+#   SecretStore (pointer persisted into credential_ref), and flipped the
+#   row to 'connected'. The actor is resolved OFF THE VERIFIED STATE (the
+#   callback has no session cookie). after_json carries {connection_type,
+#   provider, status, credential_ref_present} — NEVER the token value.
+#   Distinct from ACTION_CONNECTION_CONFIGURED so a dashboard can isolate
+#   a real OAuth connect from a CSV/webhook configure. On exchange failure
+#   the same action records status='error' (honest, never fake connected).
+ACTION_CONNECTION_OAUTH_INITIATED = "connection_oauth_initiated"
+ACTION_CONNECTION_OAUTH_CONNECTED = "connection_oauth_connected"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -809,6 +830,9 @@ ALLOWED_ACTIONS = (
     ACTION_CONNECTION_REFRESHED,
     ACTION_CONNECTION_TOKEN_REFRESHED,
     ACTION_CONNECTION_REVOKED,
+    # Arc 17 — OAuth callback completion (initiate + callback endpoints).
+    ACTION_CONNECTION_OAUTH_INITIATED,
+    ACTION_CONNECTION_OAUTH_CONNECTED,
 )
 
 

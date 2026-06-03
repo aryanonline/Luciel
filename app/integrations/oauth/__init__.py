@@ -32,6 +32,12 @@ from app.integrations.oauth.google_calendar import (
     GoogleCalendarOAuthProvider,
 )
 from app.integrations.oauth.factory import get_oauth_provider
+from app.integrations.oauth.state import (
+    OAuthState,
+    OAuthStateError,
+    sign_state,
+    verify_state,
+)
 
 __all__ = [
     "OAuthError",
@@ -40,4 +46,8 @@ __all__ = [
     "OAuthTokens",
     "GoogleCalendarOAuthProvider",
     "get_oauth_provider",
+    "OAuthState",
+    "OAuthStateError",
+    "sign_state",
+    "verify_state",
 ]

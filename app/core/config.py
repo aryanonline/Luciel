@@ -737,6 +737,32 @@ class Settings(BaseSettings):
     # Redirect URI the OAuth consent screen returns the auth code to.
     google_oauth_redirect_uri: str = ""
 
+    # Server-side HMAC secret that signs the opaque OAuth ``state`` the
+    # initiate endpoint mints and the callback endpoint verifies. The
+    # callback is UNAUTHENTICATED in the session-cookie sense (Google
+    # redirects the browser to it with no cookie), so it authorizes
+    # ENTIRELY off this verified state — a tampered/forged/expired state
+    # is rejected before any tenant resolution. Prod injects a strong
+    # random value from SSM (/luciel/production/OAUTH_STATE_SIGNING_SECRET);
+    # the dev default below is a clearly-marked placeholder that keeps the
+    # backend booting locally but is NOT safe for production. The HMAC is
+    # over (admin_id, instance_id, connection_type, nonce, issued-at), so
+    # rotating this secret simply invalidates any in-flight consent flows.
+    oauth_state_signing_secret: str = "dev-insecure-oauth-state-secret-change-me"
+    # Seconds an OAuth ``state`` stays valid between initiate and callback.
+    # The consent screen round-trip is interactive (human clicks Approve),
+    # so a few minutes is ample; a tight TTL bounds replay of a leaked
+    # state. 600s = 10 minutes.
+    oauth_state_ttl_seconds: int = 600
+    # Frontend route the callback redirects the browser to after a
+    # successful (or failed) exchange. The connection_type + an outcome
+    # flag are appended as query params so the SPA can refetch the
+    # connections list and toast the result. Prod overrides via env /
+    # SSM; the default points at the live marketing/admin host.
+    oauth_callback_success_url: str = (
+        "https://www.vantagemind.ai/admin/connections"
+    )
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

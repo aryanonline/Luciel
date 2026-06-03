@@ -142,6 +142,32 @@ class ConnectionDeleteResponse(BaseModel):
     instance_id: int
     connection_id: int
     disconnected: bool
+    # Arc 17 — set True when the disconnect enqueued a secret-cleanup
+    # outbox row (the revoked row carried a non-null credential_ref). The
+    # drain worker performs the actual SecretStore.delete out of band.
+    secret_cleanup_enqueued: bool = False
+
+
+# ---------------------------------------------------------------------
+# Arc 17 — OAuth initiate + callback (the consent-flow endpoints).
+# ---------------------------------------------------------------------
+
+
+class OAuthInitiateResponse(BaseModel):
+    """POST .../oauth/{connection_type}/initiate response.
+
+    The admin UI opens ``authorization_url`` (the provider consent
+    screen). ``state`` is the signed, opaque value round-tripped through
+    the provider; the callback authorizes off it. ``connection_id`` is the
+    ensured (status='unconfigured') row the consent will complete.
+    """
+
+    authorization_url: str
+    state: str
+    connection_id: int
+    connection_type: ConnectionType
+    provider: str
+    status: ConnectionStatus = "unconfigured"
 
 
 __all__ = [
@@ -156,6 +182,7 @@ __all__ = [
     "ConnectionCreateResponse",
     "ConnectionRefreshResponse",
     "ConnectionDeleteResponse",
+    "OAuthInitiateResponse",
     "CONNECTION_TYPES",
     "CONNECTION_STATUSES",
 ]
