@@ -713,6 +713,18 @@ class Settings(BaseSettings):
     # IAM secretsmanager:* grant. See app/integrations/secrets/.
     connections_live_secrets_enabled: bool = False
 
+    # record_source_live_enabled is the master gate for reading a LIVE
+    # record source whose store_ref points at remote object storage
+    # (an s3:// URI). When False (the boot-safe default) the resolver
+    # NEVER constructs a boto3 client and an s3:// store_ref returns an
+    # HONEST deploy-gated failure rather than a fake success — exactly
+    # the convention connections_live_secrets_enabled uses for the secret
+    # store. A local/file:// store_ref is ALWAYS readable regardless of
+    # this flag (no AWS dependency). Production flips this True in lockstep
+    # with the IAM s3:GetObject grant on the record-source bucket prefix.
+    # See app/integrations/record_source/.
+    record_source_live_enabled: bool = False
+
     # Google OAuth client credentials for the calendar connector (the
     # Arc 17 reference OAuth provider). Sourced in prod from SSM under
     # /luciel/production/. Empty defaults keep boot safe AND keep the
