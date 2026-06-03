@@ -119,8 +119,6 @@ def main() -> int:
     try:
         api_key, raw_key = svc.create_key(
             admin_id=None,
-            domain_id=None,
-            agent_id=None,
             luciel_instance_id=None,
             display_name=args.display_name,
             permissions=["chat", "sessions", "admin", "platform_admin"],
