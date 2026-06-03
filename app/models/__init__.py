@@ -92,6 +92,11 @@ from app.models.escalation_event import (  # noqa: F401
     GATE_INTAKE,
     GATE_OUTCOME,
     ALLOWED_GATES,
+    SIGNAL_BUDGET_EXHAUSTED,
+)
+# Arc 18 — §3.4.1b conversation-overage durable billing ledger.
+from app.models.conversation_overage_ledger import (  # noqa: F401
+    ConversationOverageLedger,
 )
 # Arc 14 U4 — §3.4.4 lead capture + §3.4.7 summarization (cognition).
 from app.models.lead import Lead  # noqa: F401
@@ -186,6 +191,9 @@ __all__ = [
     "GATE_INTAKE",
     "GATE_OUTCOME",
     "ALLOWED_GATES",
+    "SIGNAL_BUDGET_EXHAUSTED",
+    # Arc 18 -- §3.4.1b conversation-overage durable billing ledger.
+    "ConversationOverageLedger",
     # Arc 14 U4 -- §3.4.4 lead capture + §3.4.7 summarization.
     "Lead",
     # Arc 12 WU6 -- BYO webhook config + tool execution log.

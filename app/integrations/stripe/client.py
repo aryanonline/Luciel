@@ -388,6 +388,53 @@ class StripeClient:
         )
 
     # -----------------------------------------------------------------
+    # Arc 18 — conversation-overage metered usage (§3.4.1b)
+    # -----------------------------------------------------------------
+    #
+    # SDK-version reconciliation (documented in ARC18_BACKEND_REPORT.md):
+    # the legacy ``SubscriptionItem.create_usage_record`` API was REMOVED
+    # in stripe-python 8+ (we are on 15.x). Current metered billing reports
+    # usage via the Billing Meter Events API — ``stripe.billing.MeterEvent``
+    # keyed by a meter ``event_name`` + the customer id + a numeric value,
+    # NOT a subscription-item id. The founder provisions the metered Price
+    # AND its Meter (with an ``event_name``) in Stripe; the backend reports
+    # events against that meter. The (tier, cadence) → Price config still
+    # gates WHETHER overage bills; ``event_name`` is the single meter the
+    # overage Prices read from.
+
+    def report_overage_usage(
+        self,
+        *,
+        customer_id: str,
+        event_name: str,
+        value: int,
+        idempotency_key: str | None = None,
+    ) -> Any:
+        """Report ``value`` overage units to the Stripe meter ``event_name``
+        for ``customer_id`` (Billing Meter Events API).
+
+        The ``identifier`` (set to the idempotency key when given) makes a
+        redelivered webhook's report a no-op on Stripe's side — meter events
+        with a duplicate identifier are deduped — so the period's overage
+        cannot be double-counted.
+
+        No-op (returns ``None``) when the client is unconfigured or any
+        required field is missing, matching the wrapper's 501/no-op posture;
+        the period reset still proceeds in the caller.
+        """
+        if not self.is_configured or not customer_id or not event_name:
+            return None
+        stripe.api_key = self._api_key
+        payload: dict[str, Any] = {
+            "stripe_customer_id": customer_id,
+            "value": str(value),
+        }
+        params: dict[str, Any] = {"event_name": event_name, "payload": payload}
+        if idempotency_key:
+            params["identifier"] = idempotency_key
+        return stripe.billing.MeterEvent.create(**params)
+
+    # -----------------------------------------------------------------
     # Webhook signature verification
     # -----------------------------------------------------------------
 

@@ -193,8 +193,14 @@ class BillingWebhookService:
         self,
         db: Session,
         stripe_client: StripeClient | None = None,
+        budget_meter=None,
     ) -> None:
         self.db = db
+        # Arc 18 — the invoice.paid handler reads the per-instance
+        # conversation counter to compute overage at cycle close. Injectable
+        # (tests pass a BudgetMeter over an InMemoryBackend); lazily built
+        # from settings.redis_url on first use in production.
+        self._budget_meter = budget_meter
         # Arc 2 (2026-05-20) -- D-billing-webhook-service-stripe-attribute-error-2026-05-18:
         # `_on_checkout_completed` calls `self.stripe.retrieve_subscription(...)`
         # to read the canonical Subscription object (status, period dates,
@@ -234,6 +240,18 @@ class BillingWebhookService:
             "customer.subscription.updated": self._on_subscription_updated,
             "customer.subscription.deleted": self._on_subscription_deleted,
             "invoice.payment_failed": self._on_invoice_payment_failed,
+            # Arc 18 (§3.4.1b): cycle close. GUARDRAIL — this handler ONLY
+            # (a) reports conversation-overage usage records and (b) resets
+            # the per-instance budget counter + advances the period anchor.
+            # It does NOT touch base-invoice handling and does NOT book the
+            # base subscription invoice (Arc 7 retired base metering; the
+            # base invoice is already settled by Stripe). See
+            # ARC18_BACKEND_REPORT.md "supersedes" note.
+            "invoice.paid": self._on_invoice_paid,
+            # Stripe emits subscription cycle renewal via invoice.paid; some
+            # accounts also surface customer.subscription.renewed. Route both
+            # to the same idempotent close so neither double-books.
+            "customer.subscription.renewed": self._on_invoice_paid,
         }.get(event_type)
 
         if handler is None:
@@ -1307,6 +1325,225 @@ class BillingWebhookService:
         sub.last_event_id = event_id
         self.db.commit()
         return {"applied": True, "admin_id": sub.admin_id}
+
+    # -----------------------------------------------------------------
+    # Arc 18 — invoice.paid: conversation-overage report + counter reset
+    # -----------------------------------------------------------------
+
+    def _budget_meter_inst(self):
+        if self._budget_meter is None:
+            from app.runtime.budget_meter import BudgetMeter
+
+            self._budget_meter = BudgetMeter()
+        return self._budget_meter
+
+    def _on_invoice_paid(self, *, event_id: str, data_object: dict, event: dict) -> dict:
+        """Cycle close (§3.4.1b). GUARDRAIL-bounded: this handler does NOT
+        alter base-invoice handling and does NOT book the base subscription
+        invoice (Stripe has already settled it). It ONLY:
+
+          (a) computes per-instance conversation overage for the closing
+              period and reports a metered usage record to Stripe, and
+          (b) writes a durable overage-ledger row + audit, then resets the
+              Redis counter and advances ``current_period_start``.
+
+        Dedup: the ``last_event_id == event_id`` guard short-circuits a
+        redelivered event; the ledger's unique
+        ``(admin_id, instance_id, period_start)`` is a second idempotency
+        wall, and the Stripe usage record is reported with ``action='set'``
+        under an idempotency key so a race cannot double-bill.
+
+        Free admins (no Subscription row) never reach here — invoice.paid is
+        a paying-subscription event. A non-paying or unknown subscription is
+        a benign no-op.
+        """
+        stripe_subscription_id = data_object.get("subscription")
+        if not stripe_subscription_id:
+            return {"applied": False, "reason": "missing_subscription"}
+
+        sub = self.db.execute(
+            select(Subscription).where(
+                Subscription.stripe_subscription_id == stripe_subscription_id
+            )
+        ).scalars().first()
+        if sub is None:
+            return {"applied": False, "reason": "unknown_subscription"}
+
+        if sub.last_event_id == event_id:
+            self._record_replay(
+                event_id=event_id,
+                admin_id=sub.admin_id,
+                stripe_subscription_id=stripe_subscription_id,
+            )
+            return {"applied": False, "reason": "replay"}
+
+        from app.models.admin import Admin
+        from app.models.conversation_overage_ledger import ConversationOverageLedger
+        from app.models.instance import Instance
+        from app.models.admin_audit_log import ACTION_OVERAGE_REPORTED
+        from app.policy.entitlements import (
+            CADENCE_MONTHLY,
+            conversation_budget,
+            overage_price_config_key,
+            overage_rate_per_100_cents,
+        )
+        from app.runtime.billing_period import period_start_iso
+        from app.services.overage_billing import (
+            overage_count,
+            overage_line_item_description,
+            overage_units,
+            rate_string_from_cents,
+        )
+
+        tier = sub.tier
+        cadence = sub.billing_cadence or CADENCE_MONTHLY
+        cap = conversation_budget(tier, cadence)
+        # The CLOSING period anchor = the period_start the counter keyed on
+        # for the cycle that just billed (Stripe's prior current_period_start).
+        closing_period_dt = sub.current_period_start
+        closing_period_iso = period_start_iso(closing_period_dt)
+
+        meter = self._budget_meter_inst()
+        ctx = _webhook_audit_ctx()
+        audit_repo = AdminAuditRepository(self.db)
+
+        # Overage bills only when the (tier, cadence) carries a rate AND the
+        # founder has provisioned both the metered overage Price (gates the
+        # rate) and the Stripe Meter event_name (the report target).
+        rate_cents = overage_rate_per_100_cents(tier, cadence)
+        price_key = overage_price_config_key(tier, cadence)
+        overage_price_id = getattr(settings, price_key, "") if price_key else ""
+        meter_event_name = getattr(settings, "stripe_meter_event_overage", "") or ""
+        customer_id = self.db.execute(
+            select(Admin.stripe_customer_id).where(Admin.id == sub.admin_id)
+        ).scalar_one_or_none()
+        can_report = bool(
+            rate_cents is not None
+            and overage_price_id
+            and meter_event_name
+            and customer_id
+        )
+
+        instances = self.db.execute(
+            select(Instance.id, Instance.display_name).where(
+                Instance.admin_id == sub.admin_id
+            )
+        ).all()
+
+        closed_instances: list[dict] = []
+        for inst_id, inst_name in instances:
+            used = meter.current_count(
+                admin_id=sub.admin_id,
+                instance_id=inst_id,
+                period_start=closing_period_iso,
+            )
+            over = overage_count(conversations_used=used, budget_cap=cap)
+            units = overage_units(over)
+
+            usage_record_id = None
+            reported_at = None
+            # Report metered usage only when the tier bills overage, there IS
+            # overage, and the meter + customer are provisioned.
+            if units > 0 and can_report:
+                rate_str = rate_string_from_cents(rate_cents)
+                description = overage_line_item_description(
+                    instance_name=inst_name or f"Instance {inst_id}",
+                    additional=over,
+                    rate_str=rate_str,
+                )
+                try:
+                    rec = self.stripe.report_overage_usage(
+                        customer_id=customer_id,
+                        event_name=meter_event_name,
+                        value=units,
+                        idempotency_key=(
+                            f"overage:{event_id}:{inst_id}:{closing_period_iso}"
+                        ),
+                    )
+                    if rec is not None:
+                        usage_record_id = (
+                            rec.get("identifier") or rec.get("id")
+                            if isinstance(rec, dict)
+                            else getattr(rec, "identifier", None) or getattr(rec, "id", None)
+                        )
+                        reported_at = datetime.now(timezone.utc)
+                    logger.info(
+                        "invoice.paid: reported overage usage admin=%s inst=%s "
+                        "units=%s desc=%r", sub.admin_id, inst_id, units, description,
+                    )
+                except Exception as exc:  # noqa: BLE001 — period still resets
+                    logger.warning(
+                        "invoice.paid: usage-record report failed exc_class=%s "
+                        "admin=%s inst=%s — period still resets",
+                        type(exc).__name__, sub.admin_id, inst_id,
+                    )
+
+            # Durable ledger row (idempotent on the unique period key).
+            self.db.add(
+                ConversationOverageLedger(
+                    admin_id=sub.admin_id,
+                    instance_id=inst_id,
+                    billing_period_start=closing_period_dt or _ts(0),
+                    conversations_used=used,
+                    budget_cap=cap,
+                    overage_count=over,
+                    overage_units_reported=units,
+                    tier_at_close=tier,
+                    cadence_at_close=cadence,
+                    stripe_usage_record_id=usage_record_id,
+                    reported_at=reported_at,
+                )
+            )
+            closed_instances.append(
+                {"instance_id": inst_id, "used": used, "overage": over, "units": units}
+            )
+
+        audit_repo.record(
+            ctx=ctx,
+            admin_id=sub.admin_id,
+            action=ACTION_OVERAGE_REPORTED,
+            resource_type=RESOURCE_SUBSCRIPTION,
+            resource_pk=sub.id,
+            resource_natural_id=stripe_subscription_id,
+            after={
+                "stripe_event_id": event_id,
+                "tier": tier,
+                "cadence": cadence,
+                "cap": cap,
+                "closing_period_start": closing_period_iso,
+                "instances": closed_instances,
+            },
+            note="stripe invoice.paid -- conversation overage reported + period reset",
+        )
+
+        # Advance the period anchor to Stripe's NEW cycle start, then reset
+        # the Redis counters for the closed period.
+        new_period_start = _ts(
+            (data_object.get("lines") or {}).get("data", [{}])[0].get("period", {}).get("start")
+            if (data_object.get("lines") or {}).get("data")
+            else None
+        )
+        if new_period_start is not None:
+            sub.current_period_start = new_period_start
+        sub.last_event_id = event_id
+        self.db.commit()
+
+        # Belt-and-suspenders Redis reset (the NEW period_start already keys
+        # a fresh counter; deleting the old key is cleanup). Best-effort.
+        for inst in closed_instances:
+            try:
+                meter.reset(
+                    admin_id=sub.admin_id,
+                    instance_id=inst["instance_id"],
+                    period_start=closing_period_iso,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "invoice.paid: counter reset failed exc_class=%s admin=%s inst=%s",
+                    type(exc).__name__, sub.admin_id, inst["instance_id"],
+                )
+
+        return {"applied": True, "admin_id": sub.admin_id, "instances": len(closed_instances)}
 
     # -----------------------------------------------------------------
     # Replay + unknown event recording

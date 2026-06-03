@@ -92,6 +92,8 @@ class LucielOrchestrator:
         escalation_service=None,
         channel_arbiter=None,
         cognition_finalizer=None,
+        budget_meter=None,
+        budget_alert_service=None,
     ) -> None:
         self.context = ContextAssembler()
         self._trace_service = trace_service
@@ -113,6 +115,12 @@ class LucielOrchestrator:
         # missing provider NEVER invents an escalation.
         self._escalation_judge = escalation_judge
         self._escalation_service = escalation_service
+        # Arc 18 — conversation budget meter (Redis counter) + alert
+        # service (80%/100% notifications). Injectable so tests drive an
+        # InMemoryBackend / fake alerter; built lazily so pre-Arc-18 call
+        # sites keep working.
+        self._budget_meter = budget_meter
+        self._budget_alert_service = budget_alert_service
 
     # ------------------------------------------------------------------
     # Public entry point — the §3.4.1 agentic loop
@@ -142,6 +150,21 @@ class LucielOrchestrator:
         if intake_decision is not None:
             return self._finalize_intake_escalation(
                 req=req, decision=intake_decision, source_ids=source_ids
+            )
+
+        # 3b. CONVERSATION BUDGET GATE — Arc 18 (§3.4.1b). Position is
+        #     LOAD-BEARING: AFTER intake Gate 1 (an intake-escalated
+        #     session returned above and NEVER reaches here, so it never
+        #     consumes budget) and BEFORE PLAN (the first LLM call). The
+        #     gate counts this conversation ONCE (idempotent across the
+        #     REFLECT loop). For Free at cap it returns a budget_exhausted
+        #     EscalationDecision → short-circuit with NO LLM call. For
+        #     Pro/Enterprise it never blocks (returns None) — it only
+        #     increments the counter and fires 80%/100% alerts.
+        budget_decision = self._budget_gate(req)
+        if budget_decision is not None:
+            return self._finalize_budget_escalation(
+                req=req, decision=budget_decision, source_ids=source_ids
             )
 
         # 4. PLAN → ACT → REFLECT — bounded at MAX_LOOP_ITERATIONS.
@@ -445,6 +468,264 @@ class LucielOrchestrator:
             logger.warning(
                 "record_escalation failed: exc_class=%s — escalation flagged "
                 "on the turn but side-effects degraded",
+                type(exc).__name__,
+            )
+
+    # ------------------------------------------------------------------
+    # Conversation budget gate — Arc 18 (§3.4.1b)
+    # ------------------------------------------------------------------
+
+    def _budget_meter_inst(self):
+        """Lazy BudgetMeter accessor. Built from settings.redis_url on
+        first use; injectable for tests."""
+        if self._budget_meter is None:
+            from app.runtime.budget_meter import BudgetMeter
+
+            self._budget_meter = BudgetMeter()
+        return self._budget_meter
+
+    def _budget_gate(self, req: RuntimeRequest):
+        """CONVERSATION BUDGET GATE — Arc 18 §3.4.1b.
+
+        Counts this conversation ONCE per session (idempotent across the
+        REFLECT loop). Returns a ``budget_exhausted`` EscalationDecision
+        (Free at/over cap → short-circuit, no LLM call) or ``None``
+        (proceed to PLAN).
+
+        Pro/Enterprise NEVER block: capacity is never cut off
+        mid-conversation (Vision §2). When a paying instance is over cap
+        the counter still increments (overage) and the 80%/100% alerts
+        fire — but the turn proceeds to PLAN. Never raises: any failure
+        degrades to None (proceed) so a metering hiccup never blocks a
+        legitimate turn.
+        """
+        # No per-instance scope → no per-instance budget to meter. Proceed.
+        if req.luciel_instance_id is None:
+            return None
+
+        try:
+            from app.policy.entitlements import (
+                ALERT_THRESHOLD_80,
+                ALERT_THRESHOLD_100,
+                TIER_FREE,
+                conversation_budget,
+            )
+            from app.runtime.billing_period import resolve_billing_context
+
+            from app.db.session import SessionLocal
+
+            db = SessionLocal()
+            try:
+                ctx = resolve_billing_context(db, admin_id=req.admin_id)
+            finally:
+                db.close()
+
+            cap = conversation_budget(ctx.tier, ctx.cadence)
+            meter = self._budget_meter_inst()
+            count = meter.count_session_once(
+                admin_id=req.admin_id,
+                instance_id=req.luciel_instance_id,
+                period_start=ctx.period_start,
+                session_id=req.session_id,
+            )
+
+            # Free at/over cap → graceful single-turn handoff, no LLM call.
+            if ctx.tier == TIER_FREE and count > cap:
+                return self._build_budget_decision(
+                    req=req, ctx=ctx, count=count, cap=cap
+                )
+
+            # Pro/Enterprise: never block. Fire threshold alerts (idempotent)
+            # then proceed. Alerts are best-effort side effects.
+            if ctx.tier != TIER_FREE:
+                self._maybe_fire_budget_alerts(
+                    req=req, ctx=ctx, count=count, cap=cap
+                )
+            return None
+        except Exception as exc:  # noqa: BLE001 — never block a turn on metering
+            logger.warning(
+                "budget gate evaluation failed: exc_class=%s — proceeding to PLAN",
+                type(exc).__name__,
+            )
+            return None
+
+    def _build_budget_decision(self, *, req: RuntimeRequest, ctx, count: int, cap: int):
+        """Construct the budget_exhausted EscalationDecision (GATE_INTAKE,
+        like the intake gate, so it short-circuits pre-PLAN)."""
+        from app.models.escalation_event import (
+            GATE_INTAKE,
+            SIGNAL_BUDGET_EXHAUSTED,
+        )
+        from app.policy.escalation import EscalationDecision
+
+        return EscalationDecision(
+            signal=SIGNAL_BUDGET_EXHAUSTED,
+            gate=GATE_INTAKE,
+            admin_id=req.admin_id,
+            session_id=req.session_id,
+            luciel_instance_id=req.luciel_instance_id,
+            user_id=req.user_id,
+            signal_confidence=1.0,
+            reasoning_excerpt=(
+                f"Free instance at conversation budget cap: count={count} > cap={cap} "
+                f"(period_start={ctx.period_start})"
+            ),
+            signal_inputs={
+                "current": count,
+                "cap": cap,
+                "tier": ctx.tier,
+                "cadence": ctx.cadence,
+                "billing_period_start": ctx.period_start,
+            },
+        )
+
+    def _maybe_fire_budget_alerts(self, *, req: RuntimeRequest, ctx, count: int, cap: int):
+        """Fire 80%/100% budget alerts for a paying instance, once each
+        per period (idempotent via the meter's alert markers). Best-effort."""
+        try:
+            from app.policy.entitlements import ALERT_THRESHOLD_100, ALERT_THRESHOLD_80
+
+            if cap <= 0:
+                return
+            pct = (count * 100) // cap
+            meter = self._budget_meter_inst()
+            for threshold in (ALERT_THRESHOLD_80, ALERT_THRESHOLD_100):
+                if pct >= threshold and meter.mark_alert_fired_once(
+                    admin_id=req.admin_id,
+                    instance_id=req.luciel_instance_id,
+                    period_start=ctx.period_start,
+                    threshold=threshold,
+                ):
+                    self._budget_alert_svc().send_budget_alert(
+                        admin_id=req.admin_id,
+                        instance_id=req.luciel_instance_id,
+                        tier=ctx.tier,
+                        threshold=threshold,
+                        current=count,
+                        cap=cap,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "budget alert dispatch failed: exc_class=%s — turn proceeds",
+                type(exc).__name__,
+            )
+
+    def _budget_alert_svc(self):
+        if self._budget_alert_service is None:
+            from app.services.budget_alert_service import BudgetAlertService
+
+            self._budget_alert_service = BudgetAlertService()
+        return self._budget_alert_service
+
+    def _finalize_budget_escalation(
+        self,
+        *,
+        req: RuntimeRequest,
+        decision,
+        source_ids: list[int],
+    ) -> RuntimeResponse:
+        """Free budget-exhausted short-circuit (§3.4.1b). Mirrors
+        ``_finalize_intake_escalation``: record the escalation (→
+        escalation_events + admin_audit_log ACTION_ESCALATION_FIRED),
+        write the NAMED budget_exhausted audit row, emit a templated
+        acknowledgement (NO LLM call), and notify the admin on the
+        tier-shaped channel (Free = email). The end customer ALWAYS gets a
+        response — no silent drop."""
+        from app.runtime.budget_ack import budget_exhausted_acknowledgement
+
+        self._record_escalation_best_effort(decision)
+        self._record_budget_exhausted_audit(decision)
+        self._notify_budget_exhausted(req=req, decision=decision)
+
+        message = budget_exhausted_acknowledgement()
+        choice = self._arbitrate_channel(req, reply=message, escalation_fired=True)
+        trace_id = self._record_trace_best_effort(
+            req=req,
+            assistant_reply=message,
+            source_ids=source_ids,
+            llm_provider=None,
+            llm_model=None,
+            tool_called=False,
+            tool_name=None,
+            escalated=True,
+        )
+        self._finalize_cognition(
+            req=req,
+            assistant_reply=message,
+            escalation_fired=True,
+            escalation_decision=decision,
+        )
+        return RuntimeResponse(
+            message=message,
+            trace_id=trace_id,
+            confidence=decision.signal_confidence or 0.0,
+            session_id=req.session_id,
+            intent_summary="Initial user intent captured",
+            escalation_flag=True,
+            source_ids_used=source_ids,
+            llm_provider=None,  # NO LLM call on the budget short-circuit
+            llm_model=None,
+            tool_called=False,
+            tool_name=None,
+            iterations=0,
+            bound_hit=False,
+            response_channel=choice.channel,
+            prompt_channel_switch=choice.prompt_channel_switch,
+        )
+
+    def _record_budget_exhausted_audit(self, decision) -> None:
+        """Write the NAMED budget_exhausted audit row (§3.4.1b requires
+        the event on admin_audit_log). Best-effort — never crash the turn."""
+        try:
+            from app.db.session import SessionLocal
+            from app.models.admin_audit_log import (
+                ACTION_BUDGET_EXHAUSTED,
+                RESOURCE_INSTANCE,
+            )
+            from app.repositories.admin_audit_repository import (
+                AdminAuditRepository,
+                AuditContext,
+            )
+
+            db = SessionLocal()
+            try:
+                AdminAuditRepository(db).record(
+                    ctx=AuditContext.system(label="budget_meter"),
+                    admin_id=decision.admin_id,
+                    action=ACTION_BUDGET_EXHAUSTED,
+                    resource_type=RESOURCE_INSTANCE,
+                    resource_pk=decision.luciel_instance_id,
+                    luciel_instance_id=decision.luciel_instance_id,
+                    after=dict(decision.signal_inputs or {}),
+                    note="Free conversation budget exhausted; graceful handoff (no LLM call).",
+                    autocommit=True,
+                )
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "budget_exhausted audit write failed: exc_class=%s",
+                type(exc).__name__,
+            )
+
+    def _notify_budget_exhausted(self, *, req: RuntimeRequest, decision) -> None:
+        """Notify the Free admin that the budget was exhausted (Free =
+        email only, Vision §7). Best-effort."""
+        try:
+            from app.policy.entitlements import TIER_FREE
+
+            self._budget_alert_svc().send_budget_alert(
+                admin_id=req.admin_id,
+                instance_id=req.luciel_instance_id,
+                tier=TIER_FREE,
+                threshold=100,
+                current=int((decision.signal_inputs or {}).get("current", 0)),
+                cap=int((decision.signal_inputs or {}).get("cap", 0)),
+                exhausted=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "budget_exhausted notify failed: exc_class=%s",
                 type(exc).__name__,
             )
 

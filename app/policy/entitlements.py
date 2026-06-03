@@ -675,3 +675,158 @@ def escalation_chains_enabled(tier: str) -> bool:
     """Whether a tier may configure ordered escalation chains with SLA
     minutes (Enterprise only — Vision §3.4)."""
     return tier == TIER_ENTERPRISE
+
+
+# ---------------------------------------------------------------------
+# Arc 18 — conversation-budget + overage axis (Vision §10 Doctrine
+# Anchor; §7 tier table; Architecture §3.4.1b).
+#
+# entitlements.py is the NAMED canonical code for the budget/overage
+# axis (Vision §10). The values below are founder-ratified 2026-06-03
+# (resolving Vision §9 Open Decisions #9 & #10) — see
+# ARC18_BACKEND_SPEC.md "RATIFIED VALUES".
+#
+# DOCTRINE NOTE (Arc 18 supersedes Arc 7): Arc 7 (2026-05-24) RETIRED
+# metering in favour of flat-recurring pricing. Arc 18's founder
+# ratification re-introduces a PER-INSTANCE conversation budget with a
+# metered OVERAGE ADD-ON layered on top of the flat base subscription.
+# This is a later, ratified doctrine decision — not a contradiction. The
+# flat base price is unchanged; overage is an additional metered Stripe
+# item billed only when an instance exceeds its budget.
+#
+# CADENCE-AWARE: Vision §7 treats Pro Monthly and Pro Annual as DISTINCT
+# budget/rate rows (2000/$15-per-100 vs 2500/$10-per-100). The
+# TierEntitlement dataclass has a single `pro` tier; the cadence
+# (monthly/annual) lives on the Subscription row
+# (subscriptions.billing_cadence). So these are DERIVATION FUNCTIONS
+# keyed on (tier, cadence) — same discipline as the channel + rate-limit
+# derivations above (the frozen dataclass is not widened).
+#
+# Money is in CENTS (int) to avoid float drift on currency.
+# ---------------------------------------------------------------------
+
+CADENCE_MONTHLY = "monthly"
+CADENCE_ANNUAL = "annual"
+
+# Per-(tier, cadence) conversation budget per instance per billing period.
+# Free is cadence-independent (200, graceful cap). Enterprise baseline is
+# 10,000 (negotiable UPWARD per MSA via admin_tier_overrides — see
+# resolve_entitlement's Enterprise override hook).
+_CONVERSATION_BUDGET: dict[tuple[str, str], int] = {
+    (TIER_FREE, CADENCE_MONTHLY): 200,
+    (TIER_FREE, CADENCE_ANNUAL): 200,
+    (TIER_PRO, CADENCE_MONTHLY): 2000,
+    (TIER_PRO, CADENCE_ANNUAL): 2500,
+    (TIER_ENTERPRISE, CADENCE_MONTHLY): 10000,
+    (TIER_ENTERPRISE, CADENCE_ANNUAL): 10000,
+}
+
+# Overage rate in CENTS per additional 100 conversations per instance.
+# Free = None (graceful cap, no overage billing). Enterprise = None at
+# the static layer (per-contract rate resolved via admin_tier_overrides;
+# do NOT mint a fixed Stripe price for Enterprise — §35).
+_OVERAGE_RATE_PER_100_CENTS: dict[tuple[str, str], int | None] = {
+    (TIER_FREE, CADENCE_MONTHLY): None,
+    (TIER_FREE, CADENCE_ANNUAL): None,
+    (TIER_PRO, CADENCE_MONTHLY): 1500,  # $15.00 / 100
+    (TIER_PRO, CADENCE_ANNUAL): 1000,  # $10.00 / 100
+    (TIER_ENTERPRISE, CADENCE_MONTHLY): None,  # per-contract
+    (TIER_ENTERPRISE, CADENCE_ANNUAL): None,  # per-contract
+}
+
+# Config key (app.core.config.settings attribute) holding the Stripe
+# METERED overage Price id per (tier, cadence). Founder provisions the
+# actual Stripe prices; code references them by these keys only (§ "Stripe
+# config keys" in the report). Free has none; Enterprise has none (the
+# overage subscription item is provisioned per-contract, not via a fixed
+# platform price).
+_OVERAGE_PRICE_CONFIG_KEY: dict[tuple[str, str], str | None] = {
+    (TIER_FREE, CADENCE_MONTHLY): None,
+    (TIER_FREE, CADENCE_ANNUAL): None,
+    (TIER_PRO, CADENCE_MONTHLY): "stripe_price_overage_pro_monthly",
+    (TIER_PRO, CADENCE_ANNUAL): "stripe_price_overage_pro_annual",
+    (TIER_ENTERPRISE, CADENCE_MONTHLY): None,
+    (TIER_ENTERPRISE, CADENCE_ANNUAL): None,
+}
+
+
+def _norm_cadence(cadence: str | None) -> str:
+    """Fail-closed cadence normalisation. Unknown / None → monthly (the
+    conservative budget for Pro, and irrelevant for Free/Enterprise)."""
+    return CADENCE_ANNUAL if cadence == CADENCE_ANNUAL else CADENCE_MONTHLY
+
+
+def conversation_budget(tier: str, cadence: str | None = None) -> int:
+    """Per-instance conversation budget for a (tier, cadence).
+
+    Free → 200; Pro monthly → 2000; Pro annual → 2500; Enterprise →
+    10000 (baseline; per-contract upward override applied at the call
+    site via resolve_entitlement-style override, not here). Fail-closed
+    to the Free cap (200) for an unknown tier so a mis-tagged Admin can
+    never be handed a larger budget by accident.
+    """
+    key = (tier, _norm_cadence(cadence))
+    if key not in _CONVERSATION_BUDGET:
+        return _CONVERSATION_BUDGET[(TIER_FREE, CADENCE_MONTHLY)]
+    return _CONVERSATION_BUDGET[key]
+
+
+def overage_rate_per_100_cents(tier: str, cadence: str | None = None) -> int | None:
+    """Overage rate in cents per additional 100 conversations.
+
+    None means "no platform overage billing" — Free (graceful cap) and
+    Enterprise (per-contract rate resolved out-of-band). Fail-closed to
+    None for unknown tiers (no accidental billing).
+    """
+    return _OVERAGE_RATE_PER_100_CENTS.get((tier, _norm_cadence(cadence)))
+
+
+def overage_price_config_key(tier: str, cadence: str | None = None) -> str | None:
+    """Name of the settings attribute holding the Stripe metered overage
+    Price id for a (tier, cadence), or None when no fixed platform price
+    applies (Free, Enterprise). The billing layer reads
+    ``getattr(settings, key)`` to get the Price id."""
+    return _OVERAGE_PRICE_CONFIG_KEY.get((tier, _norm_cadence(cadence)))
+
+
+def budget_overage_billed(tier: str) -> bool:
+    """Whether exceeding budget produces an overage charge (Pro/Enterprise)
+    rather than a graceful cap (Free). Fail-closed: unknown → False."""
+    return tier in (TIER_PRO, TIER_ENTERPRISE)
+
+
+# Budget alert thresholds (percent of cap) and the notification channels
+# that fire at each (Vision §7 / §3.4.1b). Free is capped (no overage) so
+# its only "alert" is the budget_exhausted escalation at 100% on the
+# email channel. Pro: 80% email, 100% email+SMS. Enterprise: 80% email
+# (+ CSM, see budget_csm_alert_at_80), 100% email+SMS.
+ALERT_THRESHOLD_80 = 80
+ALERT_THRESHOLD_100 = 100
+
+_BUDGET_ALERT_CHANNELS: dict[tuple[str, int], frozenset[str]] = {
+    (TIER_FREE, ALERT_THRESHOLD_80): frozenset(),
+    (TIER_FREE, ALERT_THRESHOLD_100): frozenset({ESCALATION_NOTIFY_EMAIL}),
+    (TIER_PRO, ALERT_THRESHOLD_80): frozenset({ESCALATION_NOTIFY_EMAIL}),
+    (TIER_PRO, ALERT_THRESHOLD_100): frozenset(
+        {ESCALATION_NOTIFY_EMAIL, ESCALATION_NOTIFY_SMS}
+    ),
+    (TIER_ENTERPRISE, ALERT_THRESHOLD_80): frozenset({ESCALATION_NOTIFY_EMAIL}),
+    (TIER_ENTERPRISE, ALERT_THRESHOLD_100): frozenset(
+        {ESCALATION_NOTIFY_EMAIL, ESCALATION_NOTIFY_SMS}
+    ),
+}
+
+
+def budget_alert_channels(tier: str, threshold_pct: int) -> frozenset[str]:
+    """Notification channels that fire for a tier at a budget threshold
+    (80 or 100). Fail-closed: unknown (tier, threshold) → empty set (no
+    spurious notification)."""
+    return _BUDGET_ALERT_CHANNELS.get((tier, threshold_pct), frozenset())
+
+
+def budget_csm_alert_at_80(tier: str) -> bool:
+    """Whether the Customer Success Manager is alerted at 80% budget
+    (Enterprise only — §3.4.1b "Enterprise CSM at 80%"). The CSM email is
+    a config key (settings.budget_csm_alert_email), not a per-tenant
+    channel."""
+    return tier == TIER_ENTERPRISE
