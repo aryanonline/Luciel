@@ -31,18 +31,32 @@ Layered defences (mirrors admin_channels.py / admin_personality.py)
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 
 from app.api.deps import (
     TenantScopedDbSession,
     get_audit_context,
     get_luciel_instance_service,
 )
+from app.core.config import settings as app_settings
+from app.integrations.oauth import (
+    OAuthError,
+    OAuthNotConfiguredError,
+    OAuthStateError,
+    get_oauth_provider,
+    sign_state,
+    verify_state,
+)
+from app.integrations.secrets import SecretStoreError, get_secret_store
 from app.models.admin_audit_log import (
     ACTION_CONNECTION_CONFIGURED,
     ACTION_CONNECTION_DISCONNECTED,
+    ACTION_CONNECTION_OAUTH_CONNECTED,
+    ACTION_CONNECTION_OAUTH_INITIATED,
     ACTION_CONNECTION_REFRESHED,
     RESOURCE_INSTANCE_CONNECTION,
 )
@@ -60,6 +74,9 @@ from app.repositories.admin_audit_repository import (
 from app.repositories.instance_connection_repository import (
     InstanceConnectionRepository,
 )
+from app.repositories.secret_cleanup_outbox_repository import (
+    SecretCleanupOutboxRepository,
+)
 from app.schemas.connection import (
     DEFERRED_CONNECTION_TYPES,
     LIVE_CONNECTION_TYPES,
@@ -70,6 +87,7 @@ from app.schemas.connection import (
     ConnectionListResponse,
     ConnectionRefreshResponse,
     ConnectionView,
+    OAuthInitiateResponse,
 )
 from app.services.connection_health_service import ConnectionHealthService
 from app.services.instance_service import InstanceService
@@ -161,6 +179,29 @@ def _load_active_instance(
             detail=f"Instance {instance_id} is inactive",
         )
     return instance
+
+
+# OAuth connector types that the initiate/callback endpoints serve. A
+# request for any other connection_type is a 400 (the consent flow only
+# applies to OAuth-backed connectors; CSV/webhook configure via POST
+# /connections). ``crm`` is included for forward-compatibility — its
+# provider returns None today, so initiate honestly 409s "not configured"
+# until a CRM provider lands.
+_OAUTH_CONNECTION_TYPES: frozenset[str] = frozenset({"calendar", "crm"})
+
+
+def _secret_name_for(
+    *, admin_id: str, instance_id: int, connection_type: str
+) -> str:
+    """Logical secret name for a connection's stored credential.
+
+    The AwsSecretsManagerStore prefixes ``luciel/connections/`` (see
+    ``AwsSecretsManagerStore._name_for``), so the on-AWS secret resolves
+    to ``luciel/connections/{admin_id}/{instance_id}/{connection_type}``.
+    The store returns the ARN, which is what we persist into
+    ``credential_ref`` — the name here is only the put-time logical key.
+    """
+    return f"{admin_id}/{instance_id}/{connection_type}"
 
 
 def _view(row: InstanceConnection) -> ConnectionView:
@@ -447,6 +488,315 @@ def refresh_connection(
     )
 
 
+# =====================================================================
+# Arc 17 — OAuth initiate + callback (the "ignition" endpoints).
+# =====================================================================
+
+
+@router.post(
+    "/instances/{instance_id}/connections/oauth/{connection_type}/initiate",
+    response_model=OAuthInitiateResponse,
+)
+def initiate_oauth_connection(
+    request: Request,
+    instance_id: int,
+    connection_type: str,
+    db: TenantScopedDbSession,
+    instance_service: Annotated[
+        InstanceService, Depends(get_luciel_instance_service)
+    ],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> OAuthInitiateResponse:
+    """Begin the OAuth consent flow for an OAuth-backed connector.
+
+    Four-walls authorized (admin context + owns-instance + active +
+    PERM_CONFIGURE_CONNECTIONS). Mints a signed, tamper-resistant ``state``
+    encoding (admin_id, instance_id, connection_type) so the
+    (cookie-less) callback can resolve the tenant WITHOUT trusting the
+    client. If the connector's OAuth provider is absent or unconfigured
+    (no client creds — the deploy/creds gate) the endpoint returns an
+    HONEST 409, never a fake redirect. On success it ensures the
+    connection row exists in 'unconfigured' (pending consent) and returns
+    the provider consent URL for the admin UI to open.
+    """
+    admin_id = _require_admin_id(request)
+
+    if connection_type not in _OAUTH_CONNECTION_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"connection_type {connection_type!r} is not an OAuth "
+                f"connector; OAuth flow serves {sorted(_OAUTH_CONNECTION_TYPES)}."
+            ),
+        )
+
+    instance = _load_active_instance(
+        request=request,
+        instance_id=instance_id,
+        instance_service=instance_service,
+    )
+    _require_configure_connections(request, instance=instance)
+
+    provider = get_oauth_provider(connection_type, app_settings)
+    if provider is None or not provider.is_configured():
+        # Honest deploy/creds gate — never fake a redirect.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "oauth_not_configured",
+                "connection_type": connection_type,
+                "message": (
+                    f"OAuth is not configured for {connection_type!r} "
+                    "(client credentials absent). The connector stays "
+                    "unconfigured (arc17_pending); connecting is deploy-gated "
+                    "on the OAuth client credentials being populated."
+                ),
+            },
+        )
+
+    repo = InstanceConnectionRepository(db)
+    row = repo.get_live_by_type(
+        admin_id=admin_id,
+        instance_id=instance.id,
+        connection_type=connection_type,
+    )
+    if row is None:
+        row = repo.configure(
+            admin_id=admin_id,
+            instance_id=instance.id,
+            connection_type=connection_type,
+            provider=provider.connection_type,
+            status="unconfigured",
+            config_json=None,
+            credential_ref=None,
+            autocommit=False,
+        )
+
+    state = sign_state(
+        admin_id=admin_id,
+        instance_id=instance.id,
+        connection_type=connection_type,
+        secret=app_settings.oauth_state_signing_secret,
+    )
+    auth_url = provider.authorization_url(state=state)
+
+    AdminAuditRepository(db).record(
+        ctx=audit_ctx,
+        admin_id=admin_id,
+        action=ACTION_CONNECTION_OAUTH_INITIATED,
+        resource_type=RESOURCE_INSTANCE_CONNECTION,
+        resource_pk=row.id,
+        resource_natural_id=f"{instance.id}:{connection_type}",
+        luciel_instance_id=instance.id,
+        after={
+            "connection_type": connection_type,
+            "provider": row.provider,
+            "status": row.status,
+        },
+        note=f"OAuth consent initiated ({connection_type}).",
+        autocommit=False,
+    )
+
+    db.commit()
+    db.refresh(row)
+    return OAuthInitiateResponse(
+        authorization_url=auth_url,
+        state=state,
+        connection_id=row.id,
+        connection_type=connection_type,
+        provider=row.provider,
+        status=row.status,
+    )
+
+
+def _callback_redirect(connection_type: str, outcome: str) -> RedirectResponse:
+    """Build the post-callback browser redirect to the frontend.
+
+    ``outcome`` is ``connected`` or ``error``. The SPA refetches the
+    connections list and toasts the result. 302 so the browser issues a
+    fresh GET on the success route.
+    """
+    base = app_settings.oauth_callback_success_url
+    sep = "&" if "?" in base else "?"
+    return RedirectResponse(
+        url=f"{base}{sep}connection_type={connection_type}&oauth={outcome}",
+        status_code=status.HTTP_302_FOUND,
+    )
+
+
+@router.get("/connections/oauth/{connection_type}/callback")
+def oauth_callback(
+    connection_type: str,
+    db: TenantScopedDbSession,
+    state: str = "",
+    code: str = "",
+    error: str = "",
+):
+    """Google's redirect target — authorizes ENTIRELY off the verified state.
+
+    This endpoint is UNAUTHENTICATED in the session-cookie sense: Google
+    redirects the browser here with no cookie. So it MUST NOT trust the
+    request for tenant identity — it verifies the signed ``state`` (HMAC +
+    TTL), extracts (admin_id, instance_id, connection_type), and only then
+    proceeds. A tampered / forged / expired state is a 400 and NEVER
+    reaches a token exchange.
+
+    On a verified state it runs the REAL ``provider.exchange_code`` against
+    the provider, stores the refresh token via the SecretStore (the ref is
+    persisted into ``credential_ref`` — the token VALUE never touches
+    Postgres), flips the row to 'connected', and audits
+    ACTION_CONNECTION_OAUTH_CONNECTED. On any failure the row goes to
+    'error' with an honest audit — never a fake 'connected'.
+    """
+    # --- Wall: verify the state BEFORE trusting anything. ---
+    try:
+        verified = verify_state(
+            state,
+            secret=app_settings.oauth_state_signing_secret,
+            max_age_seconds=app_settings.oauth_state_ttl_seconds,
+        )
+    except OAuthStateError as exc:
+        # Cannot resolve a tenant from an unverifiable state → refuse.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "invalid_oauth_state",
+                "message": f"OAuth state did not verify: {exc}",
+            },
+        ) from exc
+
+    # The connection_type in the URL must match the signed one — a
+    # mismatch means a crafted request reusing a state for another type.
+    if verified.connection_type != connection_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "oauth_state_type_mismatch",
+                "message": (
+                    "URL connection_type does not match the signed state."
+                ),
+            },
+        )
+
+    admin_id = verified.admin_id
+    instance_id = verified.instance_id
+    repo = InstanceConnectionRepository(db)
+    audit_repo = AdminAuditRepository(db)
+    ctx = AuditContext.system(label="oauth_callback")
+
+    row = repo.get_live_by_type(
+        admin_id=admin_id,
+        instance_id=instance_id,
+        connection_type=connection_type,
+    )
+    if row is None:
+        # The initiate step ensures the row; its absence means a stale or
+        # out-of-band state. Honest 404 — do not silently mint a row off
+        # a request whose tenant context came only from the state.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "connection_not_found",
+                "message": (
+                    "No pending connection row for this state; re-initiate "
+                    "the OAuth flow."
+                ),
+            },
+        )
+
+    def _fail(detail: str) -> RedirectResponse:
+        repo.apply_health_check(
+            row=row,
+            status="error",
+            last_health_check_at=datetime.now(timezone.utc),
+            credential_ref=None,
+            autocommit=False,
+        )
+        audit_repo.record(
+            ctx=ctx,
+            admin_id=admin_id,
+            action=ACTION_CONNECTION_OAUTH_CONNECTED,
+            resource_type=RESOURCE_INSTANCE_CONNECTION,
+            resource_pk=row.id,
+            resource_natural_id=f"{instance_id}:{connection_type}",
+            luciel_instance_id=instance_id,
+            after={
+                "connection_type": connection_type,
+                "provider": row.provider,
+                "status": "error",
+                "credential_ref_present": False,
+            },
+            note=f"OAuth callback failed ({connection_type}): {detail}"[:256],
+            autocommit=False,
+        )
+        db.commit()
+        return _callback_redirect(connection_type, "error")
+
+    # Google can redirect with ?error=access_denied (user declined).
+    if error:
+        return _fail(f"provider returned error={error}")
+    if not code:
+        return _fail("no authorization code in callback")
+
+    provider = get_oauth_provider(connection_type, app_settings)
+    if provider is None or not provider.is_configured():
+        return _fail("OAuth provider not configured")
+
+    # --- REAL token exchange against the provider. ---
+    try:
+        tokens = provider.exchange_code(code=code)
+    except OAuthNotConfiguredError:
+        return _fail("OAuth provider became unconfigured")
+    except OAuthError as exc:
+        return _fail(f"token exchange rejected: {exc}")
+
+    refresh_token = tokens.refresh_token
+    if not refresh_token:
+        # No refresh token → cannot persist a durable credential. Google
+        # only re-issues it with access_type=offline + prompt=consent,
+        # which authorization_url sets, so this is an honest provider edge.
+        return _fail("provider returned no refresh token")
+
+    # --- Store the refresh token; persist ONLY the pointer. ---
+    store = get_secret_store(app_settings)
+    secret_name = _secret_name_for(
+        admin_id=admin_id,
+        instance_id=instance_id,
+        connection_type=connection_type,
+    )
+    try:
+        credential_ref = store.put(secret_name, refresh_token)
+    except SecretStoreError as exc:
+        return _fail(f"secret store write failed: {exc}")
+
+    repo.apply_health_check(
+        row=row,
+        status="connected",
+        last_health_check_at=datetime.now(timezone.utc),
+        credential_ref=credential_ref,
+        autocommit=False,
+    )
+    audit_repo.record(
+        ctx=ctx,
+        admin_id=admin_id,
+        action=ACTION_CONNECTION_OAUTH_CONNECTED,
+        resource_type=RESOURCE_INSTANCE_CONNECTION,
+        resource_pk=row.id,
+        resource_natural_id=f"{instance_id}:{connection_type}",
+        luciel_instance_id=instance_id,
+        after={
+            "connection_type": connection_type,
+            "provider": row.provider,
+            "status": "connected",
+            "credential_ref_present": True,
+        },
+        note=f"OAuth callback connected ({connection_type}).",
+        autocommit=False,
+    )
+    db.commit()
+    return _callback_redirect(connection_type, "connected")
+
+
 @router.delete(
     "/connections/{connection_id}",
     response_model=ConnectionDeleteResponse,
@@ -460,9 +810,12 @@ def disconnect_connection(
     """Soft-delete (revoke) a connection row, fenced to the admin.
 
     Idempotent: re-disconnecting an already-revoked row returns
-    ``disconnected=False``. Full Arc 17 will enqueue secret cleanup here
-    (TODO) once live credential flows land; this slice stores no secrets,
-    so there is nothing to scrub.
+    ``disconnected=False``. When the revoked row carried a non-null
+    ``credential_ref`` (a real stored secret — e.g. an OAuth refresh
+    token), the same transaction enqueues a secret-cleanup outbox row
+    (pointer only). The Celery drain worker performs the actual
+    ``SecretStore.delete`` out of band; Postgres never holds the secret
+    value, so the enqueued pointer is inert.
     """
     admin_id = _require_admin_id(request)
     repo = InstanceConnectionRepository(db)
@@ -478,12 +831,25 @@ def disconnect_connection(
 
     instance_id = row.instance_id
     conn_type = row.connection_type
+    # Capture the pointer BEFORE the soft-delete so we can enqueue cleanup.
+    credential_ref = row.credential_ref
 
     disconnected = repo.disconnect(
         admin_id=admin_id,
         connection_id=connection_id,
         autocommit=False,
     )
+
+    secret_cleanup_enqueued = False
+    if disconnected and credential_ref:
+        SecretCleanupOutboxRepository(db).enqueue(
+            admin_id=admin_id,
+            credential_ref=credential_ref,
+            instance_id=instance_id,
+            connection_id=connection_id,
+            autocommit=False,
+        )
+        secret_cleanup_enqueued = True
 
     AdminAuditRepository(db).record(
         ctx=audit_ctx,
@@ -494,6 +860,7 @@ def disconnect_connection(
         resource_natural_id=f"{instance_id}:{conn_type}",
         luciel_instance_id=instance_id,
         before={"connection_type": conn_type, "status": row.status},
+        after={"secret_cleanup_enqueued": secret_cleanup_enqueued},
         note="Connection disconnected (soft-delete).",
         autocommit=False,
     )
@@ -503,4 +870,5 @@ def disconnect_connection(
         instance_id=instance_id,
         connection_id=connection_id,
         disconnected=disconnected,
+        secret_cleanup_enqueued=secret_cleanup_enqueued,
     )
