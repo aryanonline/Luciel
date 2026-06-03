@@ -1,45 +1,52 @@
-"""lookup_record — v1 catalog tool (§3.3.2).
+"""lookup_record — v1 catalog tool (§3.3.2). Arc 17 live implementation.
 
 Read-only record lookup. Action-classification tier: ROUTINE — this is
 exactly the reading-shaped, low-blast-radius work Recap §4 names as not
 consequential.
 
+Correctness boundary (§3.2, load-bearing)
+=========================================
+``lookup_record`` returns LIVE, EXACT records from its configured
+``record_source`` connection. It reads the backing source on EVERY call
+and returns the matched rows as live records. It is NOT the knowledge
+store: it is never blended with the vector / graph retrieval path. A
+result is always framed as coming from the admin's own record source.
+
 Domain-agnostic (Locked Decision #5)
 ====================================
 The tool gates on the ``record_source`` connector category (an
 admin-configured generic record provider — e.g. an uploaded CSV) and
-carries NO vertical-specific wording. The configured ``record_source``
-connection supplies the backing data; the input schema is generic
-(``record_id`` / ``query`` / ``filters``).
+carries NO vertical-specific wording. The input schema is generic
+(``record_id`` / ``query`` / ``filters``); the query semantics reason
+only about structural ``id`` / ``record_id`` identity columns, never
+vertical columns.
 
-Interim-body rule (00_MASTER §"interim-body rule")
-==================================================
-The real implementation requires an admin-configured record source. No
-such source body exists in the tree today. The full §3.3.1 contract is
-declared so the registry, broker, schema validator, and authorisation
-gate can all reason about this tool; ``execute()`` performs NO side
-effect and returns a structured "not yet available" dict.
+Arc anchor: ARC17 (record-source data infrastructure). The Architecture
+§3.2 named the data source as "an admin-uploaded CSV or a live data
+connector" but did not assign an owning arc; the founder assigned it to
+Arc 17 and this body is the live implementation. See
+``ARC17_LOOKUP_RECORD_AMENDMENT.md`` at the repo root.
 
-Arc anchor: UNASSIGNED. Architecture §3.3.2 names the data source as
-"MLS or admin-uploaded CSV" but does NOT assign an owning arc to that
-record-source infrastructure. This is a documented gap flagged for
-founder review in the Arc 12 closeout — it is NOT confidently an Arc 14
-deliverable. The interim-body harness pins ``owning_arc="UNASSIGNED"``
-as the seam marker (see
-``tests/tools/test_arc12_wu3_catalog.py::_INTERIM_TOOLS``).
+Where the source lives, and the s3 deploy gate
+==============================================
+The connection's NON-SECRET ``config_json.store_ref`` names the storage
+location (a local path / ``file://`` URI, or an ``s3://`` URI). The
+resolver dispatches by scheme:
+  * local / file:// → ``LocalFileRecordSource`` (CSV via csv.DictReader),
+  * s3://           → ``S3RecordSource`` (real boto3), DEPLOY-GATED.
+With ``record_source_live_enabled`` False (the boot-safe default) an
+s3:// store_ref returns an HONEST deploy-gated failure — never a fake
+success and never a crash; no boto3 client is constructed.
 """
-
-# TODO(ARC-UNASSIGNED): replace this interim body once the founder
-# assigns an owning arc for the admin-configured record source
-# (CSV upload / external record connector). The interim contract is
-# enforced by tests/tools/test_arc12_wu3_catalog.py.
-
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.policy.action_classification import ActionTier
 from app.tools.base import LucielTool, ToolContext
+
+logger = logging.getLogger(__name__)
 
 
 class LookupRecordTool(LucielTool):
@@ -47,9 +54,10 @@ class LookupRecordTool(LucielTool):
     declared_tier = ActionTier.ROUTINE
 
     # Arc 15 WU4/WU5 — connection-contract gate (§3.3.2). The
-    # ``record_source`` connector (admin CSV upload) connects LIVE in
-    # this slice, so a configured CSV source yields a ``connected`` row
-    # and the WU5 gate admits dispatch.
+    # ``record_source`` connector connects LIVE (Arc 17), so a configured
+    # source yields a ``connected`` row and the gate admits dispatch. The
+    # gate already guarantees a live ``connected`` row before execute()
+    # runs, but execute() still defends against a missing row / store_ref.
     requires_connection = "record_source"
 
     @property
@@ -93,8 +101,7 @@ class LookupRecordTool(LucielTool):
                     "type": "array",
                     "items": {"type": "object", "additionalProperties": True},
                 },
-                "not_yet_available": {"type": "boolean"},
-                "owning_arc": {"type": "string"},
+                "truncated": {"type": "boolean"},
             },
             "required": ["success", "output"],
             "additionalProperties": True,
@@ -113,17 +120,96 @@ class LookupRecordTool(LucielTool):
         input: dict[str, Any],
         context: ToolContext,
     ) -> dict[str, Any]:
-        # Interim body — NO side effect, NO real lookup. The
-        # admin-configured record source ships in a later arc.
+        record_id = input.get("record_id")
+        query = input.get("query")
+        filters = input.get("filters")
+
+        # Thread the DB session from ToolContext (same pattern the
+        # DefaultDenyToolAuthorizer uses). No session → honest failure,
+        # never a crash.
+        session = context.session
+        if session is None:
+            return self._fail(
+                "Record lookup could not access a database session, so "
+                "the configured record source could not be resolved."
+            )
+
+        # Resolve the live record_source connection. Gate-3 guarantees a
+        # live ``connected`` row exists, but defend against its absence.
+        from app.repositories.instance_connection_repository import (
+            InstanceConnectionRepository,
+        )
+
+        repo = InstanceConnectionRepository(session)
+        row = repo.get_live_by_type(
+            admin_id=context.admin_id,
+            instance_id=context.instance_id,
+            connection_type="record_source",
+        )
+        if row is None:
+            return self._fail(
+                "No live record source is configured for this instance, "
+                "so there is nothing to look up against."
+            )
+
+        config = row.config_json or {}
+        store_ref = config.get("store_ref")
+        if not store_ref or not str(store_ref).strip():
+            return self._fail(
+                "The configured record source has no store_ref (storage "
+                "location), so its records cannot be read."
+            )
+
+        from app.core.config import settings
+        from app.integrations.record_source.base import RecordSourceError
+        from app.integrations.record_source.resolver import (
+            RecordSourceUnavailableError,
+            resolve_record_source,
+        )
+
+        try:
+            source = resolve_record_source(store_ref, settings)
+            rows, truncated = source.query(
+                record_id=record_id,
+                query=query,
+                filters=filters,
+            )
+        except RecordSourceUnavailableError as exc:
+            # Honest deploy-gated / unreachable-source failure.
+            return self._fail(str(exc))
+        except RecordSourceError as exc:
+            logger.warning(
+                "lookup_record: record source unreadable admin=%s "
+                "instance=%s: %s",
+                context.admin_id, context.instance_id, exc,
+            )
+            return self._fail(
+                f"The configured record source could not be read: {exc}"
+            )
+
+        if not rows:
+            return {
+                "success": True,
+                "output": "No matching records in your record source.",
+                "results": [],
+            }
+
+        count = len(rows)
+        suffix = " (results truncated)" if truncated else ""
+        return {
+            "success": True,
+            "output": (
+                f"{count} record(s) found in your record source{suffix}."
+            ),
+            "results": rows,
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _fail(reason: str) -> dict[str, Any]:
+        """Honest non-side-effecting failure (the lookup did not run)."""
         return {
             "success": False,
-            "output": (
-                "lookup_record is registered but no admin-configured "
-                "record source (CSV / external connector) exists yet "
-                "(owning arc unassigned in the canonical documents — "
-                "founder review). No results were returned."
-            ),
+            "output": reason,
             "results": [],
-            "not_yet_available": True,
-            "owning_arc": "UNASSIGNED",
         }
