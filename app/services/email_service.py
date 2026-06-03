@@ -210,6 +210,13 @@ SUBJECT_PILOT_REFUND: Final[str] = "Your VantageMind pilot has been refunded"
 # Per drift resolution path option (a), subjects are now ASCII-only;
 # body copy keeps typographer's quotes/dashes because Body.Text.Data is
 # carried with explicit `Charset="UTF-8"` and decodes correctly.
+# Arc 18 (§3.4.1b) — conversation-budget alert subjects. ASCII-only per the
+# SES Simple.Subject mojibake constraint documented above. Distinct subjects
+# per threshold so an admin who crosses 80% then 100% sees two separable
+# inbox entries rather than one overwritten alert.
+SUBJECT_BUDGET_ALERT_80: Final[str] = "VantageMind: conversation budget at 80%"
+SUBJECT_BUDGET_ALERT_100: Final[str] = "VantageMind: conversation budget reached"
+SUBJECT_BUDGET_EXHAUSTED: Final[str] = "VantageMind: conversation budget exhausted"
 SUBJECT_WELCOME_SET_PASSWORD: Final[str] = "Welcome to VantageMind - set your password"
 SUBJECT_INVITE_SET_PASSWORD: Final[str] = "You've been invited to VantageMind - set your password"
 SUBJECT_RESET_PASSWORD: Final[str] = "Reset your VantageMind password"
@@ -256,6 +263,18 @@ class RefundEmailError(RuntimeError):
     on-page success surface has already rendered the refund id; the email
     is the third confirmation leg only. This is the same swallow-and-audit
     posture the webhook handlers use against Stripe.
+    """
+
+
+class BudgetAlertEmailError(RuntimeError):
+    """Raised when a conversation-budget alert email cannot be delivered.
+
+    Arc 18 (§3.4.1b): the budget alert is a best-effort admin notification
+    leg, NOT a transactional one. The metering counter and (for the Free
+    exhausted case) the customer's graceful handoff have already happened;
+    callers catch this and degrade to a warning + audit row rather than
+    crashing the turn or the webhook. Same swallow-and-audit posture as
+    :class:`RefundEmailError`.
     """
 
 
@@ -758,3 +777,169 @@ def send_pilot_refund_email(
             body,
         )
         raise RefundEmailError(f"SES send_email failed: {exc}") from exc
+
+
+def _build_budget_alert_body(
+    *,
+    to_email: str,
+    threshold: int,
+    current: int,
+    cap: int,
+    instance_label: str | None,
+    exhausted: bool,
+) -> str:
+    """Render the plaintext body for a conversation-budget alert.
+
+    The copy is admin-facing (billing/account state) — the OPPOSITE of the
+    customer-facing budget_ack copy, which never mentions billing. This
+    body names the cap, the usage, and the consequence so the admin can
+    decide whether to upgrade.
+    """
+    scope = f" for {instance_label}" if instance_label else ""
+    if exhausted:
+        headline = (
+            f"Your conversation budget{scope} is exhausted "
+            f"({current} of {cap} used)."
+        )
+        consequence = (
+            "New conversations on this instance are now being gracefully "
+            "handed off to your team instead of answered automatically. "
+            "Upgrade your plan to restore automatic handling."
+        )
+    elif threshold >= 100:
+        headline = (
+            f"Your conversation budget{scope} has been reached "
+            f"({current} of {cap} used)."
+        )
+        consequence = (
+            "Additional conversations this period will be billed as overage "
+            "at your plan's rate. No conversations are blocked."
+        )
+    else:
+        headline = (
+            f"Your conversation budget{scope} is at {threshold}% "
+            f"({current} of {cap} used)."
+        )
+        consequence = (
+            "This is a heads-up — nothing is blocked. You may want to review "
+            "your plan if usage continues at this pace."
+        )
+    return (
+        f"Hi,\n\n"
+        f"{headline}\n\n"
+        f"{consequence}\n\n"
+        f"You can review per-instance usage any time from your VantageMind "
+        f"dashboard.\n\n"
+        f"-- The VantageMind team\n"
+    )
+
+
+def send_budget_alert_email(
+    *,
+    to_email: str,
+    threshold: int,
+    current: int,
+    cap: int,
+    instance_label: str | None = None,
+    exhausted: bool = False,
+    db: Session | None = None,
+) -> None:
+    """Send (or log) a conversation-budget alert to an admin (Arc 18 §3.4.1b).
+
+    Mirrors :func:`send_pilot_refund_email` exactly: suppression precheck,
+    ``LUCIEL_EMAIL_TRANSPORT=ses|log`` transport selection, SES v2
+    ``send_email``, lazy boto3 import for the log path. On SES failure logs
+    the body at WARNING and raises :class:`BudgetAlertEmailError` so the
+    caller's audit row is accurate; the alert is a best-effort leg and a
+    failure here must never block a turn or a webhook.
+    """
+    _precheck_suppression(to_email, db, "[budget-alert-email]")
+
+    if exhausted:
+        subject = SUBJECT_BUDGET_EXHAUSTED
+    elif threshold >= 100:
+        subject = SUBJECT_BUDGET_ALERT_100
+    else:
+        subject = SUBJECT_BUDGET_ALERT_80
+
+    body = _build_budget_alert_body(
+        to_email=to_email,
+        threshold=threshold,
+        current=current,
+        cap=cap,
+        instance_label=instance_label,
+        exhausted=exhausted,
+    )
+    transport = _transport()
+
+    if transport == _LOG_TRANSPORT:
+        logger.warning(
+            "[budget-alert-email] (log-only transport) from=%s to=%s "
+            "subject=%r threshold=%s current=%s cap=%s exhausted=%s\n%s",
+            settings.from_email,
+            to_email,
+            subject,
+            threshold,
+            current,
+            cap,
+            exhausted,
+            body,
+        )
+        return
+
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as exc:  # pragma: no cover - prod always has boto3
+        logger.exception("[budget-alert-email] boto3 unavailable; cannot send")
+        raise BudgetAlertEmailError("boto3 is not installed") from exc
+
+    region = (
+        os.getenv("SES_REGION")
+        or os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or "ca-central-1"
+    )
+
+    try:
+        client = boto3.client("sesv2", region_name=region)
+        response = client.send_email(
+            FromEmailAddress=settings.from_email,
+            Destination={"ToAddresses": [to_email]},
+            ReplyToAddresses=[settings.ses_reply_to_address],
+            ConfigurationSetName=settings.ses_configuration_set_name,
+            Content={
+                "Simple": {
+                    "Subject": {"Data": subject, "Charset": "UTF-8"},
+                    "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
+                },
+            },
+        )
+        message_id = response.get("MessageId", "<unknown>")
+        logger.info(
+            "[budget-alert-email] sent via SES from=%s to=%s subject=%r "
+            "threshold=%s current=%s cap=%s exhausted=%s message_id=%s",
+            settings.from_email,
+            to_email,
+            subject,
+            threshold,
+            current,
+            cap,
+            exhausted,
+            message_id,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning(
+            "[budget-alert-email] SES send FAILED from=%s to=%s subject=%r "
+            "threshold=%s current=%s cap=%s exhausted=%s error=%s\n%s",
+            settings.from_email,
+            to_email,
+            subject,
+            threshold,
+            current,
+            cap,
+            exhausted,
+            exc,
+            body,
+        )
+        raise BudgetAlertEmailError(f"SES send_email failed: {exc}") from exc

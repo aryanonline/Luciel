@@ -301,6 +301,23 @@ ACTION_SUBSCRIPTION_PILOT_REFUNDED = "subscription_pilot_refunded"
 # {stripe_refund_id, error_class, error_message_truncated, to_email}.
 ACTION_PILOT_REFUND_EMAIL_SEND_FAILED = "pilot_refund_email_send_failed"
 
+# Arc 18 -- conversation-budget metering (§3.4.1b).
+# ACTION_BUDGET_EXHAUSTED: a Free instance hit its per-instance
+# conversation cap; the turn was gracefully handled WITHOUT an LLM call
+# and a budget_exhausted escalation fired. resource_type=RESOURCE_INSTANCE.
+# after_json carries {current, cap, tier, cadence, billing_period_start}.
+ACTION_BUDGET_EXHAUSTED = "budget_exhausted"
+# ACTION_BUDGET_ALERT_SENT: an 80%/100% budget alert was dispatched to the
+# admin on the tier-shaped notification channel(s). after_json carries
+# {threshold, current, cap, channels}.
+ACTION_BUDGET_ALERT_SENT = "budget_alert_sent"
+# ACTION_OVERAGE_REPORTED: at cycle close (invoice.paid /
+# subscription.renewed) the overage for an instance was reported to
+# Stripe as a metered usage record and persisted to
+# conversation_overage_ledger. after_json carries
+# {overage, units, rate_cents, stripe_usage_record_id, billing_period_start}.
+ACTION_OVERAGE_REPORTED = "overage_reported"
+
 # Step 30a.2 -- retention worker hard-purge action. See ALLOWED_ACTIONS
 # entry for full rationale. Defined here (above ALLOWED_ACTIONS) so the
 # whitelist tuple can reference it.
@@ -833,6 +850,10 @@ ALLOWED_ACTIONS = (
     # Arc 17 — OAuth callback completion (initiate + callback endpoints).
     ACTION_CONNECTION_OAUTH_INITIATED,
     ACTION_CONNECTION_OAUTH_CONNECTED,
+    # Arc 18 — conversation-budget metering, overage billing (§3.4.1b).
+    ACTION_BUDGET_EXHAUSTED,
+    ACTION_BUDGET_ALERT_SENT,
+    ACTION_OVERAGE_REPORTED,
 )
 
 

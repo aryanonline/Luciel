@@ -60,12 +60,20 @@ SIGNAL_STRONG_NEGATIVE_SENTIMENT = "strong_negative_sentiment"
 # Gate 2 — OUTCOME (post-REFLECT), needs the loop output.
 SIGNAL_CANNOT_CONFIDENTLY_ANSWER = "cannot_confidently_answer"
 SIGNAL_HIGH_VALUE_LEAD = "high_value_lead"
+# Arc 18 — fires at GATE_INTAKE (pre-PLAN) when a Free instance is at/over
+# its conversation budget. The session is gracefully handled WITHOUT an
+# LLM call: a cannot_answer-style handoff with reason code
+# budget_exhausted (§3.4.1b). NOT one of the four §3.4.5 doctrinal
+# triggers — it is a capacity condition, surfaced via the same escalation
+# machinery so the audit + notify side-effects reuse one path.
+SIGNAL_BUDGET_EXHAUSTED = "budget_exhausted"
 
 ALLOWED_SIGNALS: frozenset[str] = frozenset({
     SIGNAL_EXPLICIT_HUMAN_REQUEST,
     SIGNAL_STRONG_NEGATIVE_SENTIMENT,
     SIGNAL_CANNOT_CONFIDENTLY_ANSWER,
     SIGNAL_HIGH_VALUE_LEAD,
+    SIGNAL_BUDGET_EXHAUSTED,
 })
 
 GATE_INTAKE = "intake"
@@ -121,7 +129,8 @@ class EscalationEvent(Base, TimestampMixin):
         CheckConstraint(
             "signal IN ("
             "'explicit_human_request', 'strong_negative_sentiment', "
-            "'cannot_confidently_answer', 'high_value_lead')",
+            "'cannot_confidently_answer', 'high_value_lead', "
+            "'budget_exhausted')",
             name="ck_escalation_events_signal",
         ),
         CheckConstraint(

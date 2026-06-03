@@ -225,6 +225,34 @@ class Settings(BaseSettings):
     # ``PRICE_ID_KEY`` to resolve to BillingNotConfiguredError → 501. ---
     stripe_price_enterprise_monthly: str = ""
     stripe_price_enterprise_annual: str = ""
+    # --- Arc 18 (§3.4.1b) conversation-overage metered Prices. ---
+    # The per-instance overage add-on billed at cycle close. These are
+    # METERED (usage-record) Prices, distinct from the flat-rate recurring
+    # base Prices above — Arc 18 re-introduces metering as an ADD-ON axis
+    # (Arc 7 Commit 1 retired metering only for the flat BASE subscription;
+    # see ARC18_BACKEND_REPORT.md "supersedes" note). Founder provisions
+    # these Prices in Stripe; the backend NEVER mints them. Resolved per
+    # (tier, cadence) by ``entitlements.overage_price_config_key``:
+    #   Pro monthly → $15.00 / 100 conversations (1500 cents)
+    #   Pro annual  → $10.00 / 100 conversations (1000 cents)
+    # Enterprise overage is per-contract (no fixed Price) and is resolved
+    # via admin_tier_overrides, not a config slot. Empty defaults keep boot
+    # safe: a missing slot makes the usage-record report a no-op (the
+    # period still resets) and is surfaced as a documented gap.
+    stripe_price_overage_pro_monthly: str = ""
+    stripe_price_overage_pro_annual: str = ""
+    # The Stripe Billing Meter ``event_name`` the overage Prices read from.
+    # stripe-python 15.x reports metered usage via the Billing Meter Events
+    # API (stripe.billing.MeterEvent) keyed by this event_name + the
+    # customer id, NOT the legacy per-subscription-item usage record API
+    # (removed in SDK 8+). Founder provisions the Meter; empty default →
+    # usage reporting is a no-op (period still resets). One meter serves
+    # both Pro cadences; the (tier,cadence) Price gates the rate.
+    stripe_meter_event_overage: str = ""
+    # Enterprise CSM recipient for the 80% budget heads-up (Vision §7:
+    # Enterprise gets a CSM-at-80 copy in addition to the admin email).
+    # Empty default → the CSM copy is skipped (logged, not an error).
+    budget_csm_alert_email: str = ""
     # --- One-time $100 CAD intro fee Price (retained from V1, control). ---
     # Used by BillingService when the buyer's email is first-time-ever
     # (see ``BillingService.is_first_time_customer``). Decoupled from the
