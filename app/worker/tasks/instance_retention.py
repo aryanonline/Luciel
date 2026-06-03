@@ -286,6 +286,19 @@ def _hard_delete_instance_cascade(
         {"iid": instance_id},
     )
 
+    # instance_connections: Arc 17. The soft-delete cascade already
+    # revoked these rows (revoked_at set) + enqueued secret cleanup into
+    # secret_cleanup_outbox; the drain worker handles the actual secret
+    # store deletion. Here we hard-delete the rows so the RESTRICT FK
+    # instance_connections.instance_id -> instances.id does not block the
+    # instance DELETE below. No secret value lives in these rows; the
+    # pointer cleanup is the outbox worker's job, not this purge.
+    counts["instance_connections"] = _delete_count(
+        db,
+        "DELETE FROM instance_connections WHERE instance_id = :iid",
+        {"iid": instance_id},
+    )
+
     # Audit row BEFORE the instance row goes away, so the FK
     # ``admin_audit_logs.luciel_instance_id -> instances.id`` is still
     # satisfiable. (The FK is RESTRICT; an audit row pointing at a

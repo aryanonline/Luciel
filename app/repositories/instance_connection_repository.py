@@ -107,7 +107,7 @@ class InstanceConnectionRepository:
         status: str,
         config_json: dict | None = None,
         credential_ref: str | None = None,
-        last_verified_at: datetime | None = None,
+        last_health_check_at: datetime | None = None,
         autocommit: bool = True,
     ) -> InstanceConnection:
         """Insert a new live connection row.
@@ -124,8 +124,43 @@ class InstanceConnectionRepository:
             status=status,
             config_json=config_json,
             credential_ref=credential_ref,
-            last_verified_at=last_verified_at,
+            last_health_check_at=last_health_check_at,
         )
+        self.db.add(row)
+        if autocommit:
+            self.db.commit()
+            self.db.refresh(row)
+        else:
+            self.db.flush()
+        return row
+
+    # ------------------------------------------------------------------
+    # Write: apply a health-check / refresh result.
+    # ------------------------------------------------------------------
+
+    def apply_health_check(
+        self,
+        *,
+        row: InstanceConnection,
+        status: str,
+        last_health_check_at: datetime | None,
+        credential_ref: str | None = None,
+        autocommit: bool = True,
+    ) -> InstanceConnection:
+        """Persist the honest outcome of a refresh/health check onto an
+        already-loaded row.
+
+        ``status`` and ``last_health_check_at`` come from the health
+        service; ``credential_ref`` is updated ONLY when a silent token
+        refresh rotated the stored secret (a NEW ref) — it is never
+        cleared here. The caller (route or worker) writes the audit row
+        in the same transaction.
+        """
+        row.status = status
+        if last_health_check_at is not None:
+            row.last_health_check_at = last_health_check_at
+        if credential_ref is not None:
+            row.credential_ref = credential_ref
         self.db.add(row)
         if autocommit:
             self.db.commit()
@@ -164,6 +199,68 @@ class InstanceConnectionRepository:
         if autocommit:
             self.db.commit()
         return result.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Write: lifecycle cascade (Arc 10 — revoke ALL on deactivation /
+    # account closure). Returns the rows it revoked so the caller can
+    # audit each and enqueue secret cleanup for non-null credential_refs.
+    # ------------------------------------------------------------------
+
+    def revoke_all_for_instance(
+        self,
+        *,
+        admin_id: str,
+        instance_id: int,
+        autocommit: bool = True,
+    ) -> list[InstanceConnection]:
+        """Soft-revoke every live connection row for an instance.
+
+        Returns the rows AS THEY WERE before revocation (their
+        ``credential_ref`` is needed by the caller to enqueue secret
+        cleanup). Idempotent: an already-revoked row is skipped.
+        """
+        rows = self.list_for_instance(
+            admin_id=admin_id, instance_id=instance_id
+        )
+        return self._revoke_rows(rows, autocommit=autocommit)
+
+    def revoke_all_for_admin(
+        self,
+        *,
+        admin_id: str,
+        autocommit: bool = True,
+    ) -> list[InstanceConnection]:
+        """Soft-revoke every live connection row across ALL of the
+        admin's instances (account closure). Returns the revoked rows."""
+        stmt = (
+            select(InstanceConnection)
+            .where(
+                and_(
+                    InstanceConnection.admin_id == admin_id,
+                    InstanceConnection.revoked_at.is_(None),
+                )
+            )
+            .order_by(InstanceConnection.created_at.desc())
+        )
+        rows = list(self.db.execute(stmt).scalars())
+        return self._revoke_rows(rows, autocommit=autocommit)
+
+    def _revoke_rows(
+        self,
+        rows: list[InstanceConnection],
+        *,
+        autocommit: bool,
+    ) -> list[InstanceConnection]:
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            row.revoked_at = now
+            row.updated_at = now
+            self.db.add(row)
+        if autocommit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return rows
 
     # ------------------------------------------------------------------
     # Read: listings.

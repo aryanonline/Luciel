@@ -311,6 +311,23 @@ class ClosureService:
             autocommit=False,
         )
 
+        # --- Step 4b: Arc 17 connection cascade. ---
+        # Account closure is destructive intent, so every external-system
+        # connection across all of the admin's instances is revoked here,
+        # and secret cleanup is enqueued for any non-null credential_ref.
+        # Runs in the SAME transaction as the cascade above (autocommit
+        # is the route's job) so a rollback un-revokes atomically. The
+        # repo audits each revocation (ACTION_CONNECTION_REVOKED). Imported
+        # lazily to keep the service's import graph thin.
+        from app.repositories.instance_repository import InstanceRepository
+
+        revoked_connections = InstanceRepository(
+            self.db
+        ).cascade_revoke_connections_for_admin(
+            admin_id=admin_id,
+            audit_ctx=audit_ctx,
+        )
+
         # --- Step 5: Stripe cancel \u2014 best-effort. ---
         # The local closure is the source of truth; Stripe is the
         # billing-system mirror. If Stripe fails, the local state
@@ -371,6 +388,7 @@ class ClosureService:
                 "stripe_cancellation_applied": stripe_applied,
                 "data_export_requested": request_export,
                 "data_export_job_id": export_job_id,
+                "connections_revoked": revoked_connections,
                 "grace_window_days": GRACE_WINDOW_DAYS,
                 "hard_delete_eligible_at": (
                     _add_days(now, GRACE_WINDOW_DAYS).isoformat()
