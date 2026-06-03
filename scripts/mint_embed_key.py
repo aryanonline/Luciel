@@ -277,8 +277,6 @@ def main() -> int:
     try:
         api_key, raw_key = svc.create_key(
             admin_id=payload.admin_id,
-            domain_id=payload.domain_id,
-            agent_id=None,
             luciel_instance_id=None,
             display_name=payload.display_name,
             # Server-set: matches the constraint encoded in
