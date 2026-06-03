@@ -14,7 +14,7 @@ worker flows stay deferred to full Arc 17.
 Honesty invariant (non-negotiable, spec §115)
 ----------------------------------------------
 No endpoint returns ``connected`` for a connection with no real backing.
-Only CSV (``property_source``) and ``outbound_webhook`` connect LIVE in
+Only CSV (``record_source``) and ``outbound_webhook`` connect LIVE in
 this slice → a real ``connected`` row. calendar / crm / email_sender /
 sms_sender are DEFERRED → an honest ``unconfigured`` row plus a
 structured ``arc17_pending`` payload. ``config_json`` carries NON-SECRET
@@ -43,6 +43,7 @@ from app.api.deps import (
 from app.models.admin_audit_log import (
     ACTION_CONNECTION_CONFIGURED,
     ACTION_CONNECTION_DISCONNECTED,
+    ACTION_CONNECTION_REFRESHED,
     RESOURCE_INSTANCE_CONNECTION,
 )
 from app.models.instance import Instance
@@ -67,8 +68,10 @@ from app.schemas.connection import (
     ConnectionCreateResponse,
     ConnectionDeleteResponse,
     ConnectionListResponse,
+    ConnectionRefreshResponse,
     ConnectionView,
 )
+from app.services.connection_health_service import ConnectionHealthService
 from app.services.instance_service import InstanceService
 
 logger = logging.getLogger(__name__)
@@ -82,7 +85,7 @@ router = APIRouter(
 # whose config_json is missing a required key (422). Keeps the contract
 # honest: a LIVE connector needs its real backing reference present.
 _REQUIRED_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
-    "property_source": ("store_ref",),
+    "record_source": ("store_ref",),
     "outbound_webhook": ("url",),
 }
 
@@ -169,7 +172,7 @@ def _view(row: InstanceConnection) -> ConnectionView:
         provider=row.provider,
         status=row.status,
         config_json=row.config_json,
-        last_verified_at=row.last_verified_at,
+        last_health_check_at=row.last_health_check_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -270,7 +273,7 @@ def configure_connection(
 ) -> ConnectionCreateResponse:
     """Configure a connection for an instance.
 
-    CSV (``property_source``) and ``outbound_webhook`` connect LIVE → a
+    CSV (``record_source``) and ``outbound_webhook`` connect LIVE → a
     real ``connected`` row. calendar / crm / email_sender / sms_sender
     are DEFERRED → an honest ``unconfigured`` row plus an
     ``arc17_pending`` marker. The status is decided HERE (the policy
@@ -344,6 +347,104 @@ def configure_connection(
     db.commit()
     db.refresh(row)
     return ConnectionCreateResponse(connection=_view(row), arc17_pending=pending)
+
+
+@router.post(
+    "/connections/{connection_id}/refresh",
+    response_model=ConnectionRefreshResponse,
+)
+def refresh_connection(
+    request: Request,
+    connection_id: int,
+    db: TenantScopedDbSession,
+    instance_service: Annotated[
+        InstanceService, Depends(get_luciel_instance_service)
+    ],
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> ConnectionRefreshResponse:
+    """Manually re-verify a connection (Arc 17 brief deliverable #2).
+
+    Loads the live row fenced to the admin (404 if absent / not theirs),
+    re-enforces PERM_CONFIGURE_CONNECTIONS on the owning instance, then
+    runs the shared health-check / token-refresh path:
+
+      * LIVE connector (record_source / outbound_webhook) → reachability
+        probe → ``connected`` / ``error`` + a fresh ``last_health_check_at``.
+      * DEFERRED OAuth connector → silent token refresh. The live flow is
+        DEPLOY-GATED on OAuth client creds; absent them the row stays an
+        HONEST ``unconfigured`` + ``arc17_pending`` — NEVER a fake
+        ``connected``.
+
+    The honest status is decided by ConnectionHealthService; this route
+    persists it + writes one ACTION_CONNECTION_REFRESHED audit row in the
+    same transaction.
+    """
+    from app.core.config import settings
+
+    admin_id = _require_admin_id(request)
+    repo = InstanceConnectionRepository(db)
+
+    row = repo.get_live_for_admin(
+        admin_id=admin_id, connection_id=connection_id
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Connection {connection_id} not found",
+        )
+
+    instance = _load_active_instance(
+        request=request,
+        instance_id=row.instance_id,
+        instance_service=instance_service,
+    )
+    _require_configure_connections(request, instance=instance)
+
+    result = ConnectionHealthService(settings).check_health(row)
+
+    repo.apply_health_check(
+        row=row,
+        status=result.status,
+        last_health_check_at=result.checked_at,
+        credential_ref=result.new_credential_ref,
+        autocommit=False,
+    )
+
+    pending = None
+    if result.arc17_pending:
+        pending = Arc17Pending(
+            connection_type=row.connection_type,
+            message=result.detail
+            or (
+                f"{row.connection_type} stays unconfigured "
+                "(live credential flow deferred to Arc 17 deploy)."
+            ),
+        )
+
+    AdminAuditRepository(db).record(
+        ctx=audit_ctx,
+        admin_id=admin_id,
+        action=ACTION_CONNECTION_REFRESHED,
+        resource_type=RESOURCE_INSTANCE_CONNECTION,
+        resource_pk=row.id,
+        resource_natural_id=f"{row.instance_id}:{row.connection_type}",
+        luciel_instance_id=row.instance_id,
+        after={
+            "connection_type": row.connection_type,
+            "status": result.status,
+            "arc17_pending": result.arc17_pending,
+        },
+        note=f"Connection refreshed ({row.connection_type}={result.status}).",
+        autocommit=False,
+    )
+
+    db.commit()
+    db.refresh(row)
+    return ConnectionRefreshResponse(
+        connection=_view(row),
+        arc17_pending=pending,
+        detail=result.detail,
+    )
 
 
 @router.delete(
