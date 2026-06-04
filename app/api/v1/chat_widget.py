@@ -87,6 +87,7 @@ from app.middleware.rate_limit import (
     get_embed_key_rate_limit_for_key,
     limiter,
 )
+from app.middleware.widget_token_bucket import check_widget_request as _check_widget_token_bucket
 from app.models.instance import Instance
 from app.models.instance_status import InstanceStatus
 from app.policy.moderation import ModerationGate
@@ -200,6 +201,83 @@ def widget_chat_stream(
     # is the right clock here -- it never goes backwards across an NTP
     # sync the way time.time() can.
     _turn_start_monotonic = time.monotonic()
+
+    # RESCAN TIER-DE §3.1.5 — evaluate token bucket BEFORE any budget or
+    # LLM path so abuse never increments the tenant budget counter.
+    # Build a session fingerprint from the payload session_id (if any)
+    # or from the embed-key id so a session-less first turn gets a
+    # deterministic bucket tied to this embed key.
+    _tb_session_key = (
+        str(payload.session_id)
+        if payload.session_id
+        else getattr(request.state, "api_key_id", None)
+    )
+    _tb_client_ip: str
+    _xff = request.headers.get("X-Forwarded-For", "")
+    if _xff:
+        _tb_client_ip = _xff.split(",")[0].strip()
+    else:
+        _client_obj = getattr(request, "client", None)
+        _tb_client_ip = (
+            _client_obj.host
+            if _client_obj and getattr(_client_obj, "host", None)
+            else "unknown"
+        )
+
+    # Lazy Redis client (same pattern as BudgetMeter.RedisBackend).
+    _tb_redis = None
+    try:
+        from app.core.config import settings as _s
+        if _s.redis_url:
+            import redis as _redis_pkg
+            _tb_redis = _redis_pkg.Redis.from_url(
+                _s.redis_url,
+                socket_connect_timeout=1.5,
+                socket_timeout=1.5,
+                decode_responses=False,
+            )
+    except Exception:
+        pass  # fail open below
+
+    # Audit repo for abuse event (best-effort; anonymous traffic has no
+    # admin_id so the audit is skipped in widget_token_bucket.py).
+    _tb_admin_id = getattr(request.state, "admin_id", None)
+    _tb_audit_repo = None
+    _tb_audit_ctx = None
+    if _tb_admin_id is not None:
+        try:
+            from app.repositories.admin_audit_repository import (
+                AdminAuditRepository, AuditContext,
+            )
+            _tb_audit_repo = AdminAuditRepository(db)
+            _tb_audit_ctx = AuditContext.from_request(request)
+        except Exception:
+            pass
+
+    _tb_result = _check_widget_token_bucket(
+        redis_client=_tb_redis,
+        session_key=_tb_session_key,
+        client_ip=_tb_client_ip,
+        admin_id=str(_tb_admin_id) if _tb_admin_id else None,
+        instance_id=str(getattr(request.state, "luciel_instance_id", None)),
+        audit_repository=_tb_audit_repo,
+        audit_ctx=_tb_audit_ctx,
+    )
+    if not _tb_result.allowed:
+        from starlette.responses import JSONResponse as _JSONResponse
+        _status = 429
+        _detail = "rate_limit_exceeded"
+        if _tb_result.abuse_blocked:
+            _status = 429
+            _detail = "widget_abuse_blocked"
+        return _JSONResponse(
+            status_code=_status,
+            content={
+                "error": _detail,
+                "message": "Too many requests. Please wait and try again.",
+                "source": _tb_result.source,
+            },
+        )
 
     admin_id = getattr(request.state, "admin_id", None)
     # Arc 12 EX1c / EX3: the widget surface scopes by (admin_id,

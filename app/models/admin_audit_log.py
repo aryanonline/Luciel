@@ -98,6 +98,10 @@ ACTION_DATA_EXPORT_REQUESTED = "data_export_requested"
 ACTION_DATA_EXPORT_GENERATED = "data_export_generated"
 ACTION_DATA_EXPORT_FAILED = "data_export_failed"
 ACTION_DATA_EXPORT_EXPIRED = "data_export_expired"
+# RESCAN TIER-DE: §5.10 self-serve export audit (non-closure path).
+ACTION_DATA_EXPORT_SELF_SERVE = "data_export_self_serve"
+# RESCAN TIER-DE: §3.1.5 widget abuse auto-block event.
+ACTION_WIDGET_ABUSE_BLOCKED = "widget_abuse_blocked"
 ACTION_DOWNGRADE_INITIATED = "downgrade_initiated"
 ACTION_DOWNGRADE_GRACE_ENFORCED = "downgrade_grace_enforced"
 ACTION_AUDIT_LOG_TIER_ARCHIVED = "audit_log_tier_archived"
