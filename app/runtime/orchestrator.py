@@ -90,6 +90,7 @@ class LucielOrchestrator:
         tool_broker=None,
         escalation_judge=None,
         escalation_service=None,
+        escalation_delivery_service=None,
         channel_arbiter=None,
         cognition_finalizer=None,
         budget_meter=None,
@@ -115,6 +116,11 @@ class LucielOrchestrator:
         # missing provider NEVER invents an escalation.
         self._escalation_judge = escalation_judge
         self._escalation_service = escalation_service
+        # Rescan Tier-C — §3.5 escalation delivery service (notification
+        # send-with-retry + idempotency + audit). Injectable so tests can
+        # drive a fake. Built lazily when first needed. Called AFTER the
+        # customer reply is sent — never blocks or crashes the turn.
+        self._escalation_delivery_service = escalation_delivery_service
         # Arc 18 — conversation budget meter (Redis counter) + alert
         # service (80%/100% notifications). Injectable so tests drive an
         # InMemoryBackend / fake alerter; built lazily so pre-Arc-18 call
@@ -600,18 +606,58 @@ class LucielOrchestrator:
         )
 
     def _record_escalation_best_effort(self, decision) -> None:
-        """Record an escalation via EscalationService. Best-effort: the
-        decision to escalate has already been made; persistence + notify
-        are observability/delivery side-effects and must never crash the
-        turn (Architecture §5.1)."""
+        """Record an escalation via EscalationService + trigger delivery.
+
+        Best-effort: the decision to escalate has already been made;
+        persistence + notify are observability/delivery side-effects and
+        must never crash the turn (Architecture §5.1).
+
+        Rescan Tier-C: after recording the event, calls the delivery
+        service to send the actual admin notification (email/SMS/Slack)
+        for the four real signals. The customer reply is sent BEFORE
+        this method is called, so delivery NEVER blocks the turn.
+        """
+        routing = None
         try:
-            self._escalation_svc().record_escalation(decision)
+            routing = self._escalation_svc().record_escalation(decision)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "record_escalation failed: exc_class=%s — escalation flagged "
                 "on the turn but side-effects degraded",
                 type(exc).__name__,
             )
+        # Rescan Tier-C — wire the real notification send for the four signals
+        # (budget_exhausted uses _notify_budget_exhausted; the four real signals
+        # use the delivery service). Best-effort: never raises.
+        from app.models.escalation_event import SIGNAL_BUDGET_EXHAUSTED
+        if decision.signal != SIGNAL_BUDGET_EXHAUSTED:
+            try:
+                event_id = routing.event_id if routing is not None else None
+                contact = None
+                if routing is not None:
+                    # Rebuild EscalationContact from the routing decision.
+                    from app.policy.escalation_routing import EscalationContact
+                    contact = EscalationContact(
+                        admin_id=decision.admin_id,
+                        tier=routing.tier,
+                        channels=routing.channels,
+                    )
+                if contact is not None:
+                    self._escalation_delivery_svc().deliver(
+                        event_id=event_id,
+                        admin_id=decision.admin_id,
+                        luciel_instance_id=decision.luciel_instance_id,
+                        session_id=decision.session_id,
+                        signal=decision.signal,
+                        gate=decision.gate,
+                        contact=contact,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "escalation delivery failed: exc_class=%s — "
+                    "notification not sent but turn is unaffected",
+                    type(exc).__name__,
+                )
 
     # ------------------------------------------------------------------
     # Conversation budget gate — Arc 18 (§3.4.1b)
@@ -1180,6 +1226,21 @@ class LucielOrchestrator:
 
             self._escalation_service = EscalationService()
         return self._escalation_service
+
+    def _escalation_delivery_svc(self):
+        """Return the injected EscalationDeliveryService, or build one lazily.
+
+        Rescan Tier-C — the delivery service sends real admin notifications
+        (email/SMS/Slack) when CHANNELS_LIVE_PROVISIONING_ENABLED is True;
+        records full routing+attempt decision in dry-run when False.
+        """
+        if self._escalation_delivery_service is None:
+            from app.services.escalation_delivery_service import (
+                EscalationDeliveryService,
+            )
+
+            self._escalation_delivery_service = EscalationDeliveryService()
+        return self._escalation_delivery_service
 
     # ------------------------------------------------------------------
     # Retrieve step (ARC 11 Step 8 — preserved verbatim)

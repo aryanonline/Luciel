@@ -36,6 +36,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -46,6 +47,19 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
+
+# Rescan Tier-C — delivery status literals for exactly-once idempotency.
+DELIVERY_STATUS_PENDING = "pending"
+DELIVERY_STATUS_DELIVERED = "delivered"
+DELIVERY_STATUS_ACKED = "acked"
+DELIVERY_STATUS_FAILED = "failed"
+
+ALLOWED_DELIVERY_STATUSES: frozenset[str] = frozenset({
+    DELIVERY_STATUS_PENDING,
+    DELIVERY_STATUS_DELIVERED,
+    DELIVERY_STATUS_ACKED,
+    DELIVERY_STATUS_FAILED,
+})
 
 
 # ---------------------------------------------------------------------
@@ -124,6 +138,31 @@ class EscalationEvent(Base, TimestampMixin):
     # The raw inputs the judge evaluated (message, classifier outputs,
     # loop confidence, grounding, retrieval-failure flag, etc.).
     signal_inputs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # Rescan Tier-C — delivery lifecycle columns (§3.5 notification delivery).
+    # ``delivery_status`` tracks exactly-once idempotency: pending →
+    # delivered/acked/failed. The partial unique index on (session_id, signal,
+    # gate) WHERE delivery_status IN ('delivered','acked') prevents duplicate
+    # deliveries on replay. See migration rescanc_escalation_delivery.
+    delivery_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=DELIVERY_STATUS_PENDING,
+        comment="Rescan Tier-C §3.5 delivery lifecycle: pending/delivered/acked/failed.",
+    )
+    # Cumulative send attempts across all channels for this event.
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="0",
+        comment="Rescan Tier-C §3.5 — cumulative send attempts.",
+    )
+    # Timestamp of the most recent send attempt.
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Rescan Tier-C §3.5 — timestamp of the last send attempt.",
+    )
 
     __table_args__ = (
         CheckConstraint(

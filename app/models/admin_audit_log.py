@@ -301,6 +301,43 @@ ACTION_SUBSCRIPTION_PILOT_REFUNDED = "subscription_pilot_refunded"
 # {stripe_refund_id, error_class, error_message_truncated, to_email}.
 ACTION_PILOT_REFUND_EMAIL_SEND_FAILED = "pilot_refund_email_send_failed"
 
+# Rescan Tier-C — §3.5 escalation delivery layer.
+#
+# ACTION_ESCALATION_NOTIFICATION_SENT
+#   Emitted by EscalationDeliveryService after a notification send is
+#   attempted (whether dry-run or live). Written AFTER the
+#   escalation_event row so the audit chain is: escalation_fired ->
+#   escalation_notification_sent per attempt. after_json carries
+#   {signal, gate, channel, to, sent, dry_run, provider_id, attempt,
+#   idempotency_key}. resource_type = RESOURCE_ESCALATION_EVENT;
+#   resource_pk = escalation_events.id.
+#
+# ACTION_ESCALATION_DELIVERY_FAILED
+#   Emitted after all 3 retry attempts are exhausted for a single channel.
+#   after_json carries {signal, gate, channel, to, attempts, last_error,
+#   idempotency_key}. resource_type = RESOURCE_ESCALATION_EVENT.
+#
+# ACTION_ESCALATION_CHAIN_STEP
+#   Emitted by the Enterprise chain walker on every step transition:
+#   step notified -> SLA started, SLA timeout -> step advanced, ack
+#   received -> chain resolved. after_json carries {signal, session_id,
+#   step, contact, chain_action, timestamp}.
+#
+# ACTION_ESCALATION_ACKED
+#   Emitted when an Enterprise escalation chain is acknowledged (dashboard
+#   open/read OR explicit "I'm on it"). Chain stops. after_json carries
+#   {signal, gate, session_id, step, acked_by}.
+#
+# ACTION_ESCALATION_CHAIN_END_FALLBACK
+#   Emitted when the Enterprise chain is exhausted without acknowledgement.
+#   Falls back to admin_owner email. after_json carries {signal, gate,
+#   session_id, chain_length, fallback_email}.
+ACTION_ESCALATION_NOTIFICATION_SENT = "escalation_notification_sent"
+ACTION_ESCALATION_DELIVERY_FAILED = "escalation_delivery_failed"
+ACTION_ESCALATION_CHAIN_STEP = "escalation_chain_step"
+ACTION_ESCALATION_ACKED = "escalation_acked"
+ACTION_ESCALATION_CHAIN_END_FALLBACK = "escalation_chain_end_fallback"
+
 # Arc 18 -- conversation-budget metering (§3.4.1b).
 # ACTION_BUDGET_EXHAUSTED: a Free instance hit its per-instance
 # conversation cap; the turn was gracefully handled WITHOUT an LLM call
@@ -858,6 +895,12 @@ ALLOWED_ACTIONS = (
     ACTION_CHANNEL_OUTBOUND_DELIVERED,
     # Arc 14 U2 — §3.4.5 escalation judgment.
     ACTION_ESCALATION_FIRED,
+    # Rescan Tier-C — §3.5 escalation delivery layer.
+    ACTION_ESCALATION_NOTIFICATION_SENT,
+    ACTION_ESCALATION_DELIVERY_FAILED,
+    ACTION_ESCALATION_CHAIN_STEP,
+    ACTION_ESCALATION_ACKED,
+    ACTION_ESCALATION_CHAIN_END_FALLBACK,
     # Arc 14 U4 — §3.4.4 lead capture cognition.
     ACTION_LEAD_CAPTURED,
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).

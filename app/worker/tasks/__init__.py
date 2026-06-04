@@ -7,5 +7,6 @@ add it to that `include` list AND import it here.
 """
 from app.worker.tasks import memory_extraction  # noqa: F401
 from app.worker.tasks import retention  # noqa: F401  # Step 30a.2
+from app.worker.tasks import escalation_chain_walker  # noqa: F401  # Rescan Tier-C
 
-__all__ = ["memory_extraction", "retention"]
+__all__ = ["memory_extraction", "retention", "escalation_chain_walker"]
