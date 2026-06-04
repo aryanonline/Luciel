@@ -128,6 +128,13 @@ def _build_sqlite_session():
         Column("name", String(200), nullable=False),
         Column("tier", String(20), nullable=False, server_default="pro"),
     )
+    # The callee-status gate (RESCAN ALIGN(sibling-callee-status)) reads
+    # the callee Instance row via InstanceRepository.get_by_pk, which
+    # SELECTs the full Instance ORM model. The fixture table must
+    # therefore carry every column the model maps (SQLite-compatible
+    # types: native enums/JSONB/ARRAY collapse to TEXT — the gate only
+    # reads instance_status + admin_id, so the lossy ARRAY round-trip on
+    # enabled_channels is harmless here).
     Table(
         "instances",
         md,
@@ -137,6 +144,55 @@ def _build_sqlite_session():
             ForeignKey("admins.id"), nullable=False,
         ),
         Column("instance_slug", String(100), nullable=False),
+        Column("display_name", String(200), nullable=False, server_default="n"),
+        Column("description", String(1000), nullable=True),
+        Column("active", Boolean, nullable=False, server_default="1"),
+        Column(
+            "created_at", DateTime(timezone=True),
+            nullable=False, server_default=func.now(),
+        ),
+        Column(
+            "updated_at", DateTime(timezone=True),
+            nullable=False, server_default=func.now(),
+        ),
+        Column(
+            "pending_downgrade_archived_at",
+            DateTime(timezone=True), nullable=True,
+        ),
+        Column("soft_deleted_at", DateTime(timezone=True), nullable=True),
+        Column(
+            "instance_status", String(20),
+            nullable=False, server_default="active",
+        ),
+        Column("enabled_channels", Text, server_default="widget"),
+        Column("sms_provisioned_number", String(32), nullable=True),
+        Column("sms_number_mode", String(16), nullable=True),
+        Column("website", String(255), nullable=True),
+        Column(
+            "personality_preset", String(64),
+            nullable=False, server_default="warm_concierge",
+        ),
+        Column("personality_axes", Text, nullable=True),
+        Column("business_context", Text, nullable=True),
+        Column(
+            "personality_approval_state", String(20),
+            nullable=False, server_default="live",
+        ),
+        Column("pending_personality_preset", String(64), nullable=True),
+        Column("pending_personality_axes", Text, nullable=True),
+        Column("pending_business_context", Text, nullable=True),
+        Column("personality_submitted_by_user_id", String(36), nullable=True),
+        Column(
+            "personality_submitted_at",
+            DateTime(timezone=True), nullable=True,
+        ),
+        Column("personality_approved_by_user_id", String(36), nullable=True),
+        Column(
+            "personality_approved_at",
+            DateTime(timezone=True), nullable=True,
+        ),
+        Column("lead_routing", Text, nullable=True),
+        Column("escalation_config", Text, nullable=True),
     )
     Table(
         "users",
@@ -308,17 +364,23 @@ def _seed_admin(session, admin_id: str, tier: str = "pro") -> None:
     session.commit()
 
 
-def _seed_instance(session, instance_id: int, admin_id: str) -> None:
+def _seed_instance(
+    session, instance_id: int, admin_id: str,
+    *, instance_status: str = "active",
+) -> None:
     from sqlalchemy import text as sa_text
     session.execute(
         sa_text(
-            "INSERT INTO instances (id, admin_id, instance_slug) "
-            "VALUES (:id, :admin_id, :slug)"
+            "INSERT INTO instances "
+            "(id, admin_id, instance_slug, display_name, instance_status) "
+            "VALUES (:id, :admin_id, :slug, :name, :status)"
         ),
         {
             "id": instance_id,
             "admin_id": admin_id,
             "slug": f"inst-{instance_id}",
+            "name": f"inst-{instance_id}",
+            "status": instance_status,
         },
     )
     session.commit()
@@ -1072,3 +1134,197 @@ def test_refusal_path_writes_tool_execution_log_row_with_error_class():
     assert row[2] is None  # no output_hash on refusal
     assert row[3] == "other"  # WU6 catch-all for guardrail decisions
     assert isinstance(row[4], str) and "no live sibling_call_grants" in row[4]
+
+
+# =====================================================================
+# 12. RESCAN ALIGN(sibling-callee-status) — callee lifecycle-status gate
+#     (§3.6.1). A live grant + master switches do NOT authorise
+#     dispatch to a non-active callee. Gate sits between (d) grant
+#     lookup and (e) dispatch.
+# =====================================================================
+
+
+def _set_instance_status(session, instance_id: int, status: str) -> None:
+    """Flip an already-seeded instance's lifecycle status in place."""
+    from sqlalchemy import text as sa_text
+    session.execute(
+        sa_text(
+            "UPDATE instances SET instance_status = :s WHERE id = :i"
+        ),
+        {"s": status, "i": instance_id},
+    )
+    session.commit()
+
+
+def test_callee_active_dispatches():
+    """Baseline for the gate: with the callee explicitly 'active' the
+    happy path is unchanged — all checks pass and dispatch proceeds."""
+    from app.tools.sibling_dispatch import dispatch_sibling_call
+
+    session = _build_sqlite_session()
+    admin_id = "admin-callee-active"
+    user_id = uuid.uuid4()
+    _seed_full_happy_path(session, admin_id, user_id)  # callee 20 active
+
+    ctx = _make_root_context(
+        admin_id=admin_id, instance_id=10, session=session,
+    )
+    result = dispatch_sibling_call(
+        callee_instance_id=20, task="x", payload=None, context=ctx,
+    )
+
+    assert result["success"] is True, result
+    assert result["callee_instance_id"] == 20
+
+
+def test_callee_paused_refused_not_active():
+    """THE bug this closes: a PAUSED callee keeps its sibling grant and
+    its master switch, so it sails through checks (c) and (d) — but
+    §3.6.1 defines 'paused' as operational quiet. The status gate must
+    refuse with REASON_CALLEE_NOT_ACTIVE, never an exception, and never
+    reach the dispatch seam."""
+    from app.tools.sibling_dispatch import (
+        REASON_CALLEE_NOT_ACTIVE,
+        dispatch_sibling_call,
+    )
+
+    session = _build_sqlite_session()
+    admin_id = "admin-callee-paused"
+    user_id = uuid.uuid4()
+    _seed_full_happy_path(session, admin_id, user_id)
+    _set_instance_status(session, 20, "paused")
+
+    ctx = _make_root_context(
+        admin_id=admin_id, instance_id=10, session=session,
+    )
+    result = dispatch_sibling_call(
+        callee_instance_id=20, task="wake the paused callee", payload=None,
+        context=ctx,
+    )
+
+    assert result["success"] is False
+    assert result["error_reason"] == REASON_CALLEE_NOT_ACTIVE
+    assert result["callee_instance_id"] == 20
+    # Refused BEFORE the dispatch seam — no audit row, no state mutation.
+    assert ctx.composition_state is not None
+    assert ctx.composition_state.call_stack == []
+    assert ctx.composition_state.fan_out_count == 0
+
+
+@pytest.mark.parametrize("status", ["deactivating", "grace_window"])
+def test_callee_deactivating_or_grace_window_refused(status):
+    """Defense-in-depth: a deactivating / grace_window callee was
+    previously blocked only indirectly (its grants are revoked on
+    delete). The explicit status gate refuses any non-active callee
+    with REASON_CALLEE_NOT_ACTIVE even if a live grant somehow
+    survived."""
+    from app.tools.sibling_dispatch import (
+        REASON_CALLEE_NOT_ACTIVE,
+        dispatch_sibling_call,
+    )
+
+    session = _build_sqlite_session()
+    admin_id = f"admin-callee-{status}"
+    user_id = uuid.uuid4()
+    _seed_full_happy_path(session, admin_id, user_id)
+    _set_instance_status(session, 20, status)
+
+    ctx = _make_root_context(
+        admin_id=admin_id, instance_id=10, session=session,
+    )
+    result = dispatch_sibling_call(
+        callee_instance_id=20, task="x", payload=None, context=ctx,
+    )
+
+    assert result["success"] is False
+    assert result["error_reason"] == REASON_CALLEE_NOT_ACTIVE
+
+
+def test_callee_missing_fails_closed():
+    """A callee row that does not exist under this admin → fail closed
+    with REASON_CALLEE_NOT_FOUND, never dispatch to a phantom
+    instance. The grant lookup is satisfied by seeding a grant row to a
+    callee id whose instances-row is then deleted, so the refusal lands
+    at the status gate, not earlier."""
+    from sqlalchemy import text as sa_text
+    from app.tools.sibling_dispatch import (
+        REASON_CALLEE_NOT_FOUND,
+        dispatch_sibling_call,
+    )
+
+    session = _build_sqlite_session()
+    admin_id = "admin-callee-missing"
+    user_id = uuid.uuid4()
+    _seed_full_happy_path(session, admin_id, user_id)
+    # Drop the callee instance row AFTER the auth/grant rows are seeded
+    # so checks (c) and (d) still pass and the refusal lands at the
+    # status gate's fail-closed branch.
+    session.execute(sa_text("DELETE FROM instances WHERE id = 20"))
+    session.commit()
+
+    ctx = _make_root_context(
+        admin_id=admin_id, instance_id=10, session=session,
+    )
+    result = dispatch_sibling_call(
+        callee_instance_id=20, task="x", payload=None, context=ctx,
+    )
+
+    assert result["success"] is False
+    assert result["error_reason"] == REASON_CALLEE_NOT_FOUND
+    assert result["callee_instance_id"] == 20
+
+
+def test_callee_status_refusal_writes_tool_execution_log_row():
+    """The new refusal sits after the no-caller / no-session early
+    returns, so it must still write the general-purpose
+    tool_execution_log row (§3.3.4) like every other guardrail
+    refusal: error_class='other', no output_hash, refusal text in
+    error_message."""
+    from sqlalchemy import text as sa_text
+    from app.tools.sibling_dispatch import (
+        REASON_CALLEE_NOT_ACTIVE,
+        TOOL_ID_CALL_SIBLING_LUCIEL,
+        dispatch_sibling_call,
+    )
+
+    session = _build_sqlite_session()
+    admin_id = "admin-callee-status-log"
+    user_id = uuid.uuid4()
+    _seed_full_happy_path(session, admin_id, user_id)
+    _set_instance_status(session, 20, "paused")
+
+    ctx = _make_root_context(
+        admin_id=admin_id, instance_id=10, session=session,
+    )
+    result = dispatch_sibling_call(
+        callee_instance_id=20, task="x", payload=None, context=ctx,
+    )
+    session.commit()
+
+    assert result["success"] is False
+    assert result["error_reason"] == REASON_CALLEE_NOT_ACTIVE
+
+    rows = session.execute(
+        sa_text(
+            "SELECT tool_id, execution_mode, output_hash, "
+            "error_class, error_message FROM tool_execution_log"
+        )
+    ).fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row[0] == TOOL_ID_CALL_SIBLING_LUCIEL
+    assert row[1] == "in_process"
+    assert row[2] is None  # no output_hash on refusal
+    assert row[3] == "other"
+    assert isinstance(row[4], str) and "not active" in row[4]
+
+    # The sibling-access audit row must NOT have been written — the
+    # gate refuses before the (e) audit emission.
+    n_audit = session.execute(
+        sa_text(
+            "SELECT COUNT(*) FROM admin_audit_logs WHERE "
+            "action = 'sibling_access' AND admin_id = :a"
+        ),
+        {"a": admin_id},
+    ).scalar_one()
+    assert int(n_audit) == 0
