@@ -205,6 +205,16 @@ class TierEntitlement:
     # today's role matrix exactly.
     custom_role_authoring_enabled: bool
 
+    # Axis 18 (Rescan Tier-C) -- graph knowledge store (Architecture §3.2.1).
+    # Vision §7 tier matrix: graph store is a Pro+Enterprise feature.
+    # Free admins stay vector-only; Pro and Enterprise unlock the graph
+    # ingestion-extraction path and the graph retriever (Decision #4:
+    # PostgreSQL recursive CTEs, no external graph DB; Decision #5:
+    # domain-agnostic node/edge types inferred at ingest; Decision #6:
+    # graph retriever invoked only on structured-filter-intent queries).
+    # The audit found this axis MISSING (Arc 16 not implemented).
+    knowledge_graph_enabled: bool
+
     # Axis 16 (Billing model) RETIRED at Arc 7 Commit 2 (2026-05-24).
     # Every paying tier is flat-recurring under the Arc 7 doctrine
     # pivot, so the field carried zero information. See
@@ -252,6 +262,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         stripe_customer_record_required=False,  # Gap 1: NULL until upgrade
         # Arc 12b: Free uses the four locked roles only.
         custom_role_authoring_enabled=False,
+        # Rescan Tier-C: graph store is Pro+Enterprise only (Vision §7).
+        knowledge_graph_enabled=False,
     ),
     TIER_PRO: TierEntitlement(
         # 2026-05-23 revision: instances 3\u219210, leads 2000\u21925000,
@@ -289,6 +301,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         stripe_customer_record_required=True,
         # Arc 12b: Pro uses the four locked roles only.
         custom_role_authoring_enabled=False,
+        # Rescan Tier-C: graph store enabled on Pro.
+        knowledge_graph_enabled=True,
     ),
     TIER_ENTERPRISE: TierEntitlement(
         # Arc 10: unlimited per Vision §7 tier matrix.
@@ -339,6 +353,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         stripe_customer_record_required=True,
         # Arc 12b: Enterprise unlocks admin-composed custom roles.
         custom_role_authoring_enabled=True,
+        # Rescan Tier-C: graph store enabled on Enterprise.
+        knowledge_graph_enabled=True,
     ),
 }
 

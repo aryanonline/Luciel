@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from app.knowledge.embedder import embed_single
+from app.knowledge.reranker import rerank
 from app.repositories.knowledge_repository import KnowledgeRepository
 
 logger = logging.getLogger(__name__)
@@ -171,8 +172,21 @@ class KnowledgeRetriever:
                 )
             )
 
+        # §3.2 / §3.5 RERANK stage: applies to vector retrieval on ALL tiers.
+        # Deterministic rerank by recency + chunk-ordinal proximity sits
+        # between HNSW search and top-k delivery. Never raises (rerank
+        # degrades to input order on any failure). We fetch `limit` from HNSW
+        # and let the reranker cut to `limit` after scoring.
+        out = rerank(
+            out,
+            get_source_id=lambda c: c.source_identifier,
+            get_chunk_id=lambda c: c.chunk_id,
+            get_distance=lambda c: c.distance,
+            top_k=limit,
+        )
+
         logger.info(
-            "Retrieved %d knowledge chunks for tenant=%s instance=%s",
+            "Retrieved+reranked %d knowledge chunks for tenant=%s instance=%s",
             len(out), admin_id, luciel_instance_id,
         )
         return out

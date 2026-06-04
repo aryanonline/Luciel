@@ -1435,12 +1435,16 @@ class LucielOrchestrator:
 
     def _retrieve(self, req: RuntimeRequest) -> list:
         """Open a tenant-scoped session, build the retriever, return
-        the chunk list. Architecture v1 §3.2 retrieval flow:
+        the chunk list. Architecture v1 §3.2 / §3.4.1 retrieval flow:
 
           1. Filter by admin_id, instance_id, ingestion_status=ready
              (already enforced inside ``search_similar``).
-          2. Vector similarity (top-k).
-          3. Return chunks in relevance order.
+          2. If query has structured-filter intent AND tier has
+             knowledge_graph_enabled: run graph retrieval (recursive CTE
+             traversal) FIRST, then vector, then MERGE (Decision #6).
+             Pure-semantic queries bypass the graph entirely.
+          3. Vector similarity (HNSW) → RERANK (recency + ordinal) → top-k.
+          4. Return merged chunk list in reranked relevance order.
 
         Never raises — retrieval failure must not block the
         conversation per Architecture §3.4. Caught exceptions log
@@ -1471,12 +1475,32 @@ class LucielOrchestrator:
                 try:
                     repo = KnowledgeRepository(db)
                     retriever = KnowledgeRetriever(repo)
-                    return retriever.retrieve_with_sources(
+
+                    # — Vector retrieval (ALL tiers, with built-in rerank) —
+                    vector_chunks = retriever.retrieve_with_sources(
                         query=req.message,
                         admin_id=req.admin_id,
                         luciel_instance_id=req.luciel_instance_id,
                         limit=5,
                     )
+
+                    # — Graph retrieval (Pro+Enterprise, structured-filter only) —
+                    # Decision #6: graph retriever called ONLY when:
+                    #   (a) query has structured-filter intent, AND
+                    #   (b) the admin's tier has knowledge_graph_enabled.
+                    graph_chunks = self._retrieve_graph_if_applicable(
+                        req=req, db=db
+                    )
+
+                    # — Merge —
+                    # Graph nodes are prepended (they answer the structural
+                    # filter) and vector chunks follow. Dedup by formatted
+                    # content so the same fact does not appear twice.
+                    merged = self._merge_retrieval_results(
+                        graph_chunks=graph_chunks,
+                        vector_chunks=vector_chunks,
+                    )
+                    return merged
                 finally:
                     db.close()
         except Exception as exc:  # noqa: BLE001
@@ -1486,6 +1510,72 @@ class LucielOrchestrator:
                 type(exc).__name__, admin_prefix, req.luciel_instance_id,
             )
             return []
+
+    def _retrieve_graph_if_applicable(self, *, req: RuntimeRequest, db) -> list:
+        """Run graph retrieval if the query has structured-filter intent
+        AND the admin's tier has knowledge_graph_enabled.
+
+        Decision #6: pure-semantic queries — graph retriever NOT called.
+        Returns a list of graph node objects formatted for prompt injection,
+        or [] when conditions are not met. Never raises.
+        """
+        try:
+            from app.knowledge.graph_retriever import (
+                GraphRetriever,
+                detect_structured_filter_intent,
+            )
+            from app.policy.entitlements import resolve_entitlement
+
+            # Check structural intent first (cheap, no DB).
+            if not detect_structured_filter_intent(req.message):
+                return []
+
+            # Resolve tier (fail-closed to Free = no graph).
+            tier = self._resolve_tier(req)
+            graph_enabled = resolve_entitlement(
+                tier=tier, axis="knowledge_graph_enabled"
+            )
+            if not graph_enabled:
+                return []
+
+            if req.luciel_instance_id is None:
+                return []
+
+            graph_retriever = GraphRetriever(db)
+            return graph_retriever.retrieve(
+                query=req.message,
+                admin_id=req.admin_id,
+                instance_id=req.luciel_instance_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_retrieve_graph_if_applicable failed: exc_class=%s — "
+                "returning [] (vector-only fallback)",
+                type(exc).__name__,
+            )
+            return []
+
+    @staticmethod
+    def _merge_retrieval_results(*, graph_chunks: list, vector_chunks: list) -> list:
+        """Merge graph nodes + vector chunks, deduplicating by formatted content.
+
+        Graph nodes are prepended (they directly answer the structured filter
+        query). Vector chunks follow. Dedup ensures the same content does not
+        appear twice in the prompt context.
+        """
+        seen: set[str] = set()
+        merged: list = []
+        for item in graph_chunks:
+            key = getattr(item, "formatted", str(item))
+            if key not in seen:
+                seen.add(key)
+                merged.append(item)
+        for chunk in vector_chunks:
+            key = getattr(chunk, "formatted", str(chunk))
+            if key not in seen:
+                seen.add(key)
+                merged.append(chunk)
+        return merged
 
     @staticmethod
     def _grounding_from_chunks(
