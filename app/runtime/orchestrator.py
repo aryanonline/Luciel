@@ -1044,25 +1044,31 @@ class LucielOrchestrator:
     # ------------------------------------------------------------------
 
     def _retrieve(self, req: RuntimeRequest) -> list:
-        """Open a tenant-scoped session, build the retriever, return
-        the chunk list. Architecture v1 §3.2 retrieval flow:
+        """Open a tenant-scoped session and run HYBRID retrieval
+        (ARC 16). Architecture §3.2.1 / §3.4.1 RETRIEVE step:
 
-          1. Filter by admin_id, instance_id, ingestion_status=ready
-             (already enforced inside ``search_similar``).
-          2. Vector similarity (top-k).
-          3. Return chunks in relevance order.
+          1. If the query has structured-filter intent (multi-attribute
+             intersection, relationship traversal, membership check) →
+             GRAPH filter → VECTOR → graph-informed MERGE.
+          2. Otherwise (pure semantic) → VECTOR only. The Arc 11 vector
+             path is the fallback lane, preserved intact.
 
-        Never raises — retrieval failure must not block the
-        conversation per Architecture §3.4. Caught exceptions log
-        their class name plus the first 8 chars of admin_id (the
-        PII-discipline floor from Step 6); the response continues
-        with an empty chunk list.
+        Returns ``list[RetrievedChunk]`` — the same shape Arc 11
+        returned, so grounding (``_grounding_from_chunks``), the
+        escalation gates, and context assembly are all unchanged. The
+        graph stage only influences WHICH chunks are returned.
+
+        Never raises — retrieval failure must not block the conversation
+        (Architecture §3.4). A graph-stage failure degrades to
+        vector-only inside the hybrid engine, so this path is never
+        worse than the pre-ARC-16 behaviour. Caught exceptions log their
+        class name plus the first 8 chars of admin_id (the PII-discipline
+        floor from Step 6); the response continues with an empty list.
         """
         try:
             from app.db.session import SessionLocal
             from app.db.tenant_scope import bind_tenant_scope
-            from app.knowledge.retriever import KnowledgeRetriever
-            from app.repositories.knowledge_repository import KnowledgeRepository
+            from app.runtime.knowledge_retrieval import HybridRetriever
         except Exception as exc:  # noqa: BLE001 — defensive
             logger.warning(
                 "Retrieve step deps unavailable: exc_class=%s — "
@@ -1079,14 +1085,20 @@ class LucielOrchestrator:
             ):
                 db = SessionLocal()
                 try:
-                    repo = KnowledgeRepository(db)
-                    retriever = KnowledgeRetriever(repo)
-                    return retriever.retrieve_with_sources(
+                    result = HybridRetriever(db).retrieve(
                         query=req.message,
                         admin_id=req.admin_id,
                         luciel_instance_id=req.luciel_instance_id,
                         limit=5,
                     )
+                    if result.graph_engaged:
+                        logger.info(
+                            "Hybrid retrieve: graph engaged "
+                            "(nodes=%s) admin_prefix=%s instance_id=%s",
+                            result.graph_node_count, admin_prefix,
+                            req.luciel_instance_id,
+                        )
+                    return result.chunks
                 finally:
                     db.close()
         except Exception as exc:  # noqa: BLE001

@@ -66,7 +66,10 @@ _FORCE_RLS_TABLES = (
     "sessions",
     "subscriptions",
     "scope_assignments",
-    "knowledge_embeddings",
+    # Arc 11 renamed knowledge_embeddings -> knowledge_chunks; the
+    # stale name here meant this fuzz suite errored at setup and never
+    # ran. Corrected to the live table name.
+    "knowledge_chunks",
     "api_keys",
     "user_invites",
     "user_consents",
@@ -76,6 +79,11 @@ _FORCE_RLS_TABLES = (
     "retention_policies",
     "deletion_logs",
     "messages",
+    # Arc 16: knowledge graph store. Tenant-scoped, FORCE RLS from birth
+    # (arc16_c). Listed here so the fuzz invariants (force-RLS set,
+    # unset/bogus GUC -> 0 rows) are asserted against them too.
+    "knowledge_graph_nodes",
+    "knowledge_graph_edges",
 )
 
 

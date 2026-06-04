@@ -109,10 +109,18 @@ class IngestResult:
 class IngestionService:
     """Knowledge ingestion orchestrator."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, *, graph_extractor=None) -> None:  # noqa: ANN001
         self.db = db
         self.repository = KnowledgeRepository(db)
         self.source_repository = KnowledgeSourceRepository(db)
+        # Arc 16: optional graph-extraction stage. When an
+        # ``EntityExtractor`` is injected, ingestion ALSO populates the
+        # knowledge graph from the source text (additive, never-raise).
+        # When None (default), ingestion behaves exactly as Arc 11 —
+        # the graph path is opt-in so the ingest path carries no hard
+        # LLM dependency. The extractor is the one model-backed piece;
+        # population is deterministic (see app/knowledge/graph_extractor).
+        self._graph_extractor = graph_extractor
 
     # ==============================================================
     # Public entry points
@@ -292,6 +300,33 @@ class IngestionService:
         except Exception as exc:
             self._mark_source_failed(source_row, admin_id, str(exc))
             raise
+
+        # 5b. Arc 16: populate the knowledge graph (additive, opt-in,
+        # never-raise). Runs only when an extractor was injected. A
+        # failure here must NOT fail the ingest — the vector chunks are
+        # the baseline and are already persisted; GraphIngestionService
+        # swallows its own errors and rolls back only its own work.
+        if self._graph_extractor is not None:
+            try:
+                from app.knowledge.graph_extractor import GraphIngestionService
+
+                extraction = self._graph_extractor.extract(
+                    text=text,
+                    business_description=None,
+                )
+                if extraction.entities or extraction.relations:
+                    GraphIngestionService(self.db).populate_from_source(
+                        admin_id=admin_id,
+                        luciel_instance_id=luciel_instance_id,
+                        source_id=source_row.id,
+                        extraction=extraction,
+                    )
+            except Exception as exc:  # noqa: BLE001 — never fail ingest
+                logger.warning(
+                    "Graph extraction stage failed exc_class=%s "
+                    "source_id=%s — vector ingest unaffected",
+                    type(exc).__name__, source_row.id,
+                )
 
         # 6. Mark source ready.
         self.source_repository.mark_status(
