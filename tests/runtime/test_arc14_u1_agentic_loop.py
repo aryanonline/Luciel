@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 from app.integrations.llm.base import LLMResponse
 from app.runtime.contracts import RuntimeRequest
+from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY
 from app.runtime.orchestrator import MAX_LOOP_ITERATIONS, LucielOrchestrator
 from app.tools.base import ToolResult
 
@@ -166,6 +167,11 @@ class TestLoopEndToEnd(unittest.TestCase):
 
     def test_parse_failure_degrades_to_low_confidence_no_tool_reply(self):
         # Plain prose, not JSON — tolerant parse degrades gracefully.
+        # A parse failure produces confidence < 0.6 with no grounding (retrieval
+        # flag is off, so grounding is None). Per §3.4.13, this fires
+        # SIGNAL_CANNOT_CONFIDENTLY_ANSWER, replacing the LLM content with the
+        # canonical phrase (anti-hallucination promise) rather than emitting the
+        # raw ungrounded LLM prose.
         router = _ScriptedRouter(["I cannot produce JSON but here is text."])
         orch = LucielOrchestrator(
             trace_service=_StubTrace(),
@@ -175,10 +181,12 @@ class TestLoopEndToEnd(unittest.TestCase):
 
         resp = _run(orch, _request())
 
-        self.assertIn("here is text", resp.message)
+        # Parse failure → low confidence + ungrounded → cannot_answer fires.
         self.assertLess(resp.confidence, 0.6)
         self.assertFalse(resp.tool_called)
         self.assertEqual(resp.iterations, 1)
+        # The reply is the canonical §3.4.13 phrase, not the raw LLM prose.
+        self.assertEqual(resp.message, CANNOT_ANSWER_REPLY)
 
     def test_llm_failure_degrades_without_crashing_turn(self):
         class _BoomRouter:
@@ -559,11 +567,11 @@ class TestEscalationGatesNeutralPassThrough(unittest.TestCase):
         self.assertFalse(resp.escalation_flag)
 
     def test_outcome_low_confidence_with_no_retrieval_now_escalates(self):
-        # U2 behaviour change (observable, not silent): a low-confidence
-        # answer with NO grounding (retrieval flag off ⇒ grounding None ⇒
-        # treated as below every tier floor) fires the cannot-confidently-
-        # answer OUTCOME signal. The customer-facing reply is still
-        # emitted; escalation is an additive side-effect on the turn.
+        # U2 + Tier-C behaviour: a low-confidence answer with NO grounding
+        # (retrieval flag off ⇒ grounding None ⇒ treated as below every tier
+        # floor) fires the cannot-confidently-answer OUTCOME signal. Per
+        # §3.4.13, the LLM reply is replaced with the canonical phrase so
+        # an ungrounded answer is never emitted to the customer.
         router = _ScriptedRouter([_plan_json(reply="unsure", confidence=0.1)])
         # Inject a fake escalation service so no DB is touched and we can
         # assert the decision was recorded.
@@ -583,7 +591,8 @@ class TestEscalationGatesNeutralPassThrough(unittest.TestCase):
         resp = _run(orch, _request())
 
         self.assertTrue(resp.escalation_flag)
-        self.assertEqual(resp.message, "unsure")
+        # §3.4.13: cannot_answer fires → canonical phrase replaces LLM reply.
+        self.assertEqual(resp.message, CANNOT_ANSWER_REPLY)
         self.assertEqual(len(recorded), 1)
         self.assertEqual(recorded[0].signal, "cannot_confidently_answer")
 

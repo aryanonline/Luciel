@@ -200,8 +200,9 @@ class TestCannotConfidentlyAnswer(unittest.TestCase):
         self.assertIsNone(judge.evaluate_outcome(_req(), out))
 
     def test_retrieval_failure_is_below_every_floor(self):
-        # Retrieval failed → grounding treated as 0.0 even on Enterprise
-        # (flat floor 0.5 at v1). Low confidence + retrieval failure fires.
+        # Retrieval failed → grounding treated as 0.0 (below every floor,
+        # including Enterprise at 0.55). Low confidence + retrieval failure
+        # fires on all tiers.
         judge = _judge()
         out = OutcomeContext(
             confidence=0.5, tier="enterprise", retrieval_failed=True
@@ -218,33 +219,67 @@ class TestCannotConfidentlyAnswer(unittest.TestCase):
         self.assertIsNotNone(d)
         self.assertEqual(d.signal_inputs["grounding"], 0.0)
 
-    def test_floor_is_flat_across_tiers(self):
-        # Founder decision: the grounding floor is FLAT at 0.5 for every
-        # tier in v1 (tuned later from audit data per §3.4.5). grounding
-        # 0.35 is below the flat floor → fires on free, pro, AND
-        # enterprise identically. grounding 0.5 is AT the floor → fires
-        # on none.
+    def test_per_tier_floors_match_spec_section_9(self):
+        # §9 items 21/22/23: Free 0.45 / Pro 0.50 / Enterprise 0.55.
+        # Cognition-parity: the MECHANISM is identical; only the floor
+        # VALUE differs per tier.
         from app.runtime.escalation_judge import (
             GROUNDING_FLOOR_BY_TIER,
             _DEFAULT_GROUNDING_FLOOR,
         )
 
-        self.assertEqual(GROUNDING_FLOOR_BY_TIER["free"], 0.5)
-        self.assertEqual(GROUNDING_FLOOR_BY_TIER["pro"], 0.5)
-        self.assertEqual(GROUNDING_FLOOR_BY_TIER["enterprise"], 0.5)
-        self.assertEqual(_DEFAULT_GROUNDING_FLOOR, 0.5)
+        self.assertEqual(GROUNDING_FLOOR_BY_TIER["free"], 0.45)        # §9 item 21
+        self.assertEqual(GROUNDING_FLOOR_BY_TIER["pro"], 0.50)         # §9 item 22
+        self.assertEqual(GROUNDING_FLOOR_BY_TIER["enterprise"], 0.55)  # §9 item 23
+        # Default fails open to the most permissive floor (free).
+        self.assertEqual(_DEFAULT_GROUNDING_FLOOR, 0.45)
 
         judge = _judge()
+        # Score 0.47 is below Pro (0.50) and Enterprise (0.55) but above Free (0.45).
+        self.assertIsNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="free", grounding_score=0.47),
+            ),
+            "0.47 >= Free floor 0.45 — must NOT fire on free",
+        )
+        self.assertIsNotNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="pro", grounding_score=0.47),
+            ),
+            "0.47 < Pro floor 0.50 — must fire on pro",
+        )
+        self.assertIsNotNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="enterprise", grounding_score=0.47),
+            ),
+            "0.47 < Enterprise floor 0.55 — must fire on enterprise",
+        )
+
+        # Score 0.52: between Pro floor (0.50) and Enterprise floor (0.55).
+        self.assertIsNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="pro", grounding_score=0.52),
+            ),
+            "0.52 >= Pro floor 0.50 — must NOT fire on pro",
+        )
+        self.assertIsNotNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="enterprise", grounding_score=0.52),
+            ),
+            "0.52 < Enterprise floor 0.55 — must fire on enterprise",
+        )
+
+        # Score 0.35 is below every floor — fires on all three.
         for tier in ("free", "pro", "enterprise"):
             below = OutcomeContext(confidence=0.4, tier=tier, grounding_score=0.35)
-            at_floor = OutcomeContext(confidence=0.4, tier=tier, grounding_score=0.5)
             self.assertIsNotNone(
                 judge.evaluate_outcome(_req(), below),
                 f"grounding 0.35 should fire on {tier}",
-            )
-            self.assertIsNone(
-                judge.evaluate_outcome(_req(), at_floor),
-                f"grounding 0.5 (at floor) should not fire on {tier}",
             )
 
 

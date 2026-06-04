@@ -173,9 +173,12 @@ class LucielOrchestrator:
         # Thread the CONTEXT-step retrieval outcome onto the loop result
         # so the OUTCOME gate can read grounding + retrieval-failure
         # (spec item 5). retrieval_failed = retrieval RAN but yielded no
-        # usable chunks; grounding derived from best cosine distance.
+        # usable chunks; grounding is a composite of retrieval relevance
+        # + citation overlap (§3.4.13) using the loop's final reply.
         loop.retrieval_failed = retrieval_attempted and not chunks
-        loop.grounding_score = self._grounding_from_chunks(chunks)
+        loop.grounding_score = self._grounding_from_chunks(
+            chunks, answer=loop.reply or ""
+        )
 
         # 5. ESCALATION GATE 2 — OUTCOME (post-REFLECT). §3.4.5 (c)+(d).
         #    NEVER reads loop.bound_hit (§3.4.1 locked #17).
@@ -188,7 +191,18 @@ class LucielOrchestrator:
         #    channel (replaces U1's "emit on inbound channel"). The pick
         #    defaults safely to the inbound channel when channel info is
         #    sparse, so this never breaks the turn.
-        message = loop.reply
+        #    When SIGNAL_CANNOT_CONFIDENTLY_ANSWER fired, replace the LLM
+        #    reply with the §3.4.13 canonical phrase so the anti-hallucination
+        #    promise (Vision §1) is upheld: we never send an ungrounded answer.
+        from app.models.escalation_event import SIGNAL_CANNOT_CONFIDENTLY_ANSWER
+        if (
+            outcome_decision is not None
+            and outcome_decision.signal == SIGNAL_CANNOT_CONFIDENTLY_ANSWER
+        ):
+            from app.runtime.handoff_ack import cannot_answer_reply
+            message = cannot_answer_reply()
+        else:
+            message = loop.reply
         choice = self._arbitrate_channel(
             req, reply=message, escalation_fired=escalation_flag
         )
@@ -1098,39 +1112,128 @@ class LucielOrchestrator:
             return []
 
     @staticmethod
-    def _grounding_from_chunks(chunks: Sequence) -> float | None:
-        """Derive a [0,1] grounding score from retrieved chunks.
+    def _grounding_from_chunks(
+        chunks: Sequence, answer: str = ""
+    ) -> float | None:
+        """Derive a [0,1] composite grounding score from retrieved chunks.
 
-        Returns ``None`` when nothing was retrieved (the OUTCOME gate
-        treats None as below every floor only in concert with the
-        retrieval-failed flag). When chunks exist, grounding is
-        ``1 - best_cosine_distance`` (best = smallest distance =
-        closest match), clamped to [0,1]. Chunks with no distance are
-        ignored; if none carry a distance, grounding is unknown (None).
+        §3.4.13 requires a COMPOSITE of two components:
 
-        This is a minimal, dependency-free grounding proxy — a richer
-        grounding scorer (answer-vs-source overlap) is a later unit's
-        hook. It never raises: a malformed chunk degrades to None.
+          (a) Retrieval relevance  — ``1 - best_cosine_distance`` (best =
+              smallest distance = closest match) using the chunk distances
+              already computed during retrieval. Measures how well the top
+              retrieved chunk matched the query.
+
+          (b) Citation overlap  — fraction of the answer's sentences whose
+              token-overlap with any retrieved chunk exceeds a threshold.
+              For each sentence we compute Jaccard similarity of its
+              unigram set against the unigram set of each chunk's content;
+              a sentence is "covered" when any chunk exceeds the threshold.
+              This is deterministic, dependency-free, and cheap (no
+              embedding call). Coverage = covered_sentences / total_sentences.
+              An empty answer or an answer with no extractable sentences
+              contributes a citation-overlap of 0.0.
+
+        Combination: weighted average with equal weights 0.5/0.5:
+
+            grounding = 0.5 * retrieval_relevance + 0.5 * citation_overlap
+
+        The combined score is clamped to [0,1]. Returns ``None`` when
+        nothing was retrieved (the OUTCOME gate treats None as below every
+        floor only in concert with the retrieval-failed flag). If chunks
+        exist but none carry a distance, retrieval_relevance is 0.0 (no
+        distance information means we cannot claim relevance) and citation
+        overlap is still computed against chunk content. It never raises:
+        a malformed chunk degrades gracefully.
+
+        Citation-overlap threshold: CITATION_JACCARD_THRESHOLD = 0.10.
+        This is deliberately low so that any meaningful vocabulary overlap
+        between an answer sentence and a chunk counts as a citation hit;
+        a higher threshold would produce false negatives on paraphrased
+        answers. The threshold is a module constant so it can be tuned
+        from audit data without changing the algorithm.
         """
         if not chunks:
             return None
         try:
+            # --- (a) Retrieval relevance ---
             distances = [
                 c.distance
                 for c in chunks
                 if getattr(c, "distance", None) is not None
             ]
+            if distances:
+                best = min(distances)
+                retrieval_relevance = max(0.0, min(1.0, 1.0 - float(best)))
+            else:
+                retrieval_relevance = 0.0
+
+            # --- (b) Citation overlap ---
+            citation_overlap = LucielOrchestrator._citation_overlap(
+                answer, chunks
+            )
+
+            # --- Combine (0.5 / 0.5 weighted average) ---
+            grounding = 0.5 * retrieval_relevance + 0.5 * citation_overlap
+            return max(0.0, min(1.0, grounding))
         except Exception:  # noqa: BLE001
             return None
-        if not distances:
-            return None
-        best = min(distances)
-        grounding = 1.0 - float(best)
-        if grounding < 0.0:
+
+    # Citation-overlap threshold (Jaccard similarity). A sentence is
+    # "covered" when its unigram Jaccard against any chunk >= this value.
+    _CITATION_JACCARD_THRESHOLD: float = 0.10
+
+    @staticmethod
+    def _citation_overlap(answer: str, chunks: Sequence) -> float:
+        """Fraction of answer sentences whose unigram Jaccard similarity
+        to at least one retrieved chunk exceeds _CITATION_JACCARD_THRESHOLD.
+
+        Algorithm (deterministic, no external deps):
+          1. Tokenise by splitting on whitespace/punctuation to lowercase
+             unigrams. Strip common punctuation so "fact." and "fact" match.
+          2. For each answer sentence, compute Jaccard against every chunk
+             and mark it covered if any pair exceeds the threshold.
+          3. Return covered_count / total_sentences, or 0.0 when the answer
+             has no usable sentences.
+        """
+        import re
+
+        def _tokens(text: str) -> frozenset:
+            return frozenset(w.lower() for w in re.split(r"[\s,.!?;:]+", text) if w)
+
+        # Split answer into sentences on '.', '!', '?' or newlines.
+        sentences = [
+            s.strip()
+            for s in re.split(r"(?<=[.!?])\s+|\n+", answer.strip())
+            if s.strip()
+        ]
+        if not sentences:
             return 0.0
-        if grounding > 1.0:
-            return 1.0
-        return grounding
+
+        # Pre-compute chunk token sets (defensive: use content attr or str).
+        chunk_token_sets = []
+        for c in chunks:
+            content = getattr(c, "content", None) or getattr(c, "formatted", "") or ""
+            if content:
+                chunk_token_sets.append(_tokens(str(content)))
+        if not chunk_token_sets:
+            return 0.0
+
+        threshold = LucielOrchestrator._CITATION_JACCARD_THRESHOLD
+        covered = 0
+        for sent in sentences:
+            sent_tokens = _tokens(sent)
+            if not sent_tokens:
+                continue
+            for chunk_tokens in chunk_token_sets:
+                union = sent_tokens | chunk_tokens
+                if not union:
+                    continue
+                jaccard = len(sent_tokens & chunk_tokens) / len(union)
+                if jaccard >= threshold:
+                    covered += 1
+                    break
+        return covered / len(sentences)
 
     @staticmethod
     def _collect_source_pks(chunks: Sequence) -> list[int]:
