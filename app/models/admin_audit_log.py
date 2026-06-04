@@ -714,6 +714,38 @@ ACTION_LEAD_CAPTURED = "lead_captured"
 ACTION_PERSONALITY_UPDATED = "personality_updated"
 ACTION_ESCALATION_CONFIG_UPDATED = "escalation_config_updated"
 
+# Rescan ENT — Enterprise personality second-admin approval (Vision §7).
+#
+# On Enterprise, a personality change does NOT apply immediately; it is
+# staged on the instance row (pending_personality_* columns) in
+# ``personality_approval_state='pending_approval'`` and the LIVE
+# personality_* columns are left untouched until a SECOND admin approves.
+# Mirrors the custom-role (§3.7.3) and sibling-grant (§3.3.4) approval
+# verbs.
+#
+# ACTION_PERSONALITY_SUBMITTED -- a user submitted an Enterprise
+#   personality change for approval. The live config is unchanged;
+#   the proposal sits in pending_approval. after_json carries the
+#   proposed {personality_preset, personality_axes?,
+#   business_context_len, approval_state, submitted_by_user_id} — never
+#   the raw business_context body (only its length, matching
+#   ACTION_PERSONALITY_UPDATED). resource_type =
+#   RESOURCE_INSTANCE_PERSONALITY; resource_pk = instances.id.
+#
+# ACTION_PERSONALITY_APPROVED -- a SECOND admin (NOT the submitter —
+#   self-approval forbidden) approved the pending change. The proposed
+#   pillars are copied onto the live personality_* columns,
+#   approval_state flips to 'live', approved_by_user_id/approved_at are
+#   stamped. after_json carries {personality_preset, approval_state,
+#   approved_by_user_id, approved_at}.
+#
+# ACTION_PERSONALITY_REJECTED -- a SECOND admin rejected the pending
+#   change. The proposal is discarded (pending columns cleared), the
+#   live config is left untouched, approval_state returns to 'live'.
+ACTION_PERSONALITY_SUBMITTED = "personality_submitted"
+ACTION_PERSONALITY_APPROVED = "personality_approved"
+ACTION_PERSONALITY_REJECTED = "personality_rejected"
+
 # Arc 15 WU4 — Arc 17 connection-contract slice (Architecture §3.8.2).
 #
 # ACTION_CONNECTION_CONFIGURED -- a user configured (created) an
@@ -930,6 +962,10 @@ ALLOWED_ACTIONS = (
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
     ACTION_PERSONALITY_UPDATED,
     ACTION_ESCALATION_CONFIG_UPDATED,
+    # Rescan ENT — Enterprise personality second-admin approval (Vision §7).
+    ACTION_PERSONALITY_SUBMITTED,
+    ACTION_PERSONALITY_APPROVED,
+    ACTION_PERSONALITY_REJECTED,
     # Arc 15 WU4 — Arc 17 connection-contract slice (§3.8.2).
     ACTION_CONNECTION_CONFIGURED,
     ACTION_CONNECTION_DISCONNECTED,
