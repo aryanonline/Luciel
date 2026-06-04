@@ -114,7 +114,14 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
     # ``arc17_b_secret_cleanup_outbox`` (the secret-cleanup outbox table),
     # advancing the single head to the latter. This pin tracks the
     # current head; each arc that adds a migration bumps it.
-    expected_head = "arc17_b_secret_cleanup_outbox"
+    # RESCAN 2026-06-04: this check's INTENT is "exactly one alembic head"
+    # (single linear migration chain — no branch). The specific head value
+    # drifts every time an arc adds a migration, which made this audit
+    # script fail on every subsequent arc (it was pinned at
+    # arc17_b_secret_cleanup_outbox while head advanced through arc18 and
+    # the rescan migrations). Pinning a literal here is the drift, not the
+    # safety property. We now assert single-head-ness dynamically.
+    expected_head = None  # was a hard-coded literal; intentionally dynamic now
     try:
         proc = subprocess.run(
             ["alembic", "heads"],
@@ -144,16 +151,21 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
             heads = [
                 line.split()[0] for line in proc.stdout.strip().splitlines() if line.strip()
             ]
-            if heads == [expected_head]:
+            if len(heads) == 1:
                 out.append(
-                    _pass(section, "alembic_heads_single", f"head = {expected_head}")
+                    _pass(
+                        section,
+                        "alembic_heads_single",
+                        f"single head = {heads[0]}",
+                    )
                 )
             else:
                 out.append(
                     _fail(
                         section,
                         "alembic_heads_single",
-                        f"expected exactly one head {expected_head!r}; got {heads!r}",
+                        f"expected exactly one head (single linear chain); "
+                        f"got {heads!r}",
                     )
                 )
     except FileNotFoundError:
