@@ -32,6 +32,7 @@ from app.api.deps import get_chat_service, get_session_service
 from app.channels.base import (
     SignatureVerificationError,
     UnresolvableInboundError,
+    check_instance_lifecycle,
 )
 from app.channels.sms_adapter import SmsChannelAdapter
 from app.db.session import get_db
@@ -91,6 +92,33 @@ async def receive_twilio_sms(
             resource_type=RESOURCE_INSTANCE_CHANNEL,
             resource_natural_id=(params.get("To") or "")[:320] or None,
             note=f"Inbound SMS dropped (unresolvable): {e}",
+            autocommit=True,
+        )
+        return Response(status_code=204)
+
+    # --- lifecycle gate: only an ACTIVE instance is served. ---
+    # Architecture §3.6.2: a paused/deactivating/grace_window (or missing)
+    # instance acknowledges the inbound with a 2xx no-op and is NOT routed
+    # to the runtime — no reply, no budget accrual. Shared across all
+    # channels via check_instance_lifecycle; audited, never silent.
+    drop = check_instance_lifecycle(db, ctx)
+    if drop is not None:
+        logger.info(
+            "twilio_webhook: inbound dropped, instance not active "
+            "(instance_id=%s status=%s)",
+            drop.instance_id,
+            drop.status,
+        )
+        audit.record(
+            ctx=AuditContext.system("twilio_webhook"),
+            admin_id=ctx.admin_id,
+            action=ACTION_CHANNEL_INBOUND_DROPPED,
+            resource_type=RESOURCE_INSTANCE_CHANNEL,
+            resource_natural_id=(params.get("To") or "")[:320] or None,
+            luciel_instance_id=drop.instance_id,
+            note=(
+                f"Inbound dropped: instance not active (status={drop.status})"
+            ),
             autocommit=True,
         )
         return Response(status_code=204)
