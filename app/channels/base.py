@@ -51,7 +51,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 # =====================================================================
@@ -256,3 +259,67 @@ class ChannelAdapter(Protocol):
         surfaces dispatch to a provider and return its message id.
         """
         ...
+
+
+# =====================================================================
+# Shared inbound lifecycle gate (Architecture §3.6.1 / §3.6.2).
+# =====================================================================
+#
+# RESCAN ALIGN(channel-lifecycle): one chokepoint every store-and-forward
+# channel flows through after verify_inbound resolves the InstanceContext
+# and BEFORE the runtime (chat_service.respond) is touched. SMS, email,
+# and any future channel call this so the §3.6.2 "acknowledge but do not
+# route" rule lives in exactly one place — not copy-pasted per webhook.
+#
+# §3.6.1 state table: only ``active`` responds + accrues budget. Every
+# other lifecycle state (paused / deactivating / grace_window / deleted /
+# hard_deleted) — and a missing instance row — is "No response, No budget
+# accrual". The webhook reacts to a non-None return by short-circuiting to
+# its benign-drop acknowledgement (a 2xx no-op) and audit-logging the
+# drop; an active instance returns None and the happy path proceeds
+# untouched.
+
+
+@dataclass(frozen=True)
+class InactiveInstanceDrop:
+    """Signals that an authenticated, routed inbound must NOT be served.
+
+    Returned by :func:`check_instance_lifecycle` when the resolved
+    instance is not :class:`InstanceStatus.ACTIVE` (or its row is
+    missing). ``status`` is the canonical lifecycle token for the audit
+    note (the enum value, or ``"missing"`` when the row is absent).
+    """
+
+    instance_id: int
+    status: str
+
+
+def check_instance_lifecycle(
+    db: "Session", ctx: InstanceContext
+) -> InactiveInstanceDrop | None:
+    """Lifecycle gate for a verified, routed channel inbound.
+
+    Looks up ``ctx.instance_id`` and returns ``None`` when the instance
+    is ``ACTIVE`` (the caller proceeds to the runtime). Returns an
+    :class:`InactiveInstanceDrop` when the instance is in any non-active
+    lifecycle state (paused / deactivating / grace_window / deleted /
+    hard_deleted) or its row is missing — the caller must then NOT call
+    ``chat_service.respond`` (no routing, no budget accrual), audit the
+    drop with ``ACTION_CHANNEL_INBOUND_DROPPED``, and acknowledge the
+    provider with a 2xx no-op so it does not retry-storm.
+
+    Imports are local to keep this module free of model/ORM import
+    coupling at the protocol layer.
+    """
+    from app.models.instance import Instance
+    from app.models.instance_status import InstanceStatus
+
+    instance = db.query(Instance).filter(Instance.id == ctx.instance_id).first()
+    if instance is None:
+        return InactiveInstanceDrop(instance_id=ctx.instance_id, status="missing")
+    if instance.instance_status != InstanceStatus.ACTIVE:
+        return InactiveInstanceDrop(
+            instance_id=ctx.instance_id,
+            status=instance.instance_status.value,
+        )
+    return None
