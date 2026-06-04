@@ -1,8 +1,16 @@
 """Arc 15 WU2 — chat_service composer wiring (AST shape test).
 
-Confirms both build_system_prompt call sites pass the composed PRESET +
-BUSINESS_CONTEXT stanzas and no longer thread the deprecated free-text
-system_prompt_additions (agent_prompt) layer.
+Confirms the composed PRESET + BUSINESS_CONTEXT stanzas reach the prompt
+and the deprecated free-text system_prompt_additions (agent_prompt) layer
+is gone.
+
+RESCAN CORE(serving-path) update: ChatService is now a THIN adapter over
+the LucielOrchestrator — it no longer calls ``build_system_prompt``
+directly. It still COMPOSES the stanzas in ``_resolve_luciel_context``
+and now threads them onto the ``RuntimeRequest`` (persona_preset_stanza /
+persona_business_context_stanza), where the orchestrator's
+ContextAssembler feeds them into ``build_system_prompt``. The composer
+wiring + stanza composition is unchanged; only the hand-off point moved.
 """
 from __future__ import annotations
 
@@ -26,9 +34,15 @@ def test_chat_service_imports_composer() -> None:
 
 
 def test_both_call_sites_pass_composed_stanzas() -> None:
+    # HYBRID rewiring: the composed stanzas are threaded onto the
+    # RuntimeRequest (one shared ``_run_turn`` hand-off used by both
+    # ``respond`` and ``respond_stream``), where the orchestrator's
+    # ContextAssembler feeds them into build_system_prompt.
     src = _read(CHAT_SERVICE_PATH)
-    assert src.count("preset_stanza=ctx.preset_stanza") == 2
-    assert src.count("business_context_stanza=ctx.business_context_stanza") == 2
+    assert "persona_preset_stanza=ctx.preset_stanza" in src
+    assert (
+        "persona_business_context_stanza=ctx.business_context_stanza" in src
+    )
 
 
 def test_call_sites_no_longer_thread_instance_prompt_as_agent_prompt() -> None:

@@ -60,6 +60,14 @@ class InstanceStatus(str, enum.Enum):
 
     ACTIVE = "active"
     PAUSED = "paused"
+    # RESCAN CORE(serving-path) GAP-5 — system-imposed pause (§3.6.7).
+    # Set by the Pro→Free downgrade enforcement for instances over the
+    # Free instance cap. Distinct from PAUSED (owner-initiated, §4.5
+    # Phase 8): INACTIVE is imposed by the platform when a plan change
+    # leaves more instances than the new tier allows. Treated as
+    # non-active by every lifecycle gate (only ACTIVE serves + accrues
+    # budget). The owner reactivates by upgrading or removing instances.
+    INACTIVE = "inactive"
     # Deprecated alias for grace_window; retained so existing rows and
     # queries using the 3-state vocabulary stay valid.  New code must
     # use GRACE_WINDOW.  See module docstring for the mapping rationale.

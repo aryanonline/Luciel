@@ -51,7 +51,29 @@ class ContextAssembler:
         *,
         retrieved_chunks: Sequence[RetrievedChunk] | None = None,
     ) -> str:
-        identity = build_system_prompt()
+        # RESCAN CORE(serving-path) — HYBRID persona threading. When the
+        # caller (ChatService adapter) resolved per-turn persona, build
+        # the identity layer WITH the composed §3.5.1 stanzas + instance
+        # name + consent-gated memories so the orchestrator's PLAN prompt
+        # carries the same persona the legacy ChatService path did. With
+        # no persona on the request (every orchestrator unit test, every
+        # pre-rewiring call site) this collapses to the exact prior
+        # ``build_system_prompt()`` default — byte-identical.
+        has_persona = (
+            req.persona_preset_stanza is not None
+            or req.persona_business_context_stanza is not None
+            or req.assistant_name != "Luciel"
+            or bool(req.memories)
+        )
+        if has_persona:
+            identity = build_system_prompt(
+                memories=req.memories or None,
+                preset_stanza=req.persona_preset_stanza,
+                business_context_stanza=req.persona_business_context_stanza,
+                assistant_name=req.assistant_name,
+            )
+        else:
+            identity = build_system_prompt()
         # Arc 12 EX1d: v1 ``Domain:`` line removed — v2 has a single
         # Admin→Instance boundary (Architecture §3.7.2). The prompt now
         # carries the Admin slug and the channel only.

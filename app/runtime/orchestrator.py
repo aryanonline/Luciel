@@ -135,6 +135,32 @@ class LucielOrchestrator:
     def run(self, req: RuntimeRequest) -> RuntimeResponse:
         # 1. RECEIVE — the resolved (admin, instance, session) is on req.
 
+        # RESCAN CORE(serving-path) GAP-6/R1 — LIFECYCLE PRE-RUN GATE
+        # (§3.6.1/§3.6.2). Position: the VERY FIRST step, before the
+        # human-controlled gate, so a non-active / missing instance
+        # short-circuits with ZERO LLM calls and ZERO budget accrual.
+        # Opt-in: only the live ChatService adapter sets
+        # ``enforce_lifecycle_gate=True``; the 14 orchestrator unit tests
+        # leave it False (they set luciel_instance_id but have no live
+        # instance row, so a hard gate would falsely block them). When the
+        # instance is not ACTIVE the orchestrator returns an EMPTY-message
+        # lifecycle no-op response that the adapter/channel layer maps onto
+        # its documented no-op shape (widget 204, SMS 204 drop, /chat empty).
+        if req.enforce_lifecycle_gate and req.luciel_instance_id is not None:
+            drop = self._lifecycle_gate(
+                req.luciel_instance_id, admin_id=req.admin_id
+            )
+            if drop is not None:
+                return RuntimeResponse(
+                    message="",
+                    trace_id="",
+                    confidence=0.0,
+                    session_id=req.session_id,
+                    lifecycle_blocked=True,
+                    lifecycle_status=drop.status,
+                    response_channel=req.channel,
+                )
+
         # HUMAN-CONTROLLED GATE — Rescan Tier-C §3.4.12 (LOAD-BEARING).
         # Position: AFTER session resolution (req.session_id is available),
         # BEFORE everything else (context assembly, budget, PLAN/ACT/REFLECT).
@@ -695,6 +721,47 @@ class LucielOrchestrator:
     # Human-controlled session gate — Rescan Tier-C (§3.4.12)
     # ------------------------------------------------------------------
 
+    def _lifecycle_gate(self, instance_id: int, admin_id: str = ""):
+        """RESCAN CORE(serving-path) GAP-6/R1 — §3.6.1/§3.6.2 lifecycle gate.
+
+        Returns an ``InactiveInstanceDrop`` (instance_id + status token)
+        when the resolved instance is NOT ``InstanceStatus.ACTIVE`` (paused
+        / inactive / deactivating / grace_window / deleted / hard_deleted)
+        or its row is missing; ``None`` when the instance is active and the
+        turn may proceed. Reuses the shared ``check_instance_lifecycle``
+        chokepoint (app/channels/base.py) so the /chat paths gate on the
+        exact same predicate the channel webhooks already use.
+
+        Opens its own short-lived ``SessionLocal`` (the orchestrator holds
+        no db handle), matching ``_is_session_human_controlled``. Best-effort
+        degradation: any unexpected error fails OPEN (returns None) so a DB
+        hiccup never silently swallows a legitimate active turn — the gate's
+        job is to BLOCK non-active instances, not to invent blocks."""
+        try:
+            from app.channels.base import (
+                InstanceContext,
+                check_instance_lifecycle,
+            )
+            from app.db.session import SessionLocal
+
+            db = SessionLocal()
+            try:
+                return check_instance_lifecycle(
+                    db,
+                    InstanceContext(
+                        admin_id=admin_id, instance_id=instance_id
+                    ),
+                )
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "lifecycle gate check failed: exc_class=%s — proceeding "
+                "to agentic loop (safe degradation)",
+                type(exc).__name__,
+            )
+            return None
+
     def _is_session_human_controlled(self, session_id: str) -> bool:
         """Check whether the given session is in human_controlled mode.
 
@@ -1212,7 +1279,7 @@ class LucielOrchestrator:
             result.iterations = iteration
 
             # PLAN
-            plan = self._plan(prompt, result)
+            plan = self._plan(prompt, result, provider=req.provider)
 
             result.reply = plan.reply
             result.confidence = plan.confidence
@@ -1251,7 +1318,9 @@ class LucielOrchestrator:
 
         return result
 
-    def _plan(self, prompt: str, result: "_LoopResult") -> Plan:
+    def _plan(
+        self, prompt: str, result: "_LoopResult", *, provider: str | None = None
+    ) -> Plan:
         """PLAN step — one ModelRouter.generate call + tolerant parse.
 
         Layers ``PLAN_JSON_INSTRUCTION`` onto the assembled prompt and
@@ -1260,6 +1329,12 @@ class LucielOrchestrator:
         trace. On ANY LLM failure (no provider configured, all
         providers down) PLAN degrades to a low-confidence no-tool reply
         rather than crashing the turn (§3.4.1).
+
+        ``provider`` (RESCAN CORE serving-path) is the preferred-provider
+        hint resolved by the ChatService adapter (instance.preferred_
+        provider or a caller override). Defaults None ⇒ the ModelRouter
+        picks its own default, the pre-rewiring behaviour every existing
+        test relies on.
         """
         llm_request = LLMRequest(
             messages=[
@@ -1271,7 +1346,9 @@ class LucielOrchestrator:
             ]
         )
         try:
-            response = self._router().generate(llm_request)
+            response = self._router().generate(
+                llm_request, preferred_provider=provider
+            )
         except Exception as exc:  # noqa: BLE001
             # Provider-agnostic firewall: a PLAN call must never crash
             # the turn. Degrade to a graceful low-confidence reply.

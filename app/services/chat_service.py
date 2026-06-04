@@ -42,7 +42,6 @@ from dataclasses import dataclass
 
 from app.cognition import CognitionService
 from app.core.config import settings
-from app.integrations.llm.base import LLMMessage, LLMRequest
 from app.integrations.llm.router import ModelRouter
 from app.knowledge.retriever import KnowledgeRetriever
 from app.memory.service import MemoryService
@@ -50,7 +49,6 @@ from app.persona.composer import (
     compose_business_context_stanza,
     compose_preset_stanza,
 )
-from app.persona.luciel_core import build_system_prompt
 from app.policy.consent import ConsentPolicy
 from app.policy.engine import PolicyEngine
 from app.repositories.config_repository import ConfigRepository
@@ -242,6 +240,49 @@ class ChatService:
         actor_key_prefix: str | None = None,
         actor_user_id: "uuid.UUID | None" = None,
     ) -> str:
+        # RESCAN CORE(serving-path) — HYBRID adapter. ChatService is now a
+        # THIN session/persona adapter over the LucielOrchestrator (the
+        # §3.4.1 agentic loop), which is the live serving engine. This
+        # method does the route-layer concerns ChatService owns (session
+        # verify, user-message persist, persona resolution, assistant-reply
+        # persist, consent-gated memory extraction) and delegates the
+        # ACTUAL turn — budget gate §3.4.1b, human-controlled handoff
+        # §3.4.12, grounding floors §3.4/§3.4.13, tier-gated tool broker
+        # §3.3.4, lifecycle gate §3.6 — to the orchestrator, which enforces
+        # them AT THE SOURCE (closing audit GAP-1/2/3/4/6). Retrieval +
+        # grounding are owned by the orchestrator's self-contained,
+        # tenant-scoped _retrieve step, so this adapter no longer retrieves
+        # knowledge or builds the prompt itself.
+        resp, _resolved = self._run_turn(
+            session_id=session_id,
+            message=message,
+            provider=provider,
+            caller_tenant_id=caller_tenant_id,
+            luciel_instance_id=luciel_instance_id,
+            actor_key_prefix=actor_key_prefix,
+            actor_user_id=actor_user_id,
+        )
+        return resp.message
+
+    def _run_turn(
+        self,
+        *,
+        session_id: str,
+        message: str,
+        provider: str | None,
+        caller_tenant_id: str | None,
+        luciel_instance_id: int | None,
+        actor_key_prefix: str | None,
+        actor_user_id: "uuid.UUID | None",
+    ):
+        """Drive ONE full gated turn through the orchestrator and apply the
+        adapter-owned side effects (persist user msg → run() → persist
+        assistant reply → memory extraction). Returns ``(RuntimeResponse,
+        admin_id)`` so both ``respond`` and ``respond_stream`` share the
+        exact same gated path (Option A: stream plays back the already-
+        grounded ``resp.message``, never a pre-grounding token)."""
+        from app.runtime.contracts import RuntimeRequest
+        from app.runtime.orchestrator import LucielOrchestrator
 
         # 1. Verify session
         session = self.session_service.get_session(session_id)
@@ -258,20 +299,20 @@ class ChatService:
             session_id=session_id, role="user", content=message,
         )
 
-        # 3. Resolve per-turn LucielContext (single Admin→Instance).
+        # 3. Resolve per-turn LucielContext (single Admin→Instance) — the
+        #    persona stanzas + display name + preferred provider the
+        #    orchestrator's prompt must carry to match the legacy path.
         ctx = self._resolve_luciel_context(
             luciel_instance_id=luciel_instance_id,
             admin_id=admin_id,
         )
-
-        # Use the instance-preferred provider if caller did not specify.
         if not provider and ctx.preferred_provider:
             provider = ctx.preferred_provider
 
-        # 4. Retrieve long-term memories (consent-gated). Arc 12 EX1b:
-        #    v2 single Admin→Instance boundary (§3.7.2); memory rows
-        #    are scoped by admin_id + Wall-3 RLS on luciel_instance_id.
-        #    The legacy per-agent partitioning has been excised.
+        # 4. Retrieve long-term memories (consent-gated). The consent gate
+        #    is an adapter concern (it keys off the ConsentPolicy this
+        #    service owns); the resolved memories ride the RuntimeRequest
+        #    so the orchestrator's prompt is identity-aware.
         memories: list = []
         can_use_memory = True
         if self.consent_policy and user_id:
@@ -284,128 +325,52 @@ class ChatService:
                 admin_id=admin_id,
             )
 
-        # 5. Retrieve relevant knowledge (scope-inherited).
-        knowledge = self.knowledge_retriever.retrieve(
-            query=message,
-            admin_id=admin_id,
-            luciel_instance_id=ctx.luciel_instance_id,
-        )
-
-        # 6. Load conversation history
-        history = self.session_service.list_messages(session_id)
-
-        # 7. Build the full child Luciel prompt. The tool catalog is
-        #    the 8-tool WU3 registry; per-instance authorisation
-        #    (WU2 default-deny) is enforced at dispatch time inside
-        #    the broker, not by an allow-list passed here.
-        tool_descriptions = self.tool_registry.get_tool_descriptions()
-        system_prompt = build_system_prompt(
-            memories=memories if memories else None,
-            tool_descriptions=tool_descriptions if tool_descriptions else None,
-            preset_stanza=ctx.preset_stanza,
-            business_context_stanza=ctx.business_context_stanza,
-            knowledge=knowledge if knowledge else None,
-            assistant_name=ctx.assistant_name,
-        )
-
-        llm_messages = [LLMMessage(role="system", content=system_prompt)]
-        for msg in history:
-            llm_messages.append(LLMMessage(role=msg.role, content=msg.content))
-
-        # 8. Call LLM
-        llm_request = LLMRequest(messages=llm_messages)
-        llm_response = self.model_router.generate(
-            llm_request, preferred_provider=provider
-        )
-        raw_reply = llm_response.content
-
-        llm_provider_used = llm_response.provider
-        llm_model_used = llm_response.model
-
-        # 9. Cognition step — always-on (§3.4). The cognition module
-        #    recognises one of the three intents (escalate /
-        #    save_memory / get_session_summary) in ``raw_reply`` and
-        #    executes the corresponding behaviour. No tool registry
-        #    dispatch, no substring branching in this file.
-        cognition_outcome = self.cognition_service.process_turn(
-            raw_reply=raw_reply,
-            messages=[
-                {"role": msg.role, "content": msg.content} for msg in history
-            ],
+        # 5. Build the orchestrator request. enforce_lifecycle_gate=True so
+        #    the live path runs the §3.6 lifecycle gate FIRST (GAP-6): a
+        #    non-active / inactive / missing instance short-circuits to a
+        #    no-LLM, no-budget lifecycle no-op.
+        req = RuntimeRequest(
+            message=message,
             session_id=session_id,
-            user_id=user_id,
+            user_id=str(user_id) if user_id is not None else None,
             admin_id=admin_id,
+            channel=getattr(session, "channel", "web"),
+            luciel_instance_id=ctx.luciel_instance_id,
+            persona_preset_stanza=ctx.preset_stanza,
+            persona_business_context_stanza=ctx.business_context_stanza,
+            assistant_name=ctx.assistant_name,
+            memories=list(memories) if memories else [],
+            provider=provider,
+            enforce_lifecycle_gate=True,
         )
 
-        tool_was_called = cognition_outcome.handled
-        tool_name = cognition_outcome.intent
-        tool_result_metadata = (
-            cognition_outcome.metadata if tool_was_called else None
+        # 6. Run the gated agentic loop. Reuse the SAME injected router /
+        #    broker / trace service the legacy path used so behaviour and
+        #    test doubles carry over unchanged; the orchestrator lazily
+        #    builds the rest (judge, budget meter, channel arbiter,
+        #    cognition finalizer) exactly as the production default.
+        orchestrator = LucielOrchestrator(
+            trace_service=self.trace_service,
+            model_router=self.model_router,
+            tool_broker=self.tool_broker,
         )
+        resp = orchestrator.run(req)
 
-        # Save-memory follow-through: persistence stays on the same
-        # call site it had pre-WU7 — PolicyEngine.evaluate_memory_write
-        # gate + memory_service.repository.save_memory. The cognition
-        # module surfaces the payload; the chat path persists.
-        if (
-            cognition_outcome.intent == "save_memory"
-            and cognition_outcome.memory_payload
-        ):
-            category = cognition_outcome.memory_payload.get("category", "")
-            content = cognition_outcome.memory_payload.get("content", "")
-            if user_id and self.policy_engine.evaluate_memory_write(
-                category=category, content=content,
-            ):
-                try:
-                    self.memory_service.repository.save_memory(
-                        user_id=user_id,
-                        admin_id=admin_id,
-                        category=category,
-                        content=content,
-                        source_session_id=session_id,
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to save cognition memory: %s", exc)
+        # 7. Lifecycle no-op (§3.6): the instance is not ACTIVE. NO assistant
+        #    reply is persisted, NO memory extraction runs, NO budget was
+        #    accrued. The route/channel layer maps the empty message onto
+        #    its documented no-op shape (widget 204, SMS 204, /chat empty).
+        if resp.lifecycle_blocked:
+            return resp, admin_id
 
-        # Follow-up LLM turn for non-escalation cognition (mirrors the
-        # pre-WU7 broker follow-through shape).
-        if tool_was_called and not cognition_outcome.escalated:
-            llm_messages.append(LLMMessage(role="assistant", content=raw_reply))
-            llm_messages.append(LLMMessage(
-                role="user",
-                content=(
-                    f"Tool Result: {cognition_outcome.output} — respond "
-                    f"to the user based on this result."
-                ),
-            ))
-            followup_request = LLMRequest(messages=llm_messages)
-            followup_response = self.model_router.generate(
-                followup_request, preferred_provider=provider,
-            )
-            raw_reply = followup_response.content
+        final_reply = resp.message
 
-        # 10. Policy engine — unchanged. Keys off ``tool_name`` to
-        #     swap in the default escalation copy when escalated.
-        decision = self.policy_engine.evaluate_response(
-            raw_reply=raw_reply,
-            tool_was_called=tool_was_called,
-            tool_name=tool_name,
-            tool_result_metadata=tool_result_metadata,
-        )
-        final_reply = decision.modified_reply
-
-        # 11. (Escalation side-effect already fired inside cognition
-        #     when intent == escalate_to_human. The policy engine's
-        #     ``decision.escalated`` is the customer-facing flag for
-        #     the trace row.)
-
-        # 12. Persist assistant reply — capture id for idempotency key
+        # 8. Persist assistant reply — capture id for memory-extraction key.
         assistant_msg = self.session_service.add_message(
             session_id=session_id, role="assistant", content=final_reply,
         )
 
-        # 13. Memory extraction (consent-gated) — async if flag enabled
-        memories_extracted = 0
+        # 9. Memory extraction (consent-gated) — async if flag enabled.
         if user_id and can_use_memory:
             recent_messages = [
                 {"role": "user", "content": message},
@@ -424,7 +389,6 @@ class ChatService:
                             actor_user_id=actor_user_id,
                             trace_id=None,
                         )
-                        memories_extracted = 0
                     except Exception as enq_exc:
                         logger.warning(
                             "enqueue_extraction failed (fail-open): type=%s "
@@ -435,7 +399,7 @@ class ChatService:
                             assistant_msg.id,
                         )
                 else:
-                    memories_extracted = self.memory_service.extract_and_save(
+                    self.memory_service.extract_and_save(
                         user_id=user_id,
                         admin_id=admin_id,
                         session_id=session_id,
@@ -452,29 +416,10 @@ class ChatService:
                     getattr(assistant_msg, "id", None),
                 )
 
-        # 14. Trace
-        try:
-            self.trace_service.record_trace(
-                session_id=session_id,
-                user_id=user_id,
-                admin_id=admin_id,
-                user_message=message,
-                assistant_reply=final_reply,
-                llm_provider=llm_provider_used,
-                llm_model=llm_model_used,
-                memories_retrieved=len(memories),
-                memories_used=memories if memories else None,
-                tool_called=tool_was_called,
-                tool_name=tool_name,
-                escalated=decision.escalated,
-                policy_flags=decision.flags if decision.flags else None,
-                memories_extracted=memories_extracted,
-                luciel_instance_id=ctx.luciel_instance_id,
-            )
-        except Exception as exc:
-            logger.warning("Trace recording failed: %s", exc)
-
-        return final_reply
+        # 10. Trace — the orchestrator already recorded the §3.4.1 trace
+        #     (provider/model/tool/escalation/grounding) at the source. The
+        #     adapter does NOT double-write.
+        return resp, admin_id
 
     def respond_stream(
         self,
@@ -487,160 +432,46 @@ class ChatService:
         actor_key_prefix: str | None = None,
         actor_user_id: "uuid.UUID | None" = None,
     ):
-        """Token-by-token streaming variant.
+        """RESCAN CORE(serving-path) — Option A streaming (founder-ratified).
 
-        Streaming cannot mid-stream re-dispatch a follow-up LLM turn,
-        so the streaming path does not invoke cognition mid-flight.
-        Cognition / tool follow-through on a streamed turn is an
-        Arc-14 concern (the agentic loop owns multi-step turns).
-        The non-streaming ``respond()`` path is where cognition lives
-        today. The streaming path preserves answer + policy + trace.
-        """
+        Streaming cannot emit pre-grounding tokens: the orchestrator's
+        PLAN→ACT→REFLECT loop may re-enter and the §3.4/§3.4.13 grounding
+        gate may REPLACE the answer with the canonical "I don't have that
+        information" phrase. Streaming raw LLM tokens would defeat the
+        grounding promise (Vision §1). So we COMPUTE the full gated answer
+        through the same ``_run_turn`` path ``respond`` uses, THEN play the
+        already-grounded final text back word-by-word.
 
-        session = self.session_service.get_session(session_id)
-        if session is None:
-            raise ValueError("Session not found")
-        if caller_tenant_id and session.admin_id != caller_tenant_id:
-            raise PermissionError("Session does not belong to this tenant")
-
-        user_id = session.user_id
-        admin_id = session.admin_id
-
-        self.session_service.add_message(
-            session_id=session_id, role="user", content=message,
-        )
-
-        ctx = self._resolve_luciel_context(
+        ``_run_turn`` has ALREADY persisted the assistant reply, run memory
+        extraction, and (via the orchestrator) recorded the trace — so this
+        generator ONLY replays text; it performs NO further side effects.
+        A lifecycle no-op (instance not ACTIVE) yields an empty answer, so
+        the playback emits nothing and the route maps it onto its no-op
+        shape (widget 204 / SMS 204 / /chat empty)."""
+        resp, _admin_id = self._run_turn(
+            session_id=session_id,
+            message=message,
+            provider=provider,
+            caller_tenant_id=caller_tenant_id,
             luciel_instance_id=luciel_instance_id,
-            admin_id=admin_id,
+            actor_key_prefix=actor_key_prefix,
+            actor_user_id=actor_user_id,
         )
-
-        if not provider and ctx.preferred_provider:
-            provider = ctx.preferred_provider
-
-        memories: list = []
-        can_use_memory = True
-        if self.consent_policy and user_id:
-            can_use_memory = self.consent_policy.can_persist_memory(
-                user_id=user_id, admin_id=admin_id,
-            )
-        if user_id and can_use_memory:
-            memories = self.memory_service.retrieve_memories(
-                user_id=user_id,
-                admin_id=admin_id,
-            )
-
-        knowledge = self.knowledge_retriever.retrieve(
-            query=message,
-            admin_id=admin_id,
-            luciel_instance_id=ctx.luciel_instance_id,
-        )
-
-        history = self.session_service.list_messages(session_id)
-
-        tool_descriptions = self.tool_registry.get_tool_descriptions()
-        system_prompt = build_system_prompt(
-            memories=memories if memories else None,
-            tool_descriptions=tool_descriptions if tool_descriptions else None,
-            preset_stanza=ctx.preset_stanza,
-            business_context_stanza=ctx.business_context_stanza,
-            knowledge=knowledge if knowledge else None,
-            assistant_name=ctx.assistant_name,
-        )
-
-        llm_messages = [LLMMessage(role="system", content=system_prompt)]
-        for msg in history:
-            llm_messages.append(LLMMessage(role=msg.role, content=msg.content))
-
-        llm_request = LLMRequest(messages=llm_messages)
-
-        full_reply_parts: list[str] = []
+        final_reply = resp.message
 
         def token_generator():
-            for token in self.model_router.generate_stream(
-                llm_request, preferred_provider=provider
-            ):
-                full_reply_parts.append(token)
+            # Play back the grounded final answer word-by-word, preserving
+            # the inter-word whitespace so the reassembled stream is
+            # byte-identical to ``final_reply`` (the widget concatenates
+            # token frames verbatim). ``str.split`` would drop spacing; we
+            # re-append a single space between words and rely on the widget
+            # rendering — but to keep reassembly exact we split on a regex
+            # that KEEPS the separators.
+            import re
+
+            if not final_reply:
+                return
+            for token in re.findall(r"\S+\s*", final_reply):
                 yield token
-
-            full_reply = "".join(full_reply_parts)
-
-            decision = self.policy_engine.evaluate_response(
-                raw_reply=full_reply,
-                tool_was_called=False,
-                tool_name=None,
-                tool_result_metadata=None,
-            )
-            final_reply = decision.modified_reply
-
-            assistant_msg = self.session_service.add_message(
-                session_id=session_id, role="assistant", content=final_reply,
-            )
-
-            if user_id and can_use_memory:
-                recent_messages = [
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": final_reply},
-                ]
-                try:
-                    if settings.memory_extraction_async and actor_key_prefix:
-                        try:
-                            self.memory_service.enqueue_extraction(
-                                user_id=user_id,
-                                admin_id=admin_id,
-                                session_id=session_id,
-                                message_id=assistant_msg.id,
-                                actor_key_prefix=actor_key_prefix,
-                                luciel_instance_id=luciel_instance_id,
-                                actor_user_id=actor_user_id,
-                                trace_id=None,
-                            )
-                        except Exception as enq_exc:
-                            logger.warning(
-                                "enqueue_extraction failed (fail-open, stream): "
-                                "type=%s exc_repr=%r session=%s message_id=%s",
-                                type(enq_exc).__name__,
-                                enq_exc,
-                                session_id,
-                                assistant_msg.id,
-                            )
-                    else:
-                        self.memory_service.extract_and_save(
-                            user_id=user_id,
-                            admin_id=admin_id,
-                            session_id=session_id,
-                            messages=recent_messages,
-                            message_id=assistant_msg.id,
-                            luciel_instance_id=luciel_instance_id,
-                            actor_user_id=actor_user_id,
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "Memory extraction failed: type=%s exc_repr=%r "
-                        "session=%s message_id=%s",
-                        type(exc).__name__, exc, session_id,
-                        getattr(assistant_msg, "id", None),
-                    )
-
-            try:
-                self.trace_service.record_trace(
-                    session_id=session_id,
-                    user_id=user_id,
-                    admin_id=admin_id,
-                    user_message=message,
-                    assistant_reply=final_reply,
-                    llm_provider=None,
-                    llm_model=None,
-                    memories_retrieved=len(memories),
-                    memories_used=memories if memories else None,
-                    tool_called=False,
-                    tool_name=None,
-                    escalated=decision.escalated,
-                    policy_flags=decision.flags if decision.flags else None,
-                    memories_extracted=0,
-                    luciel_instance_id=ctx.luciel_instance_id,
-                )
-            except Exception as exc:
-                logger.warning("Trace recording failed (stream): %s", exc)
 
         return token_generator()
