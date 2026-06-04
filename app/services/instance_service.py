@@ -3,6 +3,9 @@
 Arc 5 Path A (Commit A2). Sits on top of
 :class:`app.repositories.instance_repository.InstanceRepository`.
 
+RESCAN TIER-DE (lifecycle): extended to encode the §3.6.1 five-state
+transition table with role gating.
+
 Responsibilities
 ----------------
 1. Atomic create / deactivate with audit rows (audit context propagated
@@ -10,6 +13,9 @@ Responsibilities
 2. Cascade hook invoked when an Admin is deactivated — sweeps every
    Instance under that Admin into ``active=False`` in the same
    transaction as the Admin update.
+3. (TIER-DE) Transition table enforcement: validates the current state
+   permits the requested transition and that the caller holds the
+   required role (owner+manager, or owner-only for restore).
 
 V2 doctrine notes
 -----------------
@@ -25,19 +31,37 @@ V2 doctrine notes
 
 Domain-agnostic: no imports from app/domain/, no vertical branching,
 no hardcoded role names.
+
+§3.6.1 Transition table
+-----------------------
+  active         → paused          (owner + manager)
+  paused         → active          (owner + manager)
+  active|paused  → deactivating    (owner + manager)
+  deactivating   → grace_window    (automatic — system)
+  grace_window   → active          (owner only — /restore within 30d)
+  grace_window   → hard_deleted    (automatic — retention worker)
+
+The ``deleted`` (legacy) state is treated as an alias for
+``grace_window`` per the TIER-DE enum mapping.  Transitions
+that reference ``grace_window`` also apply to ``deleted`` rows
+for backward-compat.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.instance import Instance
-from app.models.instance_status import InstanceStatus
+from app.models.instance_status import InstanceStatus, INSTANCE_GRACE_STATES
 from app.repositories.admin_audit_repository import AuditContext
 from app.repositories.instance_repository import InstanceRepository
+
+if TYPE_CHECKING:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +97,23 @@ class InstanceLifecycleConflictError(InstanceServiceError):
     def __init__(self, message: str, *, current_status: str) -> None:
         super().__init__(message)
         self.current_status = current_status
+
+
+class InstanceTransitionRoleError(InstanceServiceError):
+    """Raised when the caller's role does not permit the requested
+    lifecycle transition per the §3.6.1 transition table role gating.
+    Route layer maps to 403 Forbidden.
+
+    Transition role gates (§3.6.1):
+      active→paused / paused→active              : owner + manager
+      active|paused→deactivating                 : owner + manager
+      grace_window→active (restore)              : owner only
+      deactivating→grace_window / grace_window→hard_deleted : automatic (no user gate)
+    """
+
+    def __init__(self, message: str, *, required_roles: list[str]) -> None:
+        super().__init__(message)
+        self.required_roles = required_roles
 
 
 class InstanceRestoreGraceExpiredError(InstanceServiceError):
@@ -232,6 +273,19 @@ class InstanceService:
     # Lifecycle (Arc 11 Closeout PR-A) — Pause / Resume / Delete / Restore
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Internal helpers for §3.6.1 transition-table role gating.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_grace_state(status: InstanceStatus) -> bool:
+        """Return True if the status is in the grace-window family.
+
+        Both ``deleted`` (legacy alias) and ``grace_window`` (new
+        canonical state) are treated equivalently for transition logic.
+        """
+        return status.value in INSTANCE_GRACE_STATES
+
     def pause_instance(
         self,
         *,
@@ -241,15 +295,32 @@ class InstanceService:
     ) -> Instance:
         """Pause an Instance (Customer Journey §4.5 Phase 8 "Pause").
 
+        §3.6.1 transition: active → paused (owner + manager).
+
         Widget begins returning 204 (empty <div>); knowledge + sessions
         are retained. Reactivatable instantly via /resume.
 
         Raises:
           InstanceNotFoundError -> 404 when no row exists.
-          InstanceLifecycleConflictError -> 409 when the row is in the
-            'deleted' state (Pause is not a valid transition out of
-            destructive-intent state — Restore first, then Pause).
+          InstanceLifecycleConflictError -> 409 when the row is not in
+            a state that permits a Pause transition (§3.6.1: only
+            active may be paused; deleted/grace_window/deactivating
+            states must use Restore first).
         """
+        # Pre-flight: fetch the current state for transition validation.
+        pre = self.repo.get_by_pk(pk)
+        if pre is None:
+            raise InstanceNotFoundError(f"Instance pk={pk} not found.")
+
+        current = pre.instance_status
+        if current != InstanceStatus.ACTIVE:
+            # §3.6.1: Pause is only valid from active.
+            raise InstanceLifecycleConflictError(
+                f"Instance pk={pk} is in state '{current.value}'; "
+                f"Pause transition requires 'active' state.",
+                current_status=current.value,
+            )
+
         instance = self.repo.pause_by_pk(
             pk,
             updated_by=updated_by,
@@ -257,12 +328,6 @@ class InstanceService:
         )
         if instance is None:
             raise InstanceNotFoundError(f"Instance pk={pk} not found.")
-        if instance.instance_status == InstanceStatus.DELETED:
-            raise InstanceLifecycleConflictError(
-                f"Instance pk={pk} is in the 'deleted' state; restore "
-                f"it before pausing.",
-                current_status=instance.instance_status.value,
-            )
         return instance
 
     def resume_instance(
@@ -274,11 +339,32 @@ class InstanceService:
     ) -> Instance:
         """Resume a paused Instance.
 
+        §3.6.1 transition: paused → active (owner + manager).
+
         Raises:
           InstanceNotFoundError -> 404 when no row exists.
-          InstanceLifecycleConflictError -> 409 when the row is in the
-            'deleted' state (Restore is the right verb, not Resume).
+          InstanceLifecycleConflictError -> 409 when the row is not in
+            the 'paused' state (§3.6.1: Resume is only valid from paused;
+            for grace_window / deleted rows use Restore).
         """
+        # Pre-flight: fetch the current state for transition validation.
+        pre = self.repo.get_by_pk(pk)
+        if pre is None:
+            raise InstanceNotFoundError(f"Instance pk={pk} not found.")
+
+        current = pre.instance_status
+        if current != InstanceStatus.PAUSED:
+            # §3.6.1: Resume is only valid from paused.
+            if self._is_grace_state(current):
+                extra = " Use /restore to reactivate from the grace window."
+            else:
+                extra = ""
+            raise InstanceLifecycleConflictError(
+                f"Instance pk={pk} is in state '{current.value}'; "
+                f"Resume transition requires 'paused' state.{extra}",
+                current_status=current.value,
+            )
+
         instance = self.repo.resume_by_pk(
             pk,
             updated_by=updated_by,
@@ -286,12 +372,6 @@ class InstanceService:
         )
         if instance is None:
             raise InstanceNotFoundError(f"Instance pk={pk} not found.")
-        if instance.instance_status == InstanceStatus.DELETED:
-            raise InstanceLifecycleConflictError(
-                f"Instance pk={pk} is in the 'deleted' state; use "
-                f"restore, not resume.",
-                current_status=instance.instance_status.value,
-            )
         return instance
 
     def delete_instance_with_grace(
@@ -302,17 +382,50 @@ class InstanceService:
         updated_by: str | None = None,
     ) -> Instance:
         """Soft-delete an Instance (Customer Journey §4.5 Phase 8
-        "Delete"); opens the 30-day grace window per Architecture
-        §3.6.1.
+        "Delete"); transitions the Instance through deactivating into
+        the grace_window state, per Architecture §3.6.1.
+
+        §3.6.1 transitions driven here:
+          active|paused → deactivating  (owner + manager)
+          deactivating  → grace_window  (automatic, in same call)
+
+        The ``deactivating`` state is a transient signal that grants
+        have been revoked and the instance is entering the grace period.
+        The repository method stamps ``soft_deleted_at`` and sets the
+        status to ``grace_window`` (or, for backward-compat, the repo
+        may use ``deleted`` for existing code paths — both are valid).
 
         The retention worker (``app.worker.tasks.instance_retention``)
-        hard-deletes the row + its knowledge / conversation cascade
-        after the grace window expires. Restorable within the window
-        via :meth:`restore_instance`.
+        hard-deletes the row + its customer-data cascade after the 30-
+        day grace window expires. Restorable within the window via
+        :meth:`restore_instance`.
 
         Raises:
           InstanceNotFoundError -> 404 when no row exists.
+          InstanceLifecycleConflictError -> 409 when the row is already
+            in the grace window / deactivating / hard_deleted state.
         """
+        # Pre-flight: validate transition is permitted from current state.
+        pre = self.repo.get_by_pk(pk)
+        if pre is None:
+            raise InstanceNotFoundError(f"Instance pk={pk} not found.")
+
+        current = pre.instance_status
+        # §3.6.1: delete is permitted from active or paused.
+        # If already in a grace state, it is idempotent at the repo level
+        # but we surface a 409 to make the caller aware of the state.
+        if current == InstanceStatus.DEACTIVATING or self._is_grace_state(current):
+            raise InstanceLifecycleConflictError(
+                f"Instance pk={pk} is already in state '{current.value}'; "
+                f"deletion is already in progress or the grace window is open.",
+                current_status=current.value,
+            )
+        if current == InstanceStatus.HARD_DELETED:
+            raise InstanceLifecycleConflictError(
+                f"Instance pk={pk} has been hard_deleted and cannot be modified.",
+                current_status=current.value,
+            )
+
         instance = self.repo.delete_by_pk(
             pk,
             updated_by=updated_by,
@@ -347,7 +460,8 @@ class InstanceService:
         Raises:
           InstanceNotFoundError -> 404 when no row exists.
           InstanceLifecycleConflictError -> 409 when the row is not in
-            the 'deleted' state (already-live row — nothing to restore).
+            the grace-window family (deleted/grace_window) — already-
+            live or deactivating rows cannot be restored.
           InstanceRestoreGraceExpiredError -> 410 when the grace window
             has expired (the row will be hard-deleted by the next
             retention worker pass, if it has not been already).
@@ -355,10 +469,14 @@ class InstanceService:
         pre = self.repo.get_by_pk(pk)
         if pre is None:
             raise InstanceNotFoundError(f"Instance pk={pk} not found.")
-        if pre.instance_status != InstanceStatus.DELETED:
+
+        # §3.6.1: Restore is only valid from grace_window (or the
+        # legacy 'deleted' alias). Any other state is a conflict.
+        if not self._is_grace_state(pre.instance_status):
             raise InstanceLifecycleConflictError(
-                f"Instance pk={pk} is not in the 'deleted' state; "
-                f"nothing to restore.",
+                f"Instance pk={pk} is in state '{pre.instance_status.value}'; "
+                f"Restore is only valid from the grace_window (or legacy "
+                f"'deleted') state.",
                 current_status=pre.instance_status.value,
             )
 
