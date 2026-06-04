@@ -45,6 +45,37 @@ class RuntimeRequest:
     # Defaults None so every existing call site keeps working: no
     # explicit request ⇒ the arbiter falls through to its other rules.
     customer_requested_channel: str | None = None
+    # RESCAN CORE(serving-path) — HYBRID persona threading. ChatService
+    # is now a thin adapter: it resolves the per-turn persona (the §3.5.1
+    # composed PRESET + BUSINESS_CONTEXT stanzas, the instance display
+    # name, the preferred provider) and the consent-gated user memories,
+    # then hands them to the orchestrator on the request so the PLAN
+    # prompt is persona-aware. ALL additive with defaults so every
+    # existing call site (and all 14 orchestrator test files, which build
+    # RuntimeRequest without these) keeps working byte-identically: with
+    # the defaults the orchestrator's prompt is exactly the pre-rewiring
+    # generic ContextAssembler prompt.
+    persona_preset_stanza: str | None = None
+    persona_business_context_stanza: str | None = None
+    assistant_name: str = "Luciel"
+    memories: list[str] = field(default_factory=list)
+    # Preferred LLM provider for the PLAN call (instance.preferred_provider
+    # or caller override). None ⇒ ModelRouter picks its default, the
+    # pre-rewiring behaviour.
+    provider: str | None = None
+    # RESCAN CORE(serving-path) GAP-6/R1 — opt-in lifecycle enforcement.
+    # The live serving path (the ChatService adapter) sets this True so
+    # the orchestrator runs the §3.6.1/§3.6.2 lifecycle gate FIRST (before
+    # human-controlled / budget / PLAN): a non-active or missing instance
+    # short-circuits to a lifecycle no-op with NO LLM call and NO budget
+    # accrual. Defaults False so the 14 orchestrator unit tests — which
+    # build RuntimeRequest with a luciel_instance_id but no live instance
+    # row — are unaffected (they exercise the gates that come AFTER this
+    # one and must not be blocked by a missing test fixture row). The
+    # channel webhooks (widget/SMS) already gate at their route layer via
+    # check_instance_lifecycle and need not re-set this, but doing so is
+    # harmless (idempotent — an active instance returns None).
+    enforce_lifecycle_gate: bool = False
 
 
 @dataclass
@@ -89,3 +120,15 @@ class RuntimeResponse:
     # (e.g. a pre-loop short-circuit path that has no inbound channel).
     response_channel: str | None = None
     prompt_channel_switch: bool = False
+    # RESCAN CORE(serving-path) GAP-6/R1 — lifecycle no-op marker. The
+    # orchestrator's pre-run lifecycle gate (§3.6.1/§3.6.2) sets this True
+    # and returns an EMPTY-message response when the resolved instance is
+    # not ACTIVE (paused / deactivating / grace_window / inactive /
+    # missing). The channel/adapter layer maps that onto its documented
+    # no-op shape (widget 204 empty, SMS 204 drop, /chat empty reply) and
+    # makes NO LLM call and accrues NO budget. Defaults False so every
+    # existing call site and the 14 orchestrator tests are unaffected:
+    # the gate only fires when an instance id resolves to a non-active
+    # row, which the deterministic unit tests never set up.
+    lifecycle_blocked: bool = False
+    lifecycle_status: str | None = None
