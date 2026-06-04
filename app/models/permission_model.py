@@ -12,14 +12,20 @@ small:
 * :class:`UserRoleAssignment` — User → role + scope binding.
   Tenant-scoped.
 
-Schema source of truth: alembic migration
-``arc12b_custom_roles_permission_model``.
+Schema source of truth: alembic migrations
+``arc12b_custom_roles_permission_model`` and
+``rescanb_custom_role_approval``.
 
 The DB has a CHECK constraint pinning ``locked_role`` (when set) to
 the four canonical role names. The Python ``LOCKED_ROLE_*`` constants
 below mirror those exact strings; they are also the .value of the
 ``app.models.scope_assignment.ScopeRole`` enum, so a single string can
 flow between the two surfaces without coercion.
+
+Rescan Tier-B adds the ``approval_state`` / ``approved_by_user_id`` /
+``approved_at`` / ``pending_change_json`` columns to ``CustomRole``.
+The approval-state constants follow the same pattern as
+``app.models.sibling_call_grant`` (Architecture §3.7.3).
 """
 from __future__ import annotations
 
@@ -37,10 +43,41 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+
+# -------------------------------------------------------------------
+# Rescan Tier-B: custom-role approval-state constants (Architecture §3.7.3).
+# Mirrors the sibling_call_grant pattern for approvals.
+# -------------------------------------------------------------------
+
+APPROVAL_STATE_LIVE = "live"
+APPROVAL_STATE_PENDING = "pending_approval"
+APPROVAL_STATE_REVOKED = "revoked"
+
+ALLOWED_CUSTOM_ROLE_APPROVAL_STATES: frozenset[str] = frozenset({
+    APPROVAL_STATE_LIVE,
+    APPROVAL_STATE_PENDING,
+    APPROVAL_STATE_REVOKED,
+})
+
+# Permission keys that require a second admin_owner approval before
+# the custom role may take effect. The billing permission key in this
+# codebase is ``can_view_billing`` (Architecture §3.7.3 calls it
+# ``can_manage_billing``; this constant includes both names so a
+# future rename is handled automatically). Per the spec, we also
+# include ``can_configure_connections``.
+SENSITIVE_PERMISSION_KEYS: frozenset[str] = frozenset({
+    "can_configure_connections",
+    "can_view_billing",
+    # Future-proof alias: if a can_manage_billing key is ever added
+    # to the permissions catalog, include it here.
+    "can_manage_billing",
+})
 
 
 # Canonical locked-role string values. Match the four ``scope_role``
@@ -128,6 +165,43 @@ class CustomRole(Base, TimestampMixin):
         nullable=True,
     )
 
+    # ------------------------------------------------------------------
+    # Rescan Tier-B: second-admin approval workflow (Architecture §3.7.3).
+    # Mirrors the SiblingCallGrant approval columns.
+    # ------------------------------------------------------------------
+
+    # Current approval state. Default 'live' means all existing rows
+    # (and non-sensitive new roles) are unaffected. Only sensitive
+    # custom roles (containing can_configure_connections or
+    # can_view_billing) start as 'pending_approval' until a second
+    # admin_owner approves them.
+    approval_state: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="live",
+    )
+
+    # Who approved this role (populated on pending_approval -> live).
+    approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+    # When the approval happened.
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Staged (not yet applied) permission/scope change that is waiting
+    # for a second admin_owner to approve. On approval, the change is
+    # applied (RolePermission rows synced) and this field is cleared.
+    pending_change_json: Mapped[dict | None] = mapped_column(
+        PG_JSONB,
+        nullable=True,
+    )
+
     # Relationship to RolePermission rows that bind this custom role.
     permissions: Mapped[list["RolePermission"]] = relationship(
         "RolePermission",
@@ -136,6 +210,10 @@ class CustomRole(Base, TimestampMixin):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "approval_state IN ('live', 'pending_approval', 'revoked')",
+            name="ck_custom_roles_approval_state",
+        ),
         Index(
             "uq_custom_roles_admin_role_key_active",
             "admin_id",

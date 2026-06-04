@@ -499,6 +499,26 @@ ACTION_CUSTOM_ROLE_REVOKED = "custom_role_revoked"
 ACTION_USER_ROLE_ASSIGNED = "user_role_assigned"
 ACTION_USER_ROLE_REVOKED = "user_role_revoked"
 
+# Rescan Tier-B — custom-role second-admin approval workflow
+# (Architecture §3.7.3). Two new verbs that the approval path emits.
+#
+# ACTION_ROLE_APPROVAL_REQUIRED — emitted when a sensitive custom role
+#   (containing can_configure_connections or can_view_billing) is
+#   authored or updated. The role lands ``approval_state='pending_approval'``
+#   and grants ZERO permissions until a second admin_owner calls the
+#   approve endpoint. The before_json is None; after_json carries
+#   {role_key, approval_state, sensitive_keys} so an auditor can see
+#   WHAT triggered the approval gate.
+#
+# ACTION_ROLE_APPROVED — emitted when a second admin_owner approves the
+#   pending role via POST /admin/custom-roles/{role_id}/approve. The
+#   approval_state flips to 'live' and the role begins granting
+#   permissions to assigned users. after_json carries
+#   {role_key, approved_by_user_id, approved_at,
+#    applied_permission_keys (if pending_change_json was staged)}.
+ACTION_ROLE_APPROVAL_REQUIRED = "role_approval_required"
+ACTION_ROLE_APPROVED = "role_approved"
+
 # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
 #
 # ACTION_SIBLING_ACCESS -- emitted by ``app.tools.sibling_dispatch`` on
@@ -825,6 +845,9 @@ ALLOWED_ACTIONS = (
     ACTION_CUSTOM_ROLE_REVOKED,
     ACTION_USER_ROLE_ASSIGNED,
     ACTION_USER_ROLE_REVOKED,
+    # Rescan Tier-B -- custom-role second-admin approval workflow (§3.7.3).
+    ACTION_ROLE_APPROVAL_REQUIRED,
+    ACTION_ROLE_APPROVED,
     # Arc 13 — channel adapters (email + SMS).
     ACTION_CHANNEL_ENABLED,
     ACTION_CHANNEL_DISABLED,

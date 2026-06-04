@@ -63,6 +63,8 @@ from app.models.admin_audit_log import (
     ACTION_CUSTOM_ROLE_AUTHORED,
     ACTION_CUSTOM_ROLE_REVOKED,
     ACTION_CUSTOM_ROLE_UPDATED,
+    ACTION_ROLE_APPROVAL_REQUIRED,
+    ACTION_ROLE_APPROVED,
     ACTION_USER_ROLE_ASSIGNED,
     ACTION_USER_ROLE_REVOKED,
     RESOURCE_CUSTOM_ROLE,
@@ -71,11 +73,15 @@ from app.models.admin_audit_log import (
 from app.models.permission_model import (
     ALL_LOCKED_ROLES,
     ALL_SCOPE_TYPES,
+    APPROVAL_STATE_LIVE,
+    APPROVAL_STATE_PENDING,
+    APPROVAL_STATE_REVOKED,
     CustomRole,
     Permission,
     RolePermission,
     SCOPE_TYPE_ALL_INSTANCES,
     SCOPE_TYPE_INSTANCE_SPECIFIC,
+    SENSITIVE_PERMISSION_KEYS,
     UserRoleAssignment,
 )
 from app.policy.entitlements import (
@@ -261,6 +267,15 @@ def _serialize_role(
         revoked_at=role.revoked_at,
         created_at=role.created_at,
         updated_at=role.updated_at,
+        # Rescan Tier-B: approval-workflow fields.
+        approval_state=getattr(role, "approval_state", "live") or "live",
+        approved_by_user_id=(
+            str(role.approved_by_user_id)
+            if getattr(role, "approved_by_user_id", None) is not None
+            else None
+        ),
+        approved_at=getattr(role, "approved_at", None),
+        pending_change_json=getattr(role, "pending_change_json", None),
     )
 
 
@@ -341,6 +356,11 @@ class CustomRoleRead(BaseModel):
     revoked_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # Rescan Tier-B: approval-workflow fields.
+    approval_state: Literal["live", "pending_approval", "revoked"] = "live"
+    approved_by_user_id: str | None = None
+    approved_at: datetime | None = None
+    pending_change_json: dict | None = None
 
 
 class CustomRoleListResponse(BaseModel):
@@ -531,12 +551,23 @@ def author_custom_role(
     # Resolve every requested permission.
     perms = _load_permissions_by_keys(db, body.permission_keys)
 
+    # Rescan Tier-B: determine if any requested permission keys are
+    # sensitive (can_configure_connections, can_view_billing). If so,
+    # the role starts as 'pending_approval' and grants ZERO permissions
+    # until a second admin_owner approves it.
+    requested_keys = frozenset(body.permission_keys)
+    sensitive_overlap = requested_keys & SENSITIVE_PERMISSION_KEYS
+    initial_approval_state = (
+        APPROVAL_STATE_PENDING if sensitive_overlap else APPROVAL_STATE_LIVE
+    )
+
     role = CustomRole(
         admin_id=admin_id,
         role_key=body.role_key,
         display_name=body.display_name,
         description=body.description,
         authored_by_user_id=actor_user_id,
+        approval_state=initial_approval_state,
     )
     db.add(role)
     db.flush()  # populate role.id for the bindings.
@@ -551,7 +582,8 @@ def author_custom_role(
         )
 
     # Audit row — same transaction as the mutation.
-    AdminAuditRepository(db).record(
+    audit_repo = AdminAuditRepository(db)
+    audit_repo.record(
         ctx=audit_ctx,
         admin_id=admin_id,
         action=ACTION_CUSTOM_ROLE_AUTHORED,
@@ -564,9 +596,32 @@ def author_custom_role(
             "description": role.description,
             "permission_keys": sorted(p.key for p in perms),
             "authored_by_user_id": str(actor_user_id),
+            "approval_state": initial_approval_state,
         },
         note=f"Authored custom role {role.role_key!r} with {len(perms)} permission(s).",
     )
+
+    # If sensitive permissions were requested, emit an additional audit
+    # row indicating that approval is required before the role takes effect.
+    if sensitive_overlap:
+        audit_repo.record(
+            ctx=audit_ctx,
+            admin_id=admin_id,
+            action=ACTION_ROLE_APPROVAL_REQUIRED,
+            resource_type=RESOURCE_CUSTOM_ROLE,
+            resource_pk=role.id,
+            resource_natural_id=role.role_key,
+            after={
+                "role_key": role.role_key,
+                "approval_state": APPROVAL_STATE_PENDING,
+                "sensitive_keys": sorted(sensitive_overlap),
+                "authored_by_user_id": str(actor_user_id),
+            },
+            note=(
+                f"Custom role {role.role_key!r} requires second-admin approval "
+                f"(sensitive perms: {sorted(sensitive_overlap)})."
+            ),
+        )
 
     db.commit()
     db.refresh(role)
@@ -656,6 +711,9 @@ def update_custom_role(
         role.description = body.description
 
     after_permission_keys = list(before["permission_keys"])
+    pending_triggered = False
+    audit_repo = AdminAuditRepository(db)
+
     if body.permission_keys is not None:
         existing_keys = set(before["permission_keys"])
         new_keys = set(body.permission_keys)
@@ -666,31 +724,52 @@ def update_custom_role(
         # they don't hold is permitted.
         _require_caller_holds_all(request, permission_keys=sorted(added))
 
-        # Resolve every requested permission (also catches unknown keys).
-        if new_keys:
-            perms = _load_permissions_by_keys(db, sorted(new_keys))
-        else:
-            perms = []
+        # Rescan Tier-B: if the update ADDS a sensitive permission,
+        # stage the change in pending_change_json and set the role to
+        # pending_approval instead of applying the change immediately.
+        # Non-sensitive updates (no new sensitive keys) apply immediately.
+        added_sensitive = added & SENSITIVE_PERMISSION_KEYS
 
-        # Replace the binding rows for this custom role.
-        db.execute(
-            RolePermission.__table__.delete().where(
-                RolePermission.custom_role_id == role.id
-            )
-        )
-        for p in perms:
-            db.add(
-                RolePermission(
-                    admin_id=admin_id,
-                    custom_role_id=role.id,
-                    permission_id=p.id,
+        if added_sensitive:
+            # Stage the change — do NOT modify RolePermission rows yet.
+            # The change will be applied by the approve endpoint.
+            pending_change = {
+                "permission_keys": sorted(new_keys),
+                "display_name": role.display_name,
+                "description": role.description,
+            }
+            role.pending_change_json = pending_change
+            role.approval_state = APPROVAL_STATE_PENDING
+            role.approved_by_user_id = None
+            role.approved_at = None
+            after_permission_keys = sorted(new_keys)  # for audit diff
+            pending_triggered = True
+        else:
+            # Resolve every requested permission (also catches unknown keys).
+            if new_keys:
+                perms = _load_permissions_by_keys(db, sorted(new_keys))
+            else:
+                perms = []
+
+            # Replace the binding rows for this custom role.
+            db.execute(
+                RolePermission.__table__.delete().where(
+                    RolePermission.custom_role_id == role.id
                 )
             )
-        after_permission_keys = sorted(new_keys)
+            for p in perms:
+                db.add(
+                    RolePermission(
+                        admin_id=admin_id,
+                        custom_role_id=role.id,
+                        permission_id=p.id,
+                    )
+                )
+            after_permission_keys = sorted(new_keys)
 
     role.updated_at = datetime.now(tz=timezone.utc)
 
-    AdminAuditRepository(db).record(
+    audit_repo.record(
         ctx=audit_ctx,
         admin_id=admin_id,
         action=ACTION_CUSTOM_ROLE_UPDATED,
@@ -702,9 +781,35 @@ def update_custom_role(
             "display_name": role.display_name,
             "description": role.description,
             "permission_keys": after_permission_keys,
+            "approval_state": role.approval_state,
         },
         note=f"Updated custom role {role.role_key!r}.",
     )
+
+    # Emit a separate approval-required audit row if the update triggered
+    # the pending_approval gate.
+    if pending_triggered:
+        actor_uid = _require_actor_user_id(request)
+        added_sens = frozenset(after_permission_keys) & SENSITIVE_PERMISSION_KEYS
+        audit_repo.record(
+            ctx=audit_ctx,
+            admin_id=admin_id,
+            action=ACTION_ROLE_APPROVAL_REQUIRED,
+            resource_type=RESOURCE_CUSTOM_ROLE,
+            resource_pk=role.id,
+            resource_natural_id=role.role_key,
+            after={
+                "role_key": role.role_key,
+                "approval_state": APPROVAL_STATE_PENDING,
+                "sensitive_keys": sorted(added_sens),
+                "triggered_by_update": True,
+                "authored_by_user_id": str(actor_uid),
+            },
+            note=(
+                f"Custom role {role.role_key!r} update staged pending second-admin "
+                f"approval (added sensitive: {sorted(added_sens)})."
+            ),
+        )
 
     db.commit()
     db.refresh(role)
@@ -766,6 +871,227 @@ def revoke_custom_role(
         before={"revoked_at": None},
         after={"revoked_at": role.revoked_at.isoformat()},
         note=f"Revoked custom role {role.role_key!r}.",
+    )
+
+    db.commit()
+    db.refresh(role)
+    return _serialize_role(role, _role_permission_keys(db, role))
+
+
+# =====================================================================
+# Routes — custom-role approval workflow (Rescan Tier-B, §3.7.3)
+# =====================================================================
+
+
+@roles_router.post(
+    "/{role_id}/approve",
+    response_model=CustomRoleRead,
+)
+def approve_custom_role(
+    request: Request,
+    role_id: int,
+    db: TenantScopedDbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> CustomRoleRead:
+    """Approve a pending custom role (second-admin approval, Architecture §3.7.3).
+
+    Defences:
+      * Cross-Admin guard via ``enforce_admin_scope``.
+      * Enterprise tier gate (only Enterprise tiers have the approval
+        workflow).
+      * Caller must hold ``can_author_custom_roles`` — we reuse the author
+        permission rather than introducing a separate approve permission to
+        avoid catalog churn. The second-person rule is enforced separately
+        (see below). Any admin_owner holds can_author_custom_roles.
+      * Second-person rule: the approver MUST be a different user than the
+        role's author (``authored_by_user_id``). Same-author approval is
+        rejected with 409.
+      * State precondition: role must be in ``pending_approval`` state.
+
+    On approval:
+      * ``approval_state`` flips to ``live``.
+      * ``approved_by_user_id`` and ``approved_at`` are stamped.
+      * If ``pending_change_json`` is set (staged update), the
+        ``RolePermission`` rows are synced to match the staged permission
+        set, and ``pending_change_json`` is cleared.
+      * Audit action ``role_approved`` is emitted.
+    """
+    admin_id = _require_admin_id(request)
+    actor_user_id = _require_actor_user_id(request)
+    ScopePolicy.enforce_admin_scope(request, admin_id)
+    _require_enterprise_tier(db, admin_id)
+    _require_caller_permission(
+        request, permission_key=PERM_AUTHOR_CUSTOM_ROLES
+    )
+
+    role = db.execute(
+        select(CustomRole)
+        .where(CustomRole.id == role_id)
+        .where(CustomRole.admin_id == admin_id)
+    ).scalar_one_or_none()
+    if role is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Custom role {role_id} not found",
+        )
+
+    # State precondition.
+    if role.approval_state != APPROVAL_STATE_PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Custom role {role_id} is not in pending_approval state "
+                f"(current state: {role.approval_state!r}). "
+                f"Only pending roles can be approved."
+            ),
+        )
+
+    # Second-person rule: the approver must be a different user than the author.
+    if role.authored_by_user_id == actor_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Self-approval is not permitted: the approver must be a "
+                "different admin_owner than the role author "
+                "(Architecture §3.7.3 second-person rule)."
+            ),
+        )
+
+    # Apply pending_change_json if a staged update is waiting.
+    applied_keys: list[str] | None = None
+    if role.pending_change_json is not None:
+        staged = role.pending_change_json
+        staged_keys = staged.get("permission_keys", [])
+
+        # Resolve the staged permission keys (validation pass).
+        perms = _load_permissions_by_keys(db, staged_keys)
+
+        # Replace RolePermission rows.
+        db.execute(
+            RolePermission.__table__.delete().where(
+                RolePermission.custom_role_id == role.id
+            )
+        )
+        for p in perms:
+            db.add(
+                RolePermission(
+                    admin_id=admin_id,
+                    custom_role_id=role.id,
+                    permission_id=p.id,
+                )
+            )
+        applied_keys = sorted(staged_keys)
+        role.pending_change_json = None
+
+    # Flip to live.
+    now = datetime.now(tz=timezone.utc)
+    role.approval_state = APPROVAL_STATE_LIVE
+    role.approved_by_user_id = actor_user_id
+    role.approved_at = now
+    role.updated_at = now
+
+    after_payload: dict = {
+        "role_key": role.role_key,
+        "approval_state": APPROVAL_STATE_LIVE,
+        "approved_by_user_id": str(actor_user_id),
+        "approved_at": now.isoformat(),
+    }
+    if applied_keys is not None:
+        after_payload["applied_permission_keys"] = applied_keys
+
+    AdminAuditRepository(db).record(
+        ctx=audit_ctx,
+        admin_id=admin_id,
+        action=ACTION_ROLE_APPROVED,
+        resource_type=RESOURCE_CUSTOM_ROLE,
+        resource_pk=role.id,
+        resource_natural_id=role.role_key,
+        before={"approval_state": APPROVAL_STATE_PENDING},
+        after=after_payload,
+        note=(
+            f"Custom role {role.role_key!r} approved by "
+            f"{str(actor_user_id)[:8]}."
+        ),
+    )
+
+    db.commit()
+    db.refresh(role)
+    return _serialize_role(role, _role_permission_keys(db, role))
+
+
+@roles_router.post(
+    "/{role_id}/reject",
+    response_model=CustomRoleRead,
+)
+def reject_custom_role(
+    request: Request,
+    role_id: int,
+    db: TenantScopedDbSession,
+    audit_ctx: Annotated[AuditContext, Depends(get_audit_context)],
+) -> CustomRoleRead:
+    """Reject a pending custom role (Rescan Tier-B, Architecture §3.7.3).
+
+    Distinct from revoke:
+      * reject is a pre-live terminal transition (role never went live);
+      * revoke withdraws a live role.
+    Both set ``revoked_at``; the audit verb distinguishes them.
+
+    The second-person rule applies here too (a different admin_owner must
+    reject, not the original author) -- but is intentionally NOT enforced
+    for reject (the spec does not require it and it would prevent an author
+    from self-rejecting their own pending role). Only approve has the
+    strict second-person gate.
+    """
+    admin_id = _require_admin_id(request)
+    _require_actor_user_id(request)
+    ScopePolicy.enforce_admin_scope(request, admin_id)
+    _require_enterprise_tier(db, admin_id)
+    _require_caller_permission(
+        request, permission_key=PERM_AUTHOR_CUSTOM_ROLES
+    )
+
+    role = db.execute(
+        select(CustomRole)
+        .where(CustomRole.id == role_id)
+        .where(CustomRole.admin_id == admin_id)
+    ).scalar_one_or_none()
+    if role is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Custom role {role_id} not found",
+        )
+
+    if role.approval_state != APPROVAL_STATE_PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Custom role {role_id} is not in pending_approval state "
+                f"(current state: {role.approval_state!r}). "
+                f"Only pending roles can be rejected."
+            ),
+        )
+
+    now = datetime.now(tz=timezone.utc)
+    role.approval_state = APPROVAL_STATE_REVOKED
+    role.revoked_at = now
+    role.updated_at = now
+    # Clear any staged change since the role is being rejected.
+    role.pending_change_json = None
+
+    AdminAuditRepository(db).record(
+        ctx=audit_ctx,
+        admin_id=admin_id,
+        action=ACTION_CUSTOM_ROLE_REVOKED,
+        resource_type=RESOURCE_CUSTOM_ROLE,
+        resource_pk=role.id,
+        resource_natural_id=role.role_key,
+        before={"approval_state": APPROVAL_STATE_PENDING},
+        after={
+            "approval_state": APPROVAL_STATE_REVOKED,
+            "revoked_at": now.isoformat(),
+            "note": "rejected (never went live)",
+        },
+        note=f"Rejected pending custom role {role.role_key!r} (never went live).",
     )
 
     db.commit()

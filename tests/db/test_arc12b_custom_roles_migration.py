@@ -63,25 +63,59 @@ def migration_mod():
 
 
 # =====================================================================
-# M1 — single head equal to arc12b_custom_roles_permission_model
+# M1 — single head (head-agnostic, using alembic ScriptDirectory)
 # =====================================================================
 
 
 def test_alembic_head_is_arc12b(engine):
+    """Verify the DB is at the single current alembic head.
+
+    Previously pinned to a hard-coded revision string which caused the
+    test to drift every time a new migration was added. Now uses
+    ``alembic.script.ScriptDirectory.get_heads()`` to discover the
+    canonical head(s) from the migration directory itself — so the
+    test always passes for a correctly-migrated DB regardless of which
+    revision is the current head.
+
+    The single-head assertion (``len(heads) == 1``) guards against
+    accidental branch splits in the migration tree.
+
+    Rescan Tier-B: this test previously failed because it was pinned
+    to 'arc15_c_drop_system_prompt_additions' while the DB was at
+    'arc18_conversation_budget_metering'. The head-agnostic rewrite
+    resolves that without hardcoding any future revision.
+    """
+    from pathlib import Path
+
+    from alembic.config import Config as AlembicConfig
+    from alembic.script import ScriptDirectory
+
+    # Build alembic config pointing at the backend's alembic.ini.
+    backend_root = Path(__file__).resolve().parents[2]
+    alembic_ini = backend_root / "alembic.ini"
+    alembic_cfg = AlembicConfig(str(alembic_ini))
+
+    script_dir = ScriptDirectory.from_config(alembic_cfg)
+    heads = script_dir.get_heads()
+
+    # There must be exactly one head (linear migration history, no branches).
+    assert len(heads) == 1, (
+        f"Expected a single linear alembic head; found {len(heads)}: {heads!r}. "
+        f"A branch split may have been introduced."
+    )
+    canonical_head = heads[0]
+
     with engine.connect() as conn:
         rows = conn.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalars().all()
-    assert len(rows) == 1
-    # Single linear head. Successive arcs append on top of arc12b:
-    # Arc 13 (arc13_a_channel_routes → arc13_b_instance_channel_fields),
-    # Arc 14 (arc14_u2_escalation_events → arc14_u4_leads), Arc 15
-    # (arc15_a_instance_config_pillars → arc15_b_instance_connections →
-    # arc15_c_drop_system_prompt_additions), so the live head is now
-    # arc15_c. This pin tracks the current head (one revision, no
-    # branch) rather than freezing it at arc12b.
-    assert rows[0] == "arc15_c_drop_system_prompt_additions", (
-        f"expected arc15_c head; got {rows[0]!r}"
+    assert len(rows) == 1, (
+        f"Expected exactly one alembic_version row (single head); "
+        f"got {len(rows)}: {rows!r}"
+    )
+    assert rows[0] == canonical_head, (
+        f"DB is at revision {rows[0]!r} but the alembic head is "
+        f"{canonical_head!r}. Run 'alembic upgrade head'."
     )
 
 

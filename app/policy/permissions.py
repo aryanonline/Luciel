@@ -579,7 +579,7 @@ def _load_user_role_assignments(
     try:
         # Open an explicit transaction if the connection isn't already
         # in one (psycopg autocommit-off Sessions are in one by default).
-        db.execute(sa_text("SET LOCAL app.admin_id = :aid"), {"aid": admin_id})
+        db.execute(sa_text(f"SET LOCAL app.admin_id = '{admin_id}'"))
     except Exception:
         try:
             db.rollback()
@@ -588,7 +588,7 @@ def _load_user_role_assignments(
         # Re-issue SET LOCAL on a fresh transaction; if it fails again,
         # bail and return empty.
         try:
-            db.execute(sa_text("SET LOCAL app.admin_id = :aid"), {"aid": admin_id})
+            db.execute(sa_text(f"SET LOCAL app.admin_id = '{admin_id}'"))
         except Exception:
             return []
 
@@ -596,11 +596,29 @@ def _load_user_role_assignments(
         rows = db.execute(
             sa_text(
                 """
-                SELECT locked_role, custom_role_id, scope_type, instance_id
-                FROM user_role_assignments
-                WHERE user_id = :uid
-                  AND admin_id = :aid
-                  AND revoked_at IS NULL
+                SELECT ura.locked_role,
+                       ura.custom_role_id,
+                       ura.scope_type,
+                       ura.instance_id
+                FROM user_role_assignments ura
+                WHERE ura.user_id = :uid
+                  AND ura.admin_id = :aid
+                  AND ura.revoked_at IS NULL
+                  -- Rescan Tier-B: exclude assignments whose custom role
+                  -- is pending_approval or revoked (i.e. not 'live').
+                  -- This is the load-bearing security property: a pending
+                  -- custom role grants ZERO permissions until a second
+                  -- admin_owner approves it. locked_role assignments are
+                  -- unaffected (LEFT JOIN returns NULL for custom_role
+                  -- columns, and the IS DISTINCT FROM check preserves them).
+                  AND (
+                    ura.custom_role_id IS NULL
+                    OR EXISTS (
+                        SELECT 1 FROM custom_roles cr
+                        WHERE cr.id = ura.custom_role_id
+                          AND cr.approval_state = 'live'
+                    )
+                  )
                 """
             ),
             {"uid": user_id, "aid": admin_id},
