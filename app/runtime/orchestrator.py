@@ -134,6 +134,19 @@ class LucielOrchestrator:
 
     def run(self, req: RuntimeRequest) -> RuntimeResponse:
         # 1. RECEIVE — the resolved (admin, instance, session) is on req.
+
+        # HUMAN-CONTROLLED GATE — Rescan Tier-C §3.4.12 (LOAD-BEARING).
+        # Position: AFTER session resolution (req.session_id is available),
+        # BEFORE everything else (context assembly, budget, PLAN/ACT/REFLECT).
+        # When control_mode='human_controlled', the agentic loop MUST NOT run:
+        # - ZERO LLM calls are made.
+        # - The inbound message has already been persisted by the route layer.
+        # - The session still counts as ONE conversation budget unit (§3.4.1b)
+        #   but human turns do NOT increment LLM call count (§9 item 24/33).
+        # This is the gate that makes the admin "Take over" button actually work.
+        if self._is_session_human_controlled(req.session_id):
+            return self._finalize_human_controlled_turn(req)
+
         # 2. CONTEXT ASSEMBLY — flag-gated Retrieve + prompt composition.
         chunks: list = []
         source_ids: list[int] = []
@@ -550,10 +563,29 @@ class LucielOrchestrator:
     ) -> RuntimeResponse:
         """Build the Gate-1 short-circuit response: record the
         escalation (best-effort) and emit a templated handoff
-        acknowledgement INSTEAD of running plan/act/reflect."""
+        acknowledgement INSTEAD of running plan/act/reflect.
+
+        Rescan Tier-C §3.4.12: when the signal is EXPLICIT_HUMAN_REQUEST
+        we ALSO transition the session to human_controlled='luciel_escalated'
+        so the next inbound message hits the gate above.
+        """
         from app.runtime.handoff_ack import handoff_acknowledgement
 
         self._record_escalation_best_effort(decision)
+
+        # Rescan Tier-C §3.4.12 — Luciel-initiated path: if the signal
+        # that fired is EXPLICIT_HUMAN_REQUEST, set the session to
+        # human_controlled so all subsequent messages skip the agentic loop.
+        # Best-effort: never crashes the turn.
+        if self._handoff_warranted(decision):
+            self._set_session_human_controlled_best_effort(
+                session_id=req.session_id,
+                admin_id=req.admin_id,
+                luciel_instance_id=req.luciel_instance_id,
+                trigger="luciel_escalated",
+                actor_user_id=None,  # Luciel-initiated — no human actor
+                channel=req.channel,
+            )
 
         message = handoff_acknowledgement()
         # Gate-1 IS an escalation: let the arbiter pick the outbound
@@ -658,6 +690,161 @@ class LucielOrchestrator:
                     "notification not sent but turn is unaffected",
                     type(exc).__name__,
                 )
+
+    # ------------------------------------------------------------------
+    # Human-controlled session gate — Rescan Tier-C (§3.4.12)
+    # ------------------------------------------------------------------
+
+    def _is_session_human_controlled(self, session_id: str) -> bool:
+        """Check whether the given session is in human_controlled mode.
+
+        Performs a lightweight DB lookup (primary-key fetch). Best-effort:
+        any exception degrades to False so a DB hiccup never falsely gates
+        a legitimate agentic turn. Returns True ONLY when control_mode is
+        explicitly 'human_controlled'."""
+        if not session_id:
+            return False
+        try:
+            from app.db.session import SessionLocal
+            from app.models.session import SessionModel
+
+            db = SessionLocal()
+            try:
+                row = db.get(SessionModel, session_id)
+                return row is not None and getattr(row, "control_mode", "luciel") == "human_controlled"
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "human_controlled gate check failed: exc_class=%s — "
+                "proceeding to agentic loop (safe degradation)",
+                type(exc).__name__,
+            )
+            return False
+
+    def _set_session_human_controlled_best_effort(
+        self,
+        *,
+        session_id: str,
+        admin_id: str,
+        luciel_instance_id: int | None,
+        trigger: str,
+        actor_user_id,
+        channel: str,
+    ) -> None:
+        """Transition a session to human_controlled mode and emit the
+        human_takeover_started audit event. Best-effort: never raises
+        (an audit/DB failure must not crash the escalation turn).
+
+        Called from the Luciel-initiated path (_finalize_intake_escalation)
+        with trigger='luciel_escalated'. The admin-initiated path uses the
+        /takeover endpoint directly.
+        """
+        import uuid
+        from datetime import datetime, timezone
+
+        try:
+            from app.db.session import SessionLocal
+            from app.models.session import SessionModel
+            from app.models.admin_audit_log import (
+                ACTION_HUMAN_TAKEOVER_STARTED,
+                RESOURCE_SESSION,
+            )
+            from app.repositories.admin_audit_repository import (
+                AdminAuditRepository,
+                AuditContext,
+            )
+
+            now = datetime.now(timezone.utc)
+            db = SessionLocal()
+            try:
+                row = db.get(SessionModel, session_id)
+                if row is None:
+                    logger.warning(
+                        "_set_session_human_controlled: session %s not found",
+                        session_id,
+                    )
+                    return
+                if getattr(row, "control_mode", "luciel") == "human_controlled":
+                    # Idempotent: already human_controlled, no-op.
+                    return
+                row.control_mode = "human_controlled"
+                row.taken_over_at = now
+                if actor_user_id is not None:
+                    row.taken_over_by_user_id = (
+                        actor_user_id
+                        if isinstance(actor_user_id, uuid.UUID)
+                        else uuid.UUID(str(actor_user_id))
+                    )
+                after_payload = {
+                    "session_id": session_id,
+                    "instance_id": luciel_instance_id,
+                    "actor_user_id": str(actor_user_id) if actor_user_id else None,
+                    "trigger": trigger,
+                    "channel": channel,
+                    "taken_over_at": now.isoformat(),
+                }
+                AdminAuditRepository(db).record(
+                    ctx=AuditContext.system(label="orchestrator_handoff"),
+                    admin_id=admin_id,
+                    action=ACTION_HUMAN_TAKEOVER_STARTED,
+                    resource_type=RESOURCE_SESSION,
+                    resource_pk=session_id,
+                    resource_natural_id=session_id,
+                    luciel_instance_id=luciel_instance_id,
+                    before={"control_mode": "luciel"},
+                    after=after_payload,
+                    note=f"Luciel-initiated human takeover: trigger={trigger}",
+                    autocommit=False,
+                )
+                db.commit()
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_set_session_human_controlled failed: exc_class=%s — "
+                "session not updated but escalation turn continues",
+                type(exc).__name__,
+            )
+
+    def _finalize_human_controlled_turn(self, req: RuntimeRequest) -> "RuntimeResponse":
+        """Short-circuit response for an inbound message on a human_controlled
+        session. Persists the turn as a trace (no LLM provider, 0 iterations)
+        but makes ZERO LLM calls. The session still counts as ONE conversation
+        budget unit (§3.4.1b) but this turn does NOT increment LLM call count
+        (§9 item 24/33).
+
+        The message has already been persisted by the route layer; the
+        orchestrator only needs to emit a no-op trace and return a sentinel
+        response so the dashboard live feed can surface the message.
+        """
+        trace_id = self._record_trace_best_effort(
+            req=req,
+            assistant_reply="",  # no reply — the human admin will reply
+            source_ids=[],
+            llm_provider=None,
+            llm_model=None,
+            tool_called=False,
+            tool_name=None,
+            escalated=False,
+        )
+        return RuntimeResponse(
+            message="",  # no automated reply when human_controlled
+            trace_id=trace_id,
+            confidence=1.0,
+            session_id=req.session_id,
+            intent_summary="human_controlled",
+            escalation_flag=False,
+            source_ids_used=[],
+            llm_provider=None,
+            llm_model=None,
+            tool_called=False,
+            tool_name=None,
+            iterations=0,
+            bound_hit=False,
+            response_channel=req.channel,
+            prompt_channel_switch=False,
+        )
 
     # ------------------------------------------------------------------
     # Conversation budget gate — Arc 18 (§3.4.1b)

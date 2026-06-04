@@ -355,6 +355,26 @@ ACTION_BUDGET_ALERT_SENT = "budget_alert_sent"
 # {overage, units, rate_cents, stripe_usage_record_id, billing_period_start}.
 ACTION_OVERAGE_REPORTED = "overage_reported"
 
+# Rescan Tier-C §3.4.12 — human-controlled session handoff.
+#
+# ACTION_HUMAN_TAKEOVER_STARTED — a session transitioned from
+#   control_mode='luciel' to control_mode='human_controlled'.
+#   trigger: 'luciel_escalated' (Luciel-initiated via explicit_human_request)
+#            or 'admin_initiated' (admin dashboard action).
+#   after_json carries {session_id, resolved_lead_id, instance_id,
+#   actor_user_id, trigger, channel}.
+#   resource_type = RESOURCE_SESSION; resource_pk = sessions.id;
+#   resource_natural_id = sessions.id.
+#
+# ACTION_HUMAN_TAKEOVER_ENDED — a session transitioned back from
+#   control_mode='human_controlled' to control_mode='luciel' via
+#   the /handback endpoint, OR the session was ended by inactivity
+#   timeout while human_controlled (future: inactivity path emitted
+#   by the session lifecycle worker). after_json carries
+#   {session_id, actor_user_id, duration_seconds}.
+ACTION_HUMAN_TAKEOVER_STARTED = "human_takeover_started"
+ACTION_HUMAN_TAKEOVER_ENDED = "human_takeover_ended"
+
 # Step 30a.2 -- retention worker hard-purge action. See ALLOWED_ACTIONS
 # entry for full rationale. Defined here (above ALLOWED_ACTIONS) so the
 # whitelist tuple can reference it.
@@ -920,6 +940,9 @@ ALLOWED_ACTIONS = (
     ACTION_BUDGET_EXHAUSTED,
     ACTION_BUDGET_ALERT_SENT,
     ACTION_OVERAGE_REPORTED,
+    # Rescan Tier-C §3.4.12 — human-controlled session handoff events.
+    ACTION_HUMAN_TAKEOVER_STARTED,
+    ACTION_HUMAN_TAKEOVER_ENDED,
 )
 
 

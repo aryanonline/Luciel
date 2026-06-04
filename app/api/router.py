@@ -22,6 +22,7 @@ from app.api.v1 import admin_personality  # Arc 15 WU3 -- personality config API
 from app.api.v1 import admin_escalation  # Arc 15 WU3 -- escalation-contact API
 from app.api.v1 import admin_connections  # Arc 15 WU4 -- connection-config API
 from app.api.v1 import admin_usage  # Arc 18 -- conversation-budget usage API
+from app.api.v1 import admin_handoff  # Rescan Tier-C -- human-controlled session handoff
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -51,3 +52,4 @@ api_router.include_router(admin_personality.router)  # Arc 15 WU3 -- personality
 api_router.include_router(admin_escalation.router)  # Arc 15 WU3 -- escalation
 api_router.include_router(admin_connections.router)  # Arc 15 WU4 -- connections
 api_router.include_router(admin_usage.router)  # Arc 18 -- budget usage API
+api_router.include_router(admin_handoff.router)  # Rescan Tier-C -- human handoff
