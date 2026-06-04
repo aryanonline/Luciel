@@ -31,8 +31,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, text
-from sqlalchemy.dialects.postgresql import ENUM, JSONB
+import uuid
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, text
+from sqlalchemy.dialects.postgresql import ENUM, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -52,6 +54,9 @@ CONNECTION_STATUSES = (
     "connected",
     "error",
     "expired",
+    # rescand_connections_schema additions (§3.8.4):
+    "revoked",   # explicit revoke; broker skips; revoked_at IS NOT NULL
+    "dormant",   # Pro→Free downgrade preserve; restore on re-upgrade
 )
 
 _conn_type_enum = ENUM(
@@ -107,6 +112,27 @@ class InstanceConnection(Base):
     )
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # rescand_connections_schema additions (§3.8.2):
+    status_detail: Mapped[str | None] = mapped_column(
+        Text(),
+        nullable=True,
+        comment=(
+            "Human-readable detail for the current status. Written by the "
+            "health-check worker on expired path (CJ §7 Reconnect chip) "
+            "and by the dormant path on downgrade. NULL for connected/ "
+            "unconfigured rows."
+        ),
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        comment=(
+            "The team member (User) who configured this connection. NULL "
+            "for connections created before this column was added or "
+            "created by system processes."
+        ),
     )
 
     def __repr__(self) -> str:  # pragma: no cover

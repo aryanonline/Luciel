@@ -559,6 +559,37 @@ class TierProvisioningService:
         )
         self.db.commit()
 
+        # ------------------------------------------------------------------
+        # Re-upgrade: restore dormant connections (§3.6.7 / rescand_connections_schema).
+        # When an admin upgrades from Free back to a paid tier, any connections
+        # that were set dormant on the previous Pro→Free downgrade should be
+        # restored to their prior status (e.g. 'connected').  Secrets were
+        # retained through the dormant period, so no re-configuration is needed.
+        # This is a best-effort call; a failure here does NOT roll back the
+        # tier flip (the tier flip already committed above).
+        # ------------------------------------------------------------------
+        try:
+            from app.repositories.instance_connection_repository import (
+                InstanceConnectionRepository,
+            )
+            conn_repo = InstanceConnectionRepository(self.db)
+            restored = conn_repo.restore_from_dormant_for_admin(
+                admin_id=admin_id,
+                autocommit=True,
+            )
+            if restored:
+                logger.info(
+                    "tier_provisioning: restored %d dormant connections for "
+                    "admin=%s on re-upgrade %s -> %s",
+                    len(restored), admin_id, old_tier, new_tier,
+                )
+        except Exception:
+            logger.exception(
+                "tier_provisioning: failed to restore dormant connections for "
+                "admin=%s on upgrade %s -> %s (non-fatal)",
+                admin_id, old_tier, new_tier,
+            )
+
         logger.info(
             "tier_provisioning: upgraded admin=%s tier %s -> %s source=%s",
             admin_id, old_tier, new_tier, new_tier_source,

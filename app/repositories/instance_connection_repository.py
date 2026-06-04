@@ -145,6 +145,7 @@ class InstanceConnectionRepository:
         status: str,
         last_health_check_at: datetime | None,
         credential_ref: str | None = None,
+        status_detail: str | None = None,
         autocommit: bool = True,
     ) -> InstanceConnection:
         """Persist the honest outcome of a refresh/health check onto an
@@ -153,7 +154,9 @@ class InstanceConnectionRepository:
         ``status`` and ``last_health_check_at`` come from the health
         service; ``credential_ref`` is updated ONLY when a silent token
         refresh rotated the stored secret (a NEW ref) — it is never
-        cleared here. The caller (route or worker) writes the audit row
+        cleared here. ``status_detail`` is written on the expired path
+        (CJ §7 Reconnect chip) and cleared when status is not expired.
+        The caller (route or worker) writes the audit row
         in the same transaction.
         """
         row.status = status
@@ -161,6 +164,12 @@ class InstanceConnectionRepository:
             row.last_health_check_at = last_health_check_at
         if credential_ref is not None:
             row.credential_ref = credential_ref
+        # Populate status_detail on the expired path (§3.8.5).
+        # Clear it when the connection transitions to a healthy state.
+        if status_detail is not None:
+            row.status_detail = status_detail
+        elif status in ("connected", "unconfigured"):
+            row.status_detail = None
         self.db.add(row)
         if autocommit:
             self.db.commit()
@@ -255,6 +264,96 @@ class InstanceConnectionRepository:
         for row in rows:
             row.revoked_at = now
             row.updated_at = now
+            # Dual representation: revoked_at IS NOT NULL ⇒ status='revoked'.
+            # Both signals must agree (rescand_connections_schema §3.8.4).
+            row.status = "revoked"
+            self.db.add(row)
+        if autocommit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return rows
+
+    # ------------------------------------------------------------------
+    # Write: dormant transitions (Pro→Free downgrade / re-upgrade).
+    # §3.6.7: on downgrade, retain secrets and set status='dormant'.
+    # On re-upgrade, restore the prior status from status_detail.
+    # ------------------------------------------------------------------
+
+    def set_dormant_for_admin(
+        self,
+        *,
+        admin_id: str,
+        autocommit: bool = True,
+    ) -> list[InstanceConnection]:
+        """Set every live (non-revoked, non-dormant) connection for the
+        admin to status='dormant', preserving credential_ref (secrets
+        are retained per §3.6.7).  Stores the prior status in
+        status_detail so restore_from_dormant can recover it.
+
+        Returns the list of connections that were set dormant.
+        """
+        stmt = (
+            select(InstanceConnection)
+            .where(
+                and_(
+                    InstanceConnection.admin_id == admin_id,
+                    InstanceConnection.revoked_at.is_(None),
+                    InstanceConnection.status != "dormant",
+                    InstanceConnection.status != "revoked",
+                )
+            )
+            .order_by(InstanceConnection.created_at.desc())
+        )
+        rows = list(self.db.execute(stmt).scalars())
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            # Store the prior status in status_detail for restore.
+            prior = row.status
+            row.status = "dormant"
+            row.status_detail = (
+                f"prior_status={prior}; "
+                "Connection dormant: Pro→Free downgrade. "
+                "Secrets retained. Re-upgrade to restore."
+            )
+            row.updated_at = now
+            self.db.add(row)
+        if autocommit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return rows
+
+    def restore_from_dormant_for_admin(
+        self,
+        *,
+        admin_id: str,
+        autocommit: bool = True,
+    ) -> list[InstanceConnection]:
+        """Restore all dormant connections for an admin to their prior
+        status (stored in status_detail) on re-upgrade.
+
+        If status_detail carries a ``prior_status=<value>`` prefix, that
+        value is restored; otherwise falls back to ``'connected'``.
+        Clears status_detail after restore.
+        """
+        stmt = (
+            select(InstanceConnection)
+            .where(
+                and_(
+                    InstanceConnection.admin_id == admin_id,
+                    InstanceConnection.status == "dormant",
+                )
+            )
+            .order_by(InstanceConnection.created_at.desc())
+        )
+        rows = list(self.db.execute(stmt).scalars())
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            prior_status = _extract_prior_status(row.status_detail)
+            row.status = prior_status
+            row.status_detail = None
+            row.updated_at = now
             self.db.add(row)
         if autocommit:
             self.db.commit()
@@ -301,3 +400,25 @@ class InstanceConnectionRepository:
         for r in rows:
             out.setdefault(r.connection_type, r.status)
         return out
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper — extract prior_status from status_detail.
+# ---------------------------------------------------------------------------
+
+def _extract_prior_status(status_detail: str | None) -> str:
+    """Parse the ``prior_status=<value>`` prefix written by
+    ``set_dormant_for_admin``.  Falls back to ``'connected'`` if the
+    detail is absent or malformed.
+
+    Pattern: "prior_status=<value>; ..."
+    """
+    if not status_detail:
+        return "connected"
+    if status_detail.startswith("prior_status="):
+        # Take the value up to the first ';' or end of string.
+        fragment = status_detail[len("prior_status="):]
+        value = fragment.split(";", 1)[0].strip()
+        if value in ("unconfigured", "connected", "error", "expired"):
+            return value
+    return "connected"
