@@ -216,11 +216,16 @@ def _refresh_one(
         return "skipped"
 
     repo = InstanceConnectionRepository(db)
+    # Populate status_detail on the expired path (§3.8.5 / CJ §7 Reconnect chip).
+    # HealthCheckResult.detail carries the human-readable message from the
+    # health service; pass it through to apply_health_check which writes it
+    # to status_detail when status='expired' (and clears it on connected).
     repo.apply_health_check(
         row=row,
         status=result.status,
         last_health_check_at=result.checked_at,
         credential_ref=result.new_credential_ref,
+        status_detail=result.detail if result.status == "expired" else None,
         autocommit=False,
     )
 

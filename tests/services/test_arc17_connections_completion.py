@@ -156,6 +156,9 @@ def _build_sqlite_session():
             nullable=False, server_default=func.now(),
         ),
         Column("revoked_at", DateTime(timezone=True), nullable=True),
+        # rescand_connections_schema additions (§3.8.2):
+        Column("status_detail", Text, nullable=True),
+        Column("created_by_user_id", String(36), nullable=True),
     )
     Index(
         "uq_instance_connections_active",
