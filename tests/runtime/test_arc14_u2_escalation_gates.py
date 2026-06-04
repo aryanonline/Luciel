@@ -5,8 +5,10 @@ End-to-end through ``LucielOrchestrator.run`` with deterministic fakes
 
   * INTAKE fires BEFORE plan/act/reflect — the LLM is never called and a
     templated handoff acknowledgement is emitted instead.
-  * OUTCOME fires AFTER reflect — the loop runs, the customer reply is
-    emitted, escalation is an additive flag + recorded side-effect.
+  * OUTCOME fires AFTER reflect — the loop runs. When the signal is
+    CANNOT_CONFIDENTLY_ANSWER the LLM reply is replaced by the §3.4.13
+    canonical phrase (anti-hallucination promise). Other outcome signals
+    leave the reply unchanged. Escalation is a flag + recorded side-effect.
   * The 5-iteration bound is NEVER an escalation trigger (§3.4.1 #17),
     even when the loop hits it.
 """
@@ -25,7 +27,7 @@ from app.runtime.classifiers import (
 )
 from app.runtime.contracts import RuntimeRequest
 from app.runtime.escalation_judge import EscalationJudge
-from app.runtime.handoff_ack import handoff_acknowledgement
+from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY, handoff_acknowledgement
 from app.runtime.orchestrator import LucielOrchestrator
 from app.tools.base import ToolResult
 
@@ -210,10 +212,12 @@ class TestOutcomeGateAfterReflect(unittest.TestCase):
 
         resp = _run(orch, _request())
 
-        # The loop ran (PLAN called) and the customer reply is emitted;
-        # escalation is additive.
+        # The loop ran (PLAN called). When SIGNAL_CANNOT_CONFIDENTLY_ANSWER
+        # fires, the LLM reply is replaced by the §3.4.13 canonical phrase
+        # so an ungrounded answer is never sent to the customer (Vision §1
+        # anti-hallucination promise). Escalation flag is set and recorded.
         self.assertEqual(len(router.calls), 1)
-        self.assertEqual(resp.message, "not sure")
+        self.assertEqual(resp.message, CANNOT_ANSWER_REPLY)
         self.assertTrue(resp.escalation_flag)
         self.assertEqual(esc.recorded[0].signal, "cannot_confidently_answer")
         self.assertEqual(esc.recorded[0].gate, "outcome")

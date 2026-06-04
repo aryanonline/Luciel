@@ -65,17 +65,19 @@ SENTIMENT_POLARITY_MIN_CONSISTENT: int = 2  # of the window
 # (c) cannot confidently answer
 LOW_CONFIDENCE_THRESHOLD: float = 0.6
 # Per-tier grounding floor: the minimum grounding score below which a
-# low-confidence answer is treated as ungrounded. The floor is FLAT at
-# v1 (0.5 for every tier); the per-tier dict structure is retained so
-# later tuning from audit data (§3.4.5) is a value change, not a
-# refactor. A turn that retrieved nothing scores grounding 0.0 and is
-# below every floor.
+# low-confidence answer is treated as ungrounded. §9 items 21-23 specify
+# Free 0.45 / Pro 0.50 / Enterprise 0.55 — tighter floors on higher tiers
+# reflect the stronger anti-hallucination promise of paid plans (Vision §1).
+# Cognition-parity doctrine: the MECHANISM is identical across tiers; only
+# the floor VALUE differs. The per-tier dict structure means tuning is a
+# value change, not a refactor. A turn that retrieved nothing scores
+# grounding 0.0 and is below every floor.
 GROUNDING_FLOOR_BY_TIER: dict[str, float] = {
-    "free": 0.5,
-    "pro": 0.5,
-    "enterprise": 0.5,
+    "free": 0.45,       # §9 item 21
+    "pro": 0.50,        # §9 item 22
+    "enterprise": 0.55, # §9 item 23
 }
-_DEFAULT_GROUNDING_FLOOR = 0.5
+_DEFAULT_GROUNDING_FLOOR = 0.45  # fail-open to the most permissive floor
 # (d) high-value lead — Free built-in real-estate budget heuristic.
 FREE_LEAD_BUDGET_THRESHOLD: float = 750_000.0
 
