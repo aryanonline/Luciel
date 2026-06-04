@@ -177,6 +177,12 @@ class LucielOrchestrator:
         loop.retrieval_failed = retrieval_attempted and not chunks
         loop.grounding_score = self._grounding_from_chunks(chunks)
 
+        # RESCAN TIER-C — detect lead candidate now so the OUTCOME gate
+        # has the weighted composite lead_score before it evaluates the
+        # HIGH-VALUE LEAD signal. This is a pure read (no DB, no LLM);
+        # the finalizer later persists the same candidate as a lead row.
+        self._detect_lead_for_outcome_gate(req, loop)
+
         # 5. ESCALATION GATE 2 — OUTCOME (post-REFLECT). §3.4.5 (c)+(d).
         #    NEVER reads loop.bound_hit (§3.4.1 locked #17).
         outcome_decision = self._outcome_gate(req, loop)
@@ -354,6 +360,10 @@ class LucielOrchestrator:
                 grounding_score=loop.grounding_score,
                 retrieval_failed=loop.retrieval_failed,
                 lead_value=loop.lead_value,
+                # RESCAN TIER-C — weighted composite lead score + Pro/Ent
+                # business-context custom rules (Free = None).
+                lead_score=loop.lead_score,
+                business_context_rules=self._resolve_business_context_rules(req),
             )
             return self._judge().evaluate_outcome(req, outcome)
         except Exception as exc:  # noqa: BLE001
@@ -392,6 +402,124 @@ class LucielOrchestrator:
                 type(exc).__name__,
             )
             return TIER_FREE
+
+    def _detect_lead_for_outcome_gate(
+        self, req: RuntimeRequest, loop: "_LoopResult"
+    ) -> None:
+        """Populate ``loop.lead_score`` + ``loop.lead_value`` from the
+        domain-agnostic lead detector so the OUTCOME gate can evaluate
+        the HIGH-VALUE LEAD signal before the finalizer persists the row.
+
+        RESCAN TIER-C: replaces the old path where lead_value was always
+        None here (set only inside the finalizer, which ran AFTER the
+        gate). The detector is deterministic, cheap, and never raises.
+        """
+        try:
+            from app.cognition.lead_capture import detect
+
+            candidate = detect(
+                message=req.message,
+                prior_customer_messages=req.recent_customer_messages,
+                inbound_channel=req.channel,
+            )
+            if candidate is not None:
+                loop.lead_score = candidate.lead_score
+                loop.lead_value = candidate.lead_value
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "lead detection for outcome gate failed: exc_class=%s — "
+                "lead_score stays 0 (no high-value-lead escalation this turn)",
+                type(exc).__name__,
+            )
+
+    def _resolve_business_context_rules(
+        self, req: RuntimeRequest
+    ) -> list[dict] | None:
+        """Return the Pro/Enterprise custom-value rules from the admin's
+        business-context field, or ``None`` for Free.
+
+        RESCAN TIER-C: §3.4.5 — Pro and Enterprise admins can define
+        custom value rules in the business-context field; the escalation
+        judgment module incorporates context + those rules into its
+        scoring logic. Free uses the built-in heuristic only.
+
+        Rules shape: list of dicts ``{"pattern": str, "weight_boost": float}``.
+        Any DB/tier lookup failure degrades to ``None`` (built-in only).
+        """
+        try:
+            tier = self._resolve_tier(req)
+            from app.policy.entitlements import TIER_FREE
+
+            if tier == TIER_FREE:
+                return None
+
+            # Pro/Enterprise: look up business-context rules from the
+            # instance config. This is a best-effort lookup; missing or
+            # malformed config degrades to None (built-in only).
+            return self._load_business_context_rules(req)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "business_context_rules resolution failed: exc_class=%s — "
+                "using built-in lead scoring only",
+                type(exc).__name__,
+            )
+            return None
+
+    def _load_business_context_rules(
+        self, req: RuntimeRequest
+    ) -> list[dict] | None:
+        """Load custom lead-scoring rules from the per-instance
+        business-context field (Pro/Enterprise only).
+
+        The business-context field lives on the ``AgentConfig`` or
+        ``TenantConfig`` table as a JSON blob. The expected shape for
+        lead rules is:
+          {"lead_rules": [{"pattern": "<regex>", "weight_boost": 0.2}]}
+
+        Missing field, missing table, or unrecognised shape → ``None``
+        (built-in heuristic only, no crash).
+        """
+        try:
+            from app.db.session import SessionLocal
+
+            db = SessionLocal()
+            try:
+                # Attempt to load from AgentConfig first (instance-level),
+                # falling back to None when not found.
+                from app.models.agent_config import AgentConfig  # type: ignore
+
+                config = db.query(AgentConfig).filter_by(
+                    luciel_instance_id=req.luciel_instance_id
+                ).first() if req.luciel_instance_id else None
+
+                if config is None:
+                    return None
+
+                business_context = getattr(config, "business_context", None)
+                if not isinstance(business_context, dict):
+                    return None
+
+                rules = business_context.get("lead_rules")
+                if not isinstance(rules, list):
+                    return None
+
+                # Validate shape: each rule must have pattern + weight_boost.
+                valid_rules = [
+                    r for r in rules
+                    if isinstance(r, dict)
+                    and isinstance(r.get("pattern"), str)
+                    and isinstance(r.get("weight_boost"), (int, float))
+                ]
+                return valid_rules or None
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "load_business_context_rules failed: exc_class=%s — "
+                "built-in scoring only",
+                type(exc).__name__,
+            )
+            return None
 
     def _finalize_intake_escalation(
         self,
@@ -1266,6 +1394,9 @@ class _LoopResult:
         "grounding_score",
         "retrieval_failed",
         "lead_value",
+        # RESCAN TIER-C — weighted composite lead score [0, 1] from
+        # lead_capture.detect(), populated before the OUTCOME gate.
+        "lead_score",
     )
 
     def __init__(self, *, reply: str) -> None:
@@ -1280,7 +1411,9 @@ class _LoopResult:
         # §3.4.5 OUTCOME-gate inputs. grounding_score None = retrieval
         # did not run; retrieval_failed True = CONTEXT-step Retrieve leg
         # errored or returned nothing (spec item 5 contributing signal);
-        # lead_value = extracted high-value-lead value (e.g. budget).
+        # lead_value = extracted high-value-lead budget figure (e.g. 5000);
+        # lead_score = weighted composite [0, 1] (RESCAN TIER-C).
         self.grounding_score: float | None = None
         self.retrieval_failed: bool = False
         self.lead_value: float | None = None
+        self.lead_score: float = 0.0

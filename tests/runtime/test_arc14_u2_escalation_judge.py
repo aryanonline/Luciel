@@ -26,6 +26,7 @@ from app.runtime.classifiers import (
 from app.runtime.contracts import RuntimeRequest
 from app.runtime.escalation_judge import (
     FREE_LEAD_BUDGET_THRESHOLD,
+    LEAD_SCORE_THRESHOLD,
     EscalationJudge,
     OutcomeContext,
 )
@@ -249,32 +250,92 @@ class TestCannotConfidentlyAnswer(unittest.TestCase):
 
 
 # =====================================================================
-# (d) HIGH-VALUE LEAD — Free real-estate budget heuristic.
+# (d) HIGH-VALUE LEAD — §3.4.5 weighted composite scoring.
+# RESCAN TIER-C UPDATE: the old tests used the binary real-estate
+# heuristic (lead_value >= FREE_LEAD_BUDGET_THRESHOLD = 750_000).
+# The new gate uses OutcomeContext.lead_score (the normalized [0,1]
+# weighted composite: budget×0.5 + time×0.3 + intent×0.4, capped 1.0)
+# and fires when lead_score >= LEAD_SCORE_THRESHOLD (0.3).
+# OLD BEHAVIOR that was encoding the drift:
+#   - test_fires_at_threshold: lead_value=750_000 → fires (binary)
+#   - test_below_threshold_does_not_fire: lead_value=749_999 → no fire
+#   - test_no_lead_value_does_not_fire: lead_value=None → no fire
+# NEW BEHAVIOR (domain-agnostic weighted score):
+#   - lead_score >= 0.3 fires; lead_score < 0.3 does not
+#   - signal_confidence = the normalized score (not None)
+#   - FREE_LEAD_BUDGET_THRESHOLD is retained for backward compat but
+#     does NOT control the gate (lead_score does).
 # =====================================================================
 
 
 class TestHighValueLead(unittest.TestCase):
 
-    def test_fires_at_threshold(self):
+    def test_fires_at_threshold_budget_only(self):
+        # RESCAN TIER-C UPDATE: was test_fires_at_threshold asserting
+        # binary lead_value >= 750_000. Replaced with weighted score:
+        # budget-only score = 0.5 >= 0.3 threshold → fires.
+        # signal_confidence is the score (0.5), not None.
         judge = _judge()
         out = OutcomeContext(
-            confidence=0.9, tier="free", lead_value=FREE_LEAD_BUDGET_THRESHOLD
+            confidence=0.9, tier="free",
+            lead_value=5000.0,
+            lead_score=0.5,  # budget signal only (0.5 weight)
         )
         d = judge.evaluate_outcome(_req(), out)
         self.assertIsNotNone(d)
         self.assertEqual(d.signal, SIGNAL_HIGH_VALUE_LEAD)
-        self.assertIsNone(d.signal_confidence)
+        # signal_confidence is the normalized score, NOT None
+        # (old test asserted None — that was the real-estate bug:
+        # confidence was set to None because there was no scoring).
+        self.assertAlmostEqual(d.signal_confidence, 0.5)
 
-    def test_below_threshold_does_not_fire(self):
+    def test_below_threshold_score_does_not_fire(self):
+        # RESCAN TIER-C UPDATE: was testing binary lead_value.
+        # Now: lead_score < 0.3 does not fire.
         judge = _judge()
         out = OutcomeContext(
-            confidence=0.9, tier="free", lead_value=FREE_LEAD_BUDGET_THRESHOLD - 1
+            confidence=0.9, tier="free",
+            lead_value=None,
+            lead_score=0.0,  # no signals detected
         )
         self.assertIsNone(judge.evaluate_outcome(_req(), out))
 
-    def test_no_lead_value_does_not_fire(self):
+    def test_no_lead_score_does_not_fire(self):
+        # RESCAN TIER-C UPDATE: was testing lead_value=None.
+        # Now: default lead_score=0.0 (from OutcomeContext default) → no fire.
         judge = _judge()
-        out = OutcomeContext(confidence=0.9, tier="free", lead_value=None)
+        out = OutcomeContext(confidence=0.9, tier="free")
+        self.assertIsNone(judge.evaluate_outcome(_req(), out))
+
+    def test_full_score_budget_intent_time_fires(self):
+        # budget(0.5) + time(0.3) + intent(0.4) = 1.2, capped at 1.0.
+        judge = _judge()
+        out = OutcomeContext(
+            confidence=0.9, tier="free",
+            lead_value=5000.0,
+            lead_score=1.0,  # fully scored
+        )
+        d = judge.evaluate_outcome(_req(), out)
+        self.assertIsNotNone(d)
+        self.assertEqual(d.signal, SIGNAL_HIGH_VALUE_LEAD)
+        self.assertAlmostEqual(d.signal_confidence, 1.0)
+
+    def test_score_just_above_threshold_fires(self):
+        # Exactly at threshold (0.3 — time_constraint signal only).
+        judge = _judge()
+        out = OutcomeContext(
+            confidence=0.9, tier="free",
+            lead_score=0.3,
+        )
+        d = judge.evaluate_outcome(_req(), out)
+        self.assertIsNotNone(d)
+
+    def test_score_just_below_threshold_does_not_fire(self):
+        judge = _judge()
+        out = OutcomeContext(
+            confidence=0.9, tier="free",
+            lead_score=0.29,
+        )
         self.assertIsNone(judge.evaluate_outcome(_req(), out))
 
 
@@ -286,12 +347,17 @@ class TestHighValueLead(unittest.TestCase):
 class TestOutcomePrecedenceAndBoundInvariant(unittest.TestCase):
 
     def test_cannot_answer_takes_precedence_over_high_value_lead(self):
+        # RESCAN TIER-C UPDATE: was using lead_value=FREE_LEAD_BUDGET_THRESHOLD+1
+        # (binary real-estate heuristic). Now uses lead_score=0.5 (budget signal)
+        # which is above the weighted threshold (0.3). Both signals fire; the
+        # cannot-answer signal takes precedence.
         judge = _judge()
         out = OutcomeContext(
             confidence=0.2,
             tier="free",
             grounding_score=0.0,
-            lead_value=FREE_LEAD_BUDGET_THRESHOLD + 1,
+            lead_value=5000.0,
+            lead_score=0.5,  # budget signal fires high-value-lead too
         )
         d = judge.evaluate_outcome(_req(), out)
         self.assertEqual(d.signal, SIGNAL_CANNOT_CONFIDENTLY_ANSWER)
