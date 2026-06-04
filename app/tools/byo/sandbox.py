@@ -11,7 +11,8 @@ What this module enforces (the §3.3.5 envelope)
    abusive webhook is killed at the boundary without losing the
    worker. Decision #5 / Decision #6.
 
-2. **Hard 30s timeout** — ``BYO_HARD_TIMEOUT_SECONDS = 30``.
+2. **Hard 10s timeout** — ``BYO_HARD_TIMEOUT_SECONDS = 10`` (Arch
+   §3.8.6; was 30s, corrected RESCAN BUG-4 2026-06-04).
    Enforcement point: ``asyncio.create_subprocess_exec`` followed
    by ``asyncio.wait_for`` on the child's ``communicate()``. On
    timeout the parent calls ``child.kill()`` (SIGKILL) and treats
@@ -19,10 +20,17 @@ What this module enforces (the §3.3.5 envelope)
    child is NOT given a chance to clean up — the spec says "killed
    at the boundary."
 
-3. **Egress allowlist** — admin-registered FQDN list. Enforced
-   BEFORE spawning the subprocess (cheap rejection) AND re-checked
-   inside the subprocess (defence in depth). The parent's check is
-   the load-bearing one; the child's is a TOCTOU guard.
+3. **Egress allowlist + SSRF IP guard** — admin-registered FQDN
+   list, enforced BEFORE spawning the subprocess, AND (RESCAN BUG-4,
+   Arch §3.8.6) a DNS-rebind-resistant IP check: the host is
+   resolved and every resolved address is validated against blocked
+   ranges (RFC1918, link-local incl. 169.254.169.254 metadata,
+   loopback, ULA, multicast, reserved, unspecified, and any
+   non-globally-routable address). An allowlisted FQDN that resolves
+   to a private/metadata IP is denied with ``error_class=
+   "egress_denied"``. Fail-closed on unresolvable hosts. The IP
+   guard is skipped only when ``SPAWN_OVERRIDE`` is installed (unit
+   tests with no real egress); it is always active in production.
 
 4. **Input schema validation** — happens at the broker (input is
    validated against ``tool.input_schema`` before ``execute`` is
@@ -86,11 +94,13 @@ logger = logging.getLogger(__name__)
 # Public constants (§3.3.5)
 # ---------------------------------------------------------------------
 
-BYO_HARD_TIMEOUT_SECONDS = 30
-# Slightly shorter than the subprocess kill deadline so the child's
-# HTTP timeout fires first and we get a structured envelope back. If
-# the child does not exit by HARD_TIMEOUT we SIGKILL it.
-_CHILD_REQUEST_TIMEOUT_SECONDS = 25
+# RESCAN BUG-4 (2026-06-04): Architecture §3.8.6 specifies a hard 10s
+# enforced timeout for BYO-webhook calls ("A webhook call that has not
+# returned within 10 seconds is killed"). Was 30s. The child HTTP
+# timeout must fire before the SIGKILL deadline so we get a structured
+# envelope back rather than a bare kill.
+BYO_HARD_TIMEOUT_SECONDS = 10
+_CHILD_REQUEST_TIMEOUT_SECONDS = 8
 
 DEFAULT_RETRY_COUNT = 2  # 2 retries = 3 attempts total
 DEFAULT_BACKOFF_INITIAL_SECONDS = 0.5
@@ -161,6 +171,70 @@ def _is_host_allowed(host: str, allowed: list[str]) -> bool:
     if not host:
         return False
     return host.lower() in {d.lower() for d in (allowed or [])}
+
+
+# RESCAN BUG-4 (2026-06-04): SSRF egress protection per Architecture
+# §3.8.6. The FQDN allowlist alone is insufficient: an allowlisted
+# hostname can resolve (or be re-pointed via DNS rebinding) to a
+# private, link-local, loopback, or cloud-metadata address. We resolve
+# the host and reject if ANY resolved address falls in a blocked range.
+# §3.8.6 names: RFC1918 (10/8, 172.16/12, 192.168/16), link-local
+# (169.254/16, fe80::/10), loopback (127/8, ::1), and AWS instance
+# metadata (169.254.169.254 — already covered by link-local). DNS
+# resolution is validated BEFORE the request is issued.
+def _resolved_ips(host: str) -> list[str]:
+    """Resolve ``host`` to all A/AAAA addresses. Raises on failure so
+    the caller treats an unresolvable host as egress-denied (fail-closed)."""
+    import socket
+
+    infos = socket.getaddrinfo(host, None)
+    out: list[str] = []
+    for info in infos:
+        addr = info[4][0]
+        # strip IPv6 scope id if present (e.g. 'fe80::1%eth0')
+        out.append(addr.split("%", 1)[0])
+    return out
+
+
+def _assert_egress_ip_safe(host: str) -> None:
+    """Resolve ``host`` and raise EgressDeniedError if any resolved IP
+    is private / link-local / loopback / multicast / reserved / metadata.
+    This is the DNS-rebind-resistant check: we validate the actual
+    resolved address(es), not the hostname string."""
+    import ipaddress
+
+    try:
+        ips = _resolved_ips(host)
+    except Exception as exc:  # DNS failure → fail closed
+        raise EgressDeniedError(
+            f"host {host!r} did not resolve ({exc}); egress denied"
+        ) from exc
+    if not ips:
+        raise EgressDeniedError(f"host {host!r} resolved to no address")
+    for ip_str in ips:
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError as exc:
+            raise EgressDeniedError(
+                f"host {host!r} resolved to unparseable address {ip_str!r}"
+            ) from exc
+        # Blocks RFC1918 + loopback + link-local (169.254/16 incl.
+        # 169.254.169.254 metadata) + ULA fe80:: + unique-local +
+        # multicast + reserved + unspecified. is_global is the
+        # belt-and-suspenders: only globally-routable public IPs pass.
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+            or not ip.is_global
+        ):
+            raise EgressDeniedError(
+                f"host {host!r} resolved to blocked address {ip_str!r} "
+                f"(private/link-local/loopback/metadata range); egress denied"
+            )
 
 
 def canonical_hash(payload: Any) -> str:
@@ -425,6 +499,34 @@ async def dispatch_byo_webhook(
             error_message=(
                 f"host {host!r} not in allowlist {allowed_domains!r}"
             ),
+            latency_ms=latency_ms,
+            circuit_state_at_dispatch=breaker.current_state(
+                endpoint_id
+            ),
+            attempts=0,
+        )
+
+    # --- 2b. SSRF guard (RESCAN BUG-4, §3.8.6) ----------------------
+    # An allowlisted FQDN can still resolve to a private/metadata IP
+    # (incl. via DNS rebinding). Resolve and validate the actual IPs
+    # BEFORE any dispatch; fail closed on private/link-local/loopback/
+    # metadata/unresolvable. Terminal — not a retryable transport error.
+    #
+    # Test seam: when SPAWN_OVERRIDE is installed there is NO real
+    # network egress (the override returns a canned envelope), so the
+    # live DNS resolution check is both unnecessary and undesirable
+    # (it would couple unit tests to the sandbox's resolver). The guard
+    # is ALWAYS active in production, where SPAWN_OVERRIDE is None.
+    try:
+        if SPAWN_OVERRIDE is None:
+            _assert_egress_ip_safe(host)
+    except EgressDeniedError as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return DispatchEnvelope(
+            success=False,
+            output={},
+            error_class="egress_denied",
+            error_message=str(exc),
             latency_ms=latency_ms,
             circuit_state_at_dispatch=breaker.current_state(
                 endpoint_id

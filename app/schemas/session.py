@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
@@ -33,6 +34,11 @@ class SessionRead(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    # Rescan Tier-C §3.4.12 — human-controlled session mode fields.
+    control_mode: str = "luciel"
+    taken_over_by_user_id: uuid.UUID | None = None
+    taken_over_at: datetime | None = None
+    handed_back_at: datetime | None = None
 
 
 class MessageRead(BaseModel):

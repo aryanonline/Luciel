@@ -500,12 +500,18 @@ def test_subprocess_timeout_kills_and_yields_tool_failure() -> None:
     # timeout. Restore on exit.
     original_cmd = sandbox.SUBPROCESS_CMD
     original_timeout = sandbox.BYO_HARD_TIMEOUT_SECONDS
+    original_egress = sandbox._assert_egress_ip_safe
     sandbox.SUBPROCESS_CMD = [
         sys.executable, "-c",
         "import sys, time; sys.stdin.read(); time.sleep(60)",
     ]
     sandbox.BYO_HARD_TIMEOUT_SECONDS = 1
     sandbox.SPAWN_OVERRIDE = None  # ensure we use the real spawn
+    # RESCAN BUG-4: this test exercises the subprocess-kill (timeout)
+    # path with the REAL spawn, so it bypasses the live-DNS SSRF guard
+    # (api.example.com may not resolve in CI). Egress safety itself is
+    # covered by test_rescan_bug4_byo_ssrf_guard.py.
+    sandbox._assert_egress_ip_safe = lambda host: None
 
     try:
         breaker = _fresh_breaker()
@@ -535,6 +541,7 @@ def test_subprocess_timeout_kills_and_yields_tool_failure() -> None:
     finally:
         sandbox.SUBPROCESS_CMD = original_cmd
         sandbox.BYO_HARD_TIMEOUT_SECONDS = original_timeout
+        sandbox._assert_egress_ip_safe = original_egress
 
 
 # =====================================================================

@@ -31,6 +31,8 @@ from app.integrations.oauth.base import (
 from app.integrations.oauth.google_calendar import (
     GoogleCalendarOAuthProvider,
 )
+from app.integrations.oauth.hubspot import HubSpotOAuthProvider
+from app.integrations.oauth.salesforce import SalesforceOAuthProvider
 from app.integrations.oauth.factory import get_oauth_provider
 from app.integrations.oauth.state import (
     OAuthState,
@@ -45,6 +47,8 @@ __all__ = [
     "OAuthProvider",
     "OAuthTokens",
     "GoogleCalendarOAuthProvider",
+    "HubSpotOAuthProvider",
+    "SalesforceOAuthProvider",
     "get_oauth_provider",
     "OAuthState",
     "OAuthStateError",

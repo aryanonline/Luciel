@@ -205,6 +205,16 @@ class TierEntitlement:
     # today's role matrix exactly.
     custom_role_authoring_enabled: bool
 
+    # Axis 18 (Rescan Tier-C) -- graph knowledge store (Architecture §3.2.1).
+    # Vision §7 tier matrix: graph store is a Pro+Enterprise feature.
+    # Free admins stay vector-only; Pro and Enterprise unlock the graph
+    # ingestion-extraction path and the graph retriever (Decision #4:
+    # PostgreSQL recursive CTEs, no external graph DB; Decision #5:
+    # domain-agnostic node/edge types inferred at ingest; Decision #6:
+    # graph retriever invoked only on structured-filter-intent queries).
+    # The audit found this axis MISSING (Arc 16 not implemented).
+    knowledge_graph_enabled: bool
+
     # Axis 16 (Billing model) RETIRED at Arc 7 Commit 2 (2026-05-24).
     # Every paying tier is flat-recurring under the Arc 7 doctrine
     # pivot, so the field carried zero information. See
@@ -252,6 +262,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         stripe_customer_record_required=False,  # Gap 1: NULL until upgrade
         # Arc 12b: Free uses the four locked roles only.
         custom_role_authoring_enabled=False,
+        # Rescan Tier-C: graph store is Pro+Enterprise only (Vision §7).
+        knowledge_graph_enabled=False,
     ),
     TIER_PRO: TierEntitlement(
         # 2026-05-23 revision: instances 3\u219210, leads 2000\u21925000,
@@ -281,7 +293,10 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         widget_custom_domain_cname_cap=1,  # e.g. chat.theircompany.com
         webhook_outbound_enabled=True,
         cross_instance_memory_federation=False,
-        uptime_sla_pct=99.5,
+        # RESCAN TIER-DE(ent): corrected from 99.5 -> 99.9 per Vision §7 /
+        # §5.6 / §9 item 6. The prior value encoded the drift between the
+        # code and the contractual SLA spec. §9 item 6 is now-implemented.
+        uptime_sla_pct=99.9,
         support_sla=SUPPORT_SLA_EMAIL_48H,
         data_residency_region="ca-central-1",
         export_csv_enabled=True,
@@ -289,6 +304,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         stripe_customer_record_required=True,
         # Arc 12b: Pro uses the four locked roles only.
         custom_role_authoring_enabled=False,
+        # Rescan Tier-C: graph store enabled on Pro.
+        knowledge_graph_enabled=True,
     ),
     TIER_ENTERPRISE: TierEntitlement(
         # Arc 10: unlimited per Vision §7 tier matrix.
@@ -331,7 +348,10 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         widget_custom_domain_cname_cap=None,  # unlimited CNAMEs
         webhook_outbound_enabled=True,
         cross_instance_memory_federation=True,
-        uptime_sla_pct=99.9,
+        # RESCAN TIER-DE(ent): corrected from 99.9 -> 99.95 per Vision §7 /
+        # §5.6 / §9 item 7. The prior value encoded the drift between the
+        # code and the contractual SLA spec. §9 item 7 is now-implemented.
+        uptime_sla_pct=99.95,
         support_sla=SUPPORT_SLA_EMAIL_24H_PLUS_CSM,
         data_residency_region="ca-central-1",
         export_csv_enabled=True,
@@ -339,6 +359,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlement] = {
         stripe_customer_record_required=True,
         # Arc 12b: Enterprise unlocks admin-composed custom roles.
         custom_role_authoring_enabled=True,
+        # Rescan Tier-C: graph store enabled on Enterprise.
+        knowledge_graph_enabled=True,
     ),
 }
 
@@ -502,6 +524,23 @@ def per_key_api_rate_limit_rpm(
 # enabled is a separate question answered by the per-instance
 # enabled_channels column (Arc 13 D4) — this function answers only the
 # tier-level "is this channel allowed to be enabled at all?" gate.
+#
+# RESCAN TIER-DE(ent) — Enterprise channel-matrix decision (voice/WhatsApp):
+# Vision §7 lists "All channels (incl. voice, WhatsApp)" as an Enterprise
+# capability. However, voice is v2-deferred and WhatsApp is post-v1; neither
+# channel adapter is implemented. DECISION: DO NOT add voice/whatsapp to the
+# tier-gate set in this release. Adding them to the gate while the adapter
+# layer does not exist would allow an Enterprise admin to "enable" a channel
+# that silently drops all traffic — misleading the customer and creating a
+# false sense of functionality. The §7 "all channels" statement is aspirational
+# for the Enterprise tier; it describes the end-state, not v1 ship scope.
+# When the voice adapter ships (v2) and the WhatsApp adapter ships (post-v1),
+# CHANNEL_VOICE and CHANNEL_WHATSAPP should be added to TIER_ENTERPRISE's
+# frozenset below, the channels_available() docstring updated, and adapter-
+# readiness validated before the gate change is merged.
+# Doc-reconciliation note: Architecture §3.7.3 / Vision §7 channel matrix
+# should be annotated: "voice: v2-deferred, whatsapp: post-v1; Enterprise
+# tier-gate will be updated when each adapter ships."
 #
 # These are DERIVATIONS, not new TierEntitlement fields. The dataclass
 # is frozen (adding a field breaks every TierEntitlement(...) call-site

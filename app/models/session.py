@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -67,6 +68,47 @@ class SessionModel(Base, TimestampMixin):
         ),
         nullable=True,
         index=True,
+    )
+
+    # Rescan Tier-C §3.4.12 — human-controlled session mode.
+    #
+    # control_mode: 'luciel' (default) = agentic loop runs normally;
+    #   'human_controlled' = orchestrator gate short-circuits, zero LLM
+    #   calls, inbound messages are persisted + surfaced to dashboard.
+    # taken_over_by_user_id: the admin User who initiated a takeover
+    #   (NULL for Luciel-initiated path where trigger='luciel_escalated').
+    # taken_over_at: UTC timestamp when control_mode became 'human_controlled'.
+    # handed_back_at: UTC timestamp when the admin called /handback;
+    #   NULL while still human_controlled or if the session ended via
+    #   inactivity timeout before handback.
+    control_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="luciel",
+        server_default="luciel",
+        comment="Rescan Tier-C: 'luciel' or 'human_controlled'",
+    )
+    taken_over_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=True,
+        comment="Rescan Tier-C: admin User who initiated takeover (NULL=Luciel-initiated)",
+    )
+    taken_over_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Rescan Tier-C: UTC timestamp when session became human_controlled",
+    )
+    handed_back_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Rescan Tier-C: UTC timestamp when admin called /handback",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "control_mode IN ('luciel', 'human_controlled')",
+            name="ck_sessions_control_mode",
+        ),
     )
 
     messages: Mapped[list["MessageModel"]] = relationship(

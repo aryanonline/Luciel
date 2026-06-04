@@ -97,9 +97,25 @@ class TestLeadThreshold(unittest.TestCase):
         self.assertEqual(c.lead_value, 750_000.0)
 
     def test_listing_intent_crosses(self):
+        # RESCAN TIER-C UPDATE: the old test asserted a real-estate-specific
+        # "listing_intent" trigger (fired on street addresses / MLS refs).
+        # That was encoding the pre-Tier-C real-estate bias. The new detector
+        # is domain-agnostic: it replaces "listing_intent" with domain-
+        # agnostic "time_constraint" ("this weekend") and/or
+        # "purchase_intent" ("view" = schedule/book intent).
+        # This message fires on both time_constraint and purchase_intent;
+        # a real-estate address alone no longer triggers a lead (correct
+        # domain-agnostic behavior).
         c = detect(message="I'd like to view 123 Main Street this weekend")
         self.assertIsNotNone(c)
-        self.assertIn("listing_intent", c.triggers)
+        # Should fire on domain-agnostic signals, not on listing_intent.
+        self.assertNotIn("listing_intent", c.triggers)
+        # At least one of: time_constraint ("this weekend") or purchase_intent
+        # ("view" matches purchase/booking intent regex).
+        self.assertTrue(
+            "time_constraint" in c.triggers or "purchase_intent" in c.triggers,
+            f"expected time_constraint or purchase_intent in {c.triggers}",
+        )
 
     def test_idle_chitchat_does_not_cross(self):
         for msg in ("hi", "thanks!", "what's the weather like?", "ok cool"):

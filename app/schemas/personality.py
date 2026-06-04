@@ -17,6 +17,7 @@ are enforced at the API layer via ``app.policy.instance_config``.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -50,7 +51,19 @@ class PersonalityConfigUpdate(BaseModel):
 
 
 class PersonalityConfigResponse(BaseModel):
-    """GET/PUT response: the stored personality config + tier context."""
+    """GET/PUT response: the stored personality config + tier context.
+
+    Rescan ENT (Vision §7): on Enterprise a personality change does NOT
+    apply immediately — it is staged in ``pending_approval`` until a
+    SECOND admin approves it. The ``personality_*`` fields always carry
+    the LIVE config; the ``pending_*`` fields carry the proposal (or NULL
+    when nothing is pending). ``approval_state`` is what the frontend
+    banner keys on:
+      * ``live``             — no pending change (Free/Pro always; Ent
+                               after approval/reject).
+      * ``pending_approval`` — an Enterprise proposal is awaiting a
+                               second admin's approval.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -62,7 +75,22 @@ class PersonalityConfigResponse(BaseModel):
     # The business_context char cap for this tier.
     business_context_max_chars: int
 
+    # LIVE config (what the runtime composer reads right now).
     personality_preset: PersonalityPreset
     personality_axes: dict[str, str] | None = None
     business_context: str | None = None
     updated_at: datetime | None = None
+
+    # --- Rescan ENT — approval workflow (Vision §7) -------------------
+    # The frontend approval banner keys on ``approval_state``.
+    approval_state: Literal["live", "pending_approval"] = "live"
+    # Proposed pillars (populated only when approval_state ==
+    # 'pending_approval'). The proposal does NOT shape any customer turn
+    # until approved.
+    pending_personality_preset: PersonalityPreset | None = None
+    pending_personality_axes: dict[str, str] | None = None
+    pending_business_context: str | None = None
+    personality_submitted_by_user_id: str | None = None
+    personality_submitted_at: datetime | None = None
+    personality_approved_by_user_id: str | None = None
+    personality_approved_at: datetime | None = None

@@ -78,6 +78,7 @@ from app.repositories.knowledge_source_repository import (
     KnowledgeSourceRepository,
 )
 from app.schemas.knowledge import KNOWLEDGE_TYPES
+from app.policy.entitlements import resolve_entitlement
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +302,15 @@ class IngestionService:
             autocommit=False,
         )
 
+        # 7. Graph extraction — Pro+Enterprise only (Tier-C §3.2.1).
+        # Best-effort: failure never blocks ingest pipeline.
+        self._maybe_extract_graph(
+            chunks=chunks,
+            admin_id=admin_id,
+            luciel_instance_id=luciel_instance_id,
+            source_id=source_row.id,
+        )
+
         return IngestResult(
             luciel_instance_id=luciel_instance_id,
             source_id=source_row.id,
@@ -346,6 +356,80 @@ class IngestionService:
             raise IngestionError(
                 f"knowledge_type must be one of {KNOWLEDGE_TYPES}, "
                 f"got {knowledge_type!r}"
+            )
+
+    def _maybe_extract_graph(
+        self,
+        *,
+        chunks: list[str],
+        admin_id: str,
+        luciel_instance_id: int,
+        source_id: int,
+    ) -> None:
+        """Extract graph nodes+edges from ingested chunks into the graph store.
+
+        Tier gate: Pro+Enterprise only (knowledge_graph_enabled entitlement).
+        Free tier: no-op — vector-only path.
+
+        Best-effort: any failure is logged and swallowed; the ingest
+        pipeline is unaffected. Never raises.
+        """
+        try:
+            # Resolve tier for this admin (fail-closed to Free = no graph).
+            admin_row = (
+                self.db.query(Admin)
+                .filter(Admin.id == admin_id)
+                .one_or_none()
+            )
+            tier = getattr(admin_row, "tier", "free") if admin_row else "free"
+            graph_enabled = resolve_entitlement(
+                tier=tier, axis="knowledge_graph_enabled"
+            )
+            if not graph_enabled:
+                logger.debug(
+                    "Graph extraction skipped: tier=%s does not have "
+                    "knowledge_graph_enabled (admin=%s)",
+                    tier, admin_id,
+                )
+                return
+
+            from app.knowledge.graph_extractor import GraphExtractor
+            from app.repositories.knowledge_graph_repository import (
+                KnowledgeGraphRepository,
+            )
+
+            extractor = GraphExtractor(
+                admin_id=admin_id,
+                instance_id=luciel_instance_id,
+                source_id=source_id,
+            )
+            nodes, edges = extractor.extract_from_chunks(chunks)
+
+            if not nodes:
+                logger.debug(
+                    "Graph extraction: no entities found in source %s",
+                    source_id,
+                )
+                return
+
+            repo = KnowledgeGraphRepository(self.db)
+            node_count, edge_count = repo.upsert_graph(
+                admin_id=admin_id,
+                instance_id=luciel_instance_id,
+                source_id=source_id,
+                nodes=nodes,
+                edges=edges,
+                autocommit=False,
+            )
+            logger.info(
+                "Graph extraction: source=%s tier=%s nodes=%d edges=%d",
+                source_id, tier, node_count, edge_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_maybe_extract_graph failed: exc_class=%s — "
+                "graph not populated but ingest continues",
+                type(exc).__name__,
             )
 
     def _resolve_chunking_config(

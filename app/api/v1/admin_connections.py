@@ -448,6 +448,7 @@ def refresh_connection(
         status=result.status,
         last_health_check_at=result.checked_at,
         credential_ref=result.new_credential_ref,
+        status_detail=result.detail if result.status == "expired" else None,
         autocommit=False,
     )
 

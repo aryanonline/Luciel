@@ -26,6 +26,7 @@ from app.runtime.classifiers import (
 from app.runtime.contracts import RuntimeRequest
 from app.runtime.escalation_judge import (
     FREE_LEAD_BUDGET_THRESHOLD,
+    LEAD_SCORE_THRESHOLD,
     EscalationJudge,
     OutcomeContext,
 )
@@ -200,8 +201,9 @@ class TestCannotConfidentlyAnswer(unittest.TestCase):
         self.assertIsNone(judge.evaluate_outcome(_req(), out))
 
     def test_retrieval_failure_is_below_every_floor(self):
-        # Retrieval failed → grounding treated as 0.0 even on Enterprise
-        # (flat floor 0.5 at v1). Low confidence + retrieval failure fires.
+        # Retrieval failed → grounding treated as 0.0 (below every floor,
+        # including Enterprise at 0.55). Low confidence + retrieval failure
+        # fires on all tiers.
         judge = _judge()
         out = OutcomeContext(
             confidence=0.5, tier="enterprise", retrieval_failed=True
@@ -218,63 +220,157 @@ class TestCannotConfidentlyAnswer(unittest.TestCase):
         self.assertIsNotNone(d)
         self.assertEqual(d.signal_inputs["grounding"], 0.0)
 
-    def test_floor_is_flat_across_tiers(self):
-        # Founder decision: the grounding floor is FLAT at 0.5 for every
-        # tier in v1 (tuned later from audit data per §3.4.5). grounding
-        # 0.35 is below the flat floor → fires on free, pro, AND
-        # enterprise identically. grounding 0.5 is AT the floor → fires
-        # on none.
+    def test_per_tier_floors_match_spec_section_9(self):
+        # §9 items 21/22/23: Free 0.45 / Pro 0.50 / Enterprise 0.55.
+        # Cognition-parity: the MECHANISM is identical; only the floor
+        # VALUE differs per tier.
         from app.runtime.escalation_judge import (
             GROUNDING_FLOOR_BY_TIER,
             _DEFAULT_GROUNDING_FLOOR,
         )
 
-        self.assertEqual(GROUNDING_FLOOR_BY_TIER["free"], 0.5)
-        self.assertEqual(GROUNDING_FLOOR_BY_TIER["pro"], 0.5)
-        self.assertEqual(GROUNDING_FLOOR_BY_TIER["enterprise"], 0.5)
-        self.assertEqual(_DEFAULT_GROUNDING_FLOOR, 0.5)
+        self.assertEqual(GROUNDING_FLOOR_BY_TIER["free"], 0.45)        # §9 item 21
+        self.assertEqual(GROUNDING_FLOOR_BY_TIER["pro"], 0.50)         # §9 item 22
+        self.assertEqual(GROUNDING_FLOOR_BY_TIER["enterprise"], 0.55)  # §9 item 23
+        # Default fails open to the most permissive floor (free).
+        self.assertEqual(_DEFAULT_GROUNDING_FLOOR, 0.45)
 
         judge = _judge()
+        # Score 0.47 is below Pro (0.50) and Enterprise (0.55) but above Free (0.45).
+        self.assertIsNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="free", grounding_score=0.47),
+            ),
+            "0.47 >= Free floor 0.45 — must NOT fire on free",
+        )
+        self.assertIsNotNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="pro", grounding_score=0.47),
+            ),
+            "0.47 < Pro floor 0.50 — must fire on pro",
+        )
+        self.assertIsNotNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="enterprise", grounding_score=0.47),
+            ),
+            "0.47 < Enterprise floor 0.55 — must fire on enterprise",
+        )
+
+        # Score 0.52: between Pro floor (0.50) and Enterprise floor (0.55).
+        self.assertIsNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="pro", grounding_score=0.52),
+            ),
+            "0.52 >= Pro floor 0.50 — must NOT fire on pro",
+        )
+        self.assertIsNotNone(
+            judge.evaluate_outcome(
+                _req(),
+                OutcomeContext(confidence=0.4, tier="enterprise", grounding_score=0.52),
+            ),
+            "0.52 < Enterprise floor 0.55 — must fire on enterprise",
+        )
+
+        # Score 0.35 is below every floor — fires on all three.
         for tier in ("free", "pro", "enterprise"):
             below = OutcomeContext(confidence=0.4, tier=tier, grounding_score=0.35)
-            at_floor = OutcomeContext(confidence=0.4, tier=tier, grounding_score=0.5)
             self.assertIsNotNone(
                 judge.evaluate_outcome(_req(), below),
                 f"grounding 0.35 should fire on {tier}",
             )
-            self.assertIsNone(
-                judge.evaluate_outcome(_req(), at_floor),
-                f"grounding 0.5 (at floor) should not fire on {tier}",
-            )
 
 
 # =====================================================================
-# (d) HIGH-VALUE LEAD — Free real-estate budget heuristic.
+# (d) HIGH-VALUE LEAD — §3.4.5 weighted composite scoring.
+# RESCAN TIER-C UPDATE: the old tests used the binary real-estate
+# heuristic (lead_value >= FREE_LEAD_BUDGET_THRESHOLD = 750_000).
+# The new gate uses OutcomeContext.lead_score (the normalized [0,1]
+# weighted composite: budget×0.5 + time×0.3 + intent×0.4, capped 1.0)
+# and fires when lead_score >= LEAD_SCORE_THRESHOLD (0.3).
+# OLD BEHAVIOR that was encoding the drift:
+#   - test_fires_at_threshold: lead_value=750_000 → fires (binary)
+#   - test_below_threshold_does_not_fire: lead_value=749_999 → no fire
+#   - test_no_lead_value_does_not_fire: lead_value=None → no fire
+# NEW BEHAVIOR (domain-agnostic weighted score):
+#   - lead_score >= 0.3 fires; lead_score < 0.3 does not
+#   - signal_confidence = the normalized score (not None)
+#   - FREE_LEAD_BUDGET_THRESHOLD is retained for backward compat but
+#     does NOT control the gate (lead_score does).
 # =====================================================================
 
 
 class TestHighValueLead(unittest.TestCase):
 
-    def test_fires_at_threshold(self):
+    def test_fires_at_threshold_budget_only(self):
+        # RESCAN TIER-C UPDATE: was test_fires_at_threshold asserting
+        # binary lead_value >= 750_000. Replaced with weighted score:
+        # budget-only score = 0.5 >= 0.3 threshold → fires.
+        # signal_confidence is the score (0.5), not None.
         judge = _judge()
         out = OutcomeContext(
-            confidence=0.9, tier="free", lead_value=FREE_LEAD_BUDGET_THRESHOLD
+            confidence=0.9, tier="free",
+            lead_value=5000.0,
+            lead_score=0.5,  # budget signal only (0.5 weight)
         )
         d = judge.evaluate_outcome(_req(), out)
         self.assertIsNotNone(d)
         self.assertEqual(d.signal, SIGNAL_HIGH_VALUE_LEAD)
-        self.assertIsNone(d.signal_confidence)
+        # signal_confidence is the normalized score, NOT None
+        # (old test asserted None — that was the real-estate bug:
+        # confidence was set to None because there was no scoring).
+        self.assertAlmostEqual(d.signal_confidence, 0.5)
 
-    def test_below_threshold_does_not_fire(self):
+    def test_below_threshold_score_does_not_fire(self):
+        # RESCAN TIER-C UPDATE: was testing binary lead_value.
+        # Now: lead_score < 0.3 does not fire.
         judge = _judge()
         out = OutcomeContext(
-            confidence=0.9, tier="free", lead_value=FREE_LEAD_BUDGET_THRESHOLD - 1
+            confidence=0.9, tier="free",
+            lead_value=None,
+            lead_score=0.0,  # no signals detected
         )
         self.assertIsNone(judge.evaluate_outcome(_req(), out))
 
-    def test_no_lead_value_does_not_fire(self):
+    def test_no_lead_score_does_not_fire(self):
+        # RESCAN TIER-C UPDATE: was testing lead_value=None.
+        # Now: default lead_score=0.0 (from OutcomeContext default) → no fire.
         judge = _judge()
-        out = OutcomeContext(confidence=0.9, tier="free", lead_value=None)
+        out = OutcomeContext(confidence=0.9, tier="free")
+        self.assertIsNone(judge.evaluate_outcome(_req(), out))
+
+    def test_full_score_budget_intent_time_fires(self):
+        # budget(0.5) + time(0.3) + intent(0.4) = 1.2, capped at 1.0.
+        judge = _judge()
+        out = OutcomeContext(
+            confidence=0.9, tier="free",
+            lead_value=5000.0,
+            lead_score=1.0,  # fully scored
+        )
+        d = judge.evaluate_outcome(_req(), out)
+        self.assertIsNotNone(d)
+        self.assertEqual(d.signal, SIGNAL_HIGH_VALUE_LEAD)
+        self.assertAlmostEqual(d.signal_confidence, 1.0)
+
+    def test_score_just_above_threshold_fires(self):
+        # Exactly at threshold (0.3 — time_constraint signal only).
+        judge = _judge()
+        out = OutcomeContext(
+            confidence=0.9, tier="free",
+            lead_score=0.3,
+        )
+        d = judge.evaluate_outcome(_req(), out)
+        self.assertIsNotNone(d)
+
+    def test_score_just_below_threshold_does_not_fire(self):
+        judge = _judge()
+        out = OutcomeContext(
+            confidence=0.9, tier="free",
+            lead_score=0.29,
+        )
         self.assertIsNone(judge.evaluate_outcome(_req(), out))
 
 
@@ -286,12 +382,17 @@ class TestHighValueLead(unittest.TestCase):
 class TestOutcomePrecedenceAndBoundInvariant(unittest.TestCase):
 
     def test_cannot_answer_takes_precedence_over_high_value_lead(self):
+        # RESCAN TIER-C UPDATE: was using lead_value=FREE_LEAD_BUDGET_THRESHOLD+1
+        # (binary real-estate heuristic). Now uses lead_score=0.5 (budget signal)
+        # which is above the weighted threshold (0.3). Both signals fire; the
+        # cannot-answer signal takes precedence.
         judge = _judge()
         out = OutcomeContext(
             confidence=0.2,
             tier="free",
             grounding_score=0.0,
-            lead_value=FREE_LEAD_BUDGET_THRESHOLD + 1,
+            lead_value=5000.0,
+            lead_score=0.5,  # budget signal fires high-value-lead too
         )
         d = judge.evaluate_outcome(_req(), out)
         self.assertEqual(d.signal, SIGNAL_CANNOT_CONFIDENTLY_ANSWER)

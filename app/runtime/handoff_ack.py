@@ -57,6 +57,16 @@ _TEMPLATES: dict[str, str] = {
 }
 
 
+# §3.4.13 + §3.4.5 canonical cannot_answer phrase. Used as the reply when
+# the OUTCOME gate fires SIGNAL_CANNOT_CONFIDENTLY_ANSWER (grounding below
+# the per-tier floor). This exact phrase is the Vision §1 "without
+# hallucinating" promise made tangible: when the system cannot ground its
+# answer it says so clearly and hands off to a human rather than fabricating.
+CANNOT_ANSWER_REPLY: str = (
+    "I don't have that information, let me get someone who does."
+)
+
+
 def handoff_acknowledgement(
     *,
     preset: str | None = None,
@@ -72,3 +82,16 @@ def handoff_acknowledgement(
     """
     template = _TEMPLATES.get(preset or DEFAULT_PRESET, _TEMPLATES[DEFAULT_PRESET])
     return template
+
+
+def cannot_answer_reply() -> str:
+    """Return the §3.4.13 canonical cannot_answer phrase.
+
+    Used when the OUTCOME gate fires SIGNAL_CANNOT_CONFIDENTLY_ANSWER:
+    the system cannot ground the answer above the per-tier floor so it
+    uses this exact phrase (Vision §1 anti-hallucination promise) and
+    hands off to a human. The return-value wrapper is kept for
+    symmetry with ``handoff_acknowledgement`` and to provide a single
+    import point for both Gate-1 and Gate-2 reply text.
+    """
+    return CANNOT_ANSWER_REPLY

@@ -1046,9 +1046,21 @@ class AdminService:
            4. identity_claims   WHERE admin_id=:tid
            5. memory_items      WHERE admin_id=:tid
            6. api_keys          WHERE admin_id=:tid
+          6b. RESCAN BUG-1 FIX (2026-06-04): all RESTRICT-FK children
+              of ``instances`` cleared here, plus SET-NULL children
+              that hold customer data (GDPR/PIPEDA completeness):
+              instance_composition_grants, knowledge_share_grants,
+              sibling_call_grants, instance_tool_authorizations,
+              user_role_assignments, tool_execution_log,
+              byo_webhook_endpoints, channel_routes,
+              escalation_events, leads, traces, knowledge_chunks,
+              knowledge_sources, instance_connections.
+              Without this, step 7 raised FK violation 23503 for any
+              tenant with knowledge/connections and the whole purge
+              aborted silently (PIPEDA/GDPR timeline breach).
            7. instances         WHERE admin_id=:tid
               (V2 table; was renamed from luciel_instances at
-              Arc 9.2 PR #99)
+              Arc 9.2 PR #99). FK-safe now that 6b ran first.
            8. agents / agent_configs / domain_configs: REMOVED
               (Arc 10.5). Underlying tables dropped before Arc 10;
               row-counts map carries them as 0 for audit-row schema
@@ -1190,10 +1202,67 @@ class AdminService:
             "DELETE FROM api_keys WHERE admin_id = :tid"
         )
 
+        # 6b. RESCAN BUG-1 FIX (2026-06-04): clear every child of
+        #     ``instances`` BEFORE the instance DELETE below. Prior to
+        #     this fix the cascade jumped straight to step 7 and the
+        #     DELETE FROM instances raised a PostgreSQL FK violation
+        #     (errcode 23503) for ANY tenant that had ever ingested
+        #     knowledge or configured a connection/tool/grant/webhook,
+        #     because those child tables carry ON DELETE RESTRICT FKs
+        #     to instances.id. The whole purge transaction aborted
+        #     silently and the tenant row was never tombstoned, so
+        #     PIPEDA P5 / GDPR Art.17 retention timelines were violated
+        #     for every non-trivial tenant. (Arch §3.6.5/§3.6.6.)
+        #
+        #     FK delete rules verified against the live schema
+        #     (2026-06-04). All children are admin_id-scoped, so a
+        #     single admin_id-filtered DELETE per table is sufficient
+        #     and avoids a per-instance loop.
+        #
+        #     RESTRICT children (these WOULD block the instance DELETE):
+        #       instance_composition_grants, knowledge_share_grants,
+        #       knowledge_sources, instance_tool_authorizations,
+        #       sibling_call_grants, byo_webhook_endpoints,
+        #       tool_execution_log, user_role_assignments,
+        #       channel_routes, instance_connections.
+        #     SET NULL children purged here too for GDPR/PIPEDA
+        #     completeness (they would orphan-null, not block):
+        #       knowledge_chunks, traces, leads, escalation_events.
+        #     (memory_items SET NULL already deleted in step 5;
+        #      api_keys SET NULL already deleted in step 6.)
+        #
+        #     Order: leaf grant/auth/log tables first, then the
+        #     knowledge_chunks->knowledge_sources pair (chunks before
+        #     sources to respect their own FK), then connections.
+        for _child_sql in (
+            # grants / authorizations / logs referencing instances
+            "DELETE FROM instance_composition_grants WHERE admin_id = :tid",
+            "DELETE FROM knowledge_share_grants WHERE admin_id = :tid",
+            "DELETE FROM sibling_call_grants WHERE admin_id = :tid",
+            "DELETE FROM instance_tool_authorizations WHERE admin_id = :tid",
+            "DELETE FROM user_role_assignments WHERE admin_id = :tid",
+            "DELETE FROM tool_execution_log WHERE admin_id = :tid",
+            "DELETE FROM byo_webhook_endpoints WHERE admin_id = :tid",
+            "DELETE FROM channel_routes WHERE admin_id = :tid",
+            # customer-data tables (SET NULL would orphan; purge for GDPR)
+            "DELETE FROM escalation_events WHERE admin_id = :tid",
+            "DELETE FROM leads WHERE admin_id = :tid",
+            "DELETE FROM traces WHERE admin_id = :tid",
+            # knowledge: chunks reference sources -> chunks first
+            "DELETE FROM knowledge_chunks WHERE admin_id = :tid",
+            "DELETE FROM knowledge_sources WHERE admin_id = :tid",
+            # connections last (secret pointers; outbox already enqueued
+            # secret-store cleanup on deactivation per §3.6.3)
+            "DELETE FROM instance_connections WHERE admin_id = :tid",
+        ):
+            _tbl = _child_sql.split("FROM ", 1)[1].split(" ", 1)[0]
+            row_counts[_tbl] = _delete(_child_sql)
+
         # 7. instances (V2 table; was renamed from luciel_instances
         # at Arc 9.2 PR #99 -- the pre-Arc-10.5 code targeted the
         # pre-rename name, which crashed UndefinedTable on every
-        # hard-delete attempt).
+        # hard-delete attempt). RESCAN BUG-1: now FK-safe because
+        # step 6b cleared every RESTRICT child above.
         row_counts["instances"] = _delete(
             "DELETE FROM instances WHERE admin_id = :tid"
         )

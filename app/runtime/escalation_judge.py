@@ -1,4 +1,5 @@
 """Arc 14 U2 — §3.4.5 Escalation Judgment Module.
+RESCAN TIER-C: domain-agnostic weighted lead scoring.
 
 Two gates, four FIXED signals (NOT admin-configurable — the doctrinal
 thresholds are pinned here in code):
@@ -18,8 +19,13 @@ thresholds are pinned here in code):
          signal (spec item 5): a turn that retrieved nothing is treated
          as below the grounding floor.
     d. HIGH-VALUE LEAD
-         a lead-scoring rule. Pro/Enterprise may define value rules;
-         Free uses the built-in real-estate budget heuristic.
+         §3.4.5 weighted composite lead score >= LEAD_SCORE_THRESHOLD.
+         Score = budget×0.5 + time_constraint×0.3 + purchase_intent×0.4,
+         capped at 1.0, normalized [0,1].
+         Pro/Enterprise admins may define custom value rules via the
+         business-context field that raise the score further.
+         Free uses the built-in general-purpose heuristic only.
+         The score is emitted as ``signal_confidence``.
 
 The judge is PURE DECISION: it reads classifier outputs + loop state and
 returns an ``EscalationDecision`` (or ``None``). It does NOT touch the
@@ -65,18 +71,29 @@ SENTIMENT_POLARITY_MIN_CONSISTENT: int = 2  # of the window
 # (c) cannot confidently answer
 LOW_CONFIDENCE_THRESHOLD: float = 0.6
 # Per-tier grounding floor: the minimum grounding score below which a
-# low-confidence answer is treated as ungrounded. The floor is FLAT at
-# v1 (0.5 for every tier); the per-tier dict structure is retained so
-# later tuning from audit data (§3.4.5) is a value change, not a
-# refactor. A turn that retrieved nothing scores grounding 0.0 and is
-# below every floor.
+# low-confidence answer is treated as ungrounded. §9 items 21-23 specify
+# Free 0.45 / Pro 0.50 / Enterprise 0.55 — tighter floors on higher tiers
+# reflect the stronger anti-hallucination promise of paid plans (Vision §1).
+# Cognition-parity doctrine: the MECHANISM is identical across tiers; only
+# the floor VALUE differs. The per-tier dict structure means tuning is a
+# value change, not a refactor. A turn that retrieved nothing scores
+# grounding 0.0 and is below every floor.
 GROUNDING_FLOOR_BY_TIER: dict[str, float] = {
-    "free": 0.5,
-    "pro": 0.5,
-    "enterprise": 0.5,
+    "free": 0.45,       # §9 item 21
+    "pro": 0.50,        # §9 item 22
+    "enterprise": 0.55, # §9 item 23
 }
-_DEFAULT_GROUNDING_FLOOR = 0.5
-# (d) high-value lead — Free built-in real-estate budget heuristic.
+_DEFAULT_GROUNDING_FLOOR = 0.45  # fail-open to the most permissive floor
+# (d) high-value lead — §3.4.5 weighted composite scoring (RESCAN TIER-C).
+# The normalized lead score fires when it reaches this threshold
+# (budget alone = 0.5; purchase-intent alone = 0.4; time-constraint = 0.3).
+LEAD_SCORE_THRESHOLD: float = 0.3
+
+# LEGACY COMPAT: FREE_LEAD_BUDGET_THRESHOLD is kept so existing tests that
+# import it do not break. It is no longer used for the scoring decision
+# (replaced by LEAD_SCORE_THRESHOLD on the normalized score). Its presence
+# documents the old real-estate-biased drift; scoring moved from
+# 'lead_value >= 750_000' to 'lead_score >= LEAD_SCORE_THRESHOLD'.
 FREE_LEAD_BUDGET_THRESHOLD: float = 750_000.0
 
 
@@ -89,8 +106,17 @@ class OutcomeContext:
     knowledge (``None`` when retrieval did not run). ``retrieval_failed``
     is True when the CONTEXT step's Retrieve leg errored or returned
     nothing — a contributing signal per spec item 5. ``tier`` shapes the
-    grounding floor. ``lead_value`` is an optional extracted lead value
-    (e.g. budget) for the high-value-lead heuristic.
+    grounding floor.
+
+    Lead scoring inputs (§3.4.5 RESCAN TIER-C):
+    ``lead_score`` is the weighted composite lead score [0, 1] produced
+    by ``lead_capture.score_lead`` (budget×0.5 + time×0.3 + intent×0.4,
+    capped 1.0). This replaces the old binary ``lead_value >= 750k`` gate.
+    ``lead_value`` is retained for backward compatibility (still used by
+    the lead row) but the HIGH-VALUE LEAD gate now reads ``lead_score``.
+    ``business_context_rules`` is the list of Pro/Enterprise custom-value
+    rules (each {"pattern": str, "weight_boost": float}) from the admin's
+    business-context field; Free always passes None/[].
     """
 
     confidence: float
@@ -98,6 +124,8 @@ class OutcomeContext:
     grounding_score: float | None = None
     retrieval_failed: bool = False
     lead_value: float | None = None
+    lead_score: float = 0.0
+    business_context_rules: list[dict] | None = None
 
 
 class EscalationJudge:
@@ -271,12 +299,39 @@ class EscalationJudge:
     def _high_value_lead(
         self, req, outcome: OutcomeContext
     ) -> EscalationDecision | None:
-        # Free tier: built-in real-estate budget heuristic. Pro/Enterprise
-        # custom value rules are a later unit's hook; here Free's heuristic
-        # applies to all tiers as the floor (a high-value lead is worth a
-        # human on any tier).
-        value = outcome.lead_value
-        if value is None or value < FREE_LEAD_BUDGET_THRESHOLD:
+        """HIGH-VALUE LEAD gate — §3.4.5 weighted composite scoring.
+
+        Fires when the normalized lead score >= LEAD_SCORE_THRESHOLD.
+        The score = budget×0.5 + time_constraint×0.3 + purchase_intent×0.4,
+        capped at 1.0 (see ``lead_capture.score_lead``).
+
+        Pro/Enterprise: ``outcome.business_context_rules`` may carry
+        custom-value rules that boost the score beyond the built-in
+        heuristic. Free tier: no rules → built-in heuristic only.
+
+        The normalized score is emitted as ``signal_confidence`` so the
+        audit trail records it (Customer Journey Sarah Phase 6
+        "lead-score 0.91").
+
+        RESCAN TIER-C: replaces the old binary
+        ``lead_value >= FREE_LEAD_BUDGET_THRESHOLD`` (750k) gate which
+        was real-estate-biased and binary.
+        """
+        from app.cognition.lead_capture import score_lead
+
+        # Re-compute final score applying any Pro/Enterprise custom rules.
+        # When outcome.lead_score was set by the orchestrator (from the
+        # LeadCandidate), we reuse it as the base and apply context rules.
+        # When it was not set (legacy path, or no lead detected), score = 0.
+        lead_candidate_mock = _LeadScoreHolder(
+            lead_score=outcome.lead_score,
+        )
+        final_score = score_lead(
+            lead_candidate_mock,
+            business_context_rules=outcome.business_context_rules,
+        )
+
+        if final_score < LEAD_SCORE_THRESHOLD:
             return None
 
         return EscalationDecision(
@@ -286,15 +341,28 @@ class EscalationJudge:
             session_id=req.session_id,
             luciel_instance_id=req.luciel_instance_id,
             user_id=req.user_id,
-            signal_confidence=None,
+            signal_confidence=final_score,
             reasoning_excerpt=(
-                f"lead value {value:.0f} >= budget threshold "
-                f"{FREE_LEAD_BUDGET_THRESHOLD:.0f}"
+                f"lead_score {final_score:.2f} >= threshold {LEAD_SCORE_THRESHOLD:.2f}"
+                + (
+                    f" (budget={outcome.lead_value:.0f})"
+                    if outcome.lead_value is not None
+                    else ""
+                )
+                + (
+                    " [custom rules applied]"
+                    if outcome.business_context_rules
+                    else ""
+                )
             ),
             signal_inputs={
-                "lead_value": value,
-                "threshold": FREE_LEAD_BUDGET_THRESHOLD,
+                "lead_score": final_score,
+                "lead_score_threshold": LEAD_SCORE_THRESHOLD,
+                "lead_value": outcome.lead_value,
                 "tier": outcome.tier,
+                "business_context_rules_applied": bool(
+                    outcome.business_context_rules
+                ),
             },
         )
 
@@ -315,3 +383,20 @@ class EscalationJudge:
 
             self._sentiment = LLMSentimentClassifier(model_router=self._model_router)
         return self._sentiment
+
+
+class _LeadScoreHolder:
+    """Minimal duck-type accepted by ``score_lead`` from lead_capture.
+
+    ``score_lead`` reads ``.lead_score`` and the ``key_facts`` /
+    ``intent`` fields to match business-context rules. When the judge
+    builds this from ``OutcomeContext`` (which only carries the scalar
+    score), the text fields are empty — context rules that need them must
+    operate on ``outcome.lead_score`` directly (which they do, because
+    ``score_lead`` just adds the boost to ``candidate.lead_score``).
+    """
+
+    def __init__(self, *, lead_score: float) -> None:
+        self.lead_score = lead_score
+        self.key_facts: list[str] = []
+        self.intent: str | None = None

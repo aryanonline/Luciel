@@ -90,6 +90,7 @@ class LucielOrchestrator:
         tool_broker=None,
         escalation_judge=None,
         escalation_service=None,
+        escalation_delivery_service=None,
         channel_arbiter=None,
         cognition_finalizer=None,
         budget_meter=None,
@@ -115,6 +116,11 @@ class LucielOrchestrator:
         # missing provider NEVER invents an escalation.
         self._escalation_judge = escalation_judge
         self._escalation_service = escalation_service
+        # Rescan Tier-C — §3.5 escalation delivery service (notification
+        # send-with-retry + idempotency + audit). Injectable so tests can
+        # drive a fake. Built lazily when first needed. Called AFTER the
+        # customer reply is sent — never blocks or crashes the turn.
+        self._escalation_delivery_service = escalation_delivery_service
         # Arc 18 — conversation budget meter (Redis counter) + alert
         # service (80%/100% notifications). Injectable so tests drive an
         # InMemoryBackend / fake alerter; built lazily so pre-Arc-18 call
@@ -128,6 +134,19 @@ class LucielOrchestrator:
 
     def run(self, req: RuntimeRequest) -> RuntimeResponse:
         # 1. RECEIVE — the resolved (admin, instance, session) is on req.
+
+        # HUMAN-CONTROLLED GATE — Rescan Tier-C §3.4.12 (LOAD-BEARING).
+        # Position: AFTER session resolution (req.session_id is available),
+        # BEFORE everything else (context assembly, budget, PLAN/ACT/REFLECT).
+        # When control_mode='human_controlled', the agentic loop MUST NOT run:
+        # - ZERO LLM calls are made.
+        # - The inbound message has already been persisted by the route layer.
+        # - The session still counts as ONE conversation budget unit (§3.4.1b)
+        #   but human turns do NOT increment LLM call count (§9 item 24/33).
+        # This is the gate that makes the admin "Take over" button actually work.
+        if self._is_session_human_controlled(req.session_id):
+            return self._finalize_human_controlled_turn(req)
+
         # 2. CONTEXT ASSEMBLY — flag-gated Retrieve + prompt composition.
         chunks: list = []
         source_ids: list[int] = []
@@ -173,9 +192,18 @@ class LucielOrchestrator:
         # Thread the CONTEXT-step retrieval outcome onto the loop result
         # so the OUTCOME gate can read grounding + retrieval-failure
         # (spec item 5). retrieval_failed = retrieval RAN but yielded no
-        # usable chunks; grounding derived from best cosine distance.
+        # usable chunks; grounding is a composite of retrieval relevance
+        # + citation overlap (§3.4.13) using the loop's final reply.
         loop.retrieval_failed = retrieval_attempted and not chunks
-        loop.grounding_score = self._grounding_from_chunks(chunks)
+        loop.grounding_score = self._grounding_from_chunks(
+            chunks, answer=loop.reply or ""
+        )
+
+        # RESCAN TIER-C — detect lead candidate now so the OUTCOME gate
+        # has the weighted composite lead_score before it evaluates the
+        # HIGH-VALUE LEAD signal. This is a pure read (no DB, no LLM);
+        # the finalizer later persists the same candidate as a lead row.
+        self._detect_lead_for_outcome_gate(req, loop)
 
         # 5. ESCALATION GATE 2 — OUTCOME (post-REFLECT). §3.4.5 (c)+(d).
         #    NEVER reads loop.bound_hit (§3.4.1 locked #17).
@@ -188,7 +216,18 @@ class LucielOrchestrator:
         #    channel (replaces U1's "emit on inbound channel"). The pick
         #    defaults safely to the inbound channel when channel info is
         #    sparse, so this never breaks the turn.
-        message = loop.reply
+        #    When SIGNAL_CANNOT_CONFIDENTLY_ANSWER fired, replace the LLM
+        #    reply with the §3.4.13 canonical phrase so the anti-hallucination
+        #    promise (Vision §1) is upheld: we never send an ungrounded answer.
+        from app.models.escalation_event import SIGNAL_CANNOT_CONFIDENTLY_ANSWER
+        if (
+            outcome_decision is not None
+            and outcome_decision.signal == SIGNAL_CANNOT_CONFIDENTLY_ANSWER
+        ):
+            from app.runtime.handoff_ack import cannot_answer_reply
+            message = cannot_answer_reply()
+        else:
+            message = loop.reply
         choice = self._arbitrate_channel(
             req, reply=message, escalation_fired=escalation_flag
         )
@@ -354,6 +393,10 @@ class LucielOrchestrator:
                 grounding_score=loop.grounding_score,
                 retrieval_failed=loop.retrieval_failed,
                 lead_value=loop.lead_value,
+                # RESCAN TIER-C — weighted composite lead score + Pro/Ent
+                # business-context custom rules (Free = None).
+                lead_score=loop.lead_score,
+                business_context_rules=self._resolve_business_context_rules(req),
             )
             return self._judge().evaluate_outcome(req, outcome)
         except Exception as exc:  # noqa: BLE001
@@ -393,6 +436,124 @@ class LucielOrchestrator:
             )
             return TIER_FREE
 
+    def _detect_lead_for_outcome_gate(
+        self, req: RuntimeRequest, loop: "_LoopResult"
+    ) -> None:
+        """Populate ``loop.lead_score`` + ``loop.lead_value`` from the
+        domain-agnostic lead detector so the OUTCOME gate can evaluate
+        the HIGH-VALUE LEAD signal before the finalizer persists the row.
+
+        RESCAN TIER-C: replaces the old path where lead_value was always
+        None here (set only inside the finalizer, which ran AFTER the
+        gate). The detector is deterministic, cheap, and never raises.
+        """
+        try:
+            from app.cognition.lead_capture import detect
+
+            candidate = detect(
+                message=req.message,
+                prior_customer_messages=req.recent_customer_messages,
+                inbound_channel=req.channel,
+            )
+            if candidate is not None:
+                loop.lead_score = candidate.lead_score
+                loop.lead_value = candidate.lead_value
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "lead detection for outcome gate failed: exc_class=%s — "
+                "lead_score stays 0 (no high-value-lead escalation this turn)",
+                type(exc).__name__,
+            )
+
+    def _resolve_business_context_rules(
+        self, req: RuntimeRequest
+    ) -> list[dict] | None:
+        """Return the Pro/Enterprise custom-value rules from the admin's
+        business-context field, or ``None`` for Free.
+
+        RESCAN TIER-C: §3.4.5 — Pro and Enterprise admins can define
+        custom value rules in the business-context field; the escalation
+        judgment module incorporates context + those rules into its
+        scoring logic. Free uses the built-in heuristic only.
+
+        Rules shape: list of dicts ``{"pattern": str, "weight_boost": float}``.
+        Any DB/tier lookup failure degrades to ``None`` (built-in only).
+        """
+        try:
+            tier = self._resolve_tier(req)
+            from app.policy.entitlements import TIER_FREE
+
+            if tier == TIER_FREE:
+                return None
+
+            # Pro/Enterprise: look up business-context rules from the
+            # instance config. This is a best-effort lookup; missing or
+            # malformed config degrades to None (built-in only).
+            return self._load_business_context_rules(req)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "business_context_rules resolution failed: exc_class=%s — "
+                "using built-in lead scoring only",
+                type(exc).__name__,
+            )
+            return None
+
+    def _load_business_context_rules(
+        self, req: RuntimeRequest
+    ) -> list[dict] | None:
+        """Load custom lead-scoring rules from the per-instance
+        business-context field (Pro/Enterprise only).
+
+        The business-context field lives on the ``AgentConfig`` or
+        ``TenantConfig`` table as a JSON blob. The expected shape for
+        lead rules is:
+          {"lead_rules": [{"pattern": "<regex>", "weight_boost": 0.2}]}
+
+        Missing field, missing table, or unrecognised shape → ``None``
+        (built-in heuristic only, no crash).
+        """
+        try:
+            from app.db.session import SessionLocal
+
+            db = SessionLocal()
+            try:
+                # Attempt to load from AgentConfig first (instance-level),
+                # falling back to None when not found.
+                from app.models.agent_config import AgentConfig  # type: ignore
+
+                config = db.query(AgentConfig).filter_by(
+                    luciel_instance_id=req.luciel_instance_id
+                ).first() if req.luciel_instance_id else None
+
+                if config is None:
+                    return None
+
+                business_context = getattr(config, "business_context", None)
+                if not isinstance(business_context, dict):
+                    return None
+
+                rules = business_context.get("lead_rules")
+                if not isinstance(rules, list):
+                    return None
+
+                # Validate shape: each rule must have pattern + weight_boost.
+                valid_rules = [
+                    r for r in rules
+                    if isinstance(r, dict)
+                    and isinstance(r.get("pattern"), str)
+                    and isinstance(r.get("weight_boost"), (int, float))
+                ]
+                return valid_rules or None
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "load_business_context_rules failed: exc_class=%s — "
+                "built-in scoring only",
+                type(exc).__name__,
+            )
+            return None
+
     def _finalize_intake_escalation(
         self,
         *,
@@ -402,10 +563,29 @@ class LucielOrchestrator:
     ) -> RuntimeResponse:
         """Build the Gate-1 short-circuit response: record the
         escalation (best-effort) and emit a templated handoff
-        acknowledgement INSTEAD of running plan/act/reflect."""
+        acknowledgement INSTEAD of running plan/act/reflect.
+
+        Rescan Tier-C §3.4.12: when the signal is EXPLICIT_HUMAN_REQUEST
+        we ALSO transition the session to human_controlled='luciel_escalated'
+        so the next inbound message hits the gate above.
+        """
         from app.runtime.handoff_ack import handoff_acknowledgement
 
         self._record_escalation_best_effort(decision)
+
+        # Rescan Tier-C §3.4.12 — Luciel-initiated path: if the signal
+        # that fired is EXPLICIT_HUMAN_REQUEST, set the session to
+        # human_controlled so all subsequent messages skip the agentic loop.
+        # Best-effort: never crashes the turn.
+        if self._handoff_warranted(decision):
+            self._set_session_human_controlled_best_effort(
+                session_id=req.session_id,
+                admin_id=req.admin_id,
+                luciel_instance_id=req.luciel_instance_id,
+                trigger="luciel_escalated",
+                actor_user_id=None,  # Luciel-initiated — no human actor
+                channel=req.channel,
+            )
 
         message = handoff_acknowledgement()
         # Gate-1 IS an escalation: let the arbiter pick the outbound
@@ -458,18 +638,213 @@ class LucielOrchestrator:
         )
 
     def _record_escalation_best_effort(self, decision) -> None:
-        """Record an escalation via EscalationService. Best-effort: the
-        decision to escalate has already been made; persistence + notify
-        are observability/delivery side-effects and must never crash the
-        turn (Architecture §5.1)."""
+        """Record an escalation via EscalationService + trigger delivery.
+
+        Best-effort: the decision to escalate has already been made;
+        persistence + notify are observability/delivery side-effects and
+        must never crash the turn (Architecture §5.1).
+
+        Rescan Tier-C: after recording the event, calls the delivery
+        service to send the actual admin notification (email/SMS/Slack)
+        for the four real signals. The customer reply is sent BEFORE
+        this method is called, so delivery NEVER blocks the turn.
+        """
+        routing = None
         try:
-            self._escalation_svc().record_escalation(decision)
+            routing = self._escalation_svc().record_escalation(decision)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "record_escalation failed: exc_class=%s — escalation flagged "
                 "on the turn but side-effects degraded",
                 type(exc).__name__,
             )
+        # Rescan Tier-C — wire the real notification send for the four signals
+        # (budget_exhausted uses _notify_budget_exhausted; the four real signals
+        # use the delivery service). Best-effort: never raises.
+        from app.models.escalation_event import SIGNAL_BUDGET_EXHAUSTED
+        if decision.signal != SIGNAL_BUDGET_EXHAUSTED:
+            try:
+                event_id = routing.event_id if routing is not None else None
+                contact = None
+                if routing is not None:
+                    # Rebuild EscalationContact from the routing decision.
+                    from app.policy.escalation_routing import EscalationContact
+                    contact = EscalationContact(
+                        admin_id=decision.admin_id,
+                        tier=routing.tier,
+                        channels=routing.channels,
+                    )
+                if contact is not None:
+                    self._escalation_delivery_svc().deliver(
+                        event_id=event_id,
+                        admin_id=decision.admin_id,
+                        luciel_instance_id=decision.luciel_instance_id,
+                        session_id=decision.session_id,
+                        signal=decision.signal,
+                        gate=decision.gate,
+                        contact=contact,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "escalation delivery failed: exc_class=%s — "
+                    "notification not sent but turn is unaffected",
+                    type(exc).__name__,
+                )
+
+    # ------------------------------------------------------------------
+    # Human-controlled session gate — Rescan Tier-C (§3.4.12)
+    # ------------------------------------------------------------------
+
+    def _is_session_human_controlled(self, session_id: str) -> bool:
+        """Check whether the given session is in human_controlled mode.
+
+        Performs a lightweight DB lookup (primary-key fetch). Best-effort:
+        any exception degrades to False so a DB hiccup never falsely gates
+        a legitimate agentic turn. Returns True ONLY when control_mode is
+        explicitly 'human_controlled'."""
+        if not session_id:
+            return False
+        try:
+            from app.db.session import SessionLocal
+            from app.models.session import SessionModel
+
+            db = SessionLocal()
+            try:
+                row = db.get(SessionModel, session_id)
+                return row is not None and getattr(row, "control_mode", "luciel") == "human_controlled"
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "human_controlled gate check failed: exc_class=%s — "
+                "proceeding to agentic loop (safe degradation)",
+                type(exc).__name__,
+            )
+            return False
+
+    def _set_session_human_controlled_best_effort(
+        self,
+        *,
+        session_id: str,
+        admin_id: str,
+        luciel_instance_id: int | None,
+        trigger: str,
+        actor_user_id,
+        channel: str,
+    ) -> None:
+        """Transition a session to human_controlled mode and emit the
+        human_takeover_started audit event. Best-effort: never raises
+        (an audit/DB failure must not crash the escalation turn).
+
+        Called from the Luciel-initiated path (_finalize_intake_escalation)
+        with trigger='luciel_escalated'. The admin-initiated path uses the
+        /takeover endpoint directly.
+        """
+        import uuid
+        from datetime import datetime, timezone
+
+        try:
+            from app.db.session import SessionLocal
+            from app.models.session import SessionModel
+            from app.models.admin_audit_log import (
+                ACTION_HUMAN_TAKEOVER_STARTED,
+                RESOURCE_SESSION,
+            )
+            from app.repositories.admin_audit_repository import (
+                AdminAuditRepository,
+                AuditContext,
+            )
+
+            now = datetime.now(timezone.utc)
+            db = SessionLocal()
+            try:
+                row = db.get(SessionModel, session_id)
+                if row is None:
+                    logger.warning(
+                        "_set_session_human_controlled: session %s not found",
+                        session_id,
+                    )
+                    return
+                if getattr(row, "control_mode", "luciel") == "human_controlled":
+                    # Idempotent: already human_controlled, no-op.
+                    return
+                row.control_mode = "human_controlled"
+                row.taken_over_at = now
+                if actor_user_id is not None:
+                    row.taken_over_by_user_id = (
+                        actor_user_id
+                        if isinstance(actor_user_id, uuid.UUID)
+                        else uuid.UUID(str(actor_user_id))
+                    )
+                after_payload = {
+                    "session_id": session_id,
+                    "instance_id": luciel_instance_id,
+                    "actor_user_id": str(actor_user_id) if actor_user_id else None,
+                    "trigger": trigger,
+                    "channel": channel,
+                    "taken_over_at": now.isoformat(),
+                }
+                AdminAuditRepository(db).record(
+                    ctx=AuditContext.system(label="orchestrator_handoff"),
+                    admin_id=admin_id,
+                    action=ACTION_HUMAN_TAKEOVER_STARTED,
+                    resource_type=RESOURCE_SESSION,
+                    resource_pk=session_id,
+                    resource_natural_id=session_id,
+                    luciel_instance_id=luciel_instance_id,
+                    before={"control_mode": "luciel"},
+                    after=after_payload,
+                    note=f"Luciel-initiated human takeover: trigger={trigger}",
+                    autocommit=False,
+                )
+                db.commit()
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_set_session_human_controlled failed: exc_class=%s — "
+                "session not updated but escalation turn continues",
+                type(exc).__name__,
+            )
+
+    def _finalize_human_controlled_turn(self, req: RuntimeRequest) -> "RuntimeResponse":
+        """Short-circuit response for an inbound message on a human_controlled
+        session. Persists the turn as a trace (no LLM provider, 0 iterations)
+        but makes ZERO LLM calls. The session still counts as ONE conversation
+        budget unit (§3.4.1b) but this turn does NOT increment LLM call count
+        (§9 item 24/33).
+
+        The message has already been persisted by the route layer; the
+        orchestrator only needs to emit a no-op trace and return a sentinel
+        response so the dashboard live feed can surface the message.
+        """
+        trace_id = self._record_trace_best_effort(
+            req=req,
+            assistant_reply="",  # no reply — the human admin will reply
+            source_ids=[],
+            llm_provider=None,
+            llm_model=None,
+            tool_called=False,
+            tool_name=None,
+            escalated=False,
+        )
+        return RuntimeResponse(
+            message="",  # no automated reply when human_controlled
+            trace_id=trace_id,
+            confidence=1.0,
+            session_id=req.session_id,
+            intent_summary="human_controlled",
+            escalation_flag=False,
+            source_ids_used=[],
+            llm_provider=None,
+            llm_model=None,
+            tool_called=False,
+            tool_name=None,
+            iterations=0,
+            bound_hit=False,
+            response_channel=req.channel,
+            prompt_channel_switch=False,
+        )
 
     # ------------------------------------------------------------------
     # Conversation budget gate — Arc 18 (§3.4.1b)
@@ -1039,18 +1414,37 @@ class LucielOrchestrator:
             self._escalation_service = EscalationService()
         return self._escalation_service
 
+    def _escalation_delivery_svc(self):
+        """Return the injected EscalationDeliveryService, or build one lazily.
+
+        Rescan Tier-C — the delivery service sends real admin notifications
+        (email/SMS/Slack) when CHANNELS_LIVE_PROVISIONING_ENABLED is True;
+        records full routing+attempt decision in dry-run when False.
+        """
+        if self._escalation_delivery_service is None:
+            from app.services.escalation_delivery_service import (
+                EscalationDeliveryService,
+            )
+
+            self._escalation_delivery_service = EscalationDeliveryService()
+        return self._escalation_delivery_service
+
     # ------------------------------------------------------------------
     # Retrieve step (ARC 11 Step 8 — preserved verbatim)
     # ------------------------------------------------------------------
 
     def _retrieve(self, req: RuntimeRequest) -> list:
         """Open a tenant-scoped session, build the retriever, return
-        the chunk list. Architecture v1 §3.2 retrieval flow:
+        the chunk list. Architecture v1 §3.2 / §3.4.1 retrieval flow:
 
           1. Filter by admin_id, instance_id, ingestion_status=ready
              (already enforced inside ``search_similar``).
-          2. Vector similarity (top-k).
-          3. Return chunks in relevance order.
+          2. If query has structured-filter intent AND tier has
+             knowledge_graph_enabled: run graph retrieval (recursive CTE
+             traversal) FIRST, then vector, then MERGE (Decision #6).
+             Pure-semantic queries bypass the graph entirely.
+          3. Vector similarity (HNSW) → RERANK (recency + ordinal) → top-k.
+          4. Return merged chunk list in reranked relevance order.
 
         Never raises — retrieval failure must not block the
         conversation per Architecture §3.4. Caught exceptions log
@@ -1081,12 +1475,32 @@ class LucielOrchestrator:
                 try:
                     repo = KnowledgeRepository(db)
                     retriever = KnowledgeRetriever(repo)
-                    return retriever.retrieve_with_sources(
+
+                    # — Vector retrieval (ALL tiers, with built-in rerank) —
+                    vector_chunks = retriever.retrieve_with_sources(
                         query=req.message,
                         admin_id=req.admin_id,
                         luciel_instance_id=req.luciel_instance_id,
                         limit=5,
                     )
+
+                    # — Graph retrieval (Pro+Enterprise, structured-filter only) —
+                    # Decision #6: graph retriever called ONLY when:
+                    #   (a) query has structured-filter intent, AND
+                    #   (b) the admin's tier has knowledge_graph_enabled.
+                    graph_chunks = self._retrieve_graph_if_applicable(
+                        req=req, db=db
+                    )
+
+                    # — Merge —
+                    # Graph nodes are prepended (they answer the structural
+                    # filter) and vector chunks follow. Dedup by formatted
+                    # content so the same fact does not appear twice.
+                    merged = self._merge_retrieval_results(
+                        graph_chunks=graph_chunks,
+                        vector_chunks=vector_chunks,
+                    )
+                    return merged
                 finally:
                     db.close()
         except Exception as exc:  # noqa: BLE001
@@ -1097,40 +1511,195 @@ class LucielOrchestrator:
             )
             return []
 
+    def _retrieve_graph_if_applicable(self, *, req: RuntimeRequest, db) -> list:
+        """Run graph retrieval if the query has structured-filter intent
+        AND the admin's tier has knowledge_graph_enabled.
+
+        Decision #6: pure-semantic queries — graph retriever NOT called.
+        Returns a list of graph node objects formatted for prompt injection,
+        or [] when conditions are not met. Never raises.
+        """
+        try:
+            from app.knowledge.graph_retriever import (
+                GraphRetriever,
+                detect_structured_filter_intent,
+            )
+            from app.policy.entitlements import resolve_entitlement
+
+            # Check structural intent first (cheap, no DB).
+            if not detect_structured_filter_intent(req.message):
+                return []
+
+            # Resolve tier (fail-closed to Free = no graph).
+            tier = self._resolve_tier(req)
+            graph_enabled = resolve_entitlement(
+                tier=tier, axis="knowledge_graph_enabled"
+            )
+            if not graph_enabled:
+                return []
+
+            if req.luciel_instance_id is None:
+                return []
+
+            graph_retriever = GraphRetriever(db)
+            return graph_retriever.retrieve(
+                query=req.message,
+                admin_id=req.admin_id,
+                instance_id=req.luciel_instance_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_retrieve_graph_if_applicable failed: exc_class=%s — "
+                "returning [] (vector-only fallback)",
+                type(exc).__name__,
+            )
+            return []
+
     @staticmethod
-    def _grounding_from_chunks(chunks: Sequence) -> float | None:
-        """Derive a [0,1] grounding score from retrieved chunks.
+    def _merge_retrieval_results(*, graph_chunks: list, vector_chunks: list) -> list:
+        """Merge graph nodes + vector chunks, deduplicating by formatted content.
 
-        Returns ``None`` when nothing was retrieved (the OUTCOME gate
-        treats None as below every floor only in concert with the
-        retrieval-failed flag). When chunks exist, grounding is
-        ``1 - best_cosine_distance`` (best = smallest distance =
-        closest match), clamped to [0,1]. Chunks with no distance are
-        ignored; if none carry a distance, grounding is unknown (None).
+        Graph nodes are prepended (they directly answer the structured filter
+        query). Vector chunks follow. Dedup ensures the same content does not
+        appear twice in the prompt context.
+        """
+        seen: set[str] = set()
+        merged: list = []
+        for item in graph_chunks:
+            key = getattr(item, "formatted", str(item))
+            if key not in seen:
+                seen.add(key)
+                merged.append(item)
+        for chunk in vector_chunks:
+            key = getattr(chunk, "formatted", str(chunk))
+            if key not in seen:
+                seen.add(key)
+                merged.append(chunk)
+        return merged
 
-        This is a minimal, dependency-free grounding proxy — a richer
-        grounding scorer (answer-vs-source overlap) is a later unit's
-        hook. It never raises: a malformed chunk degrades to None.
+    @staticmethod
+    def _grounding_from_chunks(
+        chunks: Sequence, answer: str = ""
+    ) -> float | None:
+        """Derive a [0,1] composite grounding score from retrieved chunks.
+
+        §3.4.13 requires a COMPOSITE of two components:
+
+          (a) Retrieval relevance  — ``1 - best_cosine_distance`` (best =
+              smallest distance = closest match) using the chunk distances
+              already computed during retrieval. Measures how well the top
+              retrieved chunk matched the query.
+
+          (b) Citation overlap  — fraction of the answer's sentences whose
+              token-overlap with any retrieved chunk exceeds a threshold.
+              For each sentence we compute Jaccard similarity of its
+              unigram set against the unigram set of each chunk's content;
+              a sentence is "covered" when any chunk exceeds the threshold.
+              This is deterministic, dependency-free, and cheap (no
+              embedding call). Coverage = covered_sentences / total_sentences.
+              An empty answer or an answer with no extractable sentences
+              contributes a citation-overlap of 0.0.
+
+        Combination: weighted average with equal weights 0.5/0.5:
+
+            grounding = 0.5 * retrieval_relevance + 0.5 * citation_overlap
+
+        The combined score is clamped to [0,1]. Returns ``None`` when
+        nothing was retrieved (the OUTCOME gate treats None as below every
+        floor only in concert with the retrieval-failed flag). If chunks
+        exist but none carry a distance, retrieval_relevance is 0.0 (no
+        distance information means we cannot claim relevance) and citation
+        overlap is still computed against chunk content. It never raises:
+        a malformed chunk degrades gracefully.
+
+        Citation-overlap threshold: CITATION_JACCARD_THRESHOLD = 0.10.
+        This is deliberately low so that any meaningful vocabulary overlap
+        between an answer sentence and a chunk counts as a citation hit;
+        a higher threshold would produce false negatives on paraphrased
+        answers. The threshold is a module constant so it can be tuned
+        from audit data without changing the algorithm.
         """
         if not chunks:
             return None
         try:
+            # --- (a) Retrieval relevance ---
             distances = [
                 c.distance
                 for c in chunks
                 if getattr(c, "distance", None) is not None
             ]
+            if distances:
+                best = min(distances)
+                retrieval_relevance = max(0.0, min(1.0, 1.0 - float(best)))
+            else:
+                retrieval_relevance = 0.0
+
+            # --- (b) Citation overlap ---
+            citation_overlap = LucielOrchestrator._citation_overlap(
+                answer, chunks
+            )
+
+            # --- Combine (0.5 / 0.5 weighted average) ---
+            grounding = 0.5 * retrieval_relevance + 0.5 * citation_overlap
+            return max(0.0, min(1.0, grounding))
         except Exception:  # noqa: BLE001
             return None
-        if not distances:
-            return None
-        best = min(distances)
-        grounding = 1.0 - float(best)
-        if grounding < 0.0:
+
+    # Citation-overlap threshold (Jaccard similarity). A sentence is
+    # "covered" when its unigram Jaccard against any chunk >= this value.
+    _CITATION_JACCARD_THRESHOLD: float = 0.10
+
+    @staticmethod
+    def _citation_overlap(answer: str, chunks: Sequence) -> float:
+        """Fraction of answer sentences whose unigram Jaccard similarity
+        to at least one retrieved chunk exceeds _CITATION_JACCARD_THRESHOLD.
+
+        Algorithm (deterministic, no external deps):
+          1. Tokenise by splitting on whitespace/punctuation to lowercase
+             unigrams. Strip common punctuation so "fact." and "fact" match.
+          2. For each answer sentence, compute Jaccard against every chunk
+             and mark it covered if any pair exceeds the threshold.
+          3. Return covered_count / total_sentences, or 0.0 when the answer
+             has no usable sentences.
+        """
+        import re
+
+        def _tokens(text: str) -> frozenset:
+            return frozenset(w.lower() for w in re.split(r"[\s,.!?;:]+", text) if w)
+
+        # Split answer into sentences on '.', '!', '?' or newlines.
+        sentences = [
+            s.strip()
+            for s in re.split(r"(?<=[.!?])\s+|\n+", answer.strip())
+            if s.strip()
+        ]
+        if not sentences:
             return 0.0
-        if grounding > 1.0:
-            return 1.0
-        return grounding
+
+        # Pre-compute chunk token sets (defensive: use content attr or str).
+        chunk_token_sets = []
+        for c in chunks:
+            content = getattr(c, "content", None) or getattr(c, "formatted", "") or ""
+            if content:
+                chunk_token_sets.append(_tokens(str(content)))
+        if not chunk_token_sets:
+            return 0.0
+
+        threshold = LucielOrchestrator._CITATION_JACCARD_THRESHOLD
+        covered = 0
+        for sent in sentences:
+            sent_tokens = _tokens(sent)
+            if not sent_tokens:
+                continue
+            for chunk_tokens in chunk_token_sets:
+                union = sent_tokens | chunk_tokens
+                if not union:
+                    continue
+                jaccard = len(sent_tokens & chunk_tokens) / len(union)
+                if jaccard >= threshold:
+                    covered += 1
+                    break
+        return covered / len(sentences)
 
     @staticmethod
     def _collect_source_pks(chunks: Sequence) -> list[int]:
@@ -1266,6 +1835,9 @@ class _LoopResult:
         "grounding_score",
         "retrieval_failed",
         "lead_value",
+        # RESCAN TIER-C — weighted composite lead score [0, 1] from
+        # lead_capture.detect(), populated before the OUTCOME gate.
+        "lead_score",
     )
 
     def __init__(self, *, reply: str) -> None:
@@ -1280,7 +1852,9 @@ class _LoopResult:
         # §3.4.5 OUTCOME-gate inputs. grounding_score None = retrieval
         # did not run; retrieval_failed True = CONTEXT-step Retrieve leg
         # errored or returned nothing (spec item 5 contributing signal);
-        # lead_value = extracted high-value-lead value (e.g. budget).
+        # lead_value = extracted high-value-lead budget figure (e.g. 5000);
+        # lead_score = weighted composite [0, 1] (RESCAN TIER-C).
         self.grounding_score: float | None = None
         self.retrieval_failed: bool = False
         self.lead_value: float | None = None
+        self.lead_score: float = 0.0

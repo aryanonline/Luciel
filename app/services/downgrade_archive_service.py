@@ -260,6 +260,29 @@ class DowngradeArchiveService:
                 )
             axes[axis] = tally
 
+        # --------------------------------------------------------------
+        # §3.6.7 DORMANT: on any downgrade (Pro→Free), set all live
+        # action-tool connections to status='dormant'.  Secrets are
+        # RETAINED (credential_ref is not touched); prior status is
+        # stored in status_detail for restore on re-upgrade.  This is
+        # separate from the overflow-archive axes above (those remove
+        # row-level resources; dormant just changes the connection status).
+        # --------------------------------------------------------------
+        from app.repositories.instance_connection_repository import (
+            InstanceConnectionRepository,
+        )
+        conn_repo = InstanceConnectionRepository(self.db)
+        dormant_rows = conn_repo.set_dormant_for_admin(
+            admin_id=admin_id,
+            autocommit=False,
+        )
+        if dormant_rows:
+            logger.info(
+                "downgrade_archive: admin=%s dormant_connections=%d "
+                "target_tier=%s (secrets retained, restore on re-upgrade)",
+                admin_id, len(dormant_rows), target_tier,
+            )
+
         if autocommit:
             self.db.commit()
 

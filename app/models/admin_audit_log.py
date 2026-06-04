@@ -98,6 +98,10 @@ ACTION_DATA_EXPORT_REQUESTED = "data_export_requested"
 ACTION_DATA_EXPORT_GENERATED = "data_export_generated"
 ACTION_DATA_EXPORT_FAILED = "data_export_failed"
 ACTION_DATA_EXPORT_EXPIRED = "data_export_expired"
+# RESCAN TIER-DE: §5.10 self-serve export audit (non-closure path).
+ACTION_DATA_EXPORT_SELF_SERVE = "data_export_self_serve"
+# RESCAN TIER-DE: §3.1.5 widget abuse auto-block event.
+ACTION_WIDGET_ABUSE_BLOCKED = "widget_abuse_blocked"
 ACTION_DOWNGRADE_INITIATED = "downgrade_initiated"
 ACTION_DOWNGRADE_GRACE_ENFORCED = "downgrade_grace_enforced"
 ACTION_AUDIT_LOG_TIER_ARCHIVED = "audit_log_tier_archived"
@@ -301,6 +305,43 @@ ACTION_SUBSCRIPTION_PILOT_REFUNDED = "subscription_pilot_refunded"
 # {stripe_refund_id, error_class, error_message_truncated, to_email}.
 ACTION_PILOT_REFUND_EMAIL_SEND_FAILED = "pilot_refund_email_send_failed"
 
+# Rescan Tier-C — §3.5 escalation delivery layer.
+#
+# ACTION_ESCALATION_NOTIFICATION_SENT
+#   Emitted by EscalationDeliveryService after a notification send is
+#   attempted (whether dry-run or live). Written AFTER the
+#   escalation_event row so the audit chain is: escalation_fired ->
+#   escalation_notification_sent per attempt. after_json carries
+#   {signal, gate, channel, to, sent, dry_run, provider_id, attempt,
+#   idempotency_key}. resource_type = RESOURCE_ESCALATION_EVENT;
+#   resource_pk = escalation_events.id.
+#
+# ACTION_ESCALATION_DELIVERY_FAILED
+#   Emitted after all 3 retry attempts are exhausted for a single channel.
+#   after_json carries {signal, gate, channel, to, attempts, last_error,
+#   idempotency_key}. resource_type = RESOURCE_ESCALATION_EVENT.
+#
+# ACTION_ESCALATION_CHAIN_STEP
+#   Emitted by the Enterprise chain walker on every step transition:
+#   step notified -> SLA started, SLA timeout -> step advanced, ack
+#   received -> chain resolved. after_json carries {signal, session_id,
+#   step, contact, chain_action, timestamp}.
+#
+# ACTION_ESCALATION_ACKED
+#   Emitted when an Enterprise escalation chain is acknowledged (dashboard
+#   open/read OR explicit "I'm on it"). Chain stops. after_json carries
+#   {signal, gate, session_id, step, acked_by}.
+#
+# ACTION_ESCALATION_CHAIN_END_FALLBACK
+#   Emitted when the Enterprise chain is exhausted without acknowledgement.
+#   Falls back to admin_owner email. after_json carries {signal, gate,
+#   session_id, chain_length, fallback_email}.
+ACTION_ESCALATION_NOTIFICATION_SENT = "escalation_notification_sent"
+ACTION_ESCALATION_DELIVERY_FAILED = "escalation_delivery_failed"
+ACTION_ESCALATION_CHAIN_STEP = "escalation_chain_step"
+ACTION_ESCALATION_ACKED = "escalation_acked"
+ACTION_ESCALATION_CHAIN_END_FALLBACK = "escalation_chain_end_fallback"
+
 # Arc 18 -- conversation-budget metering (§3.4.1b).
 # ACTION_BUDGET_EXHAUSTED: a Free instance hit its per-instance
 # conversation cap; the turn was gracefully handled WITHOUT an LLM call
@@ -317,6 +358,26 @@ ACTION_BUDGET_ALERT_SENT = "budget_alert_sent"
 # conversation_overage_ledger. after_json carries
 # {overage, units, rate_cents, stripe_usage_record_id, billing_period_start}.
 ACTION_OVERAGE_REPORTED = "overage_reported"
+
+# Rescan Tier-C §3.4.12 — human-controlled session handoff.
+#
+# ACTION_HUMAN_TAKEOVER_STARTED — a session transitioned from
+#   control_mode='luciel' to control_mode='human_controlled'.
+#   trigger: 'luciel_escalated' (Luciel-initiated via explicit_human_request)
+#            or 'admin_initiated' (admin dashboard action).
+#   after_json carries {session_id, resolved_lead_id, instance_id,
+#   actor_user_id, trigger, channel}.
+#   resource_type = RESOURCE_SESSION; resource_pk = sessions.id;
+#   resource_natural_id = sessions.id.
+#
+# ACTION_HUMAN_TAKEOVER_ENDED — a session transitioned back from
+#   control_mode='human_controlled' to control_mode='luciel' via
+#   the /handback endpoint, OR the session was ended by inactivity
+#   timeout while human_controlled (future: inactivity path emitted
+#   by the session lifecycle worker). after_json carries
+#   {session_id, actor_user_id, duration_seconds}.
+ACTION_HUMAN_TAKEOVER_STARTED = "human_takeover_started"
+ACTION_HUMAN_TAKEOVER_ENDED = "human_takeover_ended"
 
 # Step 30a.2 -- retention worker hard-purge action. See ALLOWED_ACTIONS
 # entry for full rationale. Defined here (above ALLOWED_ACTIONS) so the
@@ -499,6 +560,26 @@ ACTION_CUSTOM_ROLE_REVOKED = "custom_role_revoked"
 ACTION_USER_ROLE_ASSIGNED = "user_role_assigned"
 ACTION_USER_ROLE_REVOKED = "user_role_revoked"
 
+# Rescan Tier-B — custom-role second-admin approval workflow
+# (Architecture §3.7.3). Two new verbs that the approval path emits.
+#
+# ACTION_ROLE_APPROVAL_REQUIRED — emitted when a sensitive custom role
+#   (containing can_configure_connections or can_view_billing) is
+#   authored or updated. The role lands ``approval_state='pending_approval'``
+#   and grants ZERO permissions until a second admin_owner calls the
+#   approve endpoint. The before_json is None; after_json carries
+#   {role_key, approval_state, sensitive_keys} so an auditor can see
+#   WHAT triggered the approval gate.
+#
+# ACTION_ROLE_APPROVED — emitted when a second admin_owner approves the
+#   pending role via POST /admin/custom-roles/{role_id}/approve. The
+#   approval_state flips to 'live' and the role begins granting
+#   permissions to assigned users. after_json carries
+#   {role_key, approved_by_user_id, approved_at,
+#    applied_permission_keys (if pending_change_json was staged)}.
+ACTION_ROLE_APPROVAL_REQUIRED = "role_approval_required"
+ACTION_ROLE_APPROVED = "role_approved"
+
 # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
 #
 # ACTION_SIBLING_ACCESS -- emitted by ``app.tools.sibling_dispatch`` on
@@ -632,6 +713,38 @@ ACTION_LEAD_CAPTURED = "lead_captured"
 #   gets contacted, never WHEN escalation happens.
 ACTION_PERSONALITY_UPDATED = "personality_updated"
 ACTION_ESCALATION_CONFIG_UPDATED = "escalation_config_updated"
+
+# Rescan ENT — Enterprise personality second-admin approval (Vision §7).
+#
+# On Enterprise, a personality change does NOT apply immediately; it is
+# staged on the instance row (pending_personality_* columns) in
+# ``personality_approval_state='pending_approval'`` and the LIVE
+# personality_* columns are left untouched until a SECOND admin approves.
+# Mirrors the custom-role (§3.7.3) and sibling-grant (§3.3.4) approval
+# verbs.
+#
+# ACTION_PERSONALITY_SUBMITTED -- a user submitted an Enterprise
+#   personality change for approval. The live config is unchanged;
+#   the proposal sits in pending_approval. after_json carries the
+#   proposed {personality_preset, personality_axes?,
+#   business_context_len, approval_state, submitted_by_user_id} — never
+#   the raw business_context body (only its length, matching
+#   ACTION_PERSONALITY_UPDATED). resource_type =
+#   RESOURCE_INSTANCE_PERSONALITY; resource_pk = instances.id.
+#
+# ACTION_PERSONALITY_APPROVED -- a SECOND admin (NOT the submitter —
+#   self-approval forbidden) approved the pending change. The proposed
+#   pillars are copied onto the live personality_* columns,
+#   approval_state flips to 'live', approved_by_user_id/approved_at are
+#   stamped. after_json carries {personality_preset, approval_state,
+#   approved_by_user_id, approved_at}.
+#
+# ACTION_PERSONALITY_REJECTED -- a SECOND admin rejected the pending
+#   change. The proposal is discarded (pending columns cleared), the
+#   live config is left untouched, approval_state returns to 'live'.
+ACTION_PERSONALITY_SUBMITTED = "personality_submitted"
+ACTION_PERSONALITY_APPROVED = "personality_approved"
+ACTION_PERSONALITY_REJECTED = "personality_rejected"
 
 # Arc 15 WU4 — Arc 17 connection-contract slice (Architecture §3.8.2).
 #
@@ -825,6 +938,9 @@ ALLOWED_ACTIONS = (
     ACTION_CUSTOM_ROLE_REVOKED,
     ACTION_USER_ROLE_ASSIGNED,
     ACTION_USER_ROLE_REVOKED,
+    # Rescan Tier-B -- custom-role second-admin approval workflow (§3.7.3).
+    ACTION_ROLE_APPROVAL_REQUIRED,
+    ACTION_ROLE_APPROVED,
     # Arc 13 — channel adapters (email + SMS).
     ACTION_CHANNEL_ENABLED,
     ACTION_CHANNEL_DISABLED,
@@ -835,11 +951,21 @@ ALLOWED_ACTIONS = (
     ACTION_CHANNEL_OUTBOUND_DELIVERED,
     # Arc 14 U2 — §3.4.5 escalation judgment.
     ACTION_ESCALATION_FIRED,
+    # Rescan Tier-C — §3.5 escalation delivery layer.
+    ACTION_ESCALATION_NOTIFICATION_SENT,
+    ACTION_ESCALATION_DELIVERY_FAILED,
+    ACTION_ESCALATION_CHAIN_STEP,
+    ACTION_ESCALATION_ACKED,
+    ACTION_ESCALATION_CHAIN_END_FALLBACK,
     # Arc 14 U4 — §3.4.4 lead capture cognition.
     ACTION_LEAD_CAPTURED,
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
     ACTION_PERSONALITY_UPDATED,
     ACTION_ESCALATION_CONFIG_UPDATED,
+    # Rescan ENT — Enterprise personality second-admin approval (Vision §7).
+    ACTION_PERSONALITY_SUBMITTED,
+    ACTION_PERSONALITY_APPROVED,
+    ACTION_PERSONALITY_REJECTED,
     # Arc 15 WU4 — Arc 17 connection-contract slice (§3.8.2).
     ACTION_CONNECTION_CONFIGURED,
     ACTION_CONNECTION_DISCONNECTED,
@@ -854,6 +980,9 @@ ALLOWED_ACTIONS = (
     ACTION_BUDGET_EXHAUSTED,
     ACTION_BUDGET_ALERT_SENT,
     ACTION_OVERAGE_REPORTED,
+    # Rescan Tier-C §3.4.12 — human-controlled session handoff events.
+    ACTION_HUMAN_TAKEOVER_STARTED,
+    ACTION_HUMAN_TAKEOVER_ENDED,
 )
 
 

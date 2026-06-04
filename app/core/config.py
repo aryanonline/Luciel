@@ -32,6 +32,46 @@ class Settings(BaseSettings):
     default_openai_model: str = "gpt-4o"
     default_anthropic_model: str = "claude-sonnet-4-20250514"
 
+    # --- Per-tier model-class configuration (Architecture §3.4.3) ---
+    #
+    # The tier matrix (Vision §7) sells "model selection: base/mid/top"
+    # by tier. Each tier maps to a LOCKED model class (Anthropic primary
+    # + OpenAI fallback). The specific version strings are operational
+    # (config-driven so ops can retune without code change); what is
+    # LOCKED per Decision #7/#8/#11 is the class mapping itself.
+    #
+    # Tier -> class -> concrete model:
+    #   Free       -> small/fast  -> anthropic_model_free  / openai_model_free
+    #   Pro        -> mid         -> anthropic_model_pro   / openai_model_pro
+    #   Enterprise -> top         -> anthropic_model_ent   / openai_model_ent
+    #
+    # Per-tier fast models (intra-tier fast routing, Decision #9):
+    #   When ALL of (no tools, <= 4K ctx tokens, low complexity) hold,
+    #   the router uses the fast model variant instead of the tier primary.
+    #   Fast model defaults to the Free-tier primary (Haiku-class) for all
+    #   tiers since that is the intended cheap/fast seat. The fast model
+    #   is NOT surfaced to admins (Decision #11).
+    #
+    # Anthropic primary models by tier:
+    anthropic_model_free: str = "claude-haiku-4-20250514"
+    anthropic_model_pro: str = "claude-sonnet-4-20250514"
+    anthropic_model_ent: str = "claude-sonnet-4-20250514"
+    # OpenAI fallback models by tier:
+    openai_model_free: str = "gpt-4o-mini"
+    openai_model_pro: str = "gpt-4o"
+    openai_model_ent: str = "gpt-4o"
+    # Intra-tier fast models (used when fast-route conditions hold).
+    # One fast model shared across tiers (always Haiku-class); a tier
+    # whose primary IS already the fast class simply reuses it.
+    anthropic_model_fast: str = "claude-haiku-4-20250514"
+    openai_model_fast: str = "gpt-4o-mini"
+    # Complexity threshold for intra-tier fast routing (Decision #9).
+    # The heuristic score must be BELOW this value to qualify for the
+    # fast path. Higher value = more messages qualify. Operational.
+    llm_fast_route_complexity_threshold: float = 10.0
+    # Context token limit for the fast path (4 K tokens per Decision #9).
+    llm_fast_route_context_token_limit: int = 4096
+
     # --- Async Worker (Step 27b) ---
     # Feature flag: when True, ChatService enqueues memory extraction to the
     # luciel-worker Celery service instead of running it inline. Read at
@@ -790,6 +830,69 @@ class Settings(BaseSettings):
     oauth_callback_success_url: str = (
         "https://www.vantagemind.ai/admin/connections"
     )
+
+    # -----------------------------------------------------------------
+    # Arc 17 — deploy-gated LIVE connectors (email_sender / sms_sender /
+    # native HubSpot + Salesforce CRM OAuth).
+    # -----------------------------------------------------------------
+    #
+    # MASTER LIVE-SWITCH for the deferred connectors. Mirrors
+    # channels_live_provisioning_enabled exactly: when False (the
+    # boot-safe default) NO real provider call is ever made — the
+    # email_sender / sms_sender send tools return an HONEST no-op receipt
+    # and the CRM push tool round-trips deferred, so dev / CI / tests can
+    # exercise the full code path without billing or hitting any provider.
+    # Production flips this True IN LOCKSTEP with the per-connector
+    # credentials below landing in SSM. The OAuth client-creds gate
+    # (is_configured) is the SECOND, independent honesty gate: even with
+    # this switch on, an absent credential keeps the connector honestly
+    # unconfigured and short-circuits BEFORE any network call.
+    connectors_live_enabled: bool = False
+
+    # --- email_sender (outbound sender-identity) -------------------------
+    # The outbound send rides the existing SES transport
+    # (LUCIEL_EMAIL_TRANSPORT=ses + the Arc 13 SES IAM grant); these fields
+    # carry the VERIFIED sender identity the live send uses as the From
+    # address. Sourced in prod from SSM under
+    #   /luciel/<env>/connectors/email_sender/FROM_ADDRESS  -> email_sender_from_address
+    #   /luciel/<env>/connectors/email_sender/FROM_NAME     -> email_sender_from_name
+    # Empty defaults keep boot safe AND keep the connector honest: when
+    # email_sender_from_address is empty the send tool reports itself
+    # unconfigured and performs NO send (no SES call), exactly the
+    # is_configured() discipline the OAuth providers use.
+    email_sender_from_address: str = ""
+    email_sender_from_name: str = ""
+
+    # --- HubSpot CRM OAuth -----------------------------------------------
+    # Native HubSpot OAuth 2.0 app credentials. Sourced in prod from SSM:
+    #   /luciel/<env>/connectors/hubspot/CLIENT_ID     -> hubspot_oauth_client_id
+    #   /luciel/<env>/connectors/hubspot/CLIENT_SECRET -> hubspot_oauth_client_secret
+    #   /luciel/<env>/connectors/hubspot/REDIRECT_URI  -> hubspot_oauth_redirect_uri
+    # Empty defaults keep the connector HONEST: when either client id or
+    # secret is empty the HubSpot OAuth provider reports is_configured()
+    # False and the crm connector round-trips unconfigured + arc17_pending.
+    # The flip to a live token exchange is DEPLOY-GATED on these.
+    hubspot_oauth_client_id: str = ""
+    hubspot_oauth_client_secret: str = ""
+    hubspot_oauth_redirect_uri: str = ""
+
+    # --- Salesforce CRM OAuth --------------------------------------------
+    # Native Salesforce OAuth 2.0 (web-server flow) connected-app
+    # credentials. Sourced in prod from SSM:
+    #   /luciel/<env>/connectors/salesforce/CLIENT_ID     -> salesforce_oauth_client_id
+    #   /luciel/<env>/connectors/salesforce/CLIENT_SECRET -> salesforce_oauth_client_secret
+    #   /luciel/<env>/connectors/salesforce/REDIRECT_URI  -> salesforce_oauth_redirect_uri
+    # salesforce_oauth_login_base is the auth host: the production login
+    # domain by default; an org on a sandbox sets it to
+    # https://test.salesforce.com (or its My Domain) via
+    #   /luciel/<env>/connectors/salesforce/LOGIN_BASE -> salesforce_oauth_login_base
+    # Empty client id/secret keep the connector HONEST (is_configured()
+    # False → unconfigured + arc17_pending); the live token exchange is
+    # DEPLOY-GATED on the client id + secret being populated.
+    salesforce_oauth_client_id: str = ""
+    salesforce_oauth_client_secret: str = ""
+    salesforce_oauth_redirect_uri: str = ""
+    salesforce_oauth_login_base: str = "https://login.salesforce.com"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

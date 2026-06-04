@@ -259,15 +259,21 @@ def test_catalog_tool_output_schema_validates_interim_dict(
 
 _INTERIM_TOOLS = {
     "book_appointment": "ARC13",
-    "send_email": "ARC13",
-    "send_sms": "ARC13",
+    # send_email / send_sms: Arc 17 connectors SHIPPED the full
+    # DEPLOY-GATED LIVE send path. They no longer satisfy the interim-body
+    # invariant: with no creds the UNCONFIGURED path still returns
+    # success=False / not_yet_available=True (honest, no network), but
+    # owning_arc is now ARC17 and the configured + live-switch-on path
+    # performs a real send. See tests/tools/test_arc17_connectors.py.
     # lookup_record: Arc 17 SHIPPED — the live record-source body reads
     # the configured connection's store_ref (local/S3 RecordSource) and
     # returns LIVE rows. It no longer satisfies the interim-body
     # invariant (success=False / not_yet_available) so it is excluded
     # here. See tests/tools/test_lookup_record.py for the live coverage.
     "schedule_callback": "ARC13",
-    "push_to_crm": "ARC12_WU6",
+    # push_to_crm: Arc 17 connectors SHIPPED the native HubSpot/Salesforce
+    # OAuth dispatch path (DEPLOY-GATED). Excluded for the same reason as
+    # send_email/send_sms. See tests/tools/test_arc17_connectors.py.
     # call_sibling_luciel: Arc 12 WU5 SHIPPED — guardrails + audit are
     # real; only the LLM round-trip remains as an Arc-14 seam INSIDE
     # the happy path. The tool no longer satisfies the "interim body"
@@ -333,13 +339,14 @@ def test_interim_bodies_carry_greppable_todo_arc_comments() -> None:
     impl_dir = pathlib.Path("app/tools/implementations")
     file_to_todo = {
         "book_appointment_tool.py": "TODO(ARC13)",
-        "send_email_tool.py": "TODO(ARC13)",
-        "send_sms_tool.py": "TODO(ARC13)",
+        # send_email / send_sms / push_to_crm: Arc 17 connectors shipped
+        # the real DEPLOY-GATED LIVE bodies; the files no longer carry a
+        # TODO(ARC13) / TODO(ARC12_WU6) breadcrumb. See
+        # tests/tools/test_arc17_connectors.py.
         # lookup_record: Arc 17 shipped the live record-source body; the
         # file no longer carries a TODO(ARC-UNASSIGNED) breadcrumb. See
         # tests/tools/test_lookup_record.py.
         "schedule_callback_tool.py": "TODO(ARC13)",
-        "push_to_crm_tool.py": "TODO(ARC12_WU6)",
         # call_sibling_luciel: Arc 12 WU5 shipped — guardrails/audit
         # are real. The only remaining seam is the Arc-14 orchestrator
         # round-trip, which lives in app/tools/sibling_dispatch.py
