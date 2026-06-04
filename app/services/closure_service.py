@@ -358,6 +358,9 @@ class ClosureService:
                     triggered_by="admin_request",
                     tier_at_request=admin.tier,
                     audit_ctx=audit_ctx,
+                    # RESCAN TIER-DE §5.10: pass closure_initiated_at so
+                    # the Free-tier gate allows this closure-path export.
+                    closure_initiated_at=admin.closure_initiated_at,
                 )
                 export_job_id = str(export_job.id)
             except Exception as exc:

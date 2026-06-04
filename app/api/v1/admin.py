@@ -2132,6 +2132,7 @@ from app.services.reactivation_service import (
 from app.services.data_export_service import (
     DataExportService,
     ExportAlreadyInFlightError,
+    ExportFreeGateError,
     ExportNotFoundError,
     ExportNotReadyError,
 )
@@ -2400,7 +2401,15 @@ def request_data_export(
             triggered_by=triggered_by,
             tier_at_request=admin.tier,
             audit_ctx=audit_ctx,
+            # RESCAN TIER-DE §5.10: pass closure state so the service can
+            # enforce the Free=closure-only gate.
+            closure_initiated_at=admin.closure_initiated_at,
         )
+    except ExportFreeGateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
     except ExportAlreadyInFlightError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 

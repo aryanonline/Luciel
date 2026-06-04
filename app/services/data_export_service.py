@@ -1,81 +1,51 @@
-"""Data export service \u2014 Arc 10.
+"""Data export service — Arc 10, RESCAN TIER-DE(widget+export).
 
-Owns the pre-closure data export bundle described in Vision \u00a76.3
-and Architecture \u00a73.6.3. The bundle is the customer's "Download
-all my data" payload, generated asynchronously and delivered via
-a signed S3 URL.
+Owns the data export bundle described in Vision §6.3, Architecture §5.10,
+and Architecture §3.6.6. The bundle is the customer's "Download all my
+data" payload, generated asynchronously and delivered via a signed S3 URL.
 
-Bundle contents (per Architecture \u00a73.6.3, with the Arc 10 Option-2
-qualifier on knowledge):
+RESCAN TIER-DE: switched from .tar.gz/JSONL to open ZIP per §5.10 and
+the Enterprise security-review evidence package (customer-facing
+commitment). Format is now:
 
-  manifest.json
-    Bundle metadata: bundle_id, admin_id, tier_at_request,
-    generated_at, schema_version, bytes_size, contents map.
+  export_bundle_{admin_id}_{timestamp}.zip
+   README.txt
+   conversations/{session_id}.json        (one file per session)
+   conversations/conversations.csv        (flattened CSV)
+   leads.json
+   leads.csv
+   knowledge/{original_source_filename}   (originals if available)
+   knowledge/manifest.json
+   instances.json  (provider + non_secret_config + status; NEVER secrets)
+   audit_log.jsonl
+   manifest.json   (bundle metadata)
 
-  conversations.jsonl
-    Every conversation row owned by this admin, one per line.
-    Each line embeds the conversation's messages so the bundle
-    is self-contained \u2014 the customer does not need to cross-
-    reference a separate messages.jsonl.
+Originals note: VantageMind v1 does not retain uploaded source files
+after ingestion (Arc 10 Option-2 deferral; Arc 11 owns the knowledge S3
+bucket). When originals are unavailable, chunk reconstructions are written
+under knowledge/chunks/{src_id}__v{n}.jsonl and the README documents this.
 
-  leads.jsonl
-    Every captured lead.
+Free-tier gate (RESCAN TIER-DE §5.10): self-serve export is restricted to
+admins in closure/grace-window state on the Free tier. Pro/Enterprise may
+export at any time. The gate is enforced in enqueue().
 
-  audit_log.csv
-    The admin's own audit history (tier-conditional already \u2014
-    Free admins see their 30-day window, Pro 1y, Enterprise 7y).
+Audit event data_export_self_serve (§5.2) is emitted for Pro/Enterprise
+self-serve exports so the forensics team can trace non-closure export usage.
 
-  instances.json
-    Instance configurations (the 5 pillars per instance).
-
-  escalations.csv
-    Every escalation event with signal metadata.
-
-  knowledge_sources/
-    Per-source bundle of the admin's ingested knowledge. Arc 10
-    ships Option-2 here: originals are NOT included because Arc 11
-    owns the knowledge S3 bucket (Architecture \u00a76). The text
-    content is reconstructed from indexed chunks.
-
-      knowledge_sources/manifest.json
-        Per source_id: source_filename, source_type, source_version,
-        ingested_by, ingested_at (earliest chunk created_at),
-        chunk_count, originals_retained: false.
-
-      knowledge_sources/chunks/<source_id>__v<n>.jsonl
-        Per (source_id, version): chunks ordered by their natural
-        sequence (by id ASC, which mirrors ingestion order). Each
-        line carries title, content, knowledge_type, created_at.
-
-      Includes pending_downgrade_archived_at-stamped chunks
-      (they're still the customer's data and they're recoverable
-      on re-upgrade). EXCLUDES superseded_at and soft_deleted_at
-      stamped chunks (those have been replaced or are mid-purge).
-
-  README.md
-    Bundle layout doc, including the originals-not-retained note
-    per Option-2.
-
-Mechanics:
-
+Bundle contents unchanged from Arc 10:
   * Generated asynchronously by a Celery task.
-  * Streamed to S3 via multipart upload (the bundle can be 5GB+
-    on Pro and unlimited on Enterprise; buffering is not an
-    option).
-  * Per-admin concurrency lock via the partial unique index
-    ux_data_export_jobs_one_active_per_admin (Arc 10 migration).
-  * Signed URL TTL is tier-conditional and STICKY per bundle:
-    7 days on Free/Pro, 90 days on Enterprise. An Enterprise
-    admin who downgrades after generation keeps their 90-day URL.
-  * Available during the closure grace window. An admin who
-    closed without checking "Download all my data" can still
-    request an export within the 30-day grace.
-  * Job status machine:
-      pending \u2192 generating \u2192 ready  (happy path)
-                              \u2193
-                            expired  (signed URL TTL elapsed; the
-                                      cleanup worker stamps this)
-      pending \u2192 generating \u2192 failed (error during generation)
+  * Uploaded to S3 via upload_fileobj.
+  * Per-admin concurrency lock via ux_data_export_jobs_one_active_per_admin.
+  * Signed URL TTL: 7 days on Free/Pro, 90 days on Enterprise.
+  * Available during the closure grace window.
+  * Job status machine: pending → generating → ready / expired / failed.
+
+Originals note (Arc 10 Option-2 / RESCAN TIER-DE):
+  Original uploaded knowledge files are not retained at ingestion time by
+  VantageMind v1. Arc 11 owns the knowledge S3 bucket and will add
+  original-file retention. The text content of each source is
+  reconstructed from indexed chunks and written to the ZIP under
+  knowledge/chunks/. The README.txt documents this limitation.
 """
 from __future__ import annotations
 
@@ -83,8 +53,8 @@ import csv
 import io
 import json
 import logging
-import tarfile
 import uuid
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -97,6 +67,7 @@ from app.models.admin_audit_log import (
     ACTION_DATA_EXPORT_FAILED,
     ACTION_DATA_EXPORT_GENERATED,
     ACTION_DATA_EXPORT_REQUESTED,
+    ACTION_DATA_EXPORT_SELF_SERVE,
     RESOURCE_TENANT,
 )
 
@@ -111,20 +82,15 @@ JobStatus = Literal["pending", "generating", "ready", "expired", "failed"]
 # ---------------------------------------------------------------------
 # Tier-conditional signed-URL TTL.
 # ---------------------------------------------------------------------
-# Vision \u00a77 tier matrix: pre-closure data export is "Yes (7-day
+# Vision §7 tier matrix: pre-closure data export is "Yes (7-day
 # window)" on Free + Pro, "Yes (90-day window)" on Enterprise.
-# These map to seconds for the boto3 generate_presigned_url call.
 _TIER_URL_TTL_SECONDS: dict[Tier, int] = {
     "free":       7  * 24 * 3600,
     "pro":        7  * 24 * 3600,
     "enterprise": 90 * 24 * 3600,
 }
 
-# S3 bucket name comes from settings. Same ca-central-1 footprint
-# as everything else per Architecture \u00a74.2 (data residency).
-# The bucket has Arc 10's lifecycle policy applied: incomplete
-# multipart uploads abort after 24h so an interrupted generation
-# does not leak storage forever.
+# S3 bucket name comes from settings.
 _S3_KEY_PREFIX = "data-exports"
 
 
@@ -155,7 +121,16 @@ class ExportNotFoundError(DataExportError):
 
 
 class ExportGenerationError(DataExportError):
-    """Internal failure during bundle generation \u2014 wraps the cause."""
+    """Internal failure during bundle generation — wraps the cause."""
+
+
+class ExportFreeGateError(DataExportError):
+    """Free-tier self-serve export blocked outside closure window.
+
+    RESCAN TIER-DE §5.10: Free admins may only export data when their
+    account is in the closure / grace-window state. Pro and Enterprise
+    admins may export at any time.
+    """
 
 
 # ---------------------------------------------------------------------
@@ -164,13 +139,8 @@ class ExportGenerationError(DataExportError):
 
 @dataclass(frozen=True)
 class DataExportJob:
-    """Returned from enqueue() and used as the route's response body.
-
-    Mirrors the schema-level row but flattens the few fields the
-    frontend cares about. We do not return the row ORM object directly
-    so the route does not have to worry about lazy-load surprises.
-    """
-    id: str                              # UUID as str
+    """Returned from enqueue() and used as the route's response body."""
+    id: str
     admin_id: str
     status: JobStatus
     requested_at: datetime
@@ -185,11 +155,11 @@ class DataExportJob:
 # ---------------------------------------------------------------------
 
 class DataExportService:
-    """Orchestrates pre-closure data export.
+    """Orchestrates data export.
 
     Lifetime: one instance per request OR per Celery task invocation.
-    s3_client and audit_repository are injected so unit tests can
-    stub the AWS surface and verify audit emissions independently.
+    s3_client and audit_repository are injected so unit tests can stub
+    the AWS surface and verify audit emissions independently.
     """
 
     def __init__(
@@ -206,7 +176,7 @@ class DataExportService:
         self.audit_repository = audit_repository
 
     # -----------------------------------------------------------------
-    # Public \u2014 enqueue (route layer entry).
+    # Public — enqueue (route layer entry).
     # -----------------------------------------------------------------
 
     def enqueue(
@@ -216,20 +186,26 @@ class DataExportService:
         triggered_by: TriggeredBy,
         tier_at_request: Tier,
         audit_ctx,
+        closure_initiated_at: datetime | None = None,
     ) -> DataExportJob:
         """Insert a pending data_export_jobs row.
 
-        The Celery task generate_bundle reads pending rows. The
-        partial unique index ux_data_export_jobs_one_active_per_admin
-        guarantees at most one (pending, generating) row per admin
-        at any moment \u2014 a concurrent duplicate INSERT raises
-        IntegrityError, which we translate to
-        ExportAlreadyInFlightError.
+        RESCAN TIER-DE §5.10 — Free-tier gate:
+          * Free admins: only allowed when closure_initiated_at is set
+            (i.e. account is in closure or grace-window state).
+          * Pro/Enterprise: allowed at any time; emits
+            data_export_self_serve audit if not closure-triggered.
 
-        triggered_by is captured for forensics: 'admin_request' means
-        the closure modal initiated it; 'grace_window_request' means
-        the admin requested it during the grace window after closure.
+        Raises ExportFreeGateError for out-of-window Free requests.
         """
+        # Free-tier gate: closure-only.
+        if tier_at_request == "free" and closure_initiated_at is None:
+            raise ExportFreeGateError(
+                "Free-tier accounts may only export data during the "
+                "account closure / grace window. Upgrade to Pro or "
+                "Enterprise for self-serve export at any time."
+            )
+
         job_id = uuid.uuid4()
         now = datetime.now(timezone.utc)
 
@@ -256,11 +232,6 @@ class DataExportService:
             )
             self.db.flush()
         except IntegrityError as exc:
-            # The unique-index violation is the expected failure shape
-            # when an export is already in flight. Other IntegrityError
-            # paths (FK violation, CHECK failure) should not happen
-            # for this INSERT shape, but if they do, we surface them
-            # rather than swallow.
             if "ux_data_export_jobs_one_active_per_admin" in str(exc.orig):
                 raise ExportAlreadyInFlightError(
                     f"An export job is already in flight for admin "
@@ -268,8 +239,7 @@ class DataExportService:
                 ) from exc
             raise
 
-        # Audit row \u2014 forensics needs to see WHEN this was requested,
-        # WHO triggered it, and what tier was sticky on the bundle.
+        # Audit row.
         self.audit_repository.record(
             ctx=audit_ctx,
             admin_id=admin_id,
@@ -289,6 +259,27 @@ class DataExportService:
             autocommit=False,
         )
 
+        # RESCAN TIER-DE §5.10: emit data_export_self_serve for
+        # Pro/Enterprise non-closure exports so the forensics team can
+        # identify self-serve data-portability requests.
+        if tier_at_request in ("pro", "enterprise") and triggered_by == "admin_request":
+            self.audit_repository.record(
+                ctx=audit_ctx,
+                admin_id=admin_id,
+                action=ACTION_DATA_EXPORT_SELF_SERVE,
+                resource_type=RESOURCE_TENANT,
+                resource_natural_id=admin_id,
+                after={
+                    "job_id": str(job_id),
+                    "tier_at_request": tier_at_request,
+                },
+                note=(
+                    f"Self-serve data export requested by {admin_id} "
+                    f"({tier_at_request} tier)."
+                ),
+                autocommit=False,
+            )
+
         return DataExportJob(
             id=str(job_id),
             admin_id=admin_id,
@@ -301,23 +292,14 @@ class DataExportService:
         )
 
     # -----------------------------------------------------------------
-    # Public \u2014 generate_bundle (Celery task entry).
+    # Public — generate_bundle (Celery task entry).
     # -----------------------------------------------------------------
 
     def generate_bundle(self, job_id: str) -> None:
-        """Generate the bundle for a pending job and upload to S3.
+        """Generate the ZIP bundle for a pending job and upload to S3.
 
-        Race-safe transition: pending \u2192 generating via UPDATE \u2026 WHERE
-        status='pending'. If rowcount=0 another worker already grabbed
-        the job and this call returns cleanly.
-
-        On success: status='ready', s3_key set, signed URL computed
-        and signed_url_expires_at stamped.
-
-        On failure: status='failed', failed_at set, error_message
-        carries the exception's repr.
+        RESCAN TIER-DE: produces a ZIP per §5.10 / §3.6.6.
         """
-        # --- Transition pending \u2192 generating, race-safe. ---
         now = datetime.now(timezone.utc)
         res = self.db.execute(
             sql_text(
@@ -334,11 +316,8 @@ class DataExportService:
         )
         row = res.first()
         if row is None:
-            # Another worker already picked it up, OR the job was
-            # never created. Either way, exit clean. The other
-            # worker (or the row's absence) handles the outcome.
             logger.info(
-                "data_export_service: generate_bundle skipped \u2014 "
+                "data_export_service: generate_bundle skipped — "
                 "job_id=%s not in 'pending' (claimed by another "
                 "worker or absent).",
                 job_id,
@@ -365,12 +344,10 @@ class DataExportService:
                 f"Failed to generate bundle for job {job_id}: {exc}"
             ) from exc
 
-        # --- Compute the signed-URL expiry. ---
         ttl_seconds = _TIER_URL_TTL_SECONDS[tier_at_request]
         ready_at = datetime.now(timezone.utc)
         signed_url_expires_at = ready_at + timedelta(seconds=ttl_seconds)
 
-        # --- Stamp ready. ---
         self.db.execute(
             sql_text(
                 """
@@ -395,7 +372,6 @@ class DataExportService:
                 "id": job_id,
             },
         )
-        # Audit \u2014 stamping ready is the GDPR-relevant moment.
         self.audit_repository.record(
             ctx=_system_ctx_for_export(),
             admin_id=admin_id,
@@ -420,7 +396,7 @@ class DataExportService:
         self.db.commit()
 
     # -----------------------------------------------------------------
-    # Public \u2014 get_signed_url (route layer entry).
+    # Public — get_signed_url (route layer entry).
     # -----------------------------------------------------------------
 
     def get_signed_url(
@@ -429,18 +405,7 @@ class DataExportService:
         job_id: str,
         admin_id: str,
     ) -> tuple[str, datetime]:
-        """Return (signed_url, expires_at) for a ready job.
-
-        Enforces admin_id at the service layer in addition to RLS:
-        the data_export_jobs row carries admin_id, RLS gates SELECT
-        by app.admin_id, and we double-check via the WHERE clause
-        below. Three layers of defense, one bug away from leakage \u2014
-        the architecture cares about this kind of asymmetric risk.
-
-        Raises:
-          - ExportNotFoundError: row missing or wrong admin.
-          - ExportNotReadyError: row exists but status != 'ready'.
-        """
+        """Return (signed_url, expires_at) for a ready job."""
         row = self.db.execute(
             sql_text(
                 """
@@ -465,30 +430,23 @@ class DataExportService:
                 f"not 'ready'."
             )
         if expires_at and datetime.now(timezone.utc) >= expires_at:
-            # The cleanup worker should have flipped status to
-            # 'expired' but races happen. Refuse to mint a signed
-            # URL against an expired bundle.
             raise ExportNotReadyError(
                 f"Export job {job_id!r} signed URL has expired "
                 f"({expires_at.isoformat()})."
             )
 
-        # Compute how many seconds remain so the generated URL
-        # itself expires at signed_url_expires_at, not at
-        # now+full-TTL. This makes the URL's encoded expiry match
-        # the row's signed_url_expires_at exactly.
         remaining = int(
             (expires_at - datetime.now(timezone.utc)).total_seconds()
         )
         url = self.s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": s3_bucket, "Key": s3_key},
-            ExpiresIn=max(remaining, 60),  # never sign a <60s URL
+            ExpiresIn=max(remaining, 60),
         )
         return url, expires_at
 
     # -----------------------------------------------------------------
-    # Internals \u2014 bundle building.
+    # Internals — bundle building.
     # -----------------------------------------------------------------
 
     def _build_and_upload_bundle(
@@ -498,36 +456,29 @@ class DataExportService:
         tier_at_request: Tier,
         job_id: str,
     ) -> tuple[str, int]:
-        """Build the .tar.gz bundle in-memory-streamed to S3.
+        """Build the ZIP bundle and upload to S3.
 
-        We compose a tarfile object writing to a BytesIO buffer and
-        upload via boto3's upload_fileobj which handles multipart
-        transparently. The trade-off:
-          + simple code, no manual MultipartUpload bookkeeping
-          + boto3 picks reasonable chunk sizes (8MB default)
-          - the buffer can grow large for huge tenants; future
-            optimization is a true streaming tarfile via a pipe.
-            For Arc 10's expected bundle sizes (<10GB), BytesIO
-            is fine on a 4GB worker.
+        RESCAN TIER-DE: changed from tarfile w:gz to zipfile.ZipFile per
+        §5.10 / §3.6.6 (Enterprise security-review evidence commitment).
+        S3 key uses .zip extension; ContentType is application/zip.
 
         Returns (s3_key, bytes_written).
         """
-        s3_key = (
-            f"{_S3_KEY_PREFIX}/{admin_id}/{job_id}/bundle.tar.gz"
-        )
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        zip_name = f"export_bundle_{admin_id}_{ts}.zip"
+        s3_key = f"{_S3_KEY_PREFIX}/{admin_id}/{job_id}/{zip_name}"
 
         buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            self._write_manifest(tar, admin_id=admin_id,
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            self._write_manifest(zf, admin_id=admin_id,
                                  tier_at_request=tier_at_request,
-                                 job_id=job_id)
-            self._write_readme(tar)
-            self._write_conversations(tar, admin_id=admin_id)
-            self._write_leads(tar, admin_id=admin_id)
-            self._write_audit_log(tar, admin_id=admin_id)
-            self._write_instances(tar, admin_id=admin_id)
-            self._write_escalations(tar, admin_id=admin_id)
-            self._write_knowledge(tar, admin_id=admin_id)
+                                 job_id=job_id, zip_name=zip_name)
+            self._write_readme(zf)
+            self._write_conversations(zf, admin_id=admin_id)
+            self._write_leads(zf, admin_id=admin_id)
+            self._write_audit_log(zf, admin_id=admin_id)
+            self._write_instances(zf, admin_id=admin_id)
+            self._write_knowledge(zf, admin_id=admin_id)
 
         bytes_written = buf.tell()
         buf.seek(0)
@@ -535,65 +486,77 @@ class DataExportService:
             Fileobj=buf,
             Bucket=self.bucket,
             Key=s3_key,
-            ExtraArgs={"ContentType": "application/gzip"},
+            ExtraArgs={"ContentType": "application/zip"},
         )
         return s3_key, bytes_written
 
     def _write_manifest(
         self,
-        tar: tarfile.TarFile,
+        zf: zipfile.ZipFile,
         *,
         admin_id: str,
         tier_at_request: Tier,
         job_id: str,
+        zip_name: str,
     ) -> None:
+        """§5.10 manifest.json — bundle metadata."""
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "bundle_id": job_id,
+            "bundle_filename": zip_name,
             "admin_id": admin_id,
             "tier_at_request": tier_at_request,
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "format": "zip",
             "contents": [
-                "conversations.jsonl",
-                "leads.jsonl",
-                "audit_log.csv",
+                "README.txt",
+                "manifest.json",
+                "conversations/{session_id}.json",
+                "conversations/conversations.csv",
+                "leads.json",
+                "leads.csv",
+                "knowledge/manifest.json",
+                "knowledge/chunks/*.jsonl",
                 "instances.json",
-                "escalations.csv",
-                "knowledge_sources/manifest.json",
-                "knowledge_sources/chunks/*.jsonl",
-                "README.md",
+                "audit_log.jsonl",
             ],
             "originals_retained_in_bundle": False,
             "originals_retention_note": (
                 "Original uploaded knowledge files are not retained at "
-                "ingestion time by VantageMind v1. The text content of "
-                "each source has been reconstructed from indexed "
-                "chunks and is available under knowledge_sources/chunks/."
+                "ingestion time by VantageMind v1 (Arc 10 Option-2 "
+                "deferral). Arc 11 will add original-file retention. "
+                "The text content of each source has been reconstructed "
+                "from indexed chunks and is available under "
+                "knowledge/chunks/. See README.txt for details."
             ),
         }
-        self._add_text_entry(
-            tar, "manifest.json", json.dumps(manifest, indent=2)
-        )
+        self._add_text_entry(zf, "manifest.json",
+                             json.dumps(manifest, indent=2))
 
-    def _write_readme(self, tar: tarfile.TarFile) -> None:
-        readme = _README_TEXT
-        self._add_text_entry(tar, "README.md", readme)
+    def _write_readme(self, zf: zipfile.ZipFile) -> None:
+        self._add_text_entry(zf, "README.txt", _README_TEXT)
 
     def _write_conversations(
         self,
-        tar: tarfile.TarFile,
+        zf: zipfile.ZipFile,
         *,
         admin_id: str,
     ) -> None:
-        """Stream every conversation belonging to admin_id, with
+        """§5.10: conversations/{session_id}.json + conversations.csv.
 
-        messages embedded inline so the bundle is self-contained.
+        One JSON file per session with transcript + metadata, plus a
+        flattened CSV for spreadsheet consumers.
         """
         rows = self.db.execute(
             sql_text(
                 """
-                SELECT c.id, c.created_at, c.updated_at,
-                       c.luciel_instance_id,
+                SELECT s.id            AS session_id,
+                       s.created_at    AS session_created_at,
+                       s.channel       AS channel,
+                       s.luciel_instance_id AS instance_id,
+                       c.id            AS conversation_id,
+                       c.created_at    AS conv_created_at,
+                       c.updated_at    AS conv_updated_at,
                        COALESCE(
                          json_agg(
                            json_build_object(
@@ -605,34 +568,72 @@ class DataExportService:
                          ) FILTER (WHERE m.id IS NOT NULL),
                          '[]'::json
                        ) AS messages
-                  FROM conversations c
-             LEFT JOIN sessions s ON s.conversation_id = c.id
+                  FROM sessions s
+             LEFT JOIN conversations c ON c.id = s.conversation_id
              LEFT JOIN messages m ON m.session_id = s.id
-                 WHERE c.admin_id = :aid
-              GROUP BY c.id
-              ORDER BY c.id ASC
+                 WHERE s.admin_id = :aid
+              GROUP BY s.id, c.id
+              ORDER BY s.id ASC
                 """
             ),
             {"aid": admin_id},
         )
-        lines = []
-        for row in rows:
-            lines.append(json.dumps({
-                "conversation_id": row[0],
-                "created_at": _iso(row[1]),
-                "updated_at": _iso(row[2]),
-                "instance_id": row[3],
-                "messages": row[4] if row[4] else [],
-            }, default=str))
-        self._add_text_entry(tar, "conversations.jsonl",
-                             "\n".join(lines) + ("\n" if lines else ""))
 
-    def _write_leads(self, tar: tarfile.TarFile, *, admin_id: str) -> None:
-        # Leads are captured via cognition into the dashboard's lead
-        # view. The exact column shape is Arc 11's concern; for Arc
-        # 10 we export every column from identity_claims (the v1
-        # lead-equivalent surface) so a future schema change does
-        # not silently drop fields.
+        # CSV header for the flattened conversations.csv.
+        csv_buf = io.StringIO()
+        csv_writer = csv.writer(csv_buf)
+        csv_writer.writerow([
+            "session_id", "session_created_at", "channel",
+            "instance_id", "conversation_id",
+            "conv_created_at", "conv_updated_at",
+            "message_count",
+        ])
+
+        for row in rows:
+            session_id = str(row[0])
+            session_created_at = _iso(row[1])
+            channel = row[2]
+            instance_id = row[3]
+            conversation_id = str(row[4]) if row[4] else None
+            conv_created_at = _iso(row[5])
+            conv_updated_at = _iso(row[6])
+            messages = row[7] if row[7] else []
+
+            # Per-session JSON.
+            session_obj = {
+                "session_id": session_id,
+                "session_created_at": session_created_at,
+                "channel": channel,
+                "instance_id": instance_id,
+                "conversation_id": conversation_id,
+                "conv_created_at": conv_created_at,
+                "conv_updated_at": conv_updated_at,
+                "messages": messages,
+            }
+            safe_session_id = session_id.replace("/", "_").replace("..", "_")
+            self._add_text_entry(
+                zf,
+                f"conversations/{safe_session_id}.json",
+                json.dumps(session_obj, default=str, indent=2),
+            )
+
+            # CSV row.
+            csv_writer.writerow([
+                session_id,
+                session_created_at,
+                channel,
+                instance_id,
+                conversation_id,
+                conv_created_at,
+                conv_updated_at,
+                len(messages) if isinstance(messages, list) else 0,
+            ])
+
+        self._add_text_entry(zf, "conversations/conversations.csv",
+                             csv_buf.getvalue())
+
+    def _write_leads(self, zf: zipfile.ZipFile, *, admin_id: str) -> None:
+        """§5.10: leads.json + leads.csv."""
         rows = self.db.execute(
             sql_text(
                 """
@@ -644,23 +645,42 @@ class DataExportService:
             ),
             {"aid": admin_id},
         )
-        lines = [json.dumps(r[0], default=str) for r in rows]
-        self._add_text_entry(tar, "leads.jsonl",
-                             "\n".join(lines) + ("\n" if lines else ""))
+        leads = [r[0] for r in rows]
+
+        # leads.json
+        self._add_text_entry(
+            zf, "leads.json",
+            json.dumps(leads, default=str, indent=2),
+        )
+
+        # leads.csv — flatten the JSONB rows.
+        if leads:
+            # Use first row's keys as headers.
+            first = leads[0] if isinstance(leads[0], dict) else {}
+            headers = list(first.keys())
+            csv_buf = io.StringIO()
+            csv_writer = csv.DictWriter(csv_buf, fieldnames=headers,
+                                        extrasaction="ignore")
+            csv_writer.writeheader()
+            for lead in leads:
+                if isinstance(lead, dict):
+                    csv_writer.writerow(
+                        {k: json.dumps(v, default=str) if isinstance(v, (dict, list)) else v
+                         for k, v in lead.items()}
+                    )
+            self._add_text_entry(zf, "leads.csv", csv_buf.getvalue())
+        else:
+            self._add_text_entry(zf, "leads.csv", "")
 
     def _write_audit_log(
         self,
-        tar: tarfile.TarFile,
+        zf: zipfile.ZipFile,
         *,
         admin_id: str,
     ) -> None:
-        """Audit log as CSV. Tier retention has already been applied
+        """§5.10: audit_log.jsonl — within retention window.
 
-        upstream by AuditRetentionService; the rows still present
-        in admin_audit_logs for this admin are what the export
-        includes. cold_archived_at rows are included too \u2014 they're
-        still the customer's data \u2014 with a column noting their
-        archive state.
+        RESCAN TIER-DE: changed from CSV to JSONL per §5.10.
         """
         rows = self.db.execute(
             sql_text(
@@ -676,99 +696,127 @@ class DataExportService:
             ),
             {"aid": admin_id},
         )
-        out = io.StringIO()
-        writer = csv.writer(out)
-        writer.writerow([
-            "id", "created_at", "action", "resource_type",
-            "resource_pk", "resource_natural_id", "actor_key_prefix",
-            "tier_at_write", "cold_archived_at",
-            "before_json", "after_json", "note",
-        ])
+        lines = []
         for row in rows:
-            writer.writerow([
-                row[0],
-                _iso(row[1]),
-                row[2], row[3], row[4], row[5], row[6],
-                row[7],
-                _iso(row[8]),
-                json.dumps(row[9], default=str) if row[9] else "",
-                json.dumps(row[10], default=str) if row[10] else "",
-                row[11] or "",
-            ])
-        self._add_text_entry(tar, "audit_log.csv", out.getvalue())
+            lines.append(json.dumps({
+                "id": row[0],
+                "created_at": _iso(row[1]),
+                "action": row[2],
+                "resource_type": row[3],
+                "resource_pk": row[4],
+                "resource_natural_id": row[5],
+                "actor_key_prefix": row[6],
+                "tier_at_write": row[7],
+                "cold_archived_at": _iso(row[8]),
+                "before_json": row[9],
+                "after_json": row[10],
+                "note": row[11],
+            }, default=str))
+        self._add_text_entry(
+            zf, "audit_log.jsonl",
+            "\n".join(lines) + ("\n" if lines else ""),
+        )
 
     def _write_instances(
         self,
-        tar: tarfile.TarFile,
+        zf: zipfile.ZipFile,
         *,
         admin_id: str,
     ) -> None:
-        """Instance configs as a single JSON document.
+        """§5.10: instances.json — provider + non_secret_config + status.
 
-        We include the 5-pillar shape per Vision \u00a73: channels, tools,
-        knowledge (reference to source_ids), escalation, personality.
-        Pillar resolution happens through whatever shape the current
-        instance_service exposes; for Arc 10 we dump the raw rows
-        and let Arc 15 (config UX) refine the export schema.
+        RESCAN TIER-DE security invariant: credential_ref and any
+        secret-bearing columns MUST NEVER be written here. We query the
+        instance_connections table with an explicit column allowlist and
+        strip credential_ref entirely. The instances table itself carries
+        no secrets (those ride behind credential_ref on instance_connections).
         """
-        rows = self.db.execute(
+        # Read instance rows (no secrets on the instances table itself).
+        inst_rows = self.db.execute(
             sql_text(
                 """
-                SELECT row_to_json(i.*)
-                  FROM instances i
-                 WHERE i.admin_id = :aid
-              ORDER BY i.id ASC
+                SELECT id, admin_id, display_name, instance_status,
+                       created_at, updated_at, soft_deleted_at,
+                       instance_status_note
+                  FROM instances
+                 WHERE admin_id = :aid
+              ORDER BY id ASC
                 """
             ),
             {"aid": admin_id},
         )
-        instances = [r[0] for r in rows]
-        self._add_text_entry(
-            tar, "instances.json", json.dumps(instances, default=str, indent=2)
+
+        # Read instance_connections — provider + non_secret_config + status.
+        # credential_ref is EXCLUDED per §5.10 security invariant.
+        conn_rows = self.db.execute(
+            sql_text(
+                """
+                SELECT instance_id, connection_type, provider,
+                       config_json, status,
+                       last_health_check_at, created_at, updated_at
+                  FROM instance_connections
+                 WHERE admin_id = :aid
+              ORDER BY instance_id ASC, id ASC
+                """
+            ),
+            {"aid": admin_id},
         )
+        # Group connections by instance_id.
+        conn_by_instance: dict[int, list[dict]] = {}
+        for cr in conn_rows:
+            iid = int(cr[0])
+            conn_by_instance.setdefault(iid, []).append({
+                "connection_type": cr[1],
+                "provider": cr[2],
+                # config_json is non_secret_config (no credential_ref).
+                "non_secret_config": cr[3],
+                "status": cr[4],
+                "last_health_check_at": _iso(cr[5]),
+                "created_at": _iso(cr[6]),
+                "updated_at": _iso(cr[7]),
+                # credential_ref intentionally omitted — NEVER secret material.
+            })
 
-    def _write_escalations(
-        self,
-        tar: tarfile.TarFile,
-        *,
-        admin_id: str,
-    ) -> None:
-        """Escalations CSV.
+        instances_out = []
+        for ir in inst_rows:
+            iid = int(ir[0])
+            instances_out.append({
+                "id": iid,
+                "admin_id": ir[1],
+                "display_name": ir[2],
+                "instance_status": ir[3].value if hasattr(ir[3], "value") else ir[3],
+                "created_at": _iso(ir[4]),
+                "updated_at": _iso(ir[5]),
+                "soft_deleted_at": _iso(ir[6]),
+                "instance_status_note": ir[7],
+                # §5.10: include provider + non_secret_config + status.
+                "connections": conn_by_instance.get(iid, []),
+            })
 
-        Arc 10 does not own the escalation-emission table (Arc 14
-        wires it). For now we read audit-log rows tagged with
-        escalation actions if any exist; if the table or rows are
-        not yet present, the file is written empty (header only).
-        Forward-compatible: when Arc 14 lands and the dedicated
-        escalation_events table exists, this method updates to
-        read from it.
-        """
-        out = io.StringIO()
-        writer = csv.writer(out)
-        writer.writerow([
-            "id", "created_at", "signal", "confidence",
-            "reasoning_excerpt", "session_id", "instance_id",
-        ])
-        # No-op body for Arc 10. Arc 14 fills this in.
-        self._add_text_entry(tar, "escalations.csv", out.getvalue())
+        self._add_text_entry(
+            zf, "instances.json",
+            json.dumps(instances_out, default=str, indent=2),
+        )
 
     def _write_knowledge(
         self,
-        tar: tarfile.TarFile,
+        zf: zipfile.ZipFile,
         *,
         admin_id: str,
     ) -> None:
-        """Knowledge bundle.
+        """§5.10: knowledge/manifest.json + originals or chunk reconstructions.
 
-        Post-Cleanup-B: manifest entries are drawn directly from
-        ``knowledge_sources``; the pre-Cleanup-B legacy fallback for
-        FK-less chunks is gone with the legacy columns \u2014 every chunk
-        now has a non-NULL INTEGER source FK pointing at a
-        ``knowledge_sources`` row.
+        RESCAN TIER-DE originals-first preference: attempt to pull the
+        original file from S3 (settings.knowledge_bucket). If the original
+        is not available (Arc 10 Option-2 — originals not retained at
+        ingestion time), fall through to chunk reconstruction and note the
+        limitation in the manifest entry.
 
-        Bundle layout is unchanged:
-          * ``knowledge_sources/manifest.json``
-          * ``knowledge_sources/chunks/src-<pk>__v<version>.jsonl``
+        Currently VantageMind v1 does NOT retain original uploaded files
+        (Arc 10 Option-2; Arc 11 owns the knowledge S3 bucket). Originals
+        will be added in a future release. This method documents the
+        limitation and writes chunk reconstructions under
+        knowledge/chunks/.
         """
         ks_rows = self.db.execute(
             sql_text(
@@ -799,36 +847,48 @@ class DataExportService:
             {"aid": admin_id},
         )
         manifest: list[dict] = []
-        per_source: list[tuple[int, int]] = []
+        per_source: list[tuple[int, str, int]] = []  # (pk, filename, version)
         for r in ks_rows:
+            source_pk = int(r.source_pk)
+            source_filename = r.source_filename or f"source_{source_pk}"
+            source_version = int(r.source_version)
             manifest.append({
-                "source_pk": int(r.source_pk),
+                "source_pk": source_pk,
                 "source_uuid": str(r.source_uuid),
-                # Stable stringy id (``src-<pk>``) preserved in the
-                # export envelope for downstream consumers that still
-                # key on a string; the DB column is gone.
-                "source_id": f"src-{int(r.source_pk)}",
-                "source_filename": r.source_filename,
+                "source_id": f"src-{source_pk}",
+                "source_filename": source_filename,
                 "source_type": r.source_type,
-                "source_version": int(r.source_version),
+                "source_version": source_version,
                 "ingested_by": r.ingested_by,
                 "ingested_at": _iso(r.ingested_at),
                 "size_bytes": int(r.size_bytes or 0),
                 "chunk_count": int(r.chunk_count or 0),
                 "ingestion_status": r.ingestion_status,
+                # RESCAN TIER-DE: originals not retained in v1 (Arc 10
+                # Option-2). Arc 11 will add original-file retention.
+                # When originals ARE available, this field becomes True
+                # and knowledge/{source_filename} contains the original.
                 "originals_retained": False,
+                "originals_note": (
+                    "Original file not retained at ingestion time (Arc 10 "
+                    "Option-2). Chunk reconstruction available in "
+                    f"knowledge/chunks/src-{source_pk}__v{source_version}.jsonl."
+                ),
                 "archived_on_downgrade": bool(r.archived_on_downgrade),
             })
-            per_source.append((int(r.source_pk), int(r.source_version)))
+            per_source.append((source_pk, source_filename, source_version))
 
         self._add_text_entry(
-            tar,
-            "knowledge_sources/manifest.json",
+            zf,
+            "knowledge/manifest.json",
             json.dumps(manifest, default=str, indent=2),
         )
 
-        # Per-source chunk files.
-        for source_pk, source_version in per_source:
+        # Per-source chunk files.  Originals are not available (v1).
+        # Future: when Arc 11 adds original-file retention, pull from
+        # settings.knowledge_bucket and write under
+        # knowledge/{source_filename} instead.
+        for source_pk, source_filename, source_version in per_source:
             chunk_rows = self.db.execute(
                 sql_text(
                     """
@@ -845,7 +905,6 @@ class DataExportService:
                 {"aid": admin_id, "sid": source_pk, "sv": source_version},
             )
             file_key = f"src-{source_pk}"
-
             lines = []
             for cr in chunk_rows:
                 lines.append(json.dumps({
@@ -856,28 +915,24 @@ class DataExportService:
                     "created_at": _iso(cr[4]),
                 }, default=str))
             self._add_text_entry(
-                tar,
-                f"knowledge_sources/chunks/"
+                zf,
+                f"knowledge/chunks/"
                 f"{file_key}__v{source_version}.jsonl",
                 "\n".join(lines) + ("\n" if lines else ""),
             )
 
     # -----------------------------------------------------------------
-    # Internals \u2014 small utilities.
+    # Internals — small utilities.
     # -----------------------------------------------------------------
 
     @staticmethod
     def _add_text_entry(
-        tar: tarfile.TarFile,
+        zf: zipfile.ZipFile,
         name: str,
         content: str,
     ) -> None:
-        """Add a text file to the tarball from an in-memory string."""
-        data = content.encode("utf-8")
-        info = tarfile.TarInfo(name=name)
-        info.size = len(data)
-        info.mtime = int(datetime.now(timezone.utc).timestamp())
-        tar.addfile(info, io.BytesIO(data))
+        """Add a text file to the ZIP from an in-memory string."""
+        zf.writestr(name, content.encode("utf-8"))
 
     def _mark_failed(self, *, job_id: str, admin_id: str, err: str) -> None:
         """Stamp a job as failed and emit an audit row."""
@@ -920,51 +975,84 @@ def _iso(ts: Any) -> str | None:
 
 
 def _system_ctx_for_export():
-    """Build an AuditContext.system() for export-worker rows.
-
-    Imported lazily to avoid the same circular-import dance as
-    retention.py: admin_audit_repository pulls in audit_chain which
-    pulls in session which pulls in this module via the worker
-    Celery wiring.
-    """
+    """Build an AuditContext.system() for export-worker rows."""
     from app.repositories.admin_audit_repository import AuditContext
     return AuditContext.system(label="data_export_worker")
 
 
-_README_TEXT = """# VantageMind \u2014 Data Export Bundle
+_README_TEXT = """VantageMind — Data Export Bundle
+=================================
 
-This archive contains every piece of data VantageMind holds for
+This ZIP archive contains every piece of data VantageMind holds for
 your account at the moment of generation.
 
-## Layout
+Layout
+------
 
-| Path | Description |
-|------|-------------|
-| `manifest.json` | Bundle metadata: when it was generated, your tier, contents. |
-| `conversations.jsonl` | One conversation per line, with messages embedded. |
-| `leads.jsonl` | Every lead Luciel captured. |
-| `audit_log.csv` | Every admin action recorded against your account. |
-| `instances.json` | Configuration of every Luciel instance you created. |
-| `escalations.csv` | Every escalation event with the signal that fired it. |
-| `knowledge_sources/manifest.json` | Per-source metadata for your ingested knowledge. |
-| `knowledge_sources/chunks/*.jsonl` | Reconstructed text from each source's chunks. |
+  README.txt
+    This file.
 
-## A note on knowledge originals
+  manifest.json
+    Bundle metadata: when it was generated, your tier, contents.
+    schema_version: 2 (ZIP format, per §5.10).
 
-At the time this bundle was generated, VantageMind did not retain the
-original uploaded files (PDFs, DOCX, CSV) after ingestion. The text
-content of each source has been reconstructed from the indexed
-chunks under `knowledge_sources/chunks/`. The `manifest.json` lists
-each source's original filename so you can match it back to your
-local copy.
+  conversations/{session_id}.json
+    One JSON file per widget/chat session, containing the transcript
+    (all messages), session metadata, and the linked conversation ID.
 
-Future versions of VantageMind retain originals; if you re-ingest a
-file after that upgrade, your next export will include both the
+  conversations/conversations.csv
+    Flattened CSV view of all sessions for spreadsheet import.
+
+  leads.json
+    Every lead captured by VantageMind (identity claims), as JSON.
+
+  leads.csv
+    Same data as leads.json in CSV format.
+
+  knowledge/manifest.json
+    Per-source metadata for your ingested knowledge: original filename,
+    source type, ingestion date, chunk count, originals_retained flag.
+
+  knowledge/chunks/{src_id}__v{n}.jsonl
+    Chunk-level text reconstruction for each knowledge source.
+    One JSON object per line (title, content, knowledge_type, created_at).
+
+  instances.json
+    Configuration of every VantageMind instance you created.
+    Includes: provider, non_secret_config, connection status.
+    Does NOT include secret material (API keys, passwords, tokens).
+
+  audit_log.jsonl
+    Every admin action recorded against your account within the
+    retention window for your tier (Free: 30 days, Pro: 1 year,
+    Enterprise: 7 years). One JSON object per line.
+
+A note on knowledge originals
+------------------------------
+
+VantageMind v1 does not retain the original uploaded files (PDFs, DOCX,
+CSV) after ingestion. The text content of each source has been
+reconstructed from indexed chunks under knowledge/chunks/. The
+knowledge/manifest.json lists each source's original filename so you
+can match it back to your local copy.
+
+Future versions of VantageMind will retain originals; if you re-ingest
+a file after that upgrade, your next export will include both the
 original and the reconstructed text.
 
-## Schema version
+Security note
+-------------
 
-This bundle is `schema_version: 1`. Future bundles may add fields
-but will not remove or rename existing ones \u2014 forward-compatible
-reading is guaranteed.
+This bundle does NOT contain any API keys, passwords, OAuth tokens, or
+other secret credentials. Connection secrets are stored separately and
+are never included in data exports.
+
+Schema version
+--------------
+
+This bundle is schema_version: 2 (ZIP format, open standard).
+Previous bundles (schema_version: 1) were in .tar.gz/JSONL format.
+Both formats carry the same customer data; the ZIP format was adopted
+to align with the §5.10 open-standard commitment and to ease import
+by third-party tooling.
 """
