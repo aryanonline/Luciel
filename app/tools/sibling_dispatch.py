@@ -118,6 +118,15 @@ REASON_NO_LIVE_GRANT: str = "sibling_no_live_grant"
 REASON_NO_CALLER_CONTEXT: str = "sibling_no_caller_context"
 REASON_NO_DB_SESSION: str = "sibling_no_db_session"
 REASON_SELF_TARGET: str = "sibling_self_target"
+#: The callee instance is not in ``InstanceStatus.ACTIVE`` (paused,
+#: deactivating, grace_window, deleted, hard_deleted). §3.6.1 locks
+#: "paused" as operational quiet — a paused callee must NOT be woken to
+#: process a sibling task. Covers the latent paused-callee bug AND makes
+#: the deactivated-callee block explicit (defense-in-depth).
+REASON_CALLEE_NOT_ACTIVE: str = "sibling_callee_not_active"
+#: The callee instance row could not be resolved under this admin. Fail
+#: closed — refuse rather than dispatch to a phantom instance.
+REASON_CALLEE_NOT_FOUND: str = "sibling_callee_not_found"
 
 
 #: Map dispatch reason → tool_execution_log error_class. Sibling
@@ -133,6 +142,8 @@ _DISPATCH_REASON_TO_ERROR_CLASS: dict[str, str] = {
     REASON_CALLEE_MASTER_SWITCH_OFF: "other",
     REASON_NO_LIVE_GRANT: "other",
     REASON_SELF_TARGET: "other",
+    REASON_CALLEE_NOT_ACTIVE: "other",
+    REASON_CALLEE_NOT_FOUND: "other",
 }
 
 
@@ -452,6 +463,61 @@ def _dispatch_sibling_call_inner(
         )
 
     # ------------------------------------------------------------------
+    # (d.5) Callee lifecycle-status gate — §3.6.1
+    # ------------------------------------------------------------------
+    # A live grant proves the AUTHORISATION edge survives, but it says
+    # nothing about the callee's CURRENT lifecycle state. A PAUSED callee
+    # (§3.6.1 "operational quiet" — widget renders empty <div>, data
+    # retained, reactivatable instantly) keeps its sibling grants and its
+    # master switch, so it would otherwise sail through (c) and (d) and
+    # reach the dispatch seam — waking a paused instance to process a
+    # sibling task once the orchestrator round-trip is wired. Refuse here.
+    # A non-active status of ANY kind (paused, deactivating, grace_window,
+    # deleted, hard_deleted) → clean tool-error, never an exception. A
+    # missing callee row → fail closed.
+    from app.models.instance_status import InstanceStatus
+    from app.repositories.instance_repository import InstanceRepository
+
+    instance_repo = InstanceRepository(context.session)
+    callee = instance_repo.get_by_pk(callee_instance_id)
+    if callee is None or callee.admin_id != context.admin_id:
+        logger.info(
+            "Sibling dispatch refused: callee not found. admin=%s "
+            "caller=%s callee=%s",
+            context.admin_id, caller_instance_id, callee_instance_id,
+        )
+        return _error(
+            reason=REASON_CALLEE_NOT_FOUND,
+            message=(
+                f"Sibling dispatch refused: callee instance "
+                f"{callee_instance_id} was not found under admin "
+                f"{context.admin_id!r}. Failing closed."
+            ),
+            callee_instance_id=callee_instance_id,
+        )
+    if callee.instance_status != InstanceStatus.ACTIVE:
+        status_value = getattr(
+            callee.instance_status, "value", callee.instance_status
+        )
+        logger.info(
+            "Sibling dispatch refused: callee not active. admin=%s "
+            "caller=%s callee=%s status=%s",
+            context.admin_id, caller_instance_id, callee_instance_id,
+            status_value,
+        )
+        return _error(
+            reason=REASON_CALLEE_NOT_ACTIVE,
+            message=(
+                f"Sibling dispatch refused: callee instance "
+                f"{callee_instance_id} is not active (current status: "
+                f"{status_value!r}). A non-active callee — including a "
+                f"paused instance in §3.6.1 operational quiet — must not "
+                f"be woken to process a sibling task."
+            ),
+            callee_instance_id=callee_instance_id,
+        )
+
+    # ------------------------------------------------------------------
     # (e) ON ALL PASSING — push, audit, derive context, hand off
     # ------------------------------------------------------------------
     # Mutate the shared composition state BEFORE the hand-off so that
@@ -760,5 +826,7 @@ __all__ = [
     "REASON_NO_CALLER_CONTEXT",
     "REASON_NO_DB_SESSION",
     "REASON_SELF_TARGET",
+    "REASON_CALLEE_NOT_ACTIVE",
+    "REASON_CALLEE_NOT_FOUND",
     "dispatch_sibling_call",
 ]
