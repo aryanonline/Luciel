@@ -12,6 +12,65 @@ anchored-path change is accompanied by a change to this file.
 
 Newest entries first.
 
+## Unit 13f MOVE 2 — consolidate the behavioral tenant-isolation suite under `tests/isolation/` (2026-06-06)
+
+Resolves the MOVE 2 deferral recorded in the entry below. Per the
+**founder ruling**, `tests/isolation/` is defined by **behavioral
+purpose — a LIVE cross-tenant non-access gate — NOT by filename and NOT
+by the prior 563-test `tests/security/` + `tests/db/` bucket**. Flips the
+`isolation_suite` anchor in `DOCTRINE_ANCHORS.toml` from
+**ISOLATION-SUITE** (`paths = ["tests/security/", "tests/db/"]`, flagged
+for founder ruling) to **MATCHES-DOC** (`paths = ["tests/isolation/"]`).
+
+- **Classification criterion (by assertion mechanism, read per-file, not
+  by filename):** a test is behavioral tenant-isolation (category A) only
+  if it proves, at runtime against a live Postgres and as a
+  **NON-SUPERUSER** role (RLS only bites non-superusers — a superuser
+  session proves nothing), that tenant A cannot read/write/observe tenant
+  B's rows: FORCE RLS, GUC / `bind_tenant_scope` scoping, cross-tenant
+  non-access, RLS fuzz/leak. A test that only regex/parses migration
+  **source text** and does not run against a live DB is a
+  migration-**contract** test (category B). Everything else — general
+  security (JWT, rate-limit), perf, retrieval, log-format, single-tenant
+  lifecycle — stays in place (category C).
+- **`git mv` into `tests/isolation/` (7 files, 30 tests, all category A):**
+  `test_c9_5_live_rls_integration` (ephemeral non-superuser role; GUC
+  unset ⇒ 0 rows; GUC=A ⇒ only A; cross-tenant INSERT/UPDATE denied;
+  `is_local` GUC no-leak), `test_arc9_ws4b_rls_fuzz` (non-superuser; every
+  FORCE-RLS table 0 rows on unset/bogus GUC), `test_arc11_knowledge_rls`
+  (non-superuser; Admin B sees no A sources/chunks; JOIN-RLS + write
+  denial), `test_rescanc_graph_kb_rls` (non-superuser; B cannot read A's
+  graph nodes/edges), `test_unit13d_analytics_isolation`
+  (`bind_tenant_scope`; A's analytics exclude B),
+  `test_unit13e_session_key_isolation` (cross-tenant session-key never
+  bridges), `test_unit13e_session_summary_isolation` (non-superuser; GUC=A
+  ⇒ only A's summaries).
+- **`git mv` into the new `tests/migrations_contract/` package (29 files,
+  all category B — migration-shape/contract, conn-less):** the
+  `test_rls_c3_*` / `test_rls_c4_3*` / `test_rls_c5_*` families,
+  `test_c5_4_tenant_leak_regression` (the 46-test static-shape net — it
+  parses migration SQL, cannot run against a real DB, so it is CONTRACT),
+  `test_arc15_a/b_*_migration_shape`,
+  `test_rescanc_{escalation_delivery,graph_kb}_migration_shape`,
+  `test_rls_admin_audit_logs_migration`, `test_rls_arc12_ex2_*`,
+  `test_arc12_ex3_*`, `test_c6_1/c6_2_*_migration`,
+  `test_unit13c_auth_class_migration`,
+  `test_arc10_audit_archiver_role_privileges` (privilege-grant shape),
+  `test_arc11_rls_migrations_shape` (from `tests/security/`).
+- **Nothing deleted or weakened.** This is a relabel: the full suite total
+  is unchanged at **2834 passed / 0 failed / 36 skipped / 1 xfailed**. The
+  labeled isolation count drops from **563 → 30** *by design* — the entire
+  delta is migration-shape/non-isolation tests that moved to
+  `tests/migrations_contract/` or stayed in place, **not** behavioral
+  coverage. Every category-A nodeid that passed under the old bucket is
+  present and passing under `tests/isolation/` (before/after collect diff:
+  identical, 30 of 30).
+- `run_tests.sh`: the behavioral-isolation subset is now `tests/isolation`
+  (only); the full-suite path `tests/` is unchanged. The doc-sync gate
+  derives its globs from the anchor `paths`, so it now watches
+  `tests/isolation/`; `tests/migrations_contract/` is not a §8 doctrine
+  path and gets no anchor.
+
 ## Unit 13f — §8 path cleanup: move Alembic tree to `app/migrations/` (2026-06-06)
 
 Relocated the Alembic migration tree from `alembic/` to its §8 doctrine
