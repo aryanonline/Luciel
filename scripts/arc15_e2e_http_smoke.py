@@ -164,7 +164,7 @@ def main() -> int:
     # --- Connections honesty fork (Pro): LIVE csv/webhook vs DEFERRED calendar/crm ---
     # property_source (csv) → LIVE connected
     r = requests.post(f"{BASE}{PFX}/admin/instances/{pi}/connections", headers=H(pkey),
-                      json={"connection_type": "property_source", "provider": "csv", "config_json": {"store_ref": "s3://b/listings.csv"}}, timeout=10)
+                      json={"connection_type": "property_source", "provider": "csv", "non_secret_config": {"store_ref": "s3://b/listings.csv"}}, timeout=10)
     check("connect property_source(csv) 201", r.status_code == 201, str(r.status_code))
     if r.ok:
         conn = r.json().get("connection", {})
@@ -172,12 +172,12 @@ def main() -> int:
 
     # outbound_webhook → LIVE connected
     r = requests.post(f"{BASE}{PFX}/admin/instances/{pi}/connections", headers=H(pkey),
-                      json={"connection_type": "outbound_webhook", "provider": "custom_webhook", "config_json": {"url": "https://hooks.example.com/x"}}, timeout=10)
+                      json={"connection_type": "outbound_webhook", "provider": "custom_webhook", "non_secret_config": {"url": "https://hooks.example.com/x"}}, timeout=10)
     check("connect outbound_webhook 201", r.status_code == 201, str(r.status_code))
 
     # calendar → DEFERRED unconfigured + arc17_pending
     r = requests.post(f"{BASE}{PFX}/admin/instances/{pi}/connections", headers=H(pkey),
-                      json={"connection_type": "calendar", "provider": "google_calendar", "config_json": {}}, timeout=10)
+                      json={"connection_type": "calendar", "provider": "google_calendar", "non_secret_config": {}}, timeout=10)
     check("connect calendar accepted (2xx)", r.status_code in (200, 201, 202), str(r.status_code))
     if r.ok:
         body = r.json()

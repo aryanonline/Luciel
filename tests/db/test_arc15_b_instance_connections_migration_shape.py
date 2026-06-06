@@ -43,8 +43,8 @@ COLUMNS = (
     "instance_id",
     "connection_type",
     "provider",
-    "config_json",
-    "credential_ref",
+    "non_secret_config",
+    "secret_ref",
     "status",
     "last_verified_at",
     "created_at",
@@ -96,7 +96,7 @@ def test_all_columns_present() -> None:
         assert f'"{col}"' in text, col
 
 
-def test_config_json_is_jsonb_and_documented_non_secret() -> None:
+def test_non_secret_config_is_jsonb_and_documented_non_secret() -> None:
     text = _text()
     assert "JSONB" in text
     # Honesty invariant must be documented at the column.

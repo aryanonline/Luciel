@@ -1,7 +1,7 @@
 """SecretCleanupOutbox ORM — Arc 17 (lifecycle secret-cleanup seam).
 
 A transactional outbox: when a connection carrying a non-null
-``credential_ref`` is revoked (instance delete / account closure), the
+``secret_ref`` is revoked (instance delete / account closure), the
 lifecycle cascade INSERTs one row here IN THE SAME TRANSACTION as the
 revocation. A Celery worker later drains the outbox and deletes the
 secret from the secret store.
@@ -16,7 +16,7 @@ the secret deletion is retried by the worker until it succeeds.
 
 Honesty / security invariant
 -----------------------------
-This row stores ONLY the ``credential_ref`` (the secret NAME/ARN
+This row stores ONLY the ``secret_ref`` (the secret NAME/ARN
 pointer) — NEVER the secret VALUE (Locked Decision #18). The worker
 resolves the pointer to a value only transiently inside the store's
 ``delete`` call; nothing here or in the audit trail ever holds a value.
@@ -56,7 +56,7 @@ class SecretCleanupOutbox(Base):
         Integer, nullable=True
     )
     # The secret NAME/ARN pointer — NEVER the value (Locked Decision #18).
-    credential_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    secret_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="pending", index=True
     )
@@ -74,6 +74,6 @@ class SecretCleanupOutbox(Base):
     def __repr__(self) -> str:  # pragma: no cover
         return (
             f"<SecretCleanupOutbox id={self.id} admin={self.admin_id} "
-            f"ref={self.credential_ref} status={self.status} "
+            f"ref={self.secret_ref} status={self.status} "
             f"attempts={self.attempts}>"
         )

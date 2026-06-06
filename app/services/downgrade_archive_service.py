@@ -262,7 +262,7 @@ class DowngradeArchiveService:
         # --------------------------------------------------------------
         # §3.6.7 DORMANT: on any downgrade (Pro→Free), set all live
         # action-tool connections to status='dormant'.  Secrets are
-        # RETAINED (credential_ref is not touched); prior status is
+        # RETAINED (secret_ref is not touched); prior status is
         # stored in status_detail for restore on re-upgrade.  This is
         # separate from the overflow-archive axes above (those remove
         # row-level resources; dormant just changes the connection status).

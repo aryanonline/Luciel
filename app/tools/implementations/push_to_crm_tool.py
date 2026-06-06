@@ -184,7 +184,7 @@ class PushToCrmTool(LucielTool):
             instance_id=context.instance_id,
             connection_type="crm",
         )
-        if row is None or not row.credential_ref:
+        if row is None or not row.secret_ref:
             return {
                 "success": False,
                 "output": (
@@ -195,7 +195,7 @@ class PushToCrmTool(LucielTool):
 
         store = get_secret_store(settings)
         try:
-            refresh_token = store.get(row.credential_ref)
+            refresh_token = store.get(row.secret_ref)
             tokens = provider.refresh(refresh_token=refresh_token)
         except (SecretStoreError, OAuthError) as exc:
             return {

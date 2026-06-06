@@ -502,7 +502,7 @@ class InstanceRepository:
             # Arc 17 Task 4 — connection cascade. In the same transaction
             # as the soft-delete, revoke every live instance_connections
             # row for this instance, audit each, and enqueue secret
-            # cleanup for any non-null credential_ref. Mirrors the
+            # cleanup for any non-null secret_ref. Mirrors the
             # sibling-grant cascade above (lazy import to avoid a cycle).
             self._cascade_revoke_connections(
                 admin_id=instance.admin_id,
@@ -539,7 +539,7 @@ class InstanceRepository:
     # ------------------------------------------------------------------
     # Arc 17 Task 4 — connection cascade (instance delete + account
     # closure). Revoke live instance_connections rows, audit each, and
-    # enqueue secret cleanup for any non-null credential_ref. Shared by
+    # enqueue secret cleanup for any non-null secret_ref. Shared by
     # delete_by_pk (one instance) and the closure path (admin-wide).
     # ------------------------------------------------------------------
 
@@ -624,15 +624,15 @@ class InstanceRepository:
                 autocommit=False,
             )
             # Enqueue secret cleanup ONLY when a real secret pointer
-            # exists. credential_ref is NULL in this slice (no live
+            # exists. secret_ref is NULL in this slice (no live
             # credential-bearing connectors), so this is a no-op today —
             # but the real enqueue path is exercised when full Arc 17
-            # populates credential_ref. We enqueue the POINTER only,
+            # populates secret_ref. We enqueue the POINTER only,
             # never a secret value (Locked Decision #18).
-            if conn.credential_ref:
+            if conn.secret_ref:
                 outbox.enqueue(
                     admin_id=admin_id,
-                    credential_ref=conn.credential_ref,
+                    secret_ref=conn.secret_ref,
                     instance_id=conn.instance_id,
                     connection_id=conn.id,
                     autocommit=False,

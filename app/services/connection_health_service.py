@@ -62,7 +62,7 @@ class HealthCheckResult:
     ``status`` is one of the four DB statuses (never ``action_needed`` —
     that is a frontend label). ``checked_at`` stamps
     ``last_health_check_at`` ONLY on a real check (None when the result
-    is the no-op deferred/unconfigured round-trip). ``new_credential_ref``
+    is the no-op deferred/unconfigured round-trip). ``new_secret_ref``
     carries a rotated secret ref when a silent refresh yielded a new
     refresh token; the caller persists it. ``arc17_pending`` is True when
     the connector is deferred and its OAuth provider is unconfigured —
@@ -72,7 +72,7 @@ class HealthCheckResult:
 
     status: str
     checked_at: Optional[datetime]
-    new_credential_ref: Optional[str] = None
+    new_secret_ref: Optional[str] = None
     arc17_pending: bool = False
     detail: str = ""
 
@@ -100,7 +100,7 @@ class ConnectionHealthService:
 
         Pure: reads the row + the OAuth/secret abstractions; never writes
         the DB. The caller persists ``status`` / ``last_health_check_at``
-        / ``new_credential_ref`` and audits.
+        / ``new_secret_ref`` and audits.
         """
         conn_type = connection.connection_type
         if conn_type in LIVE_CONNECTION_TYPES:
@@ -126,7 +126,7 @@ class ConnectionHealthService:
             if connection.connection_type == "record_source"
             else "url"
         )
-        cfg = connection.config_json or {}
+        cfg = connection.non_secret_config or {}
         if cfg.get(required_key):
             # NOTE: a real network probe of the CSV store / webhook URL is
             # a documented seam. In this slice a present, validated config
@@ -176,7 +176,7 @@ class ConnectionHealthService:
             )
 
         # Provider configured but no stored refresh token → cannot refresh.
-        if not connection.credential_ref:
+        if not connection.secret_ref:
             return HealthCheckResult(
                 status="unconfigured",
                 checked_at=None,
@@ -191,7 +191,7 @@ class ConnectionHealthService:
         # live token endpoint. Exercised in tests via a fake provider +
         # LocalFakeSecretStore; never hits Google without real creds.
         try:
-            refresh_token = self._secret_store.get(connection.credential_ref)
+            refresh_token = self._secret_store.get(connection.secret_ref)
         except SecretStoreError as exc:
             logger.warning(
                 "connection %s refresh: secret read failed: %s",
@@ -231,7 +231,7 @@ class ConnectionHealthService:
         if tokens.refresh_token:
             try:
                 new_ref = self._secret_store.rotate(
-                    connection.credential_ref, tokens.refresh_token
+                    connection.secret_ref, tokens.refresh_token
                 )
             except SecretStoreError as exc:  # pragma: no cover - defensive
                 logger.warning(
@@ -242,7 +242,7 @@ class ConnectionHealthService:
         return HealthCheckResult(
             status="connected",
             checked_at=self._now(),
-            new_credential_ref=new_ref,
+            new_secret_ref=new_ref,
             detail="Token refreshed; connection healthy.",
         )
 

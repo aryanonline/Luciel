@@ -17,8 +17,8 @@ No endpoint returns ``connected`` for a connection with no real backing.
 Only CSV (``record_source``) and ``outbound_webhook`` connect LIVE in
 this slice → a real ``connected`` row. calendar / crm / email_sender /
 sms_sender are DEFERRED → an honest ``unconfigured`` row plus a
-structured ``arc17_pending`` payload. ``config_json`` carries NON-SECRET
-config ONLY; ``credential_ref`` stays NULL in this slice.
+structured ``arc17_pending`` payload. ``non_secret_config`` carries NON-SECRET
+config ONLY; ``secret_ref`` stays NULL in this slice.
 
 Layered defences (mirrors admin_channels.py / admin_personality.py)
 -------------------------------------------------------------------
@@ -100,14 +100,14 @@ router = APIRouter(
 )
 
 # Per-type required NON-SECRET config keys. The route refuses a configure
-# whose config_json is missing a required key (422). Keeps the contract
+# whose non_secret_config is missing a required key (422). Keeps the contract
 # honest: a LIVE connector needs its real backing reference present.
 _REQUIRED_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "record_source": ("store_ref",),
     "outbound_webhook": ("url",),
 }
 
-# Keys we explicitly REJECT in config_json — anything that looks like a
+# Keys we explicitly REJECT in non_secret_config — anything that looks like a
 # secret must not land in the non-secret column (spec §76 / §116).
 _FORBIDDEN_CONFIG_KEYS: frozenset[str] = frozenset(
     {
@@ -199,7 +199,7 @@ def _secret_name_for(
     ``AwsSecretsManagerStore._name_for``), so the on-AWS secret resolves
     to ``luciel/connections/{admin_id}/{instance_id}/{connection_type}``.
     The store returns the ARN, which is what we persist into
-    ``credential_ref`` — the name here is only the put-time logical key.
+    ``secret_ref`` — the name here is only the put-time logical key.
     """
     return f"{admin_id}/{instance_id}/{connection_type}"
 
@@ -212,33 +212,33 @@ def _view(row: InstanceConnection) -> ConnectionView:
         connection_type=row.connection_type,
         provider=row.provider,
         status=row.status,
-        config_json=row.config_json,
+        non_secret_config=row.non_secret_config,
         last_health_check_at=row.last_health_check_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
 
 
-def _validate_config_json(
-    *, connection_type: str, config_json: dict | None
+def _validate_non_secret_config(
+    *, connection_type: str, non_secret_config: dict | None
 ) -> dict:
-    """Enforce the non-secret + required-key invariants on config_json.
+    """Enforce the non-secret + required-key invariants on non_secret_config.
 
     * Reject any forbidden (secret-looking) key → 422.
     * For a LIVE connector, require the per-type backing reference → 422.
     Returns the (possibly empty) config dict to persist.
     """
-    cfg = dict(config_json or {})
+    cfg = dict(non_secret_config or {})
 
     offending = sorted(k for k in cfg if k.lower() in _FORBIDDEN_CONFIG_KEYS)
     if offending:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
-                "error": "secret_in_config_json",
+                "error": "secret_in_non_secret_config",
                 "message": (
-                    "config_json carries non-secret config only; secrets "
-                    "ride behind credential_ref (NULL in this slice)."
+                    "non_secret_config carries non-secret config only; secrets "
+                    "ride behind secret_ref (NULL in this slice)."
                 ),
                 "forbidden_keys": offending,
             },
@@ -250,7 +250,7 @@ def _validate_config_json(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
-                "error": "config_json_missing_required_keys",
+                "error": "non_secret_config_missing_required_keys",
                 "connection_type": connection_type,
                 "missing_keys": missing,
                 "message": (
@@ -329,8 +329,8 @@ def configure_connection(
     _require_configure_connections(request, instance=instance)
 
     conn_type = body.connection_type
-    cfg = _validate_config_json(
-        connection_type=conn_type, config_json=body.config_json
+    cfg = _validate_non_secret_config(
+        connection_type=conn_type, non_secret_config=body.non_secret_config
     )
 
     # --- The honesty fork: LIVE → connected; DEFERRED → unconfigured. ---
@@ -360,8 +360,8 @@ def configure_connection(
         connection_type=conn_type,
         provider=body.provider,
         status=new_status,
-        config_json=cfg or None,
-        credential_ref=None,  # secrets flow deferred to full Arc 17.
+        non_secret_config=cfg or None,
+        secret_ref=None,  # secrets flow deferred to full Arc 17.
         autocommit=False,
     )
 
@@ -377,7 +377,7 @@ def configure_connection(
             "connection_type": conn_type,
             "provider": body.provider,
             "status": new_status,
-            # config_json is non-secret by contract; record only its keys
+            # non_secret_config is non-secret by contract; record only its keys
             # so the audit row stays bounded and free of payload bulk.
             "config_keys": sorted(cfg.keys()),
         },
@@ -447,7 +447,7 @@ def refresh_connection(
         row=row,
         status=result.status,
         last_health_check_at=result.checked_at,
-        credential_ref=result.new_credential_ref,
+        secret_ref=result.new_secret_ref,
         status_detail=result.detail if result.status == "expired" else None,
         autocommit=False,
     )
@@ -568,8 +568,8 @@ def initiate_oauth_connection(
             connection_type=connection_type,
             provider=provider.connection_type,
             status="unconfigured",
-            config_json=None,
-            credential_ref=None,
+            non_secret_config=None,
+            secret_ref=None,
             autocommit=False,
         )
 
@@ -644,7 +644,7 @@ def oauth_callback(
 
     On a verified state it runs the REAL ``provider.exchange_code`` against
     the provider, stores the refresh token via the SecretStore (the ref is
-    persisted into ``credential_ref`` — the token VALUE never touches
+    persisted into ``secret_ref`` — the token VALUE never touches
     Postgres), flips the row to 'connected', and audits
     ACTION_CONNECTION_OAUTH_CONNECTED. On any failure the row goes to
     'error' with an honest audit — never a fake 'connected'.
@@ -710,7 +710,7 @@ def oauth_callback(
             row=row,
             status="error",
             last_health_check_at=datetime.now(timezone.utc),
-            credential_ref=None,
+            secret_ref=None,
             autocommit=False,
         )
         audit_repo.record(
@@ -725,7 +725,7 @@ def oauth_callback(
                 "connection_type": connection_type,
                 "provider": row.provider,
                 "status": "error",
-                "credential_ref_present": False,
+                "secret_ref_present": False,
             },
             note=f"OAuth callback failed ({connection_type}): {detail}"[:256],
             autocommit=False,
@@ -766,7 +766,7 @@ def oauth_callback(
         connection_type=connection_type,
     )
     try:
-        credential_ref = store.put(secret_name, refresh_token)
+        secret_ref = store.put(secret_name, refresh_token)
     except SecretStoreError as exc:
         return _fail(f"secret store write failed: {exc}")
 
@@ -774,7 +774,7 @@ def oauth_callback(
         row=row,
         status="connected",
         last_health_check_at=datetime.now(timezone.utc),
-        credential_ref=credential_ref,
+        secret_ref=secret_ref,
         autocommit=False,
     )
     audit_repo.record(
@@ -789,7 +789,7 @@ def oauth_callback(
             "connection_type": connection_type,
             "provider": row.provider,
             "status": "connected",
-            "credential_ref_present": True,
+            "secret_ref_present": True,
         },
         note=f"OAuth callback connected ({connection_type}).",
         autocommit=False,
@@ -812,7 +812,7 @@ def disconnect_connection(
 
     Idempotent: re-disconnecting an already-revoked row returns
     ``disconnected=False``. When the revoked row carried a non-null
-    ``credential_ref`` (a real stored secret — e.g. an OAuth refresh
+    ``secret_ref`` (a real stored secret — e.g. an OAuth refresh
     token), the same transaction enqueues a secret-cleanup outbox row
     (pointer only). The Celery drain worker performs the actual
     ``SecretStore.delete`` out of band; Postgres never holds the secret
@@ -833,7 +833,7 @@ def disconnect_connection(
     instance_id = row.instance_id
     conn_type = row.connection_type
     # Capture the pointer BEFORE the soft-delete so we can enqueue cleanup.
-    credential_ref = row.credential_ref
+    secret_ref = row.secret_ref
 
     disconnected = repo.disconnect(
         admin_id=admin_id,
@@ -842,10 +842,10 @@ def disconnect_connection(
     )
 
     secret_cleanup_enqueued = False
-    if disconnected and credential_ref:
+    if disconnected and secret_ref:
         SecretCleanupOutboxRepository(db).enqueue(
             admin_id=admin_id,
-            credential_ref=credential_ref,
+            secret_ref=secret_ref,
             instance_id=instance_id,
             connection_id=connection_id,
             autocommit=False,

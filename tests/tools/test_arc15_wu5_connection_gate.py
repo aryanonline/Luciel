@@ -84,8 +84,8 @@ def _build_sqlite_session():
         ),
         Column("connection_type", String(32), nullable=False),
         Column("provider", String(64), nullable=False),
-        Column("config_json", String, nullable=True),
-        Column("credential_ref", String(255), nullable=True),
+        Column("non_secret_config", String, nullable=True),
+        Column("secret_ref", String(255), nullable=True),
         Column(
             "status", String(32),
             nullable=False, server_default="unconfigured",
@@ -140,7 +140,7 @@ def _seed_connection(
         connection_type=connection_type,
         provider="test_provider",
         status=status,
-        config_json={"store_ref": "s3://x"} if status == "connected" else None,
+        non_secret_config={"store_ref": "s3://x"} if status == "connected" else None,
         last_health_check_at=datetime.now(timezone.utc),
     )
 

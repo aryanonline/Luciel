@@ -7,7 +7,7 @@ network (the real wire is exercised by the gated
   1. AST/text shape — protects the initiate/callback wiring: four-walls
      auth on initiate, honest 409 when the provider is unconfigured (no
      fake redirect), callback authorizes ENTIRELY off the verified state,
-     pointer-only secret storage (credential_ref, never the token value),
+     pointer-only secret storage (secret_ref, never the token value),
      and the no-fake-connected honesty fork on the callback.
   2. Behavioural — the ``app.integrations.oauth.state`` HMAC sign/verify
      round-trip, tamper rejection, and expiry. Pure functions, no I/O.
@@ -126,7 +126,7 @@ def test_callback_real_exchange_and_pointer_only_storage() -> None:
     # Refresh token stored via the SecretStore; only the ref is persisted.
     assert "get_secret_store" in src
     assert ".put(" in src
-    assert "credential_ref" in src
+    assert "secret_ref" in src
     assert "ACTION_CONNECTION_OAUTH_CONNECTED" in src
 
 
@@ -138,14 +138,14 @@ def test_callback_never_fakes_connected_on_failure() -> None:
 
 
 # ---------------------------------------------------------------------
-# disconnect: secret-cleanup enqueue for a non-null credential_ref.
+# disconnect: secret-cleanup enqueue for a non-null secret_ref.
 # ---------------------------------------------------------------------
 
 
 def test_disconnect_enqueues_secret_cleanup_for_stored_secret() -> None:
     src = ast.unparse(_function_node(CONN_PATH, "disconnect_connection"))
     assert "SecretCleanupOutboxRepository" in src
-    assert "credential_ref" in src
+    assert "secret_ref" in src
     assert "secret_cleanup_enqueued" in src
 
 

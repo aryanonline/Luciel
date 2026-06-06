@@ -25,11 +25,11 @@ Schema (§3.8.2 exact shape)
 * ``connection_type``  — PG enum ``connection_type`` (6 values).
 * ``provider``         — String(64) non-null. The concrete provider
                          (e.g. 'google_calendar', 'csv', 'twilio').
-* ``config_json``      — JSONB nullable. NON-SECRET config ONLY (e.g.
+* ``non_secret_config``      — JSONB nullable. NON-SECRET config ONLY (e.g.
                          a CSV column map, a webhook URL). NEVER secrets:
                          API keys / OAuth tokens live behind
-                         ``credential_ref`` in the secret store.
-* ``credential_ref``   — String(255) nullable. Opaque pointer into the
+                         ``secret_ref`` in the secret store.
+* ``secret_ref``   — String(255) nullable. Opaque pointer into the
                          secret store. NULL in this slice (no live
                          credential-bearing connectors land here).
 * ``status``           — PG enum ``connection_status`` (4 values):
@@ -157,16 +157,16 @@ def upgrade() -> None:
             comment="Concrete provider, e.g. 'csv', 'google_calendar', 'twilio'.",
         ),
         sa.Column(
-            "config_json",
+            "non_secret_config",
             JSONB(),
             nullable=True,
             comment=(
                 "NON-SECRET config ONLY (CSV column map, webhook URL). "
-                "NEVER secrets — credentials live behind credential_ref."
+                "NEVER secrets — credentials live behind secret_ref."
             ),
         ),
         sa.Column(
-            "credential_ref",
+            "secret_ref",
             sa.String(255),
             nullable=True,
             comment=(

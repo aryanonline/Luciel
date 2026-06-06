@@ -2,11 +2,11 @@
 
 Pure CRUD against the ``secret_cleanup_outbox`` table. The lifecycle
 cascade ENQUEUEs (one row per revoked connection with a non-null
-``credential_ref``); the Celery drain worker CLAIMS pending rows and
+``secret_ref``); the Celery drain worker CLAIMS pending rows and
 marks them done/failed.
 
 No policy decisions, no HTTP exceptions. The enqueue writes ONLY the
-secret pointer (``credential_ref``) — never a secret value.
+secret pointer (``secret_ref``) — never a secret value.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class SecretCleanupOutboxRepository:
         self,
         *,
         admin_id: str,
-        credential_ref: str,
+        secret_ref: str,
         instance_id: Optional[int] = None,
         connection_id: Optional[int] = None,
         autocommit: bool = False,
@@ -47,7 +47,7 @@ class SecretCleanupOutboxRepository:
             admin_id=admin_id,
             instance_id=instance_id,
             connection_id=connection_id,
-            credential_ref=credential_ref,
+            secret_ref=secret_ref,
             status="pending",
             attempts=0,
         )

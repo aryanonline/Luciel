@@ -24,7 +24,7 @@ What this migration does
      ``status = 'revoked'``.  See DUAL REVOKED REPRESENTATION NOTE below.
    * ``dormant`` — Pro → Free downgrade preserves connections per §3.6.7
      ("retain secrets, do not purge; restore on re-upgrade").  Dormant
-     rows are retained with credential_ref intact; the broker skips them
+     rows are retained with secret_ref intact; the broker skips them
      the same way it skips revoked rows.
 
    PG ENUM ADD VALUE — transaction isolation note

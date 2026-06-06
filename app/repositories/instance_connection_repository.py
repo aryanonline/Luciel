@@ -105,8 +105,8 @@ class InstanceConnectionRepository:
         connection_type: str,
         provider: str,
         status: str,
-        config_json: dict | None = None,
-        credential_ref: str | None = None,
+        non_secret_config: dict | None = None,
+        secret_ref: str | None = None,
         last_health_check_at: datetime | None = None,
         autocommit: bool = True,
     ) -> InstanceConnection:
@@ -122,8 +122,8 @@ class InstanceConnectionRepository:
             connection_type=connection_type,
             provider=provider,
             status=status,
-            config_json=config_json,
-            credential_ref=credential_ref,
+            non_secret_config=non_secret_config,
+            secret_ref=secret_ref,
             last_health_check_at=last_health_check_at,
         )
         self.db.add(row)
@@ -144,7 +144,7 @@ class InstanceConnectionRepository:
         row: InstanceConnection,
         status: str,
         last_health_check_at: datetime | None,
-        credential_ref: str | None = None,
+        secret_ref: str | None = None,
         status_detail: str | None = None,
         autocommit: bool = True,
     ) -> InstanceConnection:
@@ -152,7 +152,7 @@ class InstanceConnectionRepository:
         already-loaded row.
 
         ``status`` and ``last_health_check_at`` come from the health
-        service; ``credential_ref`` is updated ONLY when a silent token
+        service; ``secret_ref`` is updated ONLY when a silent token
         refresh rotated the stored secret (a NEW ref) — it is never
         cleared here. ``status_detail`` is written on the expired path
         (CJ §7 Reconnect chip) and cleared when status is not expired.
@@ -162,8 +162,8 @@ class InstanceConnectionRepository:
         row.status = status
         if last_health_check_at is not None:
             row.last_health_check_at = last_health_check_at
-        if credential_ref is not None:
-            row.credential_ref = credential_ref
+        if secret_ref is not None:
+            row.secret_ref = secret_ref
         # Populate status_detail on the expired path (§3.8.5).
         # Clear it when the connection transitions to a healthy state.
         if status_detail is not None:
@@ -212,7 +212,7 @@ class InstanceConnectionRepository:
     # ------------------------------------------------------------------
     # Write: lifecycle cascade (Arc 10 — revoke ALL on deactivation /
     # account closure). Returns the rows it revoked so the caller can
-    # audit each and enqueue secret cleanup for non-null credential_refs.
+    # audit each and enqueue secret cleanup for non-null secret_refs.
     # ------------------------------------------------------------------
 
     def revoke_all_for_instance(
@@ -225,7 +225,7 @@ class InstanceConnectionRepository:
         """Soft-revoke every live connection row for an instance.
 
         Returns the rows AS THEY WERE before revocation (their
-        ``credential_ref`` is needed by the caller to enqueue secret
+        ``secret_ref`` is needed by the caller to enqueue secret
         cleanup). Idempotent: an already-revoked row is skipped.
         """
         rows = self.list_for_instance(
@@ -287,7 +287,7 @@ class InstanceConnectionRepository:
         autocommit: bool = True,
     ) -> list[InstanceConnection]:
         """Set every live (non-revoked, non-dormant) connection for the
-        admin to status='dormant', preserving credential_ref (secrets
+        admin to status='dormant', preserving secret_ref (secrets
         are retained per §3.6.7).  Stores the prior status in
         status_detail so restore_from_dormant can recover it.
 

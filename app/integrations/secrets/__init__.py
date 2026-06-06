@@ -1,7 +1,7 @@
 """Secret-store integration package — Arc 17 Connections layer.
 
 A connection's secret (an OAuth refresh token, a webhook signing key)
-NEVER lives in Postgres. ``instance_connections.credential_ref`` stores
+NEVER lives in Postgres. ``instance_connections.secret_ref`` stores
 ONLY a pointer — the secret NAME/ARN — and the value rides behind a
 ``SecretStore`` (Locked Decision #18).
 

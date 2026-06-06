@@ -239,14 +239,14 @@ def test_repo_has_restore_from_dormant_for_admin():
     )
 
 
-def test_repo_dormant_preserves_credential_ref():
+def test_repo_dormant_preserves_secret_ref():
     src = _text(REPO_PATH)
     dormant_src = src[src.find("def set_dormant_for_admin"):src.find("def restore_from_dormant")]
-    # credential_ref must NOT be assigned/mutated in set_dormant_for_admin.
+    # secret_ref must NOT be assigned/mutated in set_dormant_for_admin.
     # It may appear in comments/docstrings but must not be assigned.
-    # Check no assignment to credential_ref within the function.
-    assert "row.credential_ref" not in dormant_src, (
-        "set_dormant_for_admin must NOT assign row.credential_ref "
+    # Check no assignment to secret_ref within the function.
+    assert "row.secret_ref" not in dormant_src, (
+        "set_dormant_for_admin must NOT assign row.secret_ref "
         "(secrets must be retained per §3.6.7)."
     )
 
@@ -389,8 +389,8 @@ def _build_sqlite_session():
         Column("connection_type", String(64), nullable=False),
         Column("provider", String(64), nullable=False),
         Column("status", String(32), nullable=False, default="unconfigured"),
-        Column("config_json", Text, nullable=True),
-        Column("credential_ref", String(255), nullable=True),
+        Column("non_secret_config", Text, nullable=True),
+        Column("secret_ref", String(255), nullable=True),
         Column("last_health_check_at", DateTime, nullable=True),
         Column("created_at", DateTime, nullable=False,
                default=lambda: datetime.now(timezone.utc)),
@@ -416,8 +416,8 @@ def _build_sqlite_session():
         connection_type = Column(String(64), nullable=False)
         provider = Column(String(64), nullable=False)
         status = Column(String(32), nullable=False, default="unconfigured")
-        config_json = Column(Text, nullable=True)
-        credential_ref = Column(String(255), nullable=True)
+        non_secret_config = Column(Text, nullable=True)
+        secret_ref = Column(String(255), nullable=True)
         last_health_check_at = Column(DateTime, nullable=True)
         created_at = Column(DateTime, nullable=False,
                             default=lambda: datetime.now(timezone.utc))
@@ -445,7 +445,7 @@ def _make_conn(IC, **kwargs):
         connection_type="calendar",
         provider="google_calendar",
         status="connected",
-        credential_ref="arn:aws:secretsmanager:us-east-1:123:secret:conn/1",
+        secret_ref="arn:aws:secretsmanager:us-east-1:123:secret:conn/1",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -535,13 +535,13 @@ def test_all_6_status_values_can_be_set(sqlite_session):
 
 
 def test_downgrade_sets_connections_dormant(sqlite_session):
-    """Downgrade path sets status='dormant', preserves credential_ref."""
+    """Downgrade path sets status='dormant', preserves secret_ref."""
     session, IC = sqlite_session
     # Seed: two connected connections for admin-1.
     c1 = _make_conn(IC, connection_type="calendar", provider="google",
-                    status="connected", credential_ref="arn:1")
+                    status="connected", secret_ref="arn:1")
     c2 = _make_conn(IC, connection_type="email_sender", provider="sendgrid",
-                    status="connected", credential_ref="arn:2")
+                    status="connected", secret_ref="arn:2")
     session.add_all([c1, c2])
     session.commit()
 
@@ -552,10 +552,10 @@ def test_downgrade_sets_connections_dormant(sqlite_session):
     for row in dormant:
         session.refresh(row)
         assert row.status == "dormant", f"Expected dormant, got {row.status!r}"
-        # credential_ref must be preserved (secrets retained).
-        assert row.credential_ref is not None
-        assert row.credential_ref.startswith("arn:"), (
-            "credential_ref must not be cleared on dormant transition."
+        # secret_ref must be preserved (secrets retained).
+        assert row.secret_ref is not None
+        assert row.secret_ref.startswith("arn:"), (
+            "secret_ref must not be cleared on dormant transition."
         )
         # prior_status stored in status_detail.
         assert "prior_status=connected" in row.status_detail

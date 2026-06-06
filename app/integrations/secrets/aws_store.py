@@ -9,9 +9,9 @@ True, and it is NEVER exercised by the test suite (tests use
 first use so merely importing this module costs nothing and needs no
 creds.
 
-credential_ref contract (Locked Decision #18): ``put``/``rotate``
+secret_ref contract (Locked Decision #18): ``put``/``rotate``
 return the secret's ARN, and that ARN string is the ONLY thing the
-caller persists in ``instance_connections.credential_ref``. The value
+caller persists in ``instance_connections.secret_ref``. The value
 lives solely in Secrets Manager.
 """
 from __future__ import annotations

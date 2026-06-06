@@ -16,13 +16,13 @@ admin's rows without binding ``app.admin_id`` — same posture as
        stays an honest ``unconfigured`` (+ arc17_pending) and is SKIPPED
        (no status write, no audit) so the sweep does not churn rows it
        cannot honestly change. A real refresh → connected (+ rotated
-       credential_ref); a rejected token → expired.
+       secret_ref); a rejected token → expired.
    Each status change writes one ``ACTION_CONNECTION_TOKEN_REFRESHED``
    audit row (system actor) in the same per-row transaction.
 
 2. ``run_secret_cleanup_drain``
    Drains ``secret_cleanup_outbox`` (rows enqueued by the lifecycle
-   cascade when a connection with a non-null ``credential_ref`` was
+   cascade when a connection with a non-null ``secret_ref`` was
    revoked). For each pending row it calls ``SecretStore.delete`` on the
    POINTER (never a value) and marks the row done; a failure is retried
    on the next sweep until ``max_attempts``. The AWS deletion itself is
@@ -224,7 +224,7 @@ def _refresh_one(
         row=row,
         status=result.status,
         last_health_check_at=result.checked_at,
-        credential_ref=result.new_credential_ref,
+        secret_ref=result.new_secret_ref,
         status_detail=result.detail if result.status == "expired" else None,
         autocommit=False,
     )
@@ -240,7 +240,7 @@ def _refresh_one(
         after={
             "connection_type": row.connection_type,
             "status": result.status,
-            "credential_rotated": result.new_credential_ref is not None,
+            "credential_rotated": result.new_secret_ref is not None,
         },
         note=f"Token refresh worker ({row.connection_type}={result.status}).",
         autocommit=False,
@@ -295,7 +295,7 @@ def run_secret_cleanup_drain(self):
                 # when connections_live_secrets_enabled selects the AWS
                 # store; otherwise the local fake performs the delete. The
                 # argument is the secret NAME/ARN pointer — never a value.
-                store.delete(outbox_row.credential_ref)
+                store.delete(outbox_row.secret_ref)
                 repo.mark_done(row=outbox_row, autocommit=False)
                 deleted += 1
             except SecretStoreError as exc:

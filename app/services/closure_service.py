@@ -314,7 +314,7 @@ class ClosureService:
         # --- Step 4b: Arc 17 connection cascade. ---
         # Account closure is destructive intent, so every external-system
         # connection across all of the admin's instances is revoked here,
-        # and secret cleanup is enqueued for any non-null credential_ref.
+        # and secret cleanup is enqueued for any non-null secret_ref.
         # Runs in the SAME transaction as the cascade above (autocommit
         # is the route's job) so a rollback un-revokes atomically. The
         # repo audits each revocation (ACTION_CONNECTION_REVOKED). Imported

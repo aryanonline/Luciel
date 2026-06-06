@@ -10,12 +10,12 @@ tests do not exercise behaviourally:
     contract (the ref is NOT the value).
   * Lifecycle cascade — instance delete + account closure revoke every
     connection, audit each (ACTION_CONNECTION_REVOKED), and enqueue
-    secret cleanup ONLY for non-null credential_ref (pointer only).
+    secret cleanup ONLY for non-null secret_ref (pointer only).
   * Token-refresh worker helper — _refresh_one disposition.
   * Secret-cleanup drain — outbox repo enqueue/claim/mark + store delete.
   * Cross-tenant isolation — admin A cannot read/refresh/delete admin
     B's connection via the repo's (admin_id)-fenced reads.
-  * No-secret-VALUE grep — credential_ref / config_json never carry a
+  * No-secret-VALUE grep — secret_ref / non_secret_config never carry a
     raw secret value in the shipped code.
 
 Uses an in-memory SQLite session shaped to the columns the units touch
@@ -143,8 +143,8 @@ def _build_sqlite_session():
         ),
         Column("connection_type", String(32), nullable=False),
         Column("provider", String(64), nullable=False),
-        Column("config_json", Text, nullable=True),
-        Column("credential_ref", String(255), nullable=True),
+        Column("non_secret_config", Text, nullable=True),
+        Column("secret_ref", String(255), nullable=True),
         Column("status", String(16), nullable=False, server_default="unconfigured"),
         Column("last_health_check_at", DateTime(timezone=True), nullable=True),
         Column(
@@ -176,7 +176,7 @@ def _build_sqlite_session():
         Column("admin_id", String(100), nullable=False, index=True),
         Column("instance_id", Integer, nullable=True),
         Column("connection_id", Integer, nullable=True),
-        Column("credential_ref", String(255), nullable=False),
+        Column("secret_ref", String(255), nullable=False),
         Column("status", String(16), nullable=False, server_default="pending"),
         Column("attempts", Integer, nullable=False, server_default="0"),
         Column("last_error", Text, nullable=True),
@@ -320,11 +320,11 @@ def test_factory_selects_fake_when_live_disabled() -> None:
 class _StubConn:
     """Minimal InstanceConnection-shaped stub for the health service."""
 
-    def __init__(self, *, connection_type, config_json=None, credential_ref=None):
+    def __init__(self, *, connection_type, non_secret_config=None, secret_ref=None):
         self.id = 1
         self.connection_type = connection_type
-        self.config_json = config_json
-        self.credential_ref = credential_ref
+        self.non_secret_config = non_secret_config
+        self.secret_ref = secret_ref
 
 
 def _settings():
@@ -338,7 +338,7 @@ def test_health_live_connector_config_present_connected() -> None:
 
     svc = ConnectionHealthService(_settings())
     res = svc.check_health(
-        _StubConn(connection_type="record_source", config_json={"store_ref": "s3://x"})
+        _StubConn(connection_type="record_source", non_secret_config={"store_ref": "s3://x"})
     )
     assert res.status == "connected"
     assert res.checked_at is not None
@@ -350,7 +350,7 @@ def test_health_live_connector_config_missing_error() -> None:
 
     svc = ConnectionHealthService(_settings())
     res = svc.check_health(
-        _StubConn(connection_type="outbound_webhook", config_json={})
+        _StubConn(connection_type="outbound_webhook", non_secret_config={})
     )
     assert res.status == "error"
     assert res.checked_at is not None
@@ -372,7 +372,7 @@ def test_health_deferred_oauth_unconfigured_never_fakes_connected() -> None:
 def test_health_deferred_oauth_refresh_success_connected_with_fakes() -> None:
     """The full real refresh path, exercised behind fakes: a configured
     fake provider + a stored fake refresh token → connected, with the
-    rotated credential_ref surfaced."""
+    rotated secret_ref surfaced."""
     from app.integrations.oauth import OAuthTokens
     from app.integrations.secrets import LocalFakeSecretStore
     from app.services.connection_health_service import ConnectionHealthService
@@ -399,7 +399,7 @@ def test_health_deferred_oauth_refresh_success_connected_with_fakes() -> None:
     mod.get_oauth_provider = lambda ct, s: _FakeProvider()
     try:
         res = svc.check_health(
-            _StubConn(connection_type="calendar", credential_ref=cred_ref)
+            _StubConn(connection_type="calendar", secret_ref=cred_ref)
         )
     finally:
         mod.get_oauth_provider = orig
@@ -407,8 +407,8 @@ def test_health_deferred_oauth_refresh_success_connected_with_fakes() -> None:
     assert res.status == "connected"
     assert res.checked_at is not None
     # A new refresh token was issued → the stored secret rotated.
-    assert res.new_credential_ref is not None
-    assert store.get(res.new_credential_ref) == "new-refresh-token"
+    assert res.new_secret_ref is not None
+    assert store.get(res.new_secret_ref) == "new-refresh-token"
 
 
 def test_health_deferred_oauth_rejected_token_expired() -> None:
@@ -433,7 +433,7 @@ def test_health_deferred_oauth_rejected_token_expired() -> None:
     mod.get_oauth_provider = lambda ct, s: _FakeProvider()
     try:
         res = svc.check_health(
-            _StubConn(connection_type="crm", credential_ref=cred_ref)
+            _StubConn(connection_type="crm", secret_ref=cred_ref)
         )
     finally:
         mod.get_oauth_provider = orig
@@ -449,7 +449,7 @@ def test_health_deferred_oauth_rejected_token_expired() -> None:
 
 def _make_connection(
     session, *, admin_id, instance_id, connection_type="record_source",
-    provider="csv", credential_ref=None, status="connected",
+    provider="csv", secret_ref=None, status="connected",
 ):
     from app.repositories.instance_connection_repository import (
         InstanceConnectionRepository,
@@ -461,7 +461,7 @@ def _make_connection(
         connection_type=connection_type,
         provider=provider,
         status=status,
-        credential_ref=credential_ref,
+        secret_ref=secret_ref,
         autocommit=True,
     )
 
@@ -495,7 +495,7 @@ def test_instance_delete_cascade_revokes_and_audits_connections() -> None:
     assert _count_audit(session, action="connection_revoked") == 2
 
 
-def test_cascade_enqueues_secret_cleanup_only_for_credential_ref() -> None:
+def test_cascade_enqueues_secret_cleanup_only_for_secret_ref() -> None:
     from app.repositories.instance_repository import InstanceRepository
     from sqlalchemy import text as sa_text
 
@@ -506,7 +506,7 @@ def test_cascade_enqueues_secret_cleanup_only_for_credential_ref() -> None:
     _make_connection(
         session, admin_id="adminA", instance_id=10,
         connection_type="calendar", provider="google_calendar",
-        credential_ref="luciel/connections/oauth-cal-1",
+        secret_ref="luciel/connections/oauth-cal-1",
     )
     _make_connection(session, admin_id="adminA", instance_id=10)  # NULL ref
 
@@ -516,7 +516,7 @@ def test_cascade_enqueues_secret_cleanup_only_for_credential_ref() -> None:
     session.commit()
 
     rows = session.execute(
-        sa_text("SELECT credential_ref FROM secret_cleanup_outbox")
+        sa_text("SELECT secret_ref FROM secret_cleanup_outbox")
     ).fetchall()
     # Exactly one outbox row — for the connection that had a pointer.
     assert len(rows) == 1
@@ -599,7 +599,7 @@ def test_outbox_enqueue_list_mark_done() -> None:
     repo = SecretCleanupOutboxRepository(session)
     repo.enqueue(
         admin_id="adminA",
-        credential_ref="luciel/connections/x",
+        secret_ref="luciel/connections/x",
         autocommit=True,
     )
     pending = repo.list_pending()
@@ -619,7 +619,7 @@ def test_outbox_mark_failed_flips_to_failed_after_max_attempts() -> None:
     _seed_admin(session, admin_id="adminA")
     repo = SecretCleanupOutboxRepository(session)
     row = repo.enqueue(
-        admin_id="adminA", credential_ref="luciel/connections/x", autocommit=True
+        admin_id="adminA", secret_ref="luciel/connections/x", autocommit=True
     )
     for _ in range(4):
         repo.mark_failed(row=row, error="boom", max_attempts=5, autocommit=True)
@@ -634,10 +634,10 @@ def test_outbox_mark_failed_flips_to_failed_after_max_attempts() -> None:
 # =====================================================================
 
 
-def test_no_secret_value_written_to_config_json_or_credential_ref() -> None:
+def test_no_secret_value_written_to_non_secret_config_or_secret_ref() -> None:
     """The connections code must never persist a secret VALUE — only a
-    pointer (credential_ref = NAME/ARN). Guard against an accidental
-    `credential_ref=<token value>` or storing tokens in config_json."""
+    pointer (secret_ref = NAME/ARN). Guard against an accidental
+    `secret_ref=<token value>` or storing tokens in non_secret_config."""
     paths = [
         REPO_ROOT / "app" / "api" / "v1" / "admin_connections.py",
         REPO_ROOT / "app" / "services" / "connection_health_service.py",
@@ -645,18 +645,18 @@ def test_no_secret_value_written_to_config_json_or_credential_ref() -> None:
         REPO_ROOT / "app" / "repositories" / "secret_cleanup_outbox_repository.py",
         REPO_ROOT / "app" / "worker" / "tasks" / "refresh_connections.py",
     ]
-    # The admin_connections route configures credential_ref=None in this
+    # The admin_connections route configures secret_ref=None in this
     # slice; no path should assign a token/secret value into it.
     forbidden = re.compile(
-        r"credential_ref\s*=\s*['\"].*(token|secret|password|key)",
+        r"secret_ref\s*=\s*['\"].*(token|secret|password|key)",
         re.IGNORECASE,
     )
     for p in paths:
         src = p.read_text(encoding="utf-8")
         assert not forbidden.search(src), f"possible secret value in {p.name}"
 
-    # admin_connections explicitly pins credential_ref=None.
+    # admin_connections explicitly pins secret_ref=None.
     conn_src = (
         REPO_ROOT / "app" / "api" / "v1" / "admin_connections.py"
     ).read_text(encoding="utf-8")
-    assert "credential_ref=None" in conn_src
+    assert "secret_ref=None" in conn_src

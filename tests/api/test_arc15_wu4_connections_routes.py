@@ -3,7 +3,7 @@
 AST/text shape test (same convention as the WU3 route tests): protects
 the connections router wiring (four-walls auth with
 PERM_CONFIGURE_CONNECTIONS, the no-fake-connected honesty fork, audit on
-every write, no-secret config_json guard) and the ToolView
+every write, no-secret non_secret_config guard) and the ToolView
 connection_status mapping — without a live TestClient/DB. The gate
 behaviour is covered in tests/tools/test_arc15_wu5_connection_gate.py;
 the connection_status pure mapping is covered behaviourally below.
@@ -110,12 +110,12 @@ def test_live_vs_deferred_partition_is_honest() -> None:
     assert "crm" in DEFERRED_CONNECTION_TYPES
 
 
-def test_config_json_secret_guard() -> None:
+def test_non_secret_config_secret_guard() -> None:
     src = _read(CONN_PATH)
     assert "_FORBIDDEN_CONFIG_KEYS" in src
-    assert "secret_in_config_json" in src
-    # credential_ref stays NULL in this slice.
-    assert "credential_ref=None" in src
+    assert "secret_in_non_secret_config" in src
+    # secret_ref stays NULL in this slice.
+    assert "secret_ref=None" in src
 
 
 # ---------------------------------------------------------------------
@@ -145,7 +145,7 @@ def test_audit_constants_whitelisted() -> None:
 
 
 def test_audit_records_config_keys_not_values() -> None:
-    # config_json is non-secret by contract, but record only the KEYS so
+    # non_secret_config is non-secret by contract, but record only the KEYS so
     # the audit row stays bounded.
     src = ast.unparse(_function_node(CONN_PATH, "configure_connection"))
     assert "config_keys" in src

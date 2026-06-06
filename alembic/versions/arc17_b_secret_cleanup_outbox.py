@@ -7,7 +7,7 @@ Create Date: 2026-06-03
 Why this migration exists
 -------------------------
 Task 4 of the Arc 17 connections completion: when a connection carrying
-a non-null ``credential_ref`` is revoked by the lifecycle cascade
+a non-null ``secret_ref`` is revoked by the lifecycle cascade
 (instance delete / account closure), the secret stored behind that
 pointer must be cleaned up. The cleanup is decoupled from the request
 path via a transactional OUTBOX: the cascade INSERTs one row here in
@@ -23,7 +23,7 @@ Schema
                        this row is drained; the cleanup must survive.
 * ``instance_id``    — Integer nullable, indexed (forensics).
 * ``connection_id``  — Integer nullable (forensics).
-* ``credential_ref`` — String(255) non-null. The secret NAME/ARN
+* ``secret_ref`` — String(255) non-null. The secret NAME/ARN
                        pointer — NEVER the value (Locked Decision #18).
 * ``status``         — String(16): pending | done | failed.
 * ``attempts``       — Integer, retry counter.
@@ -78,7 +78,7 @@ def upgrade() -> None:
         sa.Column("instance_id", sa.Integer(), nullable=True, index=True),
         sa.Column("connection_id", sa.Integer(), nullable=True),
         sa.Column(
-            "credential_ref",
+            "secret_ref",
             sa.String(255),
             nullable=False,
             comment=(

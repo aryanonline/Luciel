@@ -29,7 +29,7 @@ Arc 17 and this body is the live implementation. See
 
 Where the source lives, and the s3 deploy gate
 ==============================================
-The connection's NON-SECRET ``config_json.store_ref`` names the storage
+The connection's NON-SECRET ``non_secret_config.store_ref`` names the storage
 location (a local path / ``file://`` URI, or an ``s3://`` URI). The
 resolver dispatches by scheme:
   * local / file:// → ``LocalFileRecordSource`` (CSV via csv.DictReader),
@@ -154,7 +154,7 @@ class LookupRecordTool(LucielTool):
                 "so there is nothing to look up against."
             )
 
-        config = row.config_json or {}
+        config = row.non_secret_config or {}
         store_ref = config.get("store_ref")
         if not store_ref or not str(store_ref).strip():
             return self._fail(

@@ -751,7 +751,7 @@ ACTION_PERSONALITY_REJECTED = "personality_rejected"
 # ACTION_CONNECTION_CONFIGURED -- a user configured (created) an
 #   external-system connection for an Instance via the connections admin
 #   API (POST). after_json carries {connection_type, provider, status}
-#   — NEVER config_json secrets (config_json holds non-secret config
+#   — NEVER non_secret_config secrets (non_secret_config holds non-secret config
 #   only, and the audit row records the connection's shape, not its
 #   payload). resource_type = RESOURCE_INSTANCE_CONNECTION; resource_pk
 #   = instance_connections.id; resource_natural_id =
@@ -785,7 +785,7 @@ ACTION_CONNECTION_DISCONNECTED = "connection_disconnected"
 #   NOT by an explicit operator DELETE. Distinct from
 #   ACTION_CONNECTION_DISCONNECTED so an auditor can tell an operator
 #   teardown apart from an automatic lifecycle cascade. before_json
-#   carries {connection_type, status, had_credential_ref}; after_json
+#   carries {connection_type, status, had_secret_ref}; after_json
 #   carries {revoked_at, secret_cleanup_enqueued, cascade_source}.
 ACTION_CONNECTION_REFRESHED = "connection_refreshed"
 ACTION_CONNECTION_TOKEN_REFRESHED = "connection_token_refreshed"
@@ -802,10 +802,10 @@ ACTION_CONNECTION_REVOKED = "connection_revoked"
 #   actual connect that the callback performs.
 # ACTION_CONNECTION_OAUTH_CONNECTED -- the OAuth callback exchanged a real
 #   auth code with the provider, stored the refresh token via the
-#   SecretStore (pointer persisted into credential_ref), and flipped the
+#   SecretStore (pointer persisted into secret_ref), and flipped the
 #   row to 'connected'. The actor is resolved OFF THE VERIFIED STATE (the
 #   callback has no session cookie). after_json carries {connection_type,
-#   provider, status, credential_ref_present} — NEVER the token value.
+#   provider, status, secret_ref_present} — NEVER the token value.
 #   Distinct from ACTION_CONNECTION_CONFIGURED so a dashboard can isolate
 #   a real OAuth connect from a CSV/webhook configure. On exchange failure
 #   the same action records status='error' (honest, never fake connected).

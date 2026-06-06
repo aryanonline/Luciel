@@ -16,8 +16,8 @@ Walls:
   Instance.
 
 Honesty invariants (Architecture §3.8.2):
-* ``config_json`` holds NON-SECRET config ONLY (CSV column map, webhook
-  URL). Secrets NEVER land here — they ride behind ``credential_ref``.
+* ``non_secret_config`` holds NON-SECRET config ONLY (CSV column map, webhook
+  URL). Secrets NEVER land here — they ride behind ``secret_ref``.
 * ``status == 'connected'`` is only ever written for a connection with
   a real backing (CSV / webhook in this slice). Deferred connectors
   (calendar / crm) land as ``unconfigured`` — never a fake ``connected``.
@@ -89,8 +89,8 @@ class InstanceConnection(Base):
         _conn_type_enum, nullable=False
     )
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
-    config_json: Mapped[dict | None] = mapped_column(JSONB(), nullable=True)
-    credential_ref: Mapped[str | None] = mapped_column(
+    non_secret_config: Mapped[dict | None] = mapped_column(JSONB(), nullable=True)
+    secret_ref: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
     status: Mapped[str] = mapped_column(

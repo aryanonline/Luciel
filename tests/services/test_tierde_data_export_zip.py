@@ -9,7 +9,7 @@ Locks the §5.10 contract for the rewritten DataExportService:
   EZ-3  Per-session JSON: conversations/{session_id}.json present.
   EZ-4  conversations/conversations.csv present.
   EZ-5  instances.json contains provider + non_secret_config + status
-        and NEVER credential_ref or any secret material.
+        and NEVER secret_ref or any secret material.
   EZ-6  Free-tier self-serve blocked pre-closure; allowed during closure.
   EZ-7  Pro/Enterprise self-serve allowed at any time.
   EZ-8  data_export_self_serve audit emitted for Pro/Enterprise
@@ -284,11 +284,11 @@ def test_ez4_conversations_csv_present():
 
 
 # -----------------------------------------------------------------------
-# EZ-5: instances.json — no credential_ref or secrets.
+# EZ-5: instances.json — no secret_ref or secrets.
 # -----------------------------------------------------------------------
 
 def test_ez5_instances_json_no_secret_material():
-    """instances.json must NEVER contain credential_ref or secrets."""
+    """instances.json must NEVER contain secret_ref or secrets."""
     instance_row = (
         1,               # id
         "admin-1",       # admin_id
@@ -303,12 +303,12 @@ def test_ez5_instances_json_no_secret_material():
         1,                      # instance_id
         "email_sender",         # connection_type
         "sendgrid",             # provider
-        {"from_email": "noreply@test.com"},  # config_json (non_secret)
+        {"from_email": "noreply@test.com"},  # non_secret_config (non_secret)
         "connected",            # status
         datetime(2024, 1, 1, tzinfo=timezone.utc),  # last_health_check_at
         datetime(2024, 1, 1, tzinfo=timezone.utc),  # created_at
         datetime(2024, 1, 1, tzinfo=timezone.utc),  # updated_at
-        # credential_ref is NOT included in the query (intentionally omitted)
+        # secret_ref is NOT included in the query (intentionally omitted)
     )
     db = _make_db_with_data(instances=[instance_row], connections=[conn_row])
     s3 = _FakeS3()
@@ -331,10 +331,10 @@ def test_ez5_instances_json_no_secret_material():
     assert conn["status"] == "connected"
     assert "non_secret_config" in conn
 
-    # MUST NOT contain credential_ref.
+    # MUST NOT contain secret_ref.
     instances_str = instances_raw
-    assert "credential_ref" not in instances_str, (
-        "instances.json must NEVER contain credential_ref — "
+    assert "secret_ref" not in instances_str, (
+        "instances.json must NEVER contain secret_ref — "
         "this is a security invariant (§5.10)"
     )
     # Also assert no common secret field names.
