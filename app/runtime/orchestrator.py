@@ -252,27 +252,64 @@ class LucielOrchestrator:
 
         # 5. ESCALATION GATE 2 — OUTCOME (post-REFLECT). §3.4.5 (c)+(d).
         #    NEVER reads loop.bound_hit (§3.4.1 locked #17).
-        outcome_decision = self._outcome_gate(req, loop)
-        escalation_flag = outcome_decision is not None
-        if outcome_decision is not None:
-            self._record_escalation_best_effort(outcome_decision)
+        #
+        #    Unit 9 (part 2) — Architecture line 1354: if BOTH LLM
+        #    providers were down this turn there is no meaningful loop
+        #    output to evaluate, so the llm_unavailable escalation takes
+        #    PRECEDENCE over the normal outcome gate. We fire a dedicated
+        #    SIGNAL_LLM_UNAVAILABLE escalation at GATE_OUTCOME (known
+        #    post-loop), notify the admin via the SAME delivery path the
+        #    other outcome escalations use (best-effort inside
+        #    _record_escalation_best_effort), and swap the customer reply
+        #    to the canonical "I've let the team know" phrase. This branch
+        #    runs once per turn (post-loop, not inside the PLAN loop).
+        if loop.llm_unavailable:
+            from app.models.escalation_event import (
+                GATE_OUTCOME,
+                SIGNAL_LLM_UNAVAILABLE,
+            )
+            from app.policy.escalation import EscalationDecision
+            from app.runtime.handoff_ack import llm_unavailable_reply
 
-        # 6. RESPOND — the §3.4.2 channel arbiter picks the outbound
-        #    channel (replaces U1's "emit on inbound channel"). The pick
-        #    defaults safely to the inbound channel when channel info is
-        #    sparse, so this never breaks the turn.
-        #    When SIGNAL_CANNOT_CONFIDENTLY_ANSWER fired, replace the LLM
-        #    reply with the §3.4.13 canonical phrase so the anti-hallucination
-        #    promise (Vision §1) is upheld: we never send an ungrounded answer.
-        from app.models.escalation_event import SIGNAL_CANNOT_CONFIDENTLY_ANSWER
-        if (
-            outcome_decision is not None
-            and outcome_decision.signal == SIGNAL_CANNOT_CONFIDENTLY_ANSWER
-        ):
-            from app.runtime.handoff_ack import cannot_answer_reply
-            message = cannot_answer_reply()
+            outcome_decision = EscalationDecision(
+                signal=SIGNAL_LLM_UNAVAILABLE,
+                gate=GATE_OUTCOME,
+                admin_id=req.admin_id,
+                session_id=req.session_id,
+                luciel_instance_id=req.luciel_instance_id,
+                user_id=req.user_id,
+                signal_confidence=1.0,
+                reasoning_excerpt="All LLM providers unavailable",
+                signal_inputs={"all_providers_down": True},
+            )
+            escalation_flag = True
+            self._record_escalation_best_effort(outcome_decision)
+            message = llm_unavailable_reply()
         else:
-            message = loop.reply
+            outcome_decision = self._outcome_gate(req, loop)
+            escalation_flag = outcome_decision is not None
+            if outcome_decision is not None:
+                self._record_escalation_best_effort(outcome_decision)
+
+            # 6. RESPOND — the §3.4.2 channel arbiter picks the outbound
+            #    channel (replaces U1's "emit on inbound channel"). The pick
+            #    defaults safely to the inbound channel when channel info is
+            #    sparse, so this never breaks the turn.
+            #    When SIGNAL_CANNOT_CONFIDENTLY_ANSWER fired, replace the LLM
+            #    reply with the §3.4.13 canonical phrase so the
+            #    anti-hallucination promise (Vision §1) is upheld: we never
+            #    send an ungrounded answer.
+            from app.models.escalation_event import (
+                SIGNAL_CANNOT_CONFIDENTLY_ANSWER,
+            )
+            if (
+                outcome_decision is not None
+                and outcome_decision.signal == SIGNAL_CANNOT_CONFIDENTLY_ANSWER
+            ):
+                from app.runtime.handoff_ack import cannot_answer_reply
+                message = cannot_answer_reply()
+            else:
+                message = loop.reply
         choice = self._arbitrate_channel(
             req, reply=message, escalation_fired=escalation_flag
         )
@@ -1502,9 +1539,28 @@ class LucielOrchestrator:
         except Exception as exc:  # noqa: BLE001
             # Provider-agnostic firewall: a PLAN call must never crash
             # the turn. Degrade to a graceful low-confidence reply.
+            #
+            # Unit 9 (part 2) — Architecture line 1354. The router raises
+            # RuntimeError("All LLM providers failed ...") ONLY when EVERY
+            # provider (anthropic, openai, stub) is unavailable. In that
+            # specific case Luciel must NOT fabricate a degraded reply: it
+            # escalates llm_unavailable + notifies the admin + returns the
+            # canonical "I've let the team know" phrase. We mark the loop
+            # result here; the TURN layer (run()) reads the flag post-loop
+            # so the escalation fires exactly once per turn. Ordinary
+            # single-call failures (no provider configured, one provider
+            # erroring) keep the generic degraded reply below unchanged.
+            is_all_providers_down = (
+                isinstance(exc, RuntimeError)
+                and "All LLM providers failed" in str(exc)
+            )
+            if is_all_providers_down:
+                result.llm_unavailable = True
             logger.warning(
-                "PLAN LLM call failed: exc_class=%s — degrading turn",
+                "PLAN LLM call failed: exc_class=%s all_providers_down=%s — "
+                "degrading turn",
                 type(exc).__name__,
+                is_all_providers_down,
             )
             return Plan(
                 reply=(
@@ -2086,6 +2142,12 @@ class _LoopResult:
         # RESCAN TIER-C — weighted composite lead score [0, 1] from
         # lead_capture.detect(), populated before the OUTCOME gate.
         "lead_score",
+        # Unit 9 (part 2) — set True by the _plan firewall ONLY when BOTH
+        # LLM providers are down (RuntimeError "All LLM providers failed").
+        # The turn layer reads it post-loop to fire the llm_unavailable
+        # escalation (Architecture line 1354). Ordinary single-call
+        # failures leave it False (generic degraded reply unchanged).
+        "llm_unavailable",
     )
 
     def __init__(self, *, reply: str) -> None:
@@ -2106,3 +2168,5 @@ class _LoopResult:
         self.retrieval_failed: bool = False
         self.lead_value: float | None = None
         self.lead_score: float = 0.0
+        # Unit 9 (part 2) — both-providers-down marker (set by _plan).
+        self.llm_unavailable: bool = False

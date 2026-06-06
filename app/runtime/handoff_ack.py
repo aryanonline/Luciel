@@ -67,6 +67,16 @@ CANNOT_ANSWER_REPLY: str = (
 )
 
 
+# Architecture line 1354 canonical phrase. Used as the reply when BOTH LLM
+# providers are down (SIGNAL_LLM_UNAVAILABLE): Luciel never fabricates a
+# response to mask provider unavailability — it tells the customer plainly
+# that it has flagged the team, while the escalation notifies the admin.
+# This EXACT phrase is normative (line 1354) — do not paraphrase.
+LLM_UNAVAILABLE_REPLY: str = (
+    "I'm having trouble right now — I've let the team know."
+)
+
+
 def handoff_acknowledgement(
     *,
     preset: str | None = None,
@@ -95,3 +105,14 @@ def cannot_answer_reply() -> str:
     import point for both Gate-1 and Gate-2 reply text.
     """
     return CANNOT_ANSWER_REPLY
+
+
+def llm_unavailable_reply() -> str:
+    """Return the Architecture line 1354 canonical llm_unavailable phrase.
+
+    Used when BOTH LLM providers are down (SIGNAL_LLM_UNAVAILABLE fires at
+    the OUTCOME gate): the customer gets this exact line while the
+    escalation notifies the admin. Single source of truth so the
+    orchestrator's reply-swap and the tests reference one string.
+    """
+    return LLM_UNAVAILABLE_REPLY

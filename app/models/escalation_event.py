@@ -81,6 +81,14 @@ SIGNAL_HIGH_VALUE_LEAD = "high_value_lead"
 # triggers — it is a capacity condition, surfaced via the same escalation
 # machinery so the audit + notify side-effects reuse one path.
 SIGNAL_BUDGET_EXHAUSTED = "budget_exhausted"
+# Unit 9 (part 2) — fires at GATE_OUTCOME (post-loop) when BOTH LLM
+# providers are down (router raises "All LLM providers failed"). Architecture
+# line 1354: Luciel returns the canonical "I've let the team know" phrase,
+# escalates, and notifies the admin rather than fabricating a response to
+# mask provider unavailability. Like budget_exhausted it is not one of the
+# four §3.4.5 doctrinal triggers — it is an availability condition surfaced
+# via the same escalation machinery.
+SIGNAL_LLM_UNAVAILABLE = "llm_unavailable"
 
 ALLOWED_SIGNALS: frozenset[str] = frozenset({
     SIGNAL_EXPLICIT_HUMAN_REQUEST,
@@ -88,6 +96,7 @@ ALLOWED_SIGNALS: frozenset[str] = frozenset({
     SIGNAL_CANNOT_CONFIDENTLY_ANSWER,
     SIGNAL_HIGH_VALUE_LEAD,
     SIGNAL_BUDGET_EXHAUSTED,
+    SIGNAL_LLM_UNAVAILABLE,
 })
 
 GATE_INTAKE = "intake"
@@ -169,7 +178,7 @@ class EscalationEvent(Base, TimestampMixin):
             "signal IN ("
             "'explicit_human_request', 'strong_negative_sentiment', "
             "'cannot_confidently_answer', 'high_value_lead', "
-            "'budget_exhausted')",
+            "'budget_exhausted', 'llm_unavailable')",
             name="ck_escalation_events_signal",
         ),
         CheckConstraint(
