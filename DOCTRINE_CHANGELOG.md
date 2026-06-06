@@ -12,6 +12,25 @@ anchored-path change is accompanied by a change to this file.
 
 Newest entries first.
 
+## Unit 13f MOVE 2 follow-up — relocate `test_c6_4_ops_role_behavioural` into `tests/isolation/` (2026-06-06)
+
+One-file follow-up to the MOVE 2 consolidation below. `git mv` of
+`tests/db/test_c6_4_ops_role_behavioural.py` →
+`tests/isolation/test_c6_4_ops_role_behavioural.py`. This is a genuine
+**behavioral ops-role cross-tenant / privilege-isolation** suite: it
+connects to live Postgres and proves the `luciel_ops` role boundary —
+its **Class 4 "NO GUC LEAK"** tests assert the ops connection carries
+neither `app.admin_id` nor `app.instance_id`, and its auth-perimeter
+tests assert `luciel_ops` cannot touch `admins` / `tenant_configs` /
+`users` / `user_invites` / `user_consents`. It belongs in the dedicated
+isolation gate so it runs there in deploy-phase when integration creds
+are present. The suite gates on `LUCIEL_INTEGRATION_DB` (+
+`LUCIEL_INTEGRATION_OPS_DB`) and **skips entirely** when those are unset,
+as in the local harness — so **no count change**: full suite stays at
+**2834 passed / 0 failed / 36 skipped / 1 xfailed**. The `isolation_suite`
+anchor `paths` are already `tests/isolation/`, so no
+`DOCTRINE_ANCHORS.toml` change is needed.
+
 ## Unit 13f MOVE 2 — consolidate the behavioral tenant-isolation suite under `tests/isolation/` (2026-06-06)
 
 Resolves the MOVE 2 deferral recorded in the entry below. Per the
