@@ -79,7 +79,7 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.db.tenant_scope import bind_tenant_scope  # Arc 9 C4.4
-from app.integrations.llm.router import ModelRouter
+from app.runtime.llm_router import ModelRouter
 from app.memory.service import MemoryService
 from app.models.admin_audit_log import (
     ACTION_WORKER_USER_INACTIVE,

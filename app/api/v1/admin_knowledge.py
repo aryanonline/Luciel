@@ -1081,7 +1081,7 @@ def internal_retrieve(
         )
 
     from app.knowledge.embedder import embed_single
-    from app.knowledge.retriever import KnowledgeRetriever
+    from app.runtime.knowledge_retrieval import KnowledgeRetriever
     from app.repositories.knowledge_repository import KnowledgeRepository
 
     with bind_tenant_scope(

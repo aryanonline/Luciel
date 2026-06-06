@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import re
 
-from app.integrations.llm.router import ModelRouter
+from app.runtime.llm_router import ModelRouter
 from app.memory.extractor import extract_memories
 from app.repositories.memory_repository import MemoryRepository
 import uuid  # noqa: F401  (referenced via string annotation in method signatures)

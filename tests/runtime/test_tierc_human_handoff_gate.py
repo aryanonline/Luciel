@@ -394,7 +394,7 @@ class TestLucielInitiatedTakeover(unittest.TestCase):
     def test_explicit_human_request_ack_is_handoff_template(self):
         """Luciel-initiated path: the reply is the handoff ack template, not
         an LLM response."""
-        from app.runtime.handoff_ack import handoff_acknowledgement
+        from app.runtime.handoff import handoff_acknowledgement
 
         router = _ScriptedRouter([_plan_json(reply="llm response that must not appear")])
         esc = _FakeEscalationSvc()

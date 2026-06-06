@@ -182,10 +182,10 @@ def test_widget_e2e_workflow_pull_request_trigger_pins_widget_surface_paths() ->
 
     expected_paths = {
         "app/api/v1/chat_widget.py",
-        "app/api/v1/admin.py",
+        "app/api/v1/admin/**",
         "app/api/widget_deps.py",
         "app/middleware/auth.py",
-        "app/policy/moderation.py",
+        "app/runtime/input_safety.py",
         "app/core/config.py",
         "app/services/scope_prompt_preflight.py",
         "app/integrations/llm/**",

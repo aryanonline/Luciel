@@ -40,8 +40,8 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CLOSURE_SERVICE_PATH = REPO_ROOT / "app" / "services" / "closure_service.py"
-ADMIN_ROUTE_PATH = REPO_ROOT / "app" / "api" / "v1" / "admin.py"
+CLOSURE_SERVICE_PATH = REPO_ROOT / "app" / "lifecycle" / "closure.py"
+ADMIN_ROUTE_PATH = REPO_ROOT / "app" / "api" / "v1" / "admin" / "__init__.py"
 SCHEMA_PATH = REPO_ROOT / "app" / "schemas" / "lifecycle.py"
 
 

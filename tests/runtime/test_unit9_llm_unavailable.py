@@ -36,7 +36,7 @@ os.environ.setdefault("OPENAI_API_KEY", "dummy")
 
 from app.policy.entitlements import CADENCE_MONTHLY, TIER_PRO
 from app.runtime.billing_period import BillingContext
-from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
+from app.billing.metering import BudgetMeter, InMemoryBackend
 from app.runtime.classifiers import (
     INTENT_OTHER,
     IntentResult,
@@ -209,7 +209,7 @@ class TestLlmUnavailableFires(unittest.TestCase):
             GATE_OUTCOME,
             SIGNAL_LLM_UNAVAILABLE,
         )
-        from app.runtime.handoff_ack import llm_unavailable_reply
+        from app.runtime.handoff import llm_unavailable_reply
 
         router = _BoomRouter(
             RuntimeError("All LLM providers failed. Errors: anthropic: X; openai: Y")

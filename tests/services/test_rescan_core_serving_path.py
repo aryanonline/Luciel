@@ -46,8 +46,8 @@ os.environ.setdefault("OPENAI_API_KEY", "dummy")
 from app.channels.base import InactiveInstanceDrop
 from app.integrations.llm.base import LLMResponse
 from app.runtime.budget_ack import budget_exhausted_acknowledgement
-from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
-from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY
+from app.billing.metering import BudgetMeter, InMemoryBackend
+from app.runtime.handoff import CANNOT_ANSWER_REPLY
 from app.services.chat_service import ChatService
 
 
@@ -325,7 +325,7 @@ class _LivePath:
             p(patch("app.db.session.SessionLocal", side_effect=_FakeDB))
         if self.meter is not None:
             p(patch(
-                "app.runtime.budget_meter.BudgetMeter",
+                "app.billing.metering.BudgetMeter",
                 return_value=self.meter,
             ))
         for patcher in self._patches:

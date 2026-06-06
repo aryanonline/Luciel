@@ -255,7 +255,7 @@ def test_c5_retriever_exposes_source_identifier_as_int():
 
 
 def test_c5_retriever_has_retrieve_with_sources_method():
-    from app.knowledge.retriever import KnowledgeRetriever
+    from app.runtime.knowledge_retrieval import KnowledgeRetriever
 
     assert hasattr(KnowledgeRetriever, "retrieve_with_sources")
 
@@ -505,7 +505,7 @@ def test_c13_no_quota_check_in_ingestion():
 
 def test_c14_knowledge_package_reexports_retrieved_chunk():
     from app.knowledge import KnowledgeRetriever, RetrievedChunk
-    from app.knowledge.retriever import (
+    from app.runtime.knowledge_retrieval import (
         KnowledgeRetriever as _KR,
         RetrievedChunk as _RC,
     )

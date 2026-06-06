@@ -28,7 +28,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.integrations.llm.base import LLMMessage, LLMRequest, LLMResponse
-from app.integrations.llm.router import (
+from app.runtime.llm_router import (
     ModelRouter,
     _complexity_score,
     _qualifies_for_fast_route,
@@ -258,7 +258,7 @@ class TestAnthropicPrimaryOrderIndependence:
             anthropic_provider=anthropic,
             openai_provider=openai,
         )
-        with caplog.at_level(logging.WARNING, logger="app.integrations.llm.router"):
+        with caplog.at_level(logging.WARNING, logger="app.runtime.llm_router"):
             router.generate(
                 _make_request("Q"),
                 tier=_TIER_PRO,

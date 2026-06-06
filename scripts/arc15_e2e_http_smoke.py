@@ -25,7 +25,7 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.admin import Admin
 from app.models.instance import Instance
-from app.models.instance_status import InstanceStatus
+from app.lifecycle.state import InstanceStatus
 from app.services.api_key_service import ApiKeyService
 
 BASE = "http://127.0.0.1:8000"

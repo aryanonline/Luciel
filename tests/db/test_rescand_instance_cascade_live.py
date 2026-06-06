@@ -46,7 +46,7 @@ def test_instance_cascade_purges_all_child_tables():
     assert purge completes and per-step audit rows exist."""
     from sqlalchemy import text
 
-    from app.worker.tasks.instance_retention import _hard_delete_instance_cascade
+    from app.lifecycle.retention import _hard_delete_instance_cascade
 
     Session = _mk_session()
     admin_id = f"rescand-casc-{uuid.uuid4().hex[:12]}"

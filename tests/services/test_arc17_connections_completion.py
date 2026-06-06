@@ -451,7 +451,7 @@ def _make_connection(
     session, *, admin_id, instance_id, connection_type="record_source",
     provider="csv", secret_ref=None, status="connected",
 ):
-    from app.repositories.instance_connection_repository import (
+    from app.connections.repository import (
         InstanceConnectionRepository,
     )
 
@@ -467,7 +467,7 @@ def _make_connection(
 
 
 def test_instance_delete_cascade_revokes_and_audits_connections() -> None:
-    from app.repositories.instance_connection_repository import (
+    from app.connections.repository import (
         InstanceConnectionRepository,
     )
     from app.repositories.instance_repository import InstanceRepository
@@ -524,7 +524,7 @@ def test_cascade_enqueues_secret_cleanup_only_for_secret_ref() -> None:
 
 
 def test_account_closure_cascade_revokes_across_instances() -> None:
-    from app.repositories.instance_connection_repository import (
+    from app.connections.repository import (
         InstanceConnectionRepository,
     )
     from app.repositories.instance_repository import InstanceRepository
@@ -556,7 +556,7 @@ def test_account_closure_cascade_revokes_across_instances() -> None:
 
 
 def test_cross_tenant_admin_cannot_touch_other_admins_connection() -> None:
-    from app.repositories.instance_connection_repository import (
+    from app.connections.repository import (
         InstanceConnectionRepository,
     )
 
@@ -590,7 +590,7 @@ def test_cross_tenant_admin_cannot_touch_other_admins_connection() -> None:
 
 
 def test_outbox_enqueue_list_mark_done() -> None:
-    from app.repositories.secret_cleanup_outbox_repository import (
+    from app.connections.secret_cleanup_outbox_repository import (
         SecretCleanupOutboxRepository,
     )
 
@@ -611,7 +611,7 @@ def test_outbox_enqueue_list_mark_done() -> None:
 
 
 def test_outbox_mark_failed_flips_to_failed_after_max_attempts() -> None:
-    from app.repositories.secret_cleanup_outbox_repository import (
+    from app.connections.secret_cleanup_outbox_repository import (
         SecretCleanupOutboxRepository,
     )
 
@@ -641,8 +641,8 @@ def test_no_secret_value_written_to_non_secret_config_or_secret_ref() -> None:
     paths = [
         REPO_ROOT / "app" / "api" / "v1" / "admin_connections.py",
         REPO_ROOT / "app" / "services" / "connection_health_service.py",
-        REPO_ROOT / "app" / "repositories" / "instance_connection_repository.py",
-        REPO_ROOT / "app" / "repositories" / "secret_cleanup_outbox_repository.py",
+        REPO_ROOT / "app" / "connections" / "repository.py",
+        REPO_ROOT / "app" / "connections" / "secret_cleanup_outbox_repository.py",
         REPO_ROOT / "app" / "worker" / "tasks" / "refresh_connections.py",
     ]
     # The admin_connections route configures secret_ref=None in this

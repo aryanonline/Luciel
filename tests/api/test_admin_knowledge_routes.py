@@ -451,7 +451,7 @@ class TestLegacyRouteRemoved(unittest.TestCase):
     def test_r11_legacy_ingest_route_removed_from_admin_module(self):
         admin_src = (
             Path(__file__).resolve().parents[2]
-            / "app" / "api" / "v1" / "admin.py"
+            / "app" / "api" / "v1" / "admin" / "__init__.py"
         ).read_text(encoding="utf-8")
         # The legacy route's path + handler name are GONE.
         self.assertNotIn('@router.post("/knowledge/ingest"', admin_src)

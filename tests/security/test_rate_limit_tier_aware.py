@@ -96,7 +96,8 @@ def test_admin_routes_use_tier_aware_decorator() -> None:
     """
     route_files = [
         "app/api/v1/chat.py",
-        "app/api/v1/admin.py",
+        "app/api/v1/admin/__init__.py",
+        "app/api/v1/admin/usage.py",
         "app/api/v1/admin_forensics.py",
         "app/api/v1/audit_log.py",
         "app/api/v1/consent.py",

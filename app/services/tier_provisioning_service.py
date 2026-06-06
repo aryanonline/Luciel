@@ -556,7 +556,7 @@ class TierProvisioningService:
         # tier flip (the tier flip already committed above).
         # ------------------------------------------------------------------
         try:
-            from app.repositories.instance_connection_repository import (
+            from app.connections.repository import (
                 InstanceConnectionRepository,
             )
             conn_repo = InstanceConnectionRepository(self.db)

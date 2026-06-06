@@ -267,7 +267,7 @@ class DowngradeArchiveService:
         # separate from the overflow-archive axes above (those remove
         # row-level resources; dormant just changes the connection status).
         # --------------------------------------------------------------
-        from app.repositories.instance_connection_repository import (
+        from app.connections.repository import (
             InstanceConnectionRepository,
         )
         conn_repo = InstanceConnectionRepository(self.db)

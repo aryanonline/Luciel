@@ -24,7 +24,7 @@ Arc 11 Step 5 update — ``source_ids_used``:
     can do a fast ``@>`` containment lookup per source.
 
 The orchestrator (Step 8) computes the list by calling
-``app.knowledge.retriever.collect_source_pks(chunks)`` between
+``app.runtime.knowledge_retrieval.collect_source_pks(chunks)`` between
 the retrieve step and the trace write. The legacy ``memories_used``
 column is unrelated — memories are conversation-history items;
 sources are knowledge-base sources. They stay independent.
@@ -74,7 +74,7 @@ class TraceService:
         DB ``server_default '{}'``. The orchestrator (Step 8)
         builds the list by passing the chunks
         ``KnowledgeRetriever.retrieve_with_sources(...)`` returned
-        through ``app.knowledge.retriever.collect_source_pks``,
+        through ``app.runtime.knowledge_retrieval.collect_source_pks``,
         which dedupes and filters out string / None identifiers.
 
         Returns the trace_id for reference.

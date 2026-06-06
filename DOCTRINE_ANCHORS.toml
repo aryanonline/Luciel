@@ -1,0 +1,167 @@
+# DOCTRINE_ANCHORS.toml — machine-readable §8 doctrine-path map (Unit 12)
+#
+# The ratified Architecture document (§8 "Module / Path Doctrine") is the
+# single source of truth for where each subsystem's code lives. It is
+# canon and lives in the Space, NOT in this repo. This file is the
+# in-repo machine-readable projection of that doctrine: each [[anchor]]
+# maps a §8 doctrine path to the actual repo path(s) it resolves to, plus
+# a status. The CI doc-sync gate (.github/scripts/doctrine_sync_gate.py)
+# reads the `paths` globs to decide whether a PR touched a
+# doctrine-anchored path and therefore must also update the architecture
+# doc (proxied in-repo by a DOCTRINE_CHANGELOG.md entry — see §5.9.3 and
+# the [meta] note below).
+#
+# status vocabulary:
+#   MATCHES-DOC             code lives at the §8 path (post-Unit-12 normalization)
+#   CONFIG-BOUND-EXCEPTION  §8 path cannot be adopted because external tooling
+#                           binds the actual path (documented, flagged for ruling)
+#   NO-MODULE-YET           §8 names a subsystem that is not built; nothing to relocate
+#   ISOLATION-SUITE         §8 path deferred to protect the non-negotiable isolation gate
+
+[meta]
+unit = "Unit 12"
+governing_principle = "The business documents are the only ultimate source of truth; when code and the ratified Architecture doc diverge, the code is wrong — move the code to match §8."
+arch_doc_location = "external (Space) — read-only canon, not in this repo"
+in_repo_doc_proxy = "DOCTRINE_CHANGELOG.md"
+gate_rule = "§5.9.3 — a PR that changes any doctrine-anchored path MUST also add a DOCTRINE_CHANGELOG.md entry (the in-repo reviewer-reconciled proxy for 'architecture doc updated', since the .md canon lives in the Space)."
+
+# ---------------------------------------------------------------------------
+# Batch A — single-file moves
+# ---------------------------------------------------------------------------
+
+[[anchor]]
+id = "llm_router"
+doctrine = "§8 — provider + model routing"
+status = "MATCHES-DOC"
+moved_from = "app/integrations/llm/router.py"
+paths = ["app/runtime/llm_router.py"]
+note = "Only router.py moved; the integrations/llm/ clients/base/stub stay (they are provider adapters, not the routing anchor)."
+
+[[anchor]]
+id = "knowledge_retrieval"
+doctrine = "§8 — hybrid vector + graph retrieval"
+status = "MATCHES-DOC"
+moved_from = "app/knowledge/retriever.py"
+paths = ["app/runtime/knowledge_retrieval.py"]
+note = "Graph retrieval still deferred (vector-only today); the path is what was normalized. app/knowledge/__init__.py re-exports lazily via PEP 562 to avoid an import cycle."
+
+[[anchor]]
+id = "input_safety"
+doctrine = "§8 — prompt-injection defense + content moderation (§3.4.14, §3.4.15)"
+status = "MATCHES-DOC"
+moved_from = "app/policy/moderation.py"
+paths = ["app/runtime/input_safety.py"]
+
+[[anchor]]
+id = "budget_monitoring_api"
+doctrine = "§8 — budget monitoring API"
+status = "MATCHES-DOC"
+moved_from = "app/api/v1/admin_usage.py"
+paths = ["app/api/v1/admin/usage.py"]
+note = "admin.py became the package app/api/v1/admin/__init__.py so the module identity app.api.v1.admin is preserved; mounted route URLs are byte-identical."
+
+# ---------------------------------------------------------------------------
+# Batch B — extract grounding from the orchestrator
+# ---------------------------------------------------------------------------
+
+[[anchor]]
+id = "grounding"
+doctrine = "§8 — answer grounding & anti-hallucination module (§3.4.13)"
+status = "MATCHES-DOC"
+moved_from = "app/runtime/orchestrator.py (inlined static methods)"
+paths = ["app/runtime/grounding.py"]
+note = "Pure extraction of _grounding_from_chunks + _citation_overlap + _CITATION_JACCARD_THRESHOLD; the orchestrator imports them back and re-binds as class attributes so every call site is unchanged."
+
+# ---------------------------------------------------------------------------
+# Batch C — handoff runtime module
+# ---------------------------------------------------------------------------
+
+[[anchor]]
+id = "handoff"
+doctrine = "§8 — human handoff & live takeover cognition module (§3.4.12)"
+status = "MATCHES-DOC"
+moved_from = "app/runtime/handoff_ack.py"
+paths = ["app/runtime/handoff.py"]
+note = "The API surface app/api/v1/admin_handoff.py intentionally STAYS in the API layer — moving a route into app/runtime/ would violate the layered architecture; the §8 anchor names the runtime cognition module only."
+
+# ---------------------------------------------------------------------------
+# Batch D — directory anchors
+# ---------------------------------------------------------------------------
+
+[[anchor]]
+id = "connections"
+doctrine = "§8 dir — Connections Layer (§3.8)"
+status = "MATCHES-DOC"
+moved_from = "app/models/instance_connection.py, app/models/secret_cleanup_outbox.py, app/repositories/instance_connection_repository.py, app/repositories/secret_cleanup_outbox_repository.py"
+paths = ["app/connections/"]
+note = "Layered model+repo for the Connections feature folded into the feature dir: model→instance_connection.py, repo→repository.py, outbox model→secret_cleanup_outbox.py, outbox repo→secret_cleanup_outbox_repository.py. app/models/__init__.py bare-imports the model modules to keep SQLAlchemy Base.metadata registration (Alembic-safe); app/connections/__init__.py re-exports lazily via PEP 562 to break the models<->connections import cycle."
+
+[[anchor]]
+id = "lifecycle"
+doctrine = "§8 dir — Luciel state machine + hard-delete cascade (§3.6)"
+status = "MATCHES-DOC"
+moved_from = "app/models/instance_status.py, app/services/closure_service.py, app/worker/tasks/instance_retention.py"
+paths = ["app/lifecycle/"]
+note = "state enum→state.py, closure→closure.py, retention worker→retention.py. The Celery task name string and the celery_app.py include list + beat schedule were updated to app.lifecycle.retention.run_instance_retention_purge."
+
+[[anchor]]
+id = "auth_access"
+doctrine = "§8 — single-login authentication + tenant scoping (§3.7)"
+status = "MATCHES-DOC"
+moved_from = "app/services/auth_service.py"
+paths = ["app/auth/access.py"]
+note = "JUDGMENT: auth_service.py is cohesively 'auth' (password verify/set/reset — the single-login mechanism), so the WHOLE module was moved to app/auth/access.py rather than splitting an access-only surface."
+
+[[anchor]]
+id = "billing_metering"
+doctrine = "§8 — conversation counter + Stripe overage reporting"
+status = "MATCHES-DOC"
+moved_from = "app/runtime/budget_meter.py, app/services/overage_billing.py"
+paths = ["app/billing/metering.py", "app/billing/overage.py"]
+note = "JUDGMENT: §8 names ONE module but the code is two cohesive modules. budget_meter.py→metering.py (the conversation counter); overage_billing.py→overage.py (the Stripe overage arithmetic). The §8 anchor is satisfied by app/billing/ containing the metering surface."
+
+# ---------------------------------------------------------------------------
+# Anchors that DO NOT move — documented exceptions
+# ---------------------------------------------------------------------------
+
+[[anchor]]
+id = "notifications"
+doctrine = "§8 dir — notifications subsystem"
+status = "MATCHES-DOC"
+paths = ["app/notifications/"]
+note = "Already at the §8 path (built in Unit 9). No move."
+
+[[anchor]]
+id = "entitlements"
+doctrine = "§8 — entitlements"
+status = "MATCHES-DOC"
+paths = ["app/policy/entitlements.py"]
+note = "Already at the §8 path. No move."
+
+[[anchor]]
+id = "orchestrator"
+doctrine = "§8 — serving orchestrator"
+status = "MATCHES-DOC"
+paths = ["app/runtime/orchestrator.py"]
+note = "Already at the §8 path. No move (grounding was extracted out of it — see the 'grounding' anchor)."
+
+[[anchor]]
+id = "migrations"
+doctrine = "§8 — app/migrations/"
+status = "CONFIG-BOUND-EXCEPTION"
+paths = ["alembic/"]
+note = "Alembic is config-bound (alembic.ini: script_location = alembic). Renaming would desync env.py, the revision chain, and CI. Doctrine path app/migrations/ maps to alembic/ by Alembic convention. FLAGGED FOR FOUNDER RULING whether to rename (would require alembic.ini + env.py + CI updates). Not moved in this unit."
+
+[[anchor]]
+id = "analytics"
+doctrine = "§8 — app/analytics/ (§3.9, reads-only, no new write path)"
+status = "NO-MODULE-YET"
+paths = []
+note = "No analytics subsystem module exists today (only incidental references). The §3.9 subsystem is thin/unbuilt; nothing to relocate. No module fabricated."
+
+[[anchor]]
+id = "isolation_suite"
+doctrine = "§8 — tests/isolation/"
+status = "ISOLATION-SUITE"
+paths = ["tests/security/", "tests/db/"]
+note = "The non-overridable tenant-isolation suite currently lives in tests/security/ + tests/db/ (the run_tests.sh isolation subset). Moving it risks the NON-NEGOTIABLE isolation gate. FLAGGED FOR FOUNDER RULING whether to consolidate under tests/isolation/. Not moved in this unit — protecting the isolation gate outweighs the path match."

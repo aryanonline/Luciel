@@ -25,9 +25,9 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ADMIN_ROUTES_PATH = REPO_ROOT / "app" / "api" / "v1" / "admin.py"
+ADMIN_ROUTES_PATH = REPO_ROOT / "app" / "api" / "v1" / "admin" / "__init__.py"
 LIFECYCLE_SCHEMA_PATH = REPO_ROOT / "app" / "schemas" / "lifecycle.py"
-CLOSURE_SERVICE_PATH = REPO_ROOT / "app" / "services" / "closure_service.py"
+CLOSURE_SERVICE_PATH = REPO_ROOT / "app" / "lifecycle" / "closure.py"
 
 
 # ---------------------------------------------------------------------

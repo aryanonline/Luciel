@@ -1125,7 +1125,7 @@ def delete_luciel_instance(
     """Soft-delete an instance (Customer Journey §4.5 Phase 8 "Delete
     this instance"). Stamps ``soft_deleted_at`` and opens the 30-day
     grace window per Architecture §3.6.1. The retention worker
-    (``app.worker.tasks.instance_retention``) hard-deletes the row +
+    (``app.lifecycle.retention``) hard-deletes the row +
     its knowledge / conversations / leads / traces / api_keys cascade
     once the window elapses. Restorable via POST /instances/{pk}/restore
     within the window — keys are re-minted on restore per Vision §6.4.
@@ -1424,7 +1424,7 @@ from app.schemas.lifecycle import (
     ReactivationStageRequest,
     ReactivationStageResponse,
 )
-from app.services.closure_service import (
+from app.lifecycle.closure import (
     AccountAlreadyClosedError,
     AccountAlreadyTombstoneError,
     AccountNotFoundError,
@@ -1846,7 +1846,7 @@ def get_lifecycle_state(
     """
     admin_id = _require_admin_id(request)
 
-    from app.services.closure_service import ClosureService
+    from app.lifecycle.closure import ClosureService
     audit_repo = AdminAuditRepository(db)  # not used for the read but
     # ClosureService's __init__ requires it (write-path concern). Cheap
     # to construct; no side effects.

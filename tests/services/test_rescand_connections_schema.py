@@ -33,8 +33,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
     REPO_ROOT / "alembic" / "versions" / "rescand_connections_schema.py"
 )
-MODEL_PATH = REPO_ROOT / "app" / "models" / "instance_connection.py"
-REPO_PATH = REPO_ROOT / "app" / "repositories" / "instance_connection_repository.py"
+MODEL_PATH = REPO_ROOT / "app" / "connections" / "instance_connection.py"
+REPO_PATH = REPO_ROOT / "app" / "connections" / "repository.py"
 DOWNGRADE_SVC_PATH = (
     REPO_ROOT / "app" / "services" / "downgrade_archive_service.py"
 )
@@ -205,7 +205,7 @@ def test_model_has_created_by_user_id_column():
 
 
 def test_model_imports_clean():
-    from app.models.instance_connection import CONNECTION_STATUSES
+    from app.connections.instance_connection import CONNECTION_STATUSES
     assert "revoked" in CONNECTION_STATUSES
     assert "dormant" in CONNECTION_STATUSES
     assert len(CONNECTION_STATUSES) == 6, (
@@ -489,7 +489,7 @@ class _FakeRepo:
 
     def restore_from_dormant_for_admin(self, *, admin_id, autocommit=True):
         from sqlalchemy import select, and_
-        from app.repositories.instance_connection_repository import (
+        from app.connections.repository import (
             _extract_prior_status,
         )
         rows = self.db.execute(
@@ -711,33 +711,33 @@ def test_constraint_finding_documented():
 # =====================================================================
 
 def test_extract_prior_status_happy_path():
-    from app.repositories.instance_connection_repository import _extract_prior_status
+    from app.connections.repository import _extract_prior_status
 
     detail = "prior_status=connected; Connection dormant: Pro→Free downgrade."
     assert _extract_prior_status(detail) == "connected"
 
 
 def test_extract_prior_status_error_value():
-    from app.repositories.instance_connection_repository import _extract_prior_status
+    from app.connections.repository import _extract_prior_status
 
     detail = "prior_status=error; Connection dormant."
     assert _extract_prior_status(detail) == "error"
 
 
 def test_extract_prior_status_none_fallback():
-    from app.repositories.instance_connection_repository import _extract_prior_status
+    from app.connections.repository import _extract_prior_status
 
     assert _extract_prior_status(None) == "connected"
 
 
 def test_extract_prior_status_malformed_fallback():
-    from app.repositories.instance_connection_repository import _extract_prior_status
+    from app.connections.repository import _extract_prior_status
 
     assert _extract_prior_status("no prefix here") == "connected"
 
 
 def test_extract_prior_status_unknown_value_fallback():
-    from app.repositories.instance_connection_repository import _extract_prior_status
+    from app.connections.repository import _extract_prior_status
 
     # 'revoked' is not a valid restore target (once revoked, stays revoked).
     detail = "prior_status=revoked; Connection dormant."

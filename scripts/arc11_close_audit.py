@@ -879,7 +879,7 @@ def _section_7b_instance_lifecycle_routes_present(section: str) -> CheckResult:
     are all present. Pure text assertion -- the deeper behavioural
     contract is covered by tests/api/test_instance_lifecycle_arc11_closeout.py.
     """
-    admin_path = REPO_ROOT / "app" / "api" / "v1" / "admin.py"
+    admin_path = REPO_ROOT / "app" / "api" / "v1" / "admin" / "__init__.py"
     if not admin_path.exists():
         return _fail(
             section,

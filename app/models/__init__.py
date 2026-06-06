@@ -44,17 +44,14 @@ from app.models.channel_route import ChannelRoute  # noqa: F401
 from app.models.instance_tool_authorization import (  # noqa: F401
     InstanceToolAuthorization,
 )
-# Arc 15 WU4 — per-instance external-system connections (Arc 17 slice).
-from app.models.instance_connection import (  # noqa: F401
-    InstanceConnection,
-    CONNECTION_TYPES,
-    CONNECTION_STATUSES,
-)
-# Arc 17 — lifecycle secret-cleanup transactional outbox.
-from app.models.secret_cleanup_outbox import (  # noqa: F401
-    SecretCleanupOutbox,
-    OUTBOX_STATUSES,
-)
+# Arc 15 WU4 / Arc 17 — Connections Layer (§3.8) models, relocated to
+# app.connections (Unit 12 §8). Bare ``import`` (not ``from … import``)
+# registers the ORM classes on Base.metadata via module execution while
+# deferring attribute access, so a cold import of a connection submodule
+# (which imports app.models.base, triggering this __init__) cannot
+# deadlock on the app.models ⇄ app.connections cycle.
+import app.connections.instance_connection  # noqa: F401
+import app.connections.secret_cleanup_outbox  # noqa: F401
 # Arc 14 U2 — §3.4.5 escalation judgment event store.
 from app.models.escalation_event import (  # noqa: F401
     EscalationEvent,

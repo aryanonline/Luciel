@@ -103,7 +103,7 @@ def _meter():
     Local import keeps the module importable without redis installed and
     lets tests monkeypatch a meter with an InMemoryBackend.
     """
-    from app.runtime.budget_meter import BudgetMeter
+    from app.billing.metering import BudgetMeter
 
     return BudgetMeter()
 

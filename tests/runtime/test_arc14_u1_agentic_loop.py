@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 from app.integrations.llm.base import LLMResponse
 from app.runtime.contracts import RuntimeRequest
-from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY
+from app.runtime.handoff import CANNOT_ANSWER_REPLY
 from app.runtime.orchestrator import MAX_LOOP_ITERATIONS, LucielOrchestrator
 from app.tools.base import ToolResult
 

@@ -48,8 +48,8 @@ def _run() -> list[_Row]:
         conversation_budget,
         overage_rate_per_100_cents,
     )
-    from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
-    from app.services.overage_billing import (
+    from app.billing.metering import BudgetMeter, InMemoryBackend
+    from app.billing.overage import (
         overage_count,
         overage_line_item_description,
         overage_units,

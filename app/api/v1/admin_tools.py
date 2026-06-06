@@ -108,7 +108,7 @@ from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
 )
-from app.repositories.instance_connection_repository import (
+from app.connections.repository import (
     InstanceConnectionRepository,
 )
 from app.services.instance_service import InstanceService

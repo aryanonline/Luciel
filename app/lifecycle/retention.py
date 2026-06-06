@@ -135,7 +135,7 @@ INSTANCE_RETENTION_WINDOW_DAYS = INSTANCE_RESTORE_GRACE_DAYS
 
 @shared_task(
     bind=True,
-    name="app.worker.tasks.instance_retention.run_instance_retention_purge",
+    name="app.lifecycle.retention.run_instance_retention_purge",
     # Retry policy matches the tenant-level retention worker: 3 attempts,
     # exponential backoff (jittered). A failed nightly run will be retried
     # by Celery; if all retries fail, the beat schedule runs again the

@@ -167,7 +167,7 @@ class PushToCrmTool(LucielTool):
         # configured AND the master live-switch is on. Loads the connected
         # crm row, refreshes the stored OAuth token, and POSTs the record.
         # Never reached in dev / CI / test.
-        from app.repositories.instance_connection_repository import (
+        from app.connections.repository import (
             InstanceConnectionRepository,
         )
 

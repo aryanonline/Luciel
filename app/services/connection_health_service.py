@@ -50,7 +50,7 @@ from app.schemas.connection import (
 if TYPE_CHECKING:  # pragma: no cover
     from app.core.config import Settings
     from app.integrations.secrets import SecretStore
-    from app.models.instance_connection import InstanceConnection
+    from app.connections.instance_connection import InstanceConnection
 
 logger = logging.getLogger(__name__)
 

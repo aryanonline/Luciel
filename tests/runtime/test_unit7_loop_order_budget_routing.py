@@ -30,7 +30,7 @@ from unittest.mock import patch
 from app.integrations.llm.base import LLMResponse
 from app.policy.entitlements import CADENCE_MONTHLY, TIER_FREE, TIER_PRO
 from app.runtime.billing_period import BillingContext
-from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
+from app.billing.metering import BudgetMeter, InMemoryBackend
 from app.runtime.classifiers import (
     INTENT_OTHER,
     INTENT_REQUEST_HUMAN,

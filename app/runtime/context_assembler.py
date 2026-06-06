@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from app.knowledge.retriever import RetrievedChunk
+from app.runtime.knowledge_retrieval import RetrievedChunk
 from app.persona.luciel_core import build_system_prompt
 from app.runtime.contracts import RuntimeRequest
 

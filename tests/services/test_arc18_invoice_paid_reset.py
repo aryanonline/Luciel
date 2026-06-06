@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
+from app.billing.metering import BudgetMeter, InMemoryBackend
 
 
 # ---------------------------------------------------------------------

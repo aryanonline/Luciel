@@ -41,7 +41,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
-from app.models.instance_status import InstanceStatus
+from app.lifecycle.state import InstanceStatus
 from app.persona.presets import ALL_PRESETS, DEFAULT_PRESET
 
 

@@ -20,7 +20,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from app.models.instance_connection import (
+from app.connections.instance_connection import (
     CONNECTION_STATUSES,
     CONNECTION_TYPES,
 )

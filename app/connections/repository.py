@@ -28,7 +28,7 @@ from typing import Optional
 from sqlalchemy import and_, select, update
 from sqlalchemy.orm import Session
 
-from app.models.instance_connection import InstanceConnection
+from app.connections.instance_connection import InstanceConnection
 
 logger = logging.getLogger(__name__)
 

@@ -27,7 +27,7 @@ from app.policy.entitlements import (
 )
 from app.runtime.billing_period import BillingContext
 from app.runtime.budget_ack import budget_exhausted_acknowledgement
-from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
+from app.billing.metering import BudgetMeter, InMemoryBackend
 from app.runtime.classifiers import (
     INTENT_OTHER,
     INTENT_REQUEST_HUMAN,

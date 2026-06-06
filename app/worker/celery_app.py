@@ -188,7 +188,7 @@ celery_app = Celery(
         "app.worker.tasks.memory_extraction",
         "app.worker.tasks.retention",
         # Arc 11 Closeout PR-A -- per-instance hard-purge worker.
-        "app.worker.tasks.instance_retention",
+        "app.lifecycle.retention",
         # Arc 17 Task 5c -- connection token-refresh + secret-cleanup drain.
         "app.worker.tasks.refresh_connections",
         # Arc 10 -- lifecycle subsystem tasks.
@@ -294,7 +294,7 @@ celery_app.conf.update(
         # Scheduled 30 minutes after the tenant sweep so the two beat
         # tasks do not contend for the worker's prefetch slot.
         "instance-retention-purge-nightly": {
-            "task": "app.worker.tasks.instance_retention.run_instance_retention_purge",
+            "task": "app.lifecycle.retention.run_instance_retention_purge",
             "schedule": crontab(hour=8, minute=30),
             "options": {"queue": "luciel-memory-tasks"},
         },

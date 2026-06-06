@@ -23,7 +23,7 @@ import json
 import logging
 
 from app.integrations.llm.base import LLMMessage, LLMRequest
-from app.integrations.llm.router import ModelRouter
+from app.runtime.llm_router import ModelRouter
 
 logger = logging.getLogger(__name__)
 

@@ -3,7 +3,7 @@
 Two nightly Celery tasks, both running under the BYPASSRLS ops role
 (``OpsSessionLocal``) so a single cross-tenant sweep can process every
 admin's rows without binding ``app.admin_id`` — same posture as
-``app.worker.tasks.instance_retention``.
+``app.lifecycle.retention``.
 
 1. ``run_connection_token_refresh``
    Re-verifies live (non-revoked) connections via
@@ -53,15 +53,15 @@ from app.models.admin_audit_log import (
     ACTION_CONNECTION_TOKEN_REFRESHED,
     RESOURCE_INSTANCE_CONNECTION,
 )
-from app.models.instance_connection import InstanceConnection
+from app.connections.instance_connection import InstanceConnection
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
 )
-from app.repositories.instance_connection_repository import (
+from app.connections.repository import (
     InstanceConnectionRepository,
 )
-from app.repositories.secret_cleanup_outbox_repository import (
+from app.connections.secret_cleanup_outbox_repository import (
     SecretCleanupOutboxRepository,
 )
 from app.schemas.connection import DEFERRED_CONNECTION_TYPES

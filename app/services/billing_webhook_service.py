@@ -1342,7 +1342,7 @@ class BillingWebhookService:
 
     def _budget_meter_inst(self):
         if self._budget_meter is None:
-            from app.runtime.budget_meter import BudgetMeter
+            from app.billing.metering import BudgetMeter
 
             self._budget_meter = BudgetMeter()
         return self._budget_meter
@@ -1398,7 +1398,7 @@ class BillingWebhookService:
             overage_rate_per_100_cents,
         )
         from app.runtime.billing_period import period_start_iso
-        from app.services.overage_billing import (
+        from app.billing.overage import (
             overage_count,
             overage_line_item_description,
             overage_units,

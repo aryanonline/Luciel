@@ -6,7 +6,7 @@ acknowledgement WITHOUT an LLM call — the end customer ALWAYS receives a
 response (never a silent drop). The admin (not the customer) gets the
 upgrade nudge via the budget_exhausted escalation + email notification.
 
-Mirrors ``app.runtime.handoff_ack``: per-persona-preset templates keyed
+Mirrors ``app.runtime.handoff``: per-persona-preset templates keyed
 by an optional preset string, falling back to the neutral professional
 default. The copy is graceful and customer-facing — it does NOT mention
 billing, plans, or the admin's account state; it acknowledges the
@@ -17,7 +17,7 @@ customer while still routing a real human follow-up via the escalation.
 
 from __future__ import annotations
 
-from app.runtime.handoff_ack import (
+from app.runtime.handoff import (
     DEFAULT_PRESET,
     PRESET_FRIENDLY_EXPERT,
     PRESET_PROFESSIONAL_ADVISOR,

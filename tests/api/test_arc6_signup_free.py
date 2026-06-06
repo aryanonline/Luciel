@@ -231,7 +231,7 @@ class TestAuthServiceEmailVerifiedOnSetPassword:
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[2]
-        src = (repo_root / "app" / "services" / "auth_service.py").read_text()
+        src = (repo_root / "app" / "auth" / "access.py").read_text()
 
         # Find the set_password method body. The simplest robust grep
         # is "between 'def set_password' and the next top-level 'def '

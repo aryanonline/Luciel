@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
+from app.billing.metering import BudgetMeter, InMemoryBackend
 
 
 def _meter() -> BudgetMeter:

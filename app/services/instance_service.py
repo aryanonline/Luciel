@@ -56,7 +56,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.instance import Instance
-from app.models.instance_status import InstanceStatus, INSTANCE_GRACE_STATES
+from app.lifecycle.state import InstanceStatus, INSTANCE_GRACE_STATES
 from app.repositories.admin_audit_repository import AuditContext
 from app.repositories.instance_repository import InstanceRepository
 
@@ -395,7 +395,7 @@ class InstanceService:
         status to ``grace_window`` (or, for backward-compat, the repo
         may use ``deleted`` for existing code paths — both are valid).
 
-        The retention worker (``app.worker.tasks.instance_retention``)
+        The retention worker (``app.lifecycle.retention``)
         hard-deletes the row + its customer-data cascade after the 30-
         day grace window expires. Restorable within the window via
         :meth:`restore_instance`.

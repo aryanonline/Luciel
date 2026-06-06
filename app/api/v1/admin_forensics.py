@@ -1225,7 +1225,7 @@ def knowledge_pipeline_probe_arc11(
 
     # ----- Check 5: retriever importable -----
     try:
-        from app.knowledge.retriever import (  # noqa: F401
+        from app.runtime.knowledge_retrieval import (  # noqa: F401
             KnowledgeRetriever,
             RetrievedChunk,
             collect_source_pks,

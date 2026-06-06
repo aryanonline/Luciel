@@ -27,7 +27,7 @@ Send a message containing the sentinel block term. Expect:
     judgment #2).
   * frame 1: JSON object with key "session_id".
   * One "token" frame whose value is the REFUSAL_MESSAGE constant
-    from app.policy.moderation (we re-derive it via import rather
+    from app.runtime.input_safety (we re-derive it via import rather
     than hardcode the string here so a future refactor that changes
     the wording at one site doesn't quietly desync the test).
   * Final "done" frame.

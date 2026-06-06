@@ -19,7 +19,7 @@ from app.api.v1 import admin_channels  # Arc 13 D5 -- channel-config admin API
 from app.api.v1 import admin_personality  # Arc 15 WU3 -- personality config API
 from app.api.v1 import admin_escalation  # Arc 15 WU3 -- escalation-contact API
 from app.api.v1 import admin_connections  # Arc 15 WU4 -- connection-config API
-from app.api.v1 import admin_usage  # Arc 18 -- conversation-budget usage API
+from app.api.v1.admin import usage as admin_usage  # Arc 18 -- conversation-budget usage API
 from app.api.v1 import admin_handoff  # Rescan Tier-C -- human-controlled session handoff
 from app.api.v1 import admin_escalation_ack  # Unit 9 -- escalation ack endpoint
 

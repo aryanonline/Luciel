@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.overage_billing import (
+from app.billing.overage import (
     OVERAGE_UNIT_SIZE,
     overage_count,
     overage_line_item_description,

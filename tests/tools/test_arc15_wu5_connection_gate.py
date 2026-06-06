@@ -130,7 +130,7 @@ def _seed_admin_instance(session, *, admin_id: str, instance_id: int) -> None:
 def _seed_connection(
     session, *, admin_id: str, instance_id: int, connection_type: str, status: str
 ) -> None:
-    from app.repositories.instance_connection_repository import (
+    from app.connections.repository import (
         InstanceConnectionRepository,
     )
 

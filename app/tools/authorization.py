@@ -409,7 +409,7 @@ class DefaultDenyToolAuthorizer:
             )
 
         try:
-            from app.repositories.instance_connection_repository import (
+            from app.connections.repository import (
                 InstanceConnectionRepository,
             )
             repo = InstanceConnectionRepository(session)

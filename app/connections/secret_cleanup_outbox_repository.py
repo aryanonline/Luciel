@@ -17,7 +17,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.secret_cleanup_outbox import SecretCleanupOutbox
+from app.connections.secret_cleanup_outbox import SecretCleanupOutbox
 
 logger = logging.getLogger(__name__)
 

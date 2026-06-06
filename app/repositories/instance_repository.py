@@ -45,7 +45,7 @@ from app.models.admin_audit_log import (
     RESOURCE_INSTANCE_CONNECTION,
 )
 from app.models.instance import Instance
-from app.models.instance_status import InstanceStatus, INSTANCE_GRACE_STATES
+from app.lifecycle.state import InstanceStatus, INSTANCE_GRACE_STATES
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
@@ -553,7 +553,7 @@ class InstanceRepository:
 
         Revokes EVERY live connection across the admin's instances +
         enqueues secret cleanup, all in the caller's transaction. Called
-        by :class:`app.services.closure_service.ClosureService` — the
+        by :class:`app.lifecycle.closure.ClosureService` — the
         destructive-intent path. Operational admin-deactivation (Pause)
         does NOT call this: paused instances retain their connection
         rows (data-retained semantics).
@@ -579,10 +579,10 @@ class InstanceRepository:
         circular import (the connection repo / outbox model import back
         into this module's model graph).
         """
-        from app.repositories.instance_connection_repository import (
+        from app.connections.repository import (
             InstanceConnectionRepository,
         )
-        from app.repositories.secret_cleanup_outbox_repository import (
+        from app.connections.secret_cleanup_outbox_repository import (
             SecretCleanupOutboxRepository,
         )
 

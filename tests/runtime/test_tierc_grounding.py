@@ -245,17 +245,17 @@ class TestCannotAnswerPhrase(unittest.TestCase):
 
     def test_g9_cannot_answer_reply_constant_is_canonical(self):
         """G10: CANNOT_ANSWER_REPLY matches the §3.4.13 canonical phrase."""
-        from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY
+        from app.runtime.handoff import CANNOT_ANSWER_REPLY
         self.assertEqual(CANNOT_ANSWER_REPLY, CANONICAL_PHRASE)
 
     def test_g10_cannot_answer_reply_function_returns_canonical(self):
         """G11: cannot_answer_reply() returns the canonical phrase."""
-        from app.runtime.handoff_ack import cannot_answer_reply
+        from app.runtime.handoff import cannot_answer_reply
         self.assertEqual(cannot_answer_reply(), CANONICAL_PHRASE)
 
     def test_g11_canonical_phrase_contains_exact_wording(self):
         """The phrase must contain the three key clauses from §3.4.13."""
-        from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY
+        from app.runtime.handoff import CANNOT_ANSWER_REPLY
         self.assertIn("don't have that information", CANNOT_ANSWER_REPLY)
         self.assertIn("let me get someone", CANNOT_ANSWER_REPLY)
         self.assertIn("who does", CANNOT_ANSWER_REPLY)
@@ -263,7 +263,7 @@ class TestCannotAnswerPhrase(unittest.TestCase):
     def test_g12_handoff_ack_distinct_from_cannot_answer(self):
         """Gate-1 handoff ack and cannot_answer reply must be distinct phrases
         (they handle different situations: explicit request vs. ungrounded answer)."""
-        from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY, handoff_acknowledgement
+        from app.runtime.handoff import CANNOT_ANSWER_REPLY, handoff_acknowledgement
         self.assertNotEqual(handoff_acknowledgement(), CANNOT_ANSWER_REPLY)
 
 
@@ -298,7 +298,7 @@ class TestOrchestratorCannotAnswerReply(unittest.TestCase):
         grounding), the orchestrator's message must equal CANNOT_ANSWER_REPLY."""
         from unittest.mock import patch, MagicMock
         from app.runtime.contracts import RuntimeRequest
-        from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY
+        from app.runtime.handoff import CANNOT_ANSWER_REPLY
         from app.models.escalation_event import SIGNAL_CANNOT_CONFIDENTLY_ANSWER
         from app.policy.escalation import EscalationDecision
         from app.models.escalation_event import GATE_OUTCOME
@@ -352,7 +352,7 @@ class TestOrchestratorCannotAnswerReply(unittest.TestCase):
         """When no cannot_answer escalation fires, the message is the LLM reply."""
         from unittest.mock import patch, MagicMock
         from app.runtime.contracts import RuntimeRequest
-        from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY
+        from app.runtime.handoff import CANNOT_ANSWER_REPLY
 
         orch = self._build_orchestrator()
         req = RuntimeRequest(

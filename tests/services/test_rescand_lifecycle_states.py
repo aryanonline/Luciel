@@ -40,8 +40,8 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKER_PATH = REPO_ROOT / "app" / "worker" / "tasks" / "instance_retention.py"
-MODEL_PATH = REPO_ROOT / "app" / "models" / "instance_status.py"
+WORKER_PATH = REPO_ROOT / "app" / "lifecycle" / "retention.py"
+MODEL_PATH = REPO_ROOT / "app" / "lifecycle" / "state.py"
 SERVICE_PATH = REPO_ROOT / "app" / "services" / "instance_service.py"
 MIGRATION_PATH = (
     REPO_ROOT / "alembic" / "versions" / "rescand_lifecycle_states.py"
@@ -64,7 +64,7 @@ def _parse(p: Path) -> ast.Module:
 def test_instance_status_has_all_five_canonical_values():
     """All five §3.6.1 canonical values must be present."""
     # Import the live module so we test the actual enum.
-    from app.models.instance_status import InstanceStatus
+    from app.lifecycle.state import InstanceStatus
 
     values = {m.value for m in InstanceStatus}
     for expected in ("active", "paused", "deactivating", "grace_window", "hard_deleted"):
@@ -76,7 +76,7 @@ def test_instance_status_has_all_five_canonical_values():
 def test_instance_status_deleted_alias_present():
     """'deleted' is the deprecated alias for grace_window; it must still
     be a valid member so existing rows / queries are not orphaned."""
-    from app.models.instance_status import InstanceStatus
+    from app.lifecycle.state import InstanceStatus
 
     values = {m.value for m in InstanceStatus}
     assert "deleted" in values, (
@@ -88,7 +88,7 @@ def test_instance_status_deleted_alias_present():
 def test_instance_status_members_are_string_valued():
     """All InstanceStatus members must be strings so SQLAlchemy and
     Pydantic round-trip cleanly with the PG enum."""
-    from app.models.instance_status import InstanceStatus
+    from app.lifecycle.state import InstanceStatus
 
     for member in InstanceStatus:
         assert isinstance(member.value, str), (
@@ -100,7 +100,7 @@ def test_instance_grace_states_covers_both_aliases():
     """INSTANCE_GRACE_STATES must include both 'deleted' (legacy) and
     'grace_window' (new canonical) so transition logic treats them
     identically."""
-    from app.models.instance_status import INSTANCE_GRACE_STATES
+    from app.lifecycle.state import INSTANCE_GRACE_STATES
 
     assert "deleted" in INSTANCE_GRACE_STATES
     assert "grace_window" in INSTANCE_GRACE_STATES
@@ -108,7 +108,7 @@ def test_instance_grace_states_covers_both_aliases():
 
 def test_instance_status_values_tuple_is_complete():
     """INSTANCE_STATUS_VALUES must cover all 6 members (5 canonical + alias)."""
-    from app.models.instance_status import INSTANCE_STATUS_VALUES, InstanceStatus
+    from app.lifecycle.state import INSTANCE_STATUS_VALUES, InstanceStatus
 
     assert set(INSTANCE_STATUS_VALUES) == {m.value for m in InstanceStatus}
 

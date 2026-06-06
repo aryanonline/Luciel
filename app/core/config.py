@@ -89,7 +89,7 @@ class Settings(BaseSettings):
 
     # --- Content-safety moderation gate (Step 30d Deliverable B) ---
     # Provider-agnostic moderation runs on every widget chat turn
-    # BEFORE the LLM call. See app/policy/moderation.py for the
+    # BEFORE the LLM call. See app/runtime/input_safety.py for the
     # provider abstraction and ARCHITECTURE.md §3.3 step 6.5 for the
     # design statement.
     #
@@ -154,7 +154,7 @@ class Settings(BaseSettings):
     # WARNING on construction so a misconfigured deploy is observable
     # in the application log stream the first time the module is
     # imported. Parallel discipline to NullModerationProvider /
-    # empty-list KeywordModerationProvider in app/policy/moderation.py.
+    # empty-list KeywordModerationProvider in app/runtime/input_safety.py.
     enable_stub_llm_provider: bool = False
 
     # --- Hermetic stub embedding provider (Unit 10) ---

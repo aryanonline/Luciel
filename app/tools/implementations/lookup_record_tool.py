@@ -138,7 +138,7 @@ class LookupRecordTool(LucielTool):
 
         # Resolve the live record_source connection. Gate-3 guarantees a
         # live ``connected`` row exists, but defend against its absence.
-        from app.repositories.instance_connection_repository import (
+        from app.connections.repository import (
             InstanceConnectionRepository,
         )
 

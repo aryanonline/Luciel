@@ -87,7 +87,7 @@ def _build_session_with_connection(store_ref: str | None, *, with_row: bool = Tr
     session = Session()
 
     if with_row:
-        from app.models.instance_connection import InstanceConnection
+        from app.connections.instance_connection import InstanceConnection
 
         config = {"store_ref": store_ref} if store_ref is not None else {}
         row = InstanceConnection(

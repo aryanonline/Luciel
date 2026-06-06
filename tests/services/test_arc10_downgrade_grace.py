@@ -137,7 +137,7 @@ def test_assert_writable_raises_read_only_error_in_grace():
 
 def test_grace_window_days_imported_from_closure_service():
     src = SERVICE_PATH.read_text(encoding="utf-8")
-    assert "from app.services.closure_service import GRACE_WINDOW_DAYS" in src, (
+    assert "from app.lifecycle.closure import GRACE_WINDOW_DAYS" in src, (
         "DowngradeGraceService must import GRACE_WINDOW_DAYS from "
         "closure_service so the closure and downgrade clocks share a "
         "single source of truth. Founder lock L1: 30 days, not 90."
