@@ -262,7 +262,9 @@ def admin_takeover(
         admin_id=admin_id,
         action=ACTION_HUMAN_TAKEOVER_STARTED,
         resource_type=RESOURCE_SESSION,
-        resource_pk=session_id,
+        # sessions.id is a 36-char UUID string; resource_pk is an integer
+        # column. The session id lives in resource_natural_id only.
+        resource_pk=None,
         resource_natural_id=session_id,
         luciel_instance_id=session.luciel_instance_id,
         before={"control_mode": "luciel"},
@@ -359,7 +361,9 @@ def admin_handback(
         admin_id=admin_id,
         action=ACTION_HUMAN_TAKEOVER_ENDED,
         resource_type=RESOURCE_SESSION,
-        resource_pk=session_id,
+        # sessions.id is a 36-char UUID string; resource_pk is an integer
+        # column. The session id lives in resource_natural_id only.
+        resource_pk=None,
         resource_natural_id=session_id,
         luciel_instance_id=session.luciel_instance_id,
         before={"control_mode": "human_controlled"},
