@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 from app.integrations.llm.base import LLMResponse
 from app.runtime.contracts import RuntimeRequest
-from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY
+from app.runtime.handoff import CANNOT_ANSWER_REPLY
 from app.runtime.orchestrator import MAX_LOOP_ITERATIONS, LucielOrchestrator
 from app.tools.base import ToolResult
 
@@ -43,7 +43,7 @@ class _ScriptedRouter:
         self._model = model
         self.calls: list = []
 
-    def generate(self, request, *, preferred_provider=None) -> LLMResponse:
+    def generate(self, request, *, preferred_provider=None, **kwargs) -> LLMResponse:
         idx = min(len(self.calls), len(self._contents) - 1)
         self.calls.append(request)
         return LLMResponse(
@@ -190,7 +190,7 @@ class TestLoopEndToEnd(unittest.TestCase):
 
     def test_llm_failure_degrades_without_crashing_turn(self):
         class _BoomRouter:
-            def generate(self, request, *, preferred_provider=None):
+            def generate(self, request, *, preferred_provider=None, **kwargs):
                 raise RuntimeError("all providers failed")
 
         # Inject a fake escalation service so the (now-firing) U2 OUTCOME
@@ -516,7 +516,7 @@ class TestTraceFinalization(unittest.TestCase):
 
     def test_degraded_turn_records_none_provider(self):
         class _BoomRouter:
-            def generate(self, request, *, preferred_provider=None):
+            def generate(self, request, *, preferred_provider=None, **kwargs):
                 raise RuntimeError("down")
 
         trace = _StubTrace()

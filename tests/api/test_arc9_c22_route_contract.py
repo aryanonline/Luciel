@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timezone
 
 # Match the env-stub pattern from tests/api/test_signup_free_shape.py
 # (must precede any ``from app...`` import).
@@ -188,8 +189,7 @@ class TestIdentitySnapshotZeroState:
         snapshot must still report no scope so the entitlement layer
         treats it as no entitlement.
         """
-        from app.identity.bootstrap import IdentitySnapshot
-        from app.models.scope_assignment import ScopeAssignment
+        from app.identity.bootstrap import IdentitySnapshot, ScopeAssignment
         # ScopeAssignment can be constructed without a session; we
         # only need the role/admin_id attributes for has_scope.
         sa = ScopeAssignment(
@@ -197,6 +197,7 @@ class TestIdentitySnapshotZeroState:
             user_id=uuid.uuid4(),
             admin_id="free-abc",
             role="admin_owner",
+            started_at=datetime.now(timezone.utc),
             active=True,
         )
         snap = IdentitySnapshot(
@@ -208,24 +209,21 @@ class TestIdentitySnapshotZeroState:
         assert snap.has_scope is False
 
     def test_snapshot_canonical_role_prefers_owner(self):
-        """Post-Cleanup-C the canonical owner role is ``admin_owner``
-        from the ``scope_role`` PG enum."""
-        from app.identity.bootstrap import IdentitySnapshot
-        from app.models.scope_assignment import ScopeAssignment
+        """Post single-login collapse the only canonical role is
+        ``admin_owner`` (Locked Decision #19: single-login, no custom
+        roles -- one account_owner per Luciel)."""
+        from app.identity.bootstrap import IdentitySnapshot, ScopeAssignment
         u = uuid.uuid4()
         owner = ScopeAssignment(
             id=uuid.uuid4(), user_id=u, admin_id="t1",
-            role="admin_owner", active=True,
-        )
-        member = ScopeAssignment(
-            id=uuid.uuid4(), user_id=u, admin_id="t1",
-            role="admin_manager", active=True,
+            role="admin_owner",
+            started_at=datetime.now(timezone.utc), active=True,
         )
         snap = IdentitySnapshot(
             user_id=u,
             canonical_tenant_id="t1",
             canonical_tier="free",
-            active_scopes=[member, owner],  # owner second on purpose
+            active_scopes=[owner],
         )
         assert snap.has_scope is True
         assert snap.canonical_role == "admin_owner"

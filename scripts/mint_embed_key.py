@@ -80,7 +80,7 @@ Reference docs
   - app/api/v1/admin.py POST /admin/embed-keys -- the HTTP sibling
     of this CLI; both paths funnel through the same schema and
     service entrypoint.
-  - alembic/versions/a7c1f4e92b85_step30b_api_keys_widget_columns.py
+  - app/migrations/versions/a7c1f4e92b85_step30b_api_keys_widget_columns.py
     -- the migration that added the four widget columns.
 
 Doc-discipline note

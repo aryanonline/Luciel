@@ -23,7 +23,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-USAGE_API = REPO_ROOT / "app" / "api" / "v1" / "admin_usage.py"
+USAGE_API = REPO_ROOT / "app" / "api" / "v1" / "admin" / "usage.py"
 ROUTER_AGG = REPO_ROOT / "app" / "api" / "router.py"
 WEBHOOK = REPO_ROOT / "app" / "services" / "billing_webhook_service.py"
 

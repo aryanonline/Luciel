@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
+from app.billing.metering import BudgetMeter, InMemoryBackend
 
 
 # ---------------------------------------------------------------------
@@ -212,10 +212,11 @@ class TestInvoicePaidOverageReport(unittest.TestCase):
     def test_overage_reported_with_rounded_units_then_counter_reset(self):
         meter = BudgetMeter(backend=InMemoryBackend())
         closing_iso = "2026-05-01"
-        # Pro cap = 2000; seed instance 7 to 2155 used → overage 155 → 2 units.
+        # Pro Monthly cap = 1000 (Locked Decision #15); seed instance 7 to
+        # 1155 used → overage 155 → ceil(155/100) = 2 units.
         meter._backend._store[
             f"luciel:budget:count:admin-1:7:{closing_iso}"
-        ] = ("2155", float("inf"))
+        ] = ("1155", float("inf"))
         stripe = _FakeStripe()
         db = _FakeDB(
             sub=_sub(period_start=_CLOSING),
@@ -259,7 +260,7 @@ class TestInvoicePaidOverageReport(unittest.TestCase):
         closing_iso = "2026-05-01"
         meter._backend._store[
             f"luciel:budget:count:admin-1:7:{closing_iso}"
-        ] = ("1500", float("inf"))  # under the 2000 cap
+        ] = ("500", float("inf"))  # under the 1000 Pro Monthly cap
         stripe = _FakeStripe()
         db = _FakeDB(
             sub=_sub(period_start=_CLOSING),

@@ -312,7 +312,7 @@ def check_instance_lifecycle(
     coupling at the protocol layer.
     """
     from app.models.instance import Instance
-    from app.models.instance_status import InstanceStatus
+    from app.lifecycle.state import InstanceStatus
 
     instance = db.query(Instance).filter(Instance.id == ctx.instance_id).first()
     if instance is None:

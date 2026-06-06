@@ -36,7 +36,7 @@ appear in any frame the route would yield).
 References
 ==========
 
-  * app/policy/moderation.py -- the units under test.
+  * app/runtime/input_safety.py -- the units under test.
   * app/api/v1/chat_widget.py -- the wired call site.
   * ARCHITECTURE.md section 3.3 step 6.5 -- the design statement.
   * ARCHITECTURE.md section 4.9 -- the rejected-alternative bullet.
@@ -93,11 +93,11 @@ def _first_lineno_of_call_attr(node: ast.AST, obj: str, attr: str) -> int | None
 
 
 def test_moderation_module_defines_required_symbols() -> None:
-    """app/policy/moderation.py must publish the full public API the
+    """app/runtime/input_safety.py must publish the full public API the
     chat route depends on. A maintainer who renames any of these
     silently breaks the wiring at import time."""
 
-    import app.policy.moderation as mod
+    import app.runtime.input_safety as mod
 
     for name in (
         "ModerationResult",
@@ -110,7 +110,7 @@ def test_moderation_module_defines_required_symbols() -> None:
         "ConfigurationError",
     ):
         assert hasattr(mod, name), (
-            f"Step 30d-B: app.policy.moderation must publish {name!r}. "
+            f"Step 30d-B: app.runtime.input_safety must publish {name!r}. "
             f"A rename here breaks chat_widget.py at import time."
         )
 
@@ -123,7 +123,7 @@ def test_openai_provider_uses_explicit_timeout() -> None:
     at httpx, not just live in __init__.
     """
 
-    src = _read("app/policy/moderation.py")
+    src = _read("app/runtime/input_safety.py")
     tree = ast.parse(src)
     cls = next(
         (n for n in ast.walk(tree)
@@ -172,7 +172,7 @@ def test_failclosed_wrapper_blocks_on_provider_unavailable() -> None:
     the provider is unreachable.
     """
 
-    src = _read("app/policy/moderation.py")
+    src = _read("app/runtime/input_safety.py")
     tree = ast.parse(src)
     cls = next(
         (n for n in ast.walk(tree)
@@ -230,9 +230,9 @@ def test_failclosed_wrapper_blocks_on_provider_unavailable() -> None:
 
 def test_chat_widget_imports_moderation_gate() -> None:
     src = _read("app/api/v1/chat_widget.py")
-    assert "from app.policy.moderation import" in src, (
+    assert "from app.runtime.input_safety import" in src, (
         "Step 30d-B: app/api/v1/chat_widget.py must import "
-        "ModerationGate from app.policy.moderation."
+        "ModerationGate from app.runtime.input_safety."
     )
     assert "ModerationGate" in src
 
@@ -384,10 +384,10 @@ def test_refusal_branch_does_not_leak_categories() -> None:
 
 
 def test_null_provider_never_blocks_and_emits_warning(caplog) -> None:
-    from app.policy.moderation import NullModerationProvider
+    from app.runtime.input_safety import NullModerationProvider
 
     provider = NullModerationProvider()
-    caplog.set_level(logging.WARNING, logger="app.policy.moderation")
+    caplog.set_level(logging.WARNING, logger="app.runtime.input_safety")
     result = provider.moderate("hello")
 
     assert result.blocked is False
@@ -410,7 +410,7 @@ class _RaisingProvider:
     name = "raising_for_test"
 
     def moderate(self, text):
-        from app.policy.moderation import ModerationProviderUnavailable
+        from app.runtime.input_safety import ModerationProviderUnavailable
         raise ModerationProviderUnavailable("simulated outage")
 
 
@@ -418,7 +418,7 @@ class _PassThroughProvider:
     name = "passthrough_for_test"
 
     def moderate(self, text):
-        from app.policy.moderation import ModerationResult
+        from app.runtime.input_safety import ModerationResult
         return ModerationResult(
             blocked=False, categories=[], provider=self.name
         )
@@ -428,7 +428,7 @@ class _RealBlockProvider:
     name = "realblock_for_test"
 
     def moderate(self, text):
-        from app.policy.moderation import ModerationResult
+        from app.runtime.input_safety import ModerationResult
         return ModerationResult(
             blocked=True,
             categories=["hate"],
@@ -438,10 +438,10 @@ class _RealBlockProvider:
 
 
 def test_failclosed_wraps_unavailable_into_block(caplog) -> None:
-    from app.policy.moderation import FailClosedModerationProvider
+    from app.runtime.input_safety import FailClosedModerationProvider
 
     wrapper = FailClosedModerationProvider(_RaisingProvider())
-    caplog.set_level(logging.WARNING, logger="app.policy.moderation")
+    caplog.set_level(logging.WARNING, logger="app.runtime.input_safety")
     result = wrapper.moderate("anything")
 
     assert result.blocked is True, (
@@ -462,7 +462,7 @@ def test_failclosed_wraps_unavailable_into_block(caplog) -> None:
 
 
 def test_failclosed_passes_through_real_pass() -> None:
-    from app.policy.moderation import FailClosedModerationProvider
+    from app.runtime.input_safety import FailClosedModerationProvider
 
     wrapper = FailClosedModerationProvider(_PassThroughProvider())
     result = wrapper.moderate("hello")
@@ -477,7 +477,7 @@ def test_failclosed_passes_through_real_block() -> None:
     ModerationProviderUnavailable.
     """
 
-    from app.policy.moderation import FailClosedModerationProvider
+    from app.runtime.input_safety import FailClosedModerationProvider
 
     wrapper = FailClosedModerationProvider(_RealBlockProvider())
     result = wrapper.moderate("hateful text")
@@ -519,7 +519,7 @@ class _FakeSettings:
 
 
 def test_gate_factory_returns_null_provider_for_null_setting() -> None:
-    from app.policy.moderation import (
+    from app.runtime.input_safety import (
         ModerationGate,
         NullModerationProvider,
     )
@@ -531,7 +531,7 @@ def test_gate_factory_returns_null_provider_for_null_setting() -> None:
 
 
 def test_gate_factory_returns_failclosed_openai_for_openai_setting() -> None:
-    from app.policy.moderation import (
+    from app.runtime.input_safety import (
         FailClosedModerationProvider,
         ModerationGate,
         OpenAIModerationProvider,
@@ -553,7 +553,7 @@ def test_gate_factory_raises_when_openai_key_missing() -> None:
     """ConfigurationError must fire at factory time (i.e. module
     import time when the chat route loads), not at first request."""
 
-    from app.policy.moderation import ConfigurationError, ModerationGate
+    from app.runtime.input_safety import ConfigurationError, ModerationGate
 
     with pytest.raises(ConfigurationError) as excinfo:
         ModerationGate.from_settings(
@@ -565,7 +565,7 @@ def test_gate_factory_raises_when_openai_key_missing() -> None:
 
 
 def test_gate_factory_raises_on_unknown_provider() -> None:
-    from app.policy.moderation import ConfigurationError, ModerationGate
+    from app.runtime.input_safety import ConfigurationError, ModerationGate
 
     with pytest.raises(ConfigurationError):
         ModerationGate.from_settings(
@@ -581,13 +581,13 @@ def test_gate_factory_returns_bare_openai_when_failclosed_disabled(
     weaker than it should be and the log line is the only signal an
     operator gets that it shipped that way."""
 
-    from app.policy.moderation import (
+    from app.runtime.input_safety import (
         FailClosedModerationProvider,
         ModerationGate,
         OpenAIModerationProvider,
     )
 
-    caplog.set_level(logging.WARNING, logger="app.policy.moderation")
+    caplog.set_level(logging.WARNING, logger="app.runtime.input_safety")
     provider = ModerationGate.from_settings(
         _FakeSettings(
             moderation_provider="openai",
@@ -624,7 +624,7 @@ def test_openai_provider_raises_unavailable_on_transport_error(
 
     import httpx
 
-    from app.policy.moderation import (
+    from app.runtime.input_safety import (
         ModerationProviderUnavailable,
         OpenAIModerationProvider,
     )
@@ -655,7 +655,7 @@ def test_openai_provider_raises_unavailable_on_transport_error(
 def test_openai_provider_raises_unavailable_on_non_2xx(monkeypatch) -> None:
     import httpx
 
-    from app.policy.moderation import (
+    from app.runtime.input_safety import (
         ModerationProviderUnavailable,
         OpenAIModerationProvider,
     )
@@ -691,7 +691,7 @@ def test_openai_provider_raises_unavailable_on_non_2xx(monkeypatch) -> None:
 def test_openai_provider_maps_flagged_true_to_block(monkeypatch) -> None:
     import httpx
 
-    from app.policy.moderation import OpenAIModerationProvider
+    from app.runtime.input_safety import OpenAIModerationProvider
 
     class _Resp:
         status_code = 200
@@ -739,7 +739,7 @@ def test_openai_provider_maps_flagged_true_to_block(monkeypatch) -> None:
 def test_openai_provider_maps_flagged_false_to_pass(monkeypatch) -> None:
     import httpx
 
-    from app.policy.moderation import OpenAIModerationProvider
+    from app.runtime.input_safety import OpenAIModerationProvider
 
     class _Resp:
         status_code = 200
@@ -777,7 +777,7 @@ def test_openai_provider_maps_flagged_false_to_pass(monkeypatch) -> None:
 def test_moderation_module_imports_cleanly() -> None:
     import importlib
 
-    mod = importlib.import_module("app.policy.moderation")
+    mod = importlib.import_module("app.runtime.input_safety")
     # ModerationResult is the contract returned across the public API;
     # ensure it can be constructed with just blocked= and that the
     # other fields default sanely.
@@ -800,7 +800,7 @@ def test_moderation_module_imports_cleanly() -> None:
 
 
 def test_keyword_provider_blocks_on_exact_match() -> None:
-    from app.policy.moderation import KeywordModerationProvider
+    from app.runtime.input_safety import KeywordModerationProvider
 
     provider = KeywordModerationProvider(block_terms=["forbidden"])
     result = provider.moderate("this contains forbidden material")
@@ -814,7 +814,7 @@ def test_keyword_provider_blocks_on_exact_match() -> None:
 
 
 def test_keyword_provider_blocks_case_insensitively() -> None:
-    from app.policy.moderation import KeywordModerationProvider
+    from app.runtime.input_safety import KeywordModerationProvider
 
     provider = KeywordModerationProvider(block_terms=["BlockMe"])
     # Term is mixed-case; input is upper-case. Both must normalise.
@@ -824,7 +824,7 @@ def test_keyword_provider_blocks_case_insensitively() -> None:
 
 
 def test_keyword_provider_passes_clean_text() -> None:
-    from app.policy.moderation import KeywordModerationProvider
+    from app.runtime.input_safety import KeywordModerationProvider
 
     provider = KeywordModerationProvider(block_terms=["forbidden"])
     result = provider.moderate("this is a perfectly benign question")
@@ -842,9 +842,9 @@ def test_keyword_provider_empty_term_list_warns_at_construction(
     moderation_provider='keyword' but forgetting to populate the term
     list would silently disable the gate."""
 
-    from app.policy.moderation import KeywordModerationProvider
+    from app.runtime.input_safety import KeywordModerationProvider
 
-    caplog.set_level(logging.WARNING, logger="app.policy.moderation")
+    caplog.set_level(logging.WARNING, logger="app.runtime.input_safety")
     provider = KeywordModerationProvider(block_terms=[])
     # Empty-list construction must produce a never-blocks provider.
     result = provider.moderate("anything at all")
@@ -864,7 +864,7 @@ def test_keyword_provider_filters_whitespace_only_terms() -> None:
     """Whitespace-only entries in the block-term list must be ignored,
     not treated as a term that matches every non-empty input."""
 
-    from app.policy.moderation import KeywordModerationProvider
+    from app.runtime.input_safety import KeywordModerationProvider
 
     provider = KeywordModerationProvider(block_terms=["  ", "", "real_term"])
     # An input that does NOT contain 'real_term' must pass.
@@ -876,7 +876,7 @@ def test_keyword_provider_filters_whitespace_only_terms() -> None:
 
 
 def test_gate_factory_returns_keyword_provider_for_keyword_setting() -> None:
-    from app.policy.moderation import (
+    from app.runtime.input_safety import (
         FailClosedModerationProvider,
         KeywordModerationProvider,
         ModerationGate,
@@ -901,7 +901,7 @@ def test_gate_factory_keyword_provider_handles_missing_terms_setting() -> None:
     it falls back to an empty list, and KeywordModerationProvider's
     own construction-time WARNING handles the misconfig signal."""
 
-    from app.policy.moderation import (
+    from app.runtime.input_safety import (
         KeywordModerationProvider,
         ModerationGate,
     )

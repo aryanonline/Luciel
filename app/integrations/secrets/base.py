@@ -1,7 +1,7 @@
 """SecretStore ABC — the value-side of a connection's credential.
 
 The contract is intentionally tiny. A store maps an opaque ``ref``
-(the string persisted in ``instance_connections.credential_ref``) to a
+(the string persisted in ``instance_connections.secret_ref``) to a
 secret value. The ref is the ONLY thing that ever touches Postgres; the
 value never does.
 
@@ -31,7 +31,7 @@ class SecretStore(ABC):
     @abstractmethod
     def put(self, name: str, value: str) -> str:
         """Store ``value`` under a logical ``name``; return the ref to
-        persist in ``credential_ref``. The ref MAY equal ``name`` (fake)
+        persist in ``secret_ref``. The ref MAY equal ``name`` (fake)
         or be a fully-qualified ARN (AWS)."""
 
     @abstractmethod

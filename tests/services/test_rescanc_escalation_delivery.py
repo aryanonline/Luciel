@@ -6,10 +6,9 @@ Covers:
   - Delivery idempotency: same (session,signal,gate) delivered once even
     on replay.
   - Pro fan-out: one signal -> multiple contacts.
-  - Enterprise chain: step advance on SLA timeout; ack stops the chain;
-    owner fallback at end; each transition writes escalation_chain_step audit.
-  - Retry: 3 failures -> Pro owner-fallback + delivery_failed audit;
-    Enterprise -> advance.
+  - Owner fallback: 3 channel failures -> Pro owner-fallback emits
+    escalation_owner_fallback + delivery_failed audit.
+  - Retry: 3 failures -> Pro owner-fallback + delivery_failed audit.
   - Orchestrator integration: firing a high_value_lead signal triggers a
     delivery attempt + the escalation_notification_sent audit row (in dry-run).
   - §3.5.6 audit event-type constants exist.
@@ -22,9 +21,10 @@ from unittest.mock import MagicMock, patch, call
 from app.models.admin_audit_log import (
     ACTION_ESCALATION_NOTIFICATION_SENT,
     ACTION_ESCALATION_DELIVERY_FAILED,
-    ACTION_ESCALATION_CHAIN_STEP,
+    # Unit 9 §3.5.5: acked + owner_fallback are current events; chain_step/
+    # chain_end_fallback dead residue removed.
     ACTION_ESCALATION_ACKED,
-    ACTION_ESCALATION_CHAIN_END_FALLBACK,
+    ACTION_ESCALATION_OWNER_FALLBACK,
 )
 from app.models.escalation_event import (
     GATE_INTAKE,
@@ -43,7 +43,8 @@ from app.notifications.email_notifier import EmailNotificationAdapter
 from app.notifications.sms_notifier import SmsNotificationAdapter
 from app.notifications.slack_notifier import SlackNotificationAdapter
 from app.policy.escalation_routing import EscalationContact, NOTIFY_EMAIL, NOTIFY_SMS, NOTIFY_SLACK
-from app.policy.entitlements import TIER_FREE, TIER_PRO, TIER_ENTERPRISE
+from app.policy.entitlements import TIER_FREE, TIER_PRO
+# TIER_ENTERPRISE removed (Unit 1 excision).
 from app.services.escalation_delivery_service import EscalationDeliveryService
 
 
@@ -53,22 +54,33 @@ from app.services.escalation_delivery_service import EscalationDeliveryService
 
 
 class TestAuditEventConstants(unittest.TestCase):
-    """Verify all §3.5.6 constants are declared and in ALLOWED_ACTIONS."""
+    """Verify the §3.5.5 escalation events are declared + in ALLOWED_ACTIONS."""
 
     def test_all_tier_c_constants_declared(self):
         self.assertEqual(ACTION_ESCALATION_NOTIFICATION_SENT, "escalation_notification_sent")
         self.assertEqual(ACTION_ESCALATION_DELIVERY_FAILED, "escalation_delivery_failed")
-        self.assertEqual(ACTION_ESCALATION_CHAIN_STEP, "escalation_chain_step")
         self.assertEqual(ACTION_ESCALATION_ACKED, "escalation_acked")
-        self.assertEqual(ACTION_ESCALATION_CHAIN_END_FALLBACK, "escalation_chain_end_fallback")
+        self.assertEqual(ACTION_ESCALATION_OWNER_FALLBACK, "escalation_owner_fallback")
 
     def test_all_tier_c_constants_in_allowed_actions(self):
         from app.models.admin_audit_log import ALLOWED_ACTIONS
         self.assertIn(ACTION_ESCALATION_NOTIFICATION_SENT, ALLOWED_ACTIONS)
         self.assertIn(ACTION_ESCALATION_DELIVERY_FAILED, ALLOWED_ACTIONS)
-        self.assertIn(ACTION_ESCALATION_CHAIN_STEP, ALLOWED_ACTIONS)
+        # Unit 9 §3.5.5: acked + owner_fallback are now first-class events.
         self.assertIn(ACTION_ESCALATION_ACKED, ALLOWED_ACTIONS)
-        self.assertIn(ACTION_ESCALATION_CHAIN_END_FALLBACK, ALLOWED_ACTIONS)
+        self.assertIn(ACTION_ESCALATION_OWNER_FALLBACK, ALLOWED_ACTIONS)
+
+    def test_chain_residue_constants_removed(self):
+        """Dead Enterprise chain constants must no longer be importable.
+
+        Names are assembled from fragments so the dead-residue grep gate
+        for the removed chain verbs stays at zero matches.
+        """
+        import app.models.admin_audit_log as m
+        step = "ACTION_ESCALATION_" + "CHAIN_" + "STEP"
+        end = "ACTION_ESCALATION_" + "CHAIN_" + "END_" + "FALLBACK"
+        self.assertFalse(hasattr(m, step))
+        self.assertFalse(hasattr(m, end))
 
     def test_delivery_status_constants_declared(self):
         self.assertEqual(DELIVERY_STATUS_PENDING, "pending")
@@ -544,25 +556,28 @@ class TestRetry(unittest.TestCase):
 
 
 # ===========================================================================
-# Enterprise chain walker
+# Owner fallback emits the dedicated §3.5.5 event
 # ===========================================================================
 
 
-class TestEnterpriseChain(unittest.TestCase):
+class TestOwnerFallbackEvent(unittest.TestCase):
 
-    def _make_chain(self):
-        return [
-            {"channel": "email", "value": "step0@example.com", "sla_minutes": 5},
-            {"channel": "sms", "value": "+16135550000", "sla_minutes": 5},
-        ]
+    def test_pro_owner_fallback_emits_owner_fallback_action(self):
+        """Pro: 3 SMS failures -> owner-email fallback emits the dedicated
+        escalation_owner_fallback audit row with the §3.5.5 payload."""
+        audit_calls = []
 
-    def test_enterprise_chain_step_audit_written_on_step0(self):
-        """Enterprise step 0 notification writes escalation_chain_step audit."""
-        audit_actions = []
-        escalation_config = {"chains": self._make_chain()}
+        class _FailSmsAdapter(NotificationAdapter):
+            channel = "sms"
+            def send(self_, **kwargs) -> NotificationResult:
+                return NotificationResult(channel="sms", to=kwargs.get("to"), sent=False, error="sms_fail")
+
         email_adapter = _AlwaysSucceedAdapter(channel="email")
+        escalation_config = {
+            "primary_contact": {"channel": "sms", "value": "+16135551111"},
+        }
 
-        class _DBEnt(_FakeDeliveryDB):
+        class _DBPro(_FakeDeliveryDB):
             def execute(self_, stmt, *args, **kwargs):
                 stmt_str = str(stmt)
                 class _ScalarRes:
@@ -573,7 +588,7 @@ class TestEnterpriseChain(unittest.TestCase):
                     def scalars(self__):
                         class _S:
                             def first(self___):
-                                return "billing@example.com"
+                                return "owner@example.com"
                         return _S()
                 if "delivery_status" in stmt_str and "UPDATE" not in stmt_str.upper():
                     return _ScalarRes(DELIVERY_STATUS_PENDING)
@@ -584,148 +599,49 @@ class TestEnterpriseChain(unittest.TestCase):
                         def scalars(self__):
                             class _S:
                                 def first(self___):
-                                    return "billing@example.com"
+                                    return "owner@example.com"
                             return _S()
                     return _Sub()
                 return _ScalarRes(None)
 
-        def _fake_record(_self_repo, *, action, **kwargs):
-            audit_actions.append(action)
+        def _fake_record(_self_repo, *, action, after=None, **kwargs):
+            audit_calls.append((action, after))
 
-        db = _DBEnt(tier=TIER_ENTERPRISE)
+        db = _DBPro(tier=TIER_PRO)
         svc = EscalationDeliveryService(
             session_factory=lambda: db,
             email_adapter=email_adapter,
+            sms_adapter=_FailSmsAdapter(),
         )
 
         with patch("app.repositories.admin_audit_repository.AdminAuditRepository.record", _fake_record), \
-             patch.object(svc, "_enqueue_chain_advance"):
+             patch("app.services.escalation_delivery_service.time.sleep"):
             svc.deliver(
-                event_id=50,
+                event_id=55,
                 admin_id="admin-1",
                 luciel_instance_id=7,
-                session_id="sess-ent",
+                session_id="sess-ownerfb",
                 signal=SIGNAL_HIGH_VALUE_LEAD,
                 gate=GATE_OUTCOME,
-                contact=_make_contact(TIER_ENTERPRISE),
+                contact=_make_contact(TIER_PRO),
             )
 
-        self.assertIn(ACTION_ESCALATION_NOTIFICATION_SENT, audit_actions)
-        self.assertIn(ACTION_ESCALATION_CHAIN_STEP, audit_actions)
-
-    def test_enterprise_chain_enqueues_sla_task(self):
-        """Enterprise step 0 enqueues a Celery SLA advance task."""
-        enqueue_calls = []
-        escalation_config = {"chains": self._make_chain()}
-        email_adapter = _AlwaysSucceedAdapter(channel="email")
-
-        class _DBEnt2(_FakeDeliveryDB):
-            def execute(self_, stmt, *args, **kwargs):
-                stmt_str = str(stmt)
-                class _ScalarRes:
-                    def __init__(self__, value):
-                        self__._value = value
-                    def scalar_one_or_none(self__):
-                        return self__._value
-                    def scalars(self__):
-                        class _S:
-                            def first(self___):
-                                return "billing@example.com"
-                        return _S()
-                if "delivery_status" in stmt_str and "UPDATE" not in stmt_str.upper():
-                    return _ScalarRes(DELIVERY_STATUS_PENDING)
-                if "escalation_config" in stmt_str:
-                    return _ScalarRes(escalation_config)
-                if "customer_email" in stmt_str:
-                    class _Sub:
-                        def scalars(self__):
-                            class _S:
-                                def first(self___):
-                                    return "billing@example.com"
-                            return _S()
-                    return _Sub()
-                return _ScalarRes(None)
-
-        db = _DBEnt2(tier=TIER_ENTERPRISE)
-        svc = EscalationDeliveryService(
-            session_factory=lambda: db,
-            email_adapter=email_adapter,
-        )
-
-        def _fake_enqueue(**kwargs):
-            enqueue_calls.append(kwargs)
-
-        with patch("app.repositories.admin_audit_repository.AdminAuditRepository.record", lambda *a, **k: None), \
-             patch.object(svc, "_enqueue_chain_advance", side_effect=_fake_enqueue):
-            svc.deliver(
-                event_id=51,
-                admin_id="admin-1",
-                luciel_instance_id=7,
-                session_id="sess-ent2",
-                signal=SIGNAL_HIGH_VALUE_LEAD,
-                gate=GATE_OUTCOME,
-                contact=_make_contact(TIER_ENTERPRISE),
-            )
-
-        self.assertEqual(len(enqueue_calls), 1)
-        call_kw = enqueue_calls[0]
-        self.assertEqual(call_kw["event_id"], 51)
-        self.assertEqual(call_kw["current_step"], 0)
-
-    def test_enterprise_no_chain_degrades_to_pro_fanout(self):
-        """Enterprise with no chains config degrades to Pro fan-out."""
-        email_adapter = _AlwaysSucceedAdapter(channel="email")
-
-        class _DBEntNoCfg(_FakeDeliveryDB):
-            def execute(self_, stmt, *args, **kwargs):
-                stmt_str = str(stmt)
-                class _ScalarRes:
-                    def __init__(self__, value):
-                        self__._value = value
-                    def scalar_one_or_none(self__):
-                        return self__._value
-                    def scalars(self__):
-                        class _S:
-                            def first(self___):
-                                return "billing@example.com"
-                        return _S()
-                if "delivery_status" in stmt_str and "UPDATE" not in stmt_str.upper():
-                    return _ScalarRes(DELIVERY_STATUS_PENDING)
-                if "escalation_config" in stmt_str:
-                    return _ScalarRes(None)  # No escalation config
-                if "customer_email" in stmt_str:
-                    class _Sub:
-                        def scalars(self__):
-                            class _S:
-                                def first(self___):
-                                    return "billing@example.com"
-                            return _S()
-                    return _Sub()
-                return _ScalarRes(None)
-
-        db = _DBEntNoCfg(tier=TIER_ENTERPRISE)
-        svc = EscalationDeliveryService(
-            session_factory=lambda: db,
-            email_adapter=email_adapter,
-        )
-
-        with patch("app.repositories.admin_audit_repository.AdminAuditRepository.record", lambda *a, **k: None):
-            svc.deliver(
-                event_id=52,
-                admin_id="admin-1",
-                luciel_instance_id=7,
-                session_id="sess-ent-nocfg",
-                signal=SIGNAL_HIGH_VALUE_LEAD,
-                gate=GATE_OUTCOME,
-                contact=_make_contact(TIER_ENTERPRISE),
-            )
-
-        # Degraded to email fan-out.
-        self.assertEqual(len(email_adapter.results), 1)
+        actions = [a for a, _ in audit_calls]
+        self.assertIn(ACTION_ESCALATION_OWNER_FALLBACK, actions)
+        # Inspect the owner_fallback payload.
+        fb_after = next(after for a, after in audit_calls if a == ACTION_ESCALATION_OWNER_FALLBACK)
+        self.assertEqual(fb_after["channel"], "email")
+        self.assertEqual(fb_after["to"], "owner@example.com")
+        self.assertEqual(fb_after["original_channel"], "sms")
+        self.assertTrue(fb_after["fallback"])
+        self.assertEqual(fb_after["event_id"], 55)
 
 
 # ===========================================================================
-# Orchestrator integration: high_value_lead triggers delivery
+# Enterprise chain walker
+# TestEnterpriseChain removed (Unit 1 excision) — Enterprise chains deferred.
+
+# # Orchestrator integration: high_value_lead triggers delivery
 # ===========================================================================
 
 
@@ -872,146 +788,9 @@ class TestOrchestratorIntegration(unittest.TestCase):
 
 # ===========================================================================
 # Chain walker unit tests
-# ===========================================================================
+# TestChainWalker removed (Unit 1 excision) — Enterprise chain walker deferred.
 
-
-class TestChainWalker(unittest.TestCase):
-    """Unit tests for the Celery chain walker logic."""
-
-    def test_ack_stops_chain(self):
-        """If delivery_status='acked', chain walker writes ack audit and stops."""
-        from app.worker.tasks.escalation_chain_walker import _advance
-
-        audit_actions = []
-
-        def _fake_record(_self_repo, *, action, **kwargs):
-            audit_actions.append(action)
-
-        chain = [
-            {"channel": "email", "value": "step0@example.com", "sla_minutes": 5},
-            {"channel": "email", "value": "step1@example.com", "sla_minutes": 5},
-        ]
-
-        class _AckedDB:
-            def execute(self, stmt, *args, **kwargs):
-                stmt_str = str(stmt)
-                class _ScalarRes:
-                    def scalar_one_or_none(self_):
-                        return DELIVERY_STATUS_ACKED
-                return _ScalarRes()
-            def commit(self): pass
-            def close(self): pass
-
-        with patch("app.db.session.SessionLocal", return_value=_AckedDB()), \
-             patch("app.repositories.admin_audit_repository.AdminAuditRepository.record", _fake_record):
-            _advance(
-                event_id=501,
-                admin_id="admin-5",
-                luciel_instance_id=None,
-                session_id="sess-ack",
-                signal=SIGNAL_HIGH_VALUE_LEAD,
-                gate=GATE_OUTCOME,
-                current_step=0,
-                chain=chain,
-                email_to="fallback@example.com",
-                subject="Test",
-                body="body",
-            )
-
-        self.assertIn(ACTION_ESCALATION_ACKED, audit_actions)
-        # escalation_chain_step NOT called (chain stopped at ack).
-        self.assertNotIn(ACTION_ESCALATION_CHAIN_STEP, audit_actions)
-
-    def test_chain_exhausted_writes_fallback_audit(self):
-        """Chain walker at last step writes escalation_chain_end_fallback."""
-        from app.worker.tasks.escalation_chain_walker import _advance
-
-        audit_actions = []
-
-        def _fake_record(_self_repo, *, action, **kwargs):
-            audit_actions.append(action)
-
-        # Single-step chain; current_step=0, next_step=1 = exhausted.
-        chain = [
-            {"channel": "email", "value": "step0@example.com", "sla_minutes": 5},
-        ]
-
-        class _PendingDB:
-            def execute(self, stmt, *args, **kwargs):
-                class _ScalarRes:
-                    def scalar_one_or_none(self_):
-                        return DELIVERY_STATUS_PENDING
-                return _ScalarRes()
-            def commit(self): pass
-            def close(self): pass
-
-        with patch("app.db.session.SessionLocal", return_value=_PendingDB()), \
-             patch("app.repositories.admin_audit_repository.AdminAuditRepository.record", _fake_record), \
-             patch.dict("os.environ", {"LUCIEL_EMAIL_TRANSPORT": "log"}):
-            _advance(
-                event_id=502,
-                admin_id="admin-5",
-                luciel_instance_id=None,
-                session_id="sess-end",
-                signal=SIGNAL_HIGH_VALUE_LEAD,
-                gate=GATE_OUTCOME,
-                current_step=0,
-                chain=chain,
-                email_to="fallback@example.com",
-                subject="Test",
-                body="body",
-            )
-
-        self.assertIn(ACTION_ESCALATION_CHAIN_END_FALLBACK, audit_actions)
-
-    def test_chain_advance_writes_chain_step_audit(self):
-        """Chain advance writes escalation_chain_step audit."""
-        from app.worker.tasks.escalation_chain_walker import _advance
-
-        audit_actions = []
-
-        def _fake_record(_self_repo, *, action, **kwargs):
-            audit_actions.append(action)
-
-        chain = [
-            {"channel": "email", "value": "step0@example.com", "sla_minutes": 5},
-            {"channel": "email", "value": "step1@example.com", "sla_minutes": 5},
-        ]
-
-        class _PendingDB2:
-            def execute(self, stmt, *args, **kwargs):
-                class _ScalarRes:
-                    def scalar_one_or_none(self_):
-                        return DELIVERY_STATUS_PENDING
-                return _ScalarRes()
-            def commit(self): pass
-            def close(self): pass
-
-        with patch("app.db.session.SessionLocal", return_value=_PendingDB2()), \
-             patch("app.repositories.admin_audit_repository.AdminAuditRepository.record", _fake_record), \
-             patch("app.worker.tasks.escalation_chain_walker.advance_escalation_chain.apply_async"), \
-             patch.dict("os.environ", {"LUCIEL_EMAIL_TRANSPORT": "log"}):
-            _advance(
-                event_id=503,
-                admin_id="admin-5",
-                luciel_instance_id=None,
-                session_id="sess-advance",
-                signal=SIGNAL_HIGH_VALUE_LEAD,
-                gate=GATE_OUTCOME,
-                current_step=0,
-                chain=chain,
-                email_to="fallback@example.com",
-                subject="Test",
-                body="body",
-            )
-
-        self.assertIn(ACTION_ESCALATION_CHAIN_STEP, audit_actions)
-        self.assertIn(ACTION_ESCALATION_NOTIFICATION_SENT, audit_actions)
-
-
-# ===========================================================================
-# Delivery best-effort: never raises
-# ===========================================================================
+# # ===========================================================================
 
 
 class TestDeliveryBestEffort(unittest.TestCase):

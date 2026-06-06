@@ -123,7 +123,7 @@ class _LLMClassifierBase:
 
     def _router(self):
         if self._model_router is None:
-            from app.integrations.llm.router import ModelRouter
+            from app.runtime.llm_router import ModelRouter
 
             self._model_router = ModelRouter()
         return self._model_router

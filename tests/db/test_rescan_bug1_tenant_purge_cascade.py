@@ -124,8 +124,9 @@ def test_tenant_purge_completes_with_knowledge_and_connection():
             """
             INSERT INTO instance_connections
                 (admin_id, instance_id, connection_type,
-                 provider, status, created_at)
-            VALUES (:aid, :iid, 'crm', 'hubspot', 'connected', now())
+                 provider, status, auth_class, created_at)
+            VALUES (:aid, :iid, 'crm', 'hubspot', 'connected',
+                    'oauth_token', now())
             """
         ), {"aid": admin_id, "iid": instance_id})
         db.commit()

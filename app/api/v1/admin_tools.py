@@ -101,17 +101,14 @@ from app.policy.entitlements import (
     TIER_FREE,
 )
 from app.policy.scope import (
-    ROLE_ADMIN_MANAGER,
     ROLE_ADMIN_OWNER,
-    ROLE_INSTANCE_OPERATOR,
-    ROLE_READ_ONLY_VIEWER,
     ScopePolicy,
 )
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
 )
-from app.repositories.instance_connection_repository import (
+from app.connections.repository import (
     InstanceConnectionRepository,
 )
 from app.services.instance_service import InstanceService
@@ -133,24 +130,13 @@ router = APIRouter(
 # Role gate sets (Wall-2).
 # =====================================================================
 #
-# Tool authorization is an admin-level configuration action (analogous
-# to the "edit" / "delete" verbs on Knowledge per §3.2.2): only
-# admin_owner and admin_manager may toggle. read_only_viewer cannot
-# mutate by construction. instance_operator is intentionally excluded
-# from the configure set -- §3.2.2 scopes operator to list/view on
-# Knowledge; the analogous policy for tool config is "operator can
-# READ tool state on their bound Instance but cannot toggle it".
-# Toggle is therefore owner+manager only; the GET route allows the
-# full four-role matrix scoped through ScopePolicy (operator must be
-# bound to the target Instance; viewer can read across).
+# Single-login model (Locked Dec #19): the account owner is the only tenant
+# identity and may both read and toggle tool authorization. Both gate sets
+# collapse to {ROLE_ADMIN_OWNER}; ScopePolicy enforces owner-of-instance (or
+# platform_admin) before either action.
 
-_TOGGLE_ROLES = frozenset({ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER})
-_READ_ROLES = frozenset({
-    ROLE_ADMIN_OWNER,
-    ROLE_ADMIN_MANAGER,
-    ROLE_INSTANCE_OPERATOR,
-    ROLE_READ_ONLY_VIEWER,
-})
+_TOGGLE_ROLES = frozenset({ROLE_ADMIN_OWNER})
+_READ_ROLES = frozenset({ROLE_ADMIN_OWNER})
 
 
 # =====================================================================

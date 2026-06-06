@@ -1081,7 +1081,7 @@ def internal_retrieve(
         )
 
     from app.knowledge.embedder import embed_single
-    from app.knowledge.retriever import KnowledgeRetriever
+    from app.runtime.knowledge_retrieval import KnowledgeRetriever
     from app.repositories.knowledge_repository import KnowledgeRepository
 
     with bind_tenant_scope(
@@ -1105,13 +1105,13 @@ def internal_retrieve(
             vec_lit = "[" + ",".join(f"{float(x):.7f}" for x in query_vec) + "]"
             explain_rows = db.execute(
                 sql_text(
-                    "EXPLAIN ANALYZE SELECT id, embedding <=> :v::vector AS d "
+                    "EXPLAIN ANALYZE SELECT id, embedding <=> CAST(:v AS vector) AS d "
                     "FROM knowledge_chunks "
                     "WHERE admin_id = :aid "
                     "  AND luciel_instance_id = :iid "
                     "  AND superseded_at IS NULL "
                     "  AND soft_deleted_at IS NULL "
-                    "ORDER BY embedding <=> :v::vector "
+                    "ORDER BY embedding <=> CAST(:v AS vector) "
                     "LIMIT :n"
                 ).bindparams(
                     v=vec_lit,

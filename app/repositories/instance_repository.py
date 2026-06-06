@@ -45,7 +45,7 @@ from app.models.admin_audit_log import (
     RESOURCE_INSTANCE_CONNECTION,
 )
 from app.models.instance import Instance
-from app.models.instance_status import InstanceStatus
+from app.lifecycle.state import InstanceStatus, INSTANCE_GRACE_STATES
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
@@ -319,11 +319,11 @@ class InstanceRepository:
         instance = self.get_by_pk(pk)
         if instance is None:
             return None
-        if instance.instance_status == InstanceStatus.DELETED:
+        if instance.instance_status.value in INSTANCE_GRACE_STATES:
             # No-op signal — route layer maps this to 409. Caller can
-            # distinguish "already paused" (idempotent) from "deleted"
-            # (conflict) by reading instance.instance_status off the
-            # returned row.
+            # distinguish "already paused" (idempotent) from a grace-window
+            # instance (conflict) by reading instance.instance_status off
+            # the returned row. (Accepts grace_window + legacy 'deleted'.)
             return instance
 
         before_status = instance.instance_status
@@ -382,7 +382,7 @@ class InstanceRepository:
         instance = self.get_by_pk(pk)
         if instance is None:
             return None
-        if instance.instance_status == InstanceStatus.DELETED:
+        if instance.instance_status.value in INSTANCE_GRACE_STATES:
             return instance
 
         before_status = instance.instance_status
@@ -452,15 +452,21 @@ class InstanceRepository:
         instance = self.get_by_pk(pk)
         if instance is None:
             return None
-        if instance.instance_status == InstanceStatus.DELETED:
-            # Idempotent — preserve the original soft_deleted_at clock.
+        if instance.instance_status.value in INSTANCE_GRACE_STATES:
+            # Idempotent — already in the grace window (grace_window, or a
+            # legacy 'deleted' row). Preserve the original soft_deleted_at
+            # clock.
             return instance
 
         before_status = instance.instance_status
         was_active = bool(instance.active)
         now = datetime.now(timezone.utc)
 
-        instance.instance_status = InstanceStatus.DELETED
+        # 5-state machine (Architecture §3.6.1): deactivation lands the
+        # instance in ``grace_window`` (the 30-day soft-delete state),
+        # NOT the legacy 3-state ``deleted`` alias. ``soft_deleted_at`` is
+        # the grace clock the retention worker reads.
+        instance.instance_status = InstanceStatus.GRACE_WINDOW
         instance.active = False
         instance.soft_deleted_at = now
 
@@ -479,7 +485,7 @@ class InstanceRepository:
                     "soft_deleted_at": None,
                 },
                 after={
-                    "instance_status": InstanceStatus.DELETED.value,
+                    "instance_status": InstanceStatus.GRACE_WINDOW.value,
                     "active": False,
                     "soft_deleted_at": now.isoformat(),
                     "grace_window_days": INSTANCE_RESTORE_GRACE_DAYS,
@@ -487,40 +493,35 @@ class InstanceRepository:
                 autocommit=False,
             )
 
-            # Arc 12 WU4 — sibling-grant cascade per Architecture
-            # §3.6.1 step 3. Wired here so the grant revocations
-            # commit atomically with the instance-status flip. The
-            # service handles the per-grant audit emission.
-            # Imported lazily to avoid a circular import (the
-            # service constructs an AdminAuditRepository internally
-            # which imports back into this module's models).
-            from app.services.sibling_call_grant_service import (
-                SiblingCallGrantService,
-            )
-
-            grant_service = SiblingCallGrantService(self.db)
-            revoked_grants = grant_service.revoke_all_touching_instance(
-                admin_id=instance.admin_id,
-                instance_id=instance.id,
-                audit_ctx=audit_ctx,
-                autocommit=False,
-            )
-            if revoked_grants:
-                logger.info(
-                    "Instance delete cascade revoked %s sibling-call "
-                    "grant(s) touching pk=%s admin=%s",
-                    len(revoked_grants), instance.id, instance.admin_id,
-                )
+            # Sibling-call-grant cascade removed in Unit 1: the
+            # call_sibling_luciel tool and sibling_call_grants table are
+            # deferred-feature surfaces (multi-Luciel, Open Decision #7)
+            # excised in this unit. The single-Luciel model has no
+            # sibling grants to revoke on instance delete.
 
             # Arc 17 Task 4 — connection cascade. In the same transaction
             # as the soft-delete, revoke every live instance_connections
             # row for this instance, audit each, and enqueue secret
-            # cleanup for any non-null credential_ref. Mirrors the
+            # cleanup for any non-null secret_ref. Mirrors the
             # sibling-grant cascade above (lazy import to avoid a cycle).
             self._cascade_revoke_connections(
                 admin_id=instance.admin_id,
                 instance_id=instance.id,
                 audit_ctx=audit_ctx,
+            )
+
+            # §3.6.3 step 3 — knowledge sources set to soft_deleted, in
+            # the SAME atomic transaction as the state flip. The retriever
+            # filters ``soft_deleted_at IS NULL`` so this makes the
+            # knowledge non-retrievable during the grace window; restore
+            # (§3.6.4) reverses exactly what this stamped.
+            from app.repositories.knowledge_repository import (
+                KnowledgeRepository,
+            )
+            KnowledgeRepository(self.db).soft_delete_for_instance(
+                instance_id=instance.id,
+                admin_id=instance.admin_id,
+                autocommit=False,
             )
 
         self.db.commit()
@@ -538,7 +539,7 @@ class InstanceRepository:
     # ------------------------------------------------------------------
     # Arc 17 Task 4 — connection cascade (instance delete + account
     # closure). Revoke live instance_connections rows, audit each, and
-    # enqueue secret cleanup for any non-null credential_ref. Shared by
+    # enqueue secret cleanup for any non-null secret_ref. Shared by
     # delete_by_pk (one instance) and the closure path (admin-wide).
     # ------------------------------------------------------------------
 
@@ -552,7 +553,7 @@ class InstanceRepository:
 
         Revokes EVERY live connection across the admin's instances +
         enqueues secret cleanup, all in the caller's transaction. Called
-        by :class:`app.services.closure_service.ClosureService` — the
+        by :class:`app.lifecycle.closure.ClosureService` — the
         destructive-intent path. Operational admin-deactivation (Pause)
         does NOT call this: paused instances retain their connection
         rows (data-retained semantics).
@@ -578,10 +579,10 @@ class InstanceRepository:
         circular import (the connection repo / outbox model import back
         into this module's model graph).
         """
-        from app.repositories.instance_connection_repository import (
+        from app.connections.repository import (
             InstanceConnectionRepository,
         )
-        from app.repositories.secret_cleanup_outbox_repository import (
+        from app.connections.secret_cleanup_outbox_repository import (
             SecretCleanupOutboxRepository,
         )
 
@@ -623,15 +624,15 @@ class InstanceRepository:
                 autocommit=False,
             )
             # Enqueue secret cleanup ONLY when a real secret pointer
-            # exists. credential_ref is NULL in this slice (no live
+            # exists. secret_ref is NULL in this slice (no live
             # credential-bearing connectors), so this is a no-op today —
             # but the real enqueue path is exercised when full Arc 17
-            # populates credential_ref. We enqueue the POINTER only,
+            # populates secret_ref. We enqueue the POINTER only,
             # never a secret value (Locked Decision #18).
-            if conn.credential_ref:
+            if conn.secret_ref:
                 outbox.enqueue(
                     admin_id=admin_id,
-                    credential_ref=conn.credential_ref,
+                    secret_ref=conn.secret_ref,
                     instance_id=conn.instance_id,
                     connection_id=conn.id,
                     autocommit=False,
@@ -668,16 +669,17 @@ class InstanceRepository:
         instance = self.get_by_pk(pk)
         if instance is None:
             return None
-        if instance.instance_status != InstanceStatus.DELETED:
-            # Not deleted -- restore is a no-op transition. The route
-            # layer treats this as 409 (not 410: the grace window is
-            # not the question; the row is already live).
+        if instance.instance_status.value not in INSTANCE_GRACE_STATES:
+            # Not in the grace window -- restore is a no-op transition.
+            # The route layer treats this as 409 (not 410: the grace
+            # window is not the question; the row is already live).
+            # (Accepts grace_window + legacy 'deleted'.)
             return instance
         if instance.soft_deleted_at is None:
-            # Shape invariant violated: deleted rows must carry a
+            # Shape invariant violated: grace-window rows must carry a
             # soft_deleted_at. Refuse to restore rather than guess.
             logger.error(
-                "Instance restore refused: pk=%s is 'deleted' but "
+                "Instance restore refused: pk=%s is in a grace state but "
                 "soft_deleted_at is NULL (shape invariant violation)",
                 instance.id,
             )
@@ -698,6 +700,19 @@ class InstanceRepository:
         instance.instance_status = InstanceStatus.ACTIVE
         instance.active = True
         instance.soft_deleted_at = None
+
+        # §3.6.4 reactivation — mark knowledge sources active again.
+        # Scope the restore to rows the deactivation cascade itself
+        # soft-deleted (stamped at-or-after the grace clock), so a
+        # source the admin had independently deleted before deactivating
+        # stays deleted.
+        from app.repositories.knowledge_repository import KnowledgeRepository
+        KnowledgeRepository(self.db).restore_for_instance(
+            instance_id=instance.id,
+            admin_id=instance.admin_id,
+            deactivated_at=before_soft_deleted_at,
+            autocommit=False,
+        )
 
         if audit_ctx is not None:
             AdminAuditRepository(self.db).record(

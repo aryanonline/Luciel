@@ -7,7 +7,7 @@ fixed runtime cognition, not admin-configurable).
 """
 from __future__ import annotations
 
-from app.policy.entitlements import TIER_ENTERPRISE, TIER_FREE, TIER_PRO
+from app.policy.entitlements import TIER_FREE, TIER_PRO
 from app.policy.escalation_config import (
     ESCALATION_SIGNALS,
     check_no_trigger_config,
@@ -33,7 +33,7 @@ def test_signals_are_the_four_fixed_runtime_signals() -> None:
 
 
 def test_trigger_keys_rejected_on_every_tier() -> None:
-    for tier in (TIER_FREE, TIER_PRO, TIER_ENTERPRISE):
+    for tier in (TIER_FREE, TIER_PRO):
         for key in (
             "triggers",
             "thresholds",
@@ -73,8 +73,9 @@ def test_check_no_trigger_config_passes_clean_contact_shape() -> None:
 
 
 def test_unknown_top_level_key_rejected() -> None:
+    # Enterprise removed; use Pro for this check.
     problems = validate_escalation_config_for_tier(
-        tier=TIER_ENTERPRISE, config={"primary_email": "a@b.com", "foo": 1}
+        tier=TIER_PRO, config={"primary_email": "a@b.com", "foo": 1}
     )
     assert any(p["reason"] == "unknown_field" for p in problems), problems
 
@@ -164,16 +165,6 @@ def test_pro_routing_unknown_signal_rejected() -> None:
     assert any(p["reason"] == "unknown_escalation_signal" for p in problems)
 
 
-def test_pro_slack_notify_channel_rejected() -> None:
-    problems = validate_escalation_config_for_tier(
-        tier=TIER_PRO,
-        config={"primary_contact": {"channel": "slack", "value": "#ops"}},
-    )
-    assert any(
-        p["reason"] == "notify_channel_not_available_on_tier" for p in problems
-    )
-
-
 def test_pro_chains_rejected() -> None:
     problems = validate_escalation_config_for_tier(
         tier=TIER_PRO,
@@ -185,53 +176,6 @@ def test_pro_chains_rejected() -> None:
         },
     )
     assert any(p["reason"] == "chains_not_available_on_tier" for p in problems)
-
-
-# ---------------------------------------------------------------------
-# Enterprise tier — + ordered chains + slack/custom notify channels.
-# ---------------------------------------------------------------------
-
-
-def test_enterprise_chains_ok() -> None:
-    problems = validate_escalation_config_for_tier(
-        tier=TIER_ENTERPRISE,
-        config={
-            "primary_contact": {"channel": "email", "value": "a@b.com"},
-            "routing_rules": {"strong_negative_sentiment": {"channel": "slack"}},
-            "chains": [
-                {"contact": {"channel": "slack", "value": "#ops"}, "sla_minutes": 15},
-                {"contact": {"channel": "custom", "value": "pd-key"}, "sla_minutes": 30},
-            ],
-        },
-    )
-    assert problems == [], problems
-
-
-def test_enterprise_chain_requires_positive_sla() -> None:
-    problems = validate_escalation_config_for_tier(
-        tier=TIER_ENTERPRISE,
-        config={
-            "primary_contact": {"channel": "email", "value": "a@b.com"},
-            "chains": [
-                {"contact": {"channel": "sms", "value": "+1"}, "sla_minutes": 0}
-            ],
-        },
-    )
-    assert any(p["reason"] == "invalid_sla_minutes" for p in problems)
-
-
-def test_enterprise_chain_rejects_bool_sla() -> None:
-    # bool is an int subclass — must not pass the positive-int check.
-    problems = validate_escalation_config_for_tier(
-        tier=TIER_ENTERPRISE,
-        config={
-            "primary_contact": {"channel": "email", "value": "a@b.com"},
-            "chains": [
-                {"contact": {"channel": "sms", "value": "+1"}, "sla_minutes": True}
-            ],
-        },
-    )
-    assert any(p["reason"] == "invalid_sla_minutes" for p in problems)
 
 
 # ---------------------------------------------------------------------

@@ -122,6 +122,13 @@ class SessionService:
         # keeps backward compatibility with all legacy tooling that
         # treats sessions.user_id as opaque, while still being
         # unambiguously joinable on User.id when needed.
+        # Unit 13e §3.4.8: the identity resolver bound this session to a
+        # lead/User, so the §3.4.8 session-key participant id is the
+        # resolved User.id (stored as a string, mirroring user_id). This
+        # is the lead-facing-channel branch of participant_id; the
+        # anonymous widget path (create_session, no identity) leaves
+        # resolved_lead_id NULL so it never matches another session as
+        # "same participant" (§3.4.9 HARD RULE).
         session_id = str(uuid.uuid4())
         new_session = self.repository.create_session(
             session_id=session_id,
@@ -130,6 +137,7 @@ class SessionService:
             channel=channel,
             conversation_id=resolution.conversation_id,
             luciel_instance_id=luciel_instance_id,
+            resolved_lead_id=str(resolution.user_id),
         )
 
         return SessionWithIdentity(

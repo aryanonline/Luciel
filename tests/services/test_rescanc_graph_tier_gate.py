@@ -84,33 +84,6 @@ class TestGraphTierGate:
         mock_extractor_cls.assert_called_once()
         mock_extractor.extract_from_chunks.assert_called_once()
 
-    def test_enterprise_tier_attempts_graph_extraction(self):
-        """Enterprise tier: _maybe_extract_graph should call GraphExtractor."""
-        svc, db_mock = self._make_service(admin_tier="enterprise")
-
-        mock_extractor = MagicMock()
-        mock_extractor.extract_from_chunks.return_value = (
-            [MagicMock()],
-            [MagicMock()],
-        )
-
-        with patch(
-            "app.knowledge.graph_extractor.GraphExtractor",
-            return_value=mock_extractor,
-        ) as mock_extractor_cls, patch(
-            "app.repositories.knowledge_graph_repository.KnowledgeGraphRepository",
-            autospec=True,
-        ) as mock_repo_cls:
-            mock_repo_cls.return_value.upsert_graph.return_value = (1, 1)
-            svc._maybe_extract_graph(
-                chunks=["Dr. Smith is a General Practitioner."],
-                admin_id="admin-ent",
-                luciel_instance_id=2,
-                source_id=88,
-            )
-
-        mock_extractor_cls.assert_called_once()
-
     def test_graph_extraction_failure_does_not_raise(self):
         """If graph extraction raises, _maybe_extract_graph must not propagate."""
         svc, db_mock = self._make_service(admin_tier="pro")

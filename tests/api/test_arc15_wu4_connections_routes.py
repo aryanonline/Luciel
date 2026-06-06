@@ -3,7 +3,7 @@
 AST/text shape test (same convention as the WU3 route tests): protects
 the connections router wiring (four-walls auth with
 PERM_CONFIGURE_CONNECTIONS, the no-fake-connected honesty fork, audit on
-every write, no-secret config_json guard) and the ToolView
+every write, no-secret non_secret_config guard) and the ToolView
 connection_status mapping — without a live TestClient/DB. The gate
 behaviour is covered in tests/tools/test_arc15_wu5_connection_gate.py;
 the connection_status pure mapping is covered behaviourally below.
@@ -83,39 +83,55 @@ def test_delete_fences_to_admin() -> None:
 
 
 # ---------------------------------------------------------------------
-# Honesty fork: LIVE → connected; DEFERRED → unconfigured + arc17_pending.
+# Honesty fork (Unit 13c): driven by the §3.8.5 auth_class, NOT a
+# hardcoded LIVE/DEFERRED list. Each credential SHAPE has its own honest
+# connect path; none ever fabricates 'connected' without a real backing.
 # ---------------------------------------------------------------------
 
 
 def test_post_honesty_fork_no_fake_connected() -> None:
     src = ast.unparse(_function_node(CONN_PATH, "configure_connection"))
-    assert "LIVE_CONNECTION_TYPES" in src
-    assert "DEFERRED_CONNECTION_TYPES" in src
+    # The fork now keys on auth_class_for(conn_type) — the hardcoded
+    # LIVE/DEFERRED sets were removed.
+    assert "auth_class_for" in src
+    assert "LIVE_CONNECTION_TYPES" not in src
+    assert "DEFERRED_CONNECTION_TYPES" not in src
+    # All three honest dispositions are present; connected only on a real
+    # backing (api_key config-presence / provisioned identity present).
     assert "'connected'" in src or '"connected"' in src
     assert "'unconfigured'" in src or '"unconfigured"' in src
     assert "Arc17Pending" in src
+    # provisioned_resource verifies a real platform identity before connect.
+    assert "_provisioned_resource_identity" in src
 
 
-def test_live_vs_deferred_partition_is_honest() -> None:
-    # record_source + outbound_webhook are the ONLY live connectors.
-    from app.schemas.connection import (
-        DEFERRED_CONNECTION_TYPES,
-        LIVE_CONNECTION_TYPES,
+def test_auth_class_fork_covers_every_shape() -> None:
+    # The fork must branch on all four §3.8.5 credential shapes (oauth_token
+    # / api_key / provisioned_resource handled; long_lived_token falls into
+    # the same liveness family). auth_class_for is the single mapping point.
+    from app.connections.instance_connection import (
+        AUTH_CLASS_BY_TYPE,
+        auth_class_for,
     )
 
-    assert LIVE_CONNECTION_TYPES == frozenset(
-        {"record_source", "outbound_webhook"}
-    )
-    assert "calendar" in DEFERRED_CONNECTION_TYPES
-    assert "crm" in DEFERRED_CONNECTION_TYPES
+    assert auth_class_for("calendar") == "oauth_token"
+    assert auth_class_for("crm") == "oauth_token"
+    assert auth_class_for("email_sender") == "provisioned_resource"
+    assert auth_class_for("sms_sender") == "provisioned_resource"
+    assert auth_class_for("record_source") == "api_key"
+    assert auth_class_for("outbound_webhook") == "api_key"
+    # Every connection_type maps to a class (no silent gap).
+    src = ast.unparse(_function_node(CONN_PATH, "configure_connection"))
+    for klass in set(AUTH_CLASS_BY_TYPE.values()):
+        assert klass in src, klass
 
 
-def test_config_json_secret_guard() -> None:
+def test_non_secret_config_secret_guard() -> None:
     src = _read(CONN_PATH)
     assert "_FORBIDDEN_CONFIG_KEYS" in src
-    assert "secret_in_config_json" in src
-    # credential_ref stays NULL in this slice.
-    assert "credential_ref=None" in src
+    assert "secret_in_non_secret_config" in src
+    # secret_ref stays NULL in this slice.
+    assert "secret_ref=None" in src
 
 
 # ---------------------------------------------------------------------
@@ -145,7 +161,7 @@ def test_audit_constants_whitelisted() -> None:
 
 
 def test_audit_records_config_keys_not_values() -> None:
-    # config_json is non-secret by contract, but record only the KEYS so
+    # non_secret_config is non-secret by contract, but record only the KEYS so
     # the audit row stays bounded.
     src = ast.unparse(_function_node(CONN_PATH, "configure_connection"))
     assert "config_keys" in src

@@ -214,6 +214,65 @@ jobs:
           OPENAI_API_KEY: "ci-not-a-real-key-backend-free-tests-only"
         run: python -m pytest tests/db/test_c7_1_ops_connect_log_format.py -v
 
+  doctrine-doc-sync:
+    # ---------------------------------------------------------------------------
+    # Unit 12: Architecture §5.9.3 doc-sync gate. A PR that changes any
+    # doctrine-anchored path (a `paths` entry in DOCTRINE_ANCHORS.toml)
+    # MUST also add a DOCTRINE_CHANGELOG.md entry — the in-repo proxy for
+    # "the architecture doc was updated", because the ratified .md canon
+    # lives in the Space and CI cannot diff it. The reviewer reconciles the
+    # changelog entry against the Space doc at review time.
+    #
+    # The gate's matching logic is pure and unit-tested
+    # (tests/infra/test_doctrine_sync_gate.py); this job runs that test AND
+    # applies the gate to the PR/push's actual changed-file set.
+    # ---------------------------------------------------------------------------
+    name: Doctrine doc-sync gate (§5.9.3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          # Need history so we can diff the PR/push range below.
+          fetch-depth: 0
+
+      - name: set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: run gate matching-logic unit test
+        # stdlib-only (ast/tomllib/importlib); pytest is the only dep.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pytest tests/infra/test_doctrine_sync_gate.py -v
+
+      - name: compute changed files
+        id: changes
+        # PR: diff the merge base against the head. Push: diff the pushed
+        # range (before..after). The before-sha is all-zeros on a brand-new
+        # branch's first push; fall back to diffing against the parent.
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+            git diff --name-only "$base" "$head" > changed.txt
+          else
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+              before="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+            fi
+            git diff --name-only "$before" "${{ github.sha }}" > changed.txt
+          fi
+          echo "==> changed files:"
+          cat changed.txt
+
+      - name: enforce doc-sync gate
+        run: python .github/scripts/doctrine_sync_gate.py < changed.txt
+
   widget-build-and-size:
     name: Widget bundle build + size gate (Step 30b)
     runs-on: ubuntu-latest

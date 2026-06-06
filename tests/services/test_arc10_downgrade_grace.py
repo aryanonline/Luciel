@@ -47,7 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SERVICE_PATH = REPO_ROOT / "app" / "services" / "downgrade_grace_service.py"
 ARCHIVE_PATH = REPO_ROOT / "app" / "services" / "downgrade_archive_service.py"
 MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "arc10_lifecycle_subsystem.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "arc10_lifecycle_subsystem.py"
 )
 
 
@@ -137,7 +137,7 @@ def test_assert_writable_raises_read_only_error_in_grace():
 
 def test_grace_window_days_imported_from_closure_service():
     src = SERVICE_PATH.read_text(encoding="utf-8")
-    assert "from app.services.closure_service import GRACE_WINDOW_DAYS" in src, (
+    assert "from app.lifecycle.closure import GRACE_WINDOW_DAYS" in src, (
         "DowngradeGraceService must import GRACE_WINDOW_DAYS from "
         "closure_service so the closure and downgrade clocks share a "
         "single source of truth. Founder lock L1: 30 days, not 90."
@@ -176,20 +176,22 @@ def test_all_five_downgrade_axes_declared():
 def test_all_axes_tuple_contains_knowledge():
     """The AXIS_KNOWLEDGE constant is only meaningful if it's in the
     'all axes' tuple the enforcement worker iterates over. The
-    decision to add knowledge as the 5th axis was founder lock L2."""
+    decision to add knowledge as the 5th axis was founder lock L2.
+    Unit 1 excision: AXIS_SEATS removed (single-owner model); tuple is
+    now AXIS_INSTANCES, AXIS_EMBED_KEYS, AXIS_CNAMES, AXIS_KNOWLEDGE."""
     src = ARCHIVE_PATH.read_text(encoding="utf-8")
     flat = re.sub(r"\s+", " ", src)
-    # The tuple should include all five axis names in declaration order.
-    # We look for AXIS_KNOWLEDGE inside a tuple literal that also names
-    # the other four.
+    # The tuple should include all four axis names in declaration order.
+    # AXIS_SEATS was removed in Unit 1 (no multi-seat table).
     pat = re.search(
-        r"\(\s*AXIS_INSTANCES\s*,\s*AXIS_EMBED_KEYS\s*,\s*AXIS_CNAMES\s*,\s*AXIS_SEATS\s*,\s*AXIS_KNOWLEDGE\s*[,)]",
+        r"\(\s*AXIS_INSTANCES\s*,\s*AXIS_EMBED_KEYS\s*,\s*AXIS_CNAMES\s*,\s*AXIS_KNOWLEDGE\s*[,)]",
         flat,
     )
     assert pat, (
         "Expected a tuple containing AXIS_INSTANCES, AXIS_EMBED_KEYS, "
-        "AXIS_CNAMES, AXIS_SEATS, AXIS_KNOWLEDGE in that order. The "
-        "enforcement worker iterates over this tuple to archive overflow."
+        "AXIS_CNAMES, AXIS_KNOWLEDGE in that order (AXIS_SEATS removed "
+        "in Unit 1 excision). The enforcement worker iterates over this "
+        "tuple to archive overflow."
     )
 
 

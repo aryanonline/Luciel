@@ -1,6 +1,6 @@
 """get_oauth_provider — OAuth provider selector by connection_type.
 
-Maps a deferred ``connection_type`` to its provider, reading client
+Maps an OAuth-backed ``connection_type`` to its provider, reading client
 credentials from settings. Google Calendar is the reference provider;
 the native CRM connectors (HubSpot + Salesforce) follow the SAME shape.
 ``email_sender`` / ``sms_sender`` are NOT OAuth — they authenticate via

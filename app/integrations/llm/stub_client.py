@@ -18,7 +18,7 @@ contract -- session frame, one or more token frames, terminal
   * a coupling to a live third-party API whose availability and
     quota status would inject flakiness into a contract test.
 
-Parallel to KeywordModerationProvider in app/policy/moderation.py:
+Parallel to KeywordModerationProvider in app/runtime/input_safety.py:
 both exist to give the E2E harness a deterministic, hermetic seat
 for a class of dependency (LLM here, content-safety there) without
 disabling the gate-shape we are testing. Same construction-time
@@ -29,7 +29,7 @@ is imported.
 Wiring
 ======
 
-Registered by ModelRouter (app/integrations/llm/router.py) only when
+Registered by ModelRouter (app/runtime/llm_router.py) only when
 settings.enable_stub_llm_provider is True. The setting defaults to
 False so production is unaffected. The widget-e2e workflow flips it
 to True via the ENABLE_STUB_LLM_PROVIDER env var.

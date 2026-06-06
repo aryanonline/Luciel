@@ -129,7 +129,7 @@ def main() -> int:
             connection_type=args.connection_type,
         )
         ref = store.put(name, tokens.refresh_token)
-        print(f"\nStored in AWS Secrets Manager. credential_ref (ARN): {ref}")
+        print(f"\nStored in AWS Secrets Manager. secret_ref (ARN): {ref}")
         print(
             "  (the gated E2E reads this ref to drive the real refresh; "
             "delete it when done — the lifecycle test also exercises delete.)"

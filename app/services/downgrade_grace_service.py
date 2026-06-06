@@ -68,7 +68,7 @@ from app.models.admin_audit_log import (
     ACTION_DOWNGRADE_GRACE_ENFORCED,
     RESOURCE_TENANT,
 )
-from app.services.closure_service import GRACE_WINDOW_DAYS
+from app.lifecycle.closure import GRACE_WINDOW_DAYS
 
 logger = logging.getLogger(__name__)
 

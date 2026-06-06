@@ -194,7 +194,7 @@ class TestChannelLifecycleGate(unittest.TestCase):
     # -----------------------------------------------------------------
 
     def test_active_instance_routes_and_replies(self):
-        from app.models.instance_status import InstanceStatus
+        from app.lifecycle.state import InstanceStatus
 
         self._set_status(InstanceStatus.ACTIVE)
         chat = MagicMock()
@@ -241,19 +241,19 @@ class TestChannelLifecycleGate(unittest.TestCase):
         self.assertIn(f"status={expected_token}", drop.note or "")
 
     def test_paused_instance_is_silently_dropped(self):
-        from app.models.instance_status import InstanceStatus
+        from app.lifecycle.state import InstanceStatus
 
         self._set_status(InstanceStatus.PAUSED)
         self._assert_silent_drop(InstanceStatus.PAUSED, "paused")
 
     def test_deactivating_instance_is_silently_dropped(self):
-        from app.models.instance_status import InstanceStatus
+        from app.lifecycle.state import InstanceStatus
 
         self._set_status(InstanceStatus.DEACTIVATING)
         self._assert_silent_drop(InstanceStatus.DEACTIVATING, "deactivating")
 
     def test_grace_window_instance_is_silently_dropped(self):
-        from app.models.instance_status import InstanceStatus
+        from app.lifecycle.state import InstanceStatus
 
         self._set_status(InstanceStatus.GRACE_WINDOW)
         self._assert_silent_drop(InstanceStatus.GRACE_WINDOW, "grace_window")
@@ -268,7 +268,7 @@ class TestChannelLifecycleGate(unittest.TestCase):
             InstanceContext,
             check_instance_lifecycle,
         )
-        from app.models.instance_status import InstanceStatus
+        from app.lifecycle.state import InstanceStatus
 
         ctx = InstanceContext(
             admin_id=self.admin_id, instance_id=self.instance.id, session_id=None

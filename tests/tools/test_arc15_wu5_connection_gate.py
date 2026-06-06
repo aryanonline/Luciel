@@ -84,11 +84,17 @@ def _build_sqlite_session():
         ),
         Column("connection_type", String(32), nullable=False),
         Column("provider", String(64), nullable=False),
-        Column("config_json", String, nullable=True),
-        Column("credential_ref", String(255), nullable=True),
+        Column("non_secret_config", String, nullable=True),
+        Column("secret_ref", String(255), nullable=True),
         Column(
             "status", String(32),
             nullable=False, server_default="unconfigured",
+        ),
+        # §3.8.5 (Unit 13c): credential-shape class, NOT NULL on the live
+        # table; the repository derives it via auth_class_for at configure.
+        Column(
+            "auth_class", String(32),
+            nullable=False, server_default="api_key",
         ),
         Column("last_health_check_at", DateTime(timezone=True), nullable=True),
         Column(
@@ -130,7 +136,7 @@ def _seed_admin_instance(session, *, admin_id: str, instance_id: int) -> None:
 def _seed_connection(
     session, *, admin_id: str, instance_id: int, connection_type: str, status: str
 ) -> None:
-    from app.repositories.instance_connection_repository import (
+    from app.connections.repository import (
         InstanceConnectionRepository,
     )
 
@@ -140,7 +146,7 @@ def _seed_connection(
         connection_type=connection_type,
         provider="test_provider",
         status=status,
-        config_json={"store_ref": "s3://x"} if status == "connected" else None,
+        non_secret_config={"store_ref": "s3://x"} if status == "connected" else None,
         last_health_check_at=datetime.now(timezone.utc),
     )
 

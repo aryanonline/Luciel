@@ -49,10 +49,10 @@
 #     pull_request:
 #       paths:
 #         - app/api/v1/chat_widget.py
-#         - app/api/v1/admin.py
+#         - app/api/v1/admin/**
 #         - app/api/widget_deps.py
 #         - app/middleware/auth.py
-#         - app/policy/moderation.py
+#         - app/runtime/input_safety.py
 #         - app/core/config.py
 #         - app/services/scope_prompt_preflight.py
 #         - app/integrations/llm/**
@@ -107,17 +107,17 @@ on:
     # `widget/**` exclusions are redundant under an allowlist).
     paths:
       - app/api/v1/chat_widget.py
-      - app/api/v1/admin.py
+      - app/api/v1/admin/**
       - app/api/widget_deps.py
       - app/middleware/auth.py
-      - app/policy/moderation.py
+      - app/runtime/input_safety.py
       - app/core/config.py
       - app/services/scope_prompt_preflight.py
       - app/integrations/llm/**
       - app/models/admin.py
       - app/models/instance.py
       - app/models/api_key.py
-      - alembic/versions/**
+      - app/migrations/versions/**
       - scripts/bootstrap_platform_admin_ci.py
       - ci/e2e/**
       - .github/workflows/widget-e2e.yml

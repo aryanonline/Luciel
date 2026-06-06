@@ -101,7 +101,9 @@ class PushToCrmTool(LucielTool):
 
     @property
     def requires_tier(self) -> tuple[str, ...]:
-        return ("pro", "enterprise")
+        # Action tools are Pro-only; Enterprise tier deferred
+        # (Open Decision #8 -- ratified 2-tier Free/Pro model).
+        return ("pro",)
 
     @property
     def execution_mode(self) -> str:
@@ -165,7 +167,7 @@ class PushToCrmTool(LucielTool):
         # configured AND the master live-switch is on. Loads the connected
         # crm row, refreshes the stored OAuth token, and POSTs the record.
         # Never reached in dev / CI / test.
-        from app.repositories.instance_connection_repository import (
+        from app.connections.repository import (
             InstanceConnectionRepository,
         )
 
@@ -182,7 +184,7 @@ class PushToCrmTool(LucielTool):
             instance_id=context.instance_id,
             connection_type="crm",
         )
-        if row is None or not row.credential_ref:
+        if row is None or not row.secret_ref:
             return {
                 "success": False,
                 "output": (
@@ -193,7 +195,7 @@ class PushToCrmTool(LucielTool):
 
         store = get_secret_store(settings)
         try:
-            refresh_token = store.get(row.credential_ref)
+            refresh_token = store.get(row.secret_ref)
             tokens = provider.refresh(refresh_token=refresh_token)
         except (SecretStoreError, OAuthError) as exc:
             return {

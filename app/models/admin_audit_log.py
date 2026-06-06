@@ -321,26 +321,20 @@ ACTION_PILOT_REFUND_EMAIL_SEND_FAILED = "pilot_refund_email_send_failed"
 #   after_json carries {signal, gate, channel, to, attempts, last_error,
 #   idempotency_key}. resource_type = RESOURCE_ESCALATION_EVENT.
 #
-# ACTION_ESCALATION_CHAIN_STEP
-#   Emitted by the Enterprise chain walker on every step transition:
-#   step notified -> SLA started, SLA timeout -> step advanced, ack
-#   received -> chain resolved. after_json carries {signal, session_id,
-#   step, contact, chain_action, timestamp}.
-#
 # ACTION_ESCALATION_ACKED
-#   Emitted when an Enterprise escalation chain is acknowledged (dashboard
-#   open/read OR explicit "I'm on it"). Chain stops. after_json carries
-#   {signal, gate, session_id, step, acked_by}.
+#   §3.5.5: emitted when an escalation is acknowledged (dashboard open
+#   OR explicit "I'm on it"). The delivery_status transitions to 'acked'.
+#   after_json carries {event_id, session_id, signal, gate, actor_user_id}.
 #
-# ACTION_ESCALATION_CHAIN_END_FALLBACK
-#   Emitted when the Enterprise chain is exhausted without acknowledgement.
-#   Falls back to admin_owner email. after_json carries {signal, gate,
-#   session_id, chain_length, fallback_email}.
+# ACTION_ESCALATION_OWNER_FALLBACK
+#   §3.5.5: "Owner fallback invoked" — emitted when all configured
+#   channels fail and delivery falls back to the account-owner email.
+#   after_json carries {signal, gate, channel:"email", to:owner_email,
+#   original_channel, fallback:True, event_id}.
 ACTION_ESCALATION_NOTIFICATION_SENT = "escalation_notification_sent"
 ACTION_ESCALATION_DELIVERY_FAILED = "escalation_delivery_failed"
-ACTION_ESCALATION_CHAIN_STEP = "escalation_chain_step"
 ACTION_ESCALATION_ACKED = "escalation_acked"
-ACTION_ESCALATION_CHAIN_END_FALLBACK = "escalation_chain_end_fallback"
+ACTION_ESCALATION_OWNER_FALLBACK = "escalation_owner_fallback"
 
 # Arc 18 -- conversation-budget metering (§3.4.1b).
 # ACTION_BUDGET_EXHAUSTED: a Free instance hit its per-instance
@@ -367,7 +361,8 @@ ACTION_OVERAGE_REPORTED = "overage_reported"
 #            or 'admin_initiated' (admin dashboard action).
 #   after_json carries {session_id, resolved_lead_id, instance_id,
 #   actor_user_id, trigger, channel}.
-#   resource_type = RESOURCE_SESSION; resource_pk = sessions.id;
+#   resource_type = RESOURCE_SESSION; resource_pk = None (sessions.id is a
+#   36-char UUID string, NOT the integer resource_pk column);
 #   resource_natural_id = sessions.id.
 #
 # ACTION_HUMAN_TAKEOVER_ENDED — a session transitioned back from
@@ -378,6 +373,20 @@ ACTION_OVERAGE_REPORTED = "overage_reported"
 #   {session_id, actor_user_id, duration_seconds}.
 ACTION_HUMAN_TAKEOVER_STARTED = "human_takeover_started"
 ACTION_HUMAN_TAKEOVER_ENDED = "human_takeover_ended"
+
+# Unit 13e §3.4.8 — a session was finalized (ended + summarized) because
+# its channel-class inactivity timeout elapsed. Emitted by the session
+# sweep (app.worker.tasks.session_sweep) for each session it finalizes.
+# resource_type = RESOURCE_SESSION; resource_natural_id = sessions.id.
+# after_json carries {session_id, channel, channel_class,
+# timeout_seconds, resolved_lead_id, idle_seconds}.
+ACTION_SESSION_FINALIZED_INACTIVITY = "session_finalized_inactivity"
+
+# Unit 13e §3.4.10 — the retention worker hard-deleted a data row (a
+# transcript/session, a summary, or a lead) because its tier-resolved
+# retention TTL elapsed. Emitted on EACH hard-delete. after_json carries
+# {data_class, resolved_lead_id, retention_policy_applied, deleted_at}.
+ACTION_DATA_RETENTION_HARD_DELETE = "data_retention_hard_delete"
 
 # Step 30a.2 -- retention worker hard-purge action. See ALLOWED_ACTIONS
 # entry for full rationale. Defined here (above ALLOWED_ACTIONS) so the
@@ -690,6 +699,20 @@ ACTION_ESCALATION_FIRED = "escalation_fired"
 #   a lead row carries customer contact/PII the operator can act on.
 ACTION_LEAD_CAPTURED = "lead_captured"
 
+# Unit 13d (§3.9) — admin records a lead's sales outcome.
+#
+# ACTION_LEAD_OUTCOME_SET -- emitted by PATCH /api/v1/admin/leads/{id}/
+#   outcome when the admin sets/changes a lead's ``outcome`` (converted /
+#   lost / in_progress). This is the ONLY write path the §3.9 Analytics
+#   unit adds, and it writes lead BUSINESS data the admin owns (not
+#   analytics data — analytics itself stays read-only). Distinct from
+#   ACTION_LEAD_CAPTURED (cognition writing the row) — this is the
+#   operator working the lead afterward. before_json carries
+#   {outcome: <old-or-null>}; after_json carries {outcome: <new>}.
+#   resource_type = RESOURCE_LEAD; resource_pk = leads.id;
+#   resource_natural_id = the session_id.
+ACTION_LEAD_OUTCOME_SET = "lead_outcome_set"
+
 # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
 #
 # ACTION_PERSONALITY_UPDATED -- a user changed an Instance's structured
@@ -751,7 +774,7 @@ ACTION_PERSONALITY_REJECTED = "personality_rejected"
 # ACTION_CONNECTION_CONFIGURED -- a user configured (created) an
 #   external-system connection for an Instance via the connections admin
 #   API (POST). after_json carries {connection_type, provider, status}
-#   — NEVER config_json secrets (config_json holds non-secret config
+#   — NEVER non_secret_config secrets (non_secret_config holds non-secret config
 #   only, and the audit row records the connection's shape, not its
 #   payload). resource_type = RESOURCE_INSTANCE_CONNECTION; resource_pk
 #   = instance_connections.id; resource_natural_id =
@@ -785,7 +808,7 @@ ACTION_CONNECTION_DISCONNECTED = "connection_disconnected"
 #   NOT by an explicit operator DELETE. Distinct from
 #   ACTION_CONNECTION_DISCONNECTED so an auditor can tell an operator
 #   teardown apart from an automatic lifecycle cascade. before_json
-#   carries {connection_type, status, had_credential_ref}; after_json
+#   carries {connection_type, status, had_secret_ref}; after_json
 #   carries {revoked_at, secret_cleanup_enqueued, cascade_source}.
 ACTION_CONNECTION_REFRESHED = "connection_refreshed"
 ACTION_CONNECTION_TOKEN_REFRESHED = "connection_token_refreshed"
@@ -802,15 +825,33 @@ ACTION_CONNECTION_REVOKED = "connection_revoked"
 #   actual connect that the callback performs.
 # ACTION_CONNECTION_OAUTH_CONNECTED -- the OAuth callback exchanged a real
 #   auth code with the provider, stored the refresh token via the
-#   SecretStore (pointer persisted into credential_ref), and flipped the
+#   SecretStore (pointer persisted into secret_ref), and flipped the
 #   row to 'connected'. The actor is resolved OFF THE VERIFIED STATE (the
 #   callback has no session cookie). after_json carries {connection_type,
-#   provider, status, credential_ref_present} — NEVER the token value.
+#   provider, status, secret_ref_present} — NEVER the token value.
 #   Distinct from ACTION_CONNECTION_CONFIGURED so a dashboard can isolate
 #   a real OAuth connect from a CSV/webhook configure. On exchange failure
 #   the same action records status='error' (honest, never fake connected).
 ACTION_CONNECTION_OAUTH_INITIATED = "connection_oauth_initiated"
 ACTION_CONNECTION_OAUTH_CONNECTED = "connection_oauth_connected"
+
+# Unit 13c (§3.8.5) — connection status transition audit.
+#
+# ACTION_CONNECTION_STATUS_CHANGED -- emitted whenever a connection row's
+#   ``status`` transitions from one value to another along a connect /
+#   refresh / health-check path (e.g. unconfigured→connected on an OAuth
+#   callback, connected→expired on a refresh-token rejection). Distinct
+#   from ACTION_CONNECTION_OAUTH_CONNECTED / ACTION_CONNECTION_TOKEN_REFRESHED
+#   (which capture the OPERATION) so an auditor can reconstruct the
+#   status TIMELINE of a connection by filtering this verb alone.
+#   before_json carries {status: <old>}; after_json carries
+#   {connection_type, auth_class, status: <new>, notify_admin}. The
+#   ``notify_admin`` flag is True on a refresh-fail→expired transition
+#   (§3.8.5: the admin must be told to reconnect) — it is a documented
+#   seam: the connection-health notification channel is deploy-phase, so
+#   the marker records the INTENT in the audit trail without a delivery
+#   leg. resource_type = RESOURCE_INSTANCE_CONNECTION.
+ACTION_CONNECTION_STATUS_CHANGED = "connection_status_changed"
 
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
@@ -865,14 +906,8 @@ ALLOWED_ACTIONS = (
     # + table manifest belongs in a structurally distinct action so
     # dashboards can tell them apart at-a-glance.
     ACTION_TENANT_HARD_PURGED,
-    # Step 30a.4 -- first-class invite lifecycle for Team and Company tiers.
-    ACTION_USER_INVITED,
-    ACTION_INVITE_REDEEMED,
-    ACTION_INVITE_RESENT,
-    ACTION_INVITE_REVOKED,
-    # Step 30a.5 -- Company-tier Domain self-serve verbs.
-    ACTION_DOMAIN_CREATED,
-    ACTION_DOMAIN_DEACTIVATED,
+    # Step 30a.4 invite lifecycle: DEFERRED (Unit 1 excision) — single-owner, no invites.
+    # Step 30a.5 domain lifecycle: DEFERRED (Unit 1 excision) — Company tier not launched.
     # Arc 8 WU-6 -- SES feedback / suppression cohort.
     ACTION_EMAIL_SUPPRESSION_RECORDED,
     ACTION_EMAIL_SUPPRESSION_CLEARED,
@@ -920,27 +955,14 @@ ALLOWED_ACTIONS = (
     ACTION_INSTANCE_DELETED,
     ACTION_INSTANCE_RESTORED,
     ACTION_INSTANCE_HARD_PURGED,
-    # Arc 12 WU4 -- sibling-Luciel composition grant lifecycle.
-    ACTION_SIBLING_GRANT_AUTHORED,
-    ACTION_SIBLING_GRANT_APPROVED,
-    ACTION_SIBLING_GRANT_REJECTED,
-    ACTION_SIBLING_GRANT_REVOKED,
+    # Arc 12 WU4 sibling grants: DEFERRED (Unit 1 excision) — sibling model deleted.
     # Arc 12 WU2b -- per-instance tool authorization admin API.
     ACTION_TOOL_AUTHORIZED,
     ACTION_TOOL_REVOKED,
-    # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
-    ACTION_SIBLING_ACCESS,
+    # Arc 12 WU5 sibling dispatch: DEFERRED (Unit 1 excision) — sibling model deleted.
     # Arc 12 EX4 -- one-time audit-chain reseal.
     ACTION_AUDIT_CHAIN_RESEALED,
-    # Arc 12b -- Enterprise custom-role authoring lifecycle.
-    ACTION_CUSTOM_ROLE_AUTHORED,
-    ACTION_CUSTOM_ROLE_UPDATED,
-    ACTION_CUSTOM_ROLE_REVOKED,
-    ACTION_USER_ROLE_ASSIGNED,
-    ACTION_USER_ROLE_REVOKED,
-    # Rescan Tier-B -- custom-role second-admin approval workflow (§3.7.3).
-    ACTION_ROLE_APPROVAL_REQUIRED,
-    ACTION_ROLE_APPROVED,
+    # Arc 12b custom-role + role assignment: DEFERRED (Unit 1 excision) — single-owner model.
     # Arc 13 — channel adapters (email + SMS).
     ACTION_CHANNEL_ENABLED,
     ACTION_CHANNEL_DISABLED,
@@ -954,18 +976,19 @@ ALLOWED_ACTIONS = (
     # Rescan Tier-C — §3.5 escalation delivery layer.
     ACTION_ESCALATION_NOTIFICATION_SENT,
     ACTION_ESCALATION_DELIVERY_FAILED,
-    ACTION_ESCALATION_CHAIN_STEP,
+    # Unit 9 — §3.5.5 audit-vocabulary alignment: chain_step/chain_end_fallback
+    # removed (Enterprise chains deferred, Unit 1). acked + owner_fallback are
+    # current §3.5.5 events and ARE wired here.
     ACTION_ESCALATION_ACKED,
-    ACTION_ESCALATION_CHAIN_END_FALLBACK,
+    ACTION_ESCALATION_OWNER_FALLBACK,
     # Arc 14 U4 — §3.4.4 lead capture cognition.
     ACTION_LEAD_CAPTURED,
+    # Unit 13d — §3.9 admin lead-outcome recording.
+    ACTION_LEAD_OUTCOME_SET,
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
     ACTION_PERSONALITY_UPDATED,
     ACTION_ESCALATION_CONFIG_UPDATED,
-    # Rescan ENT — Enterprise personality second-admin approval (Vision §7).
-    ACTION_PERSONALITY_SUBMITTED,
-    ACTION_PERSONALITY_APPROVED,
-    ACTION_PERSONALITY_REJECTED,
+    # Personality submit/approve/reject: DEFERRED (Unit 1 excision) — approval workflow removed.
     # Arc 15 WU4 — Arc 17 connection-contract slice (§3.8.2).
     ACTION_CONNECTION_CONFIGURED,
     ACTION_CONNECTION_DISCONNECTED,
@@ -976,6 +999,8 @@ ALLOWED_ACTIONS = (
     # Arc 17 — OAuth callback completion (initiate + callback endpoints).
     ACTION_CONNECTION_OAUTH_INITIATED,
     ACTION_CONNECTION_OAUTH_CONNECTED,
+    # Unit 13c (§3.8.5) — connection status transition timeline.
+    ACTION_CONNECTION_STATUS_CHANGED,
     # Arc 18 — conversation-budget metering, overage billing (§3.4.1b).
     ACTION_BUDGET_EXHAUSTED,
     ACTION_BUDGET_ALERT_SENT,
@@ -983,6 +1008,9 @@ ALLOWED_ACTIONS = (
     # Rescan Tier-C §3.4.12 — human-controlled session handoff events.
     ACTION_HUMAN_TAKEOVER_STARTED,
     ACTION_HUMAN_TAKEOVER_ENDED,
+    # Unit 13e §3.4.8 / §3.4.10
+    ACTION_SESSION_FINALIZED_INACTIVITY,
+    ACTION_DATA_RETENTION_HARD_DELETE,
 )
 
 
@@ -1113,6 +1141,11 @@ RESOURCE_ESCALATION_EVENT = "escalation_event"
 # conversation" with a single filter.
 RESOURCE_LEAD = "lead"
 
+# Unit 13e — §3.4.10 persisted session-summary store. The auditable
+# resource for the retention worker's summary-TTL hard-delete.
+# resource_natural_id = session_summaries.session_id.
+RESOURCE_SESSION_SUMMARY = "session_summary"
+
 # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1). Both target
 # the instances row but carry distinct resource types so an auditor can
 # isolate persona-voice changes from escalation-contact changes at the
@@ -1178,6 +1211,8 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_ESCALATION_EVENT,
     # Arc 14 U4 — lead capture cognition.
     RESOURCE_LEAD,
+    # Unit 13e — §3.4.10 persisted session-summary store.
+    RESOURCE_SESSION_SUMMARY,
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
     RESOURCE_INSTANCE_PERSONALITY,
     RESOURCE_INSTANCE_ESCALATION,

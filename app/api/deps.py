@@ -23,9 +23,9 @@ from app.db.instance_context import (
     reset_current_instance_id,
     set_current_instance_id,
 )
-from app.integrations.llm.router import ModelRouter
+from app.runtime.llm_router import ModelRouter
 from app.knowledge.ingestion import IngestionService
-from app.knowledge.retriever import KnowledgeRetriever
+from app.runtime.knowledge_retrieval import KnowledgeRetriever
 from app.memory.service import MemoryService
 from app.repositories.config_repository import ConfigRepository
 from app.repositories.knowledge_repository import KnowledgeRepository

@@ -445,9 +445,9 @@ def test_chat_service_luciel_context_is_admin_instance_only() -> None:
     assert "business_context_stanza" in field_names
 
 
-def test_registry_has_exactly_the_eight_catalog_tools() -> None:
-    """After WU7, the tool registry holds exactly the 8 §3.3.2
-    configurable tools — the cognition tools have been evicted."""
+def test_registry_has_exactly_the_seven_catalog_tools() -> None:
+    """After WU7 + Unit 1 excision, the tool registry holds exactly the 7
+    configurable tools (call_sibling_luciel removed — multi-Luciel deferred)."""
 
     from app.tools.registry import ToolRegistry
 
@@ -459,11 +459,11 @@ def test_registry_has_exactly_the_eight_catalog_tools() -> None:
         "lookup_record",
         "schedule_callback",
         "push_to_crm",
-        "call_sibling_luciel",
+        # call_sibling_luciel removed (Unit 1 excision — multi-Luciel deferred).
         "bring_your_own_webhook",
     }
     assert ids == expected, (
-        f"Registry mismatch — expected exactly the 8 catalog tools. "
+        f"Registry mismatch — expected exactly the 7 catalog tools. "
         f"Got {ids!r}; expected {expected!r}"
     )
     assert "escalate_to_human" not in ids

@@ -35,21 +35,23 @@ ADMIN_SERVICE_PATH = REPO_ROOT / "app" / "services" / "admin_service.py"
 # docstring at AdminService.deactivate_tenant_with_cascade. Pinning as a
 # tuple here so this file is the authoritative executable mirror.
 #
-# Arc 10 Gap 7 prune: layers 6 (`agents`) and 7 (`agent_configs`) were
-# REMOVED because their underlying tables were dropped at
-# arc5_c_admin_instance_subtractive (Arc 5 Path A). They never executed
-# successfully in production; the route that called them crashed at
-# import time with ModuleNotFoundError on the deleted AgentRepository.
+# Arc 10 Gap 7 prune: pre-Arc-10 layers 6 (`agents`) and 7
+# (`agent_configs`) were REMOVED because their tables were dropped.
+#
+# Unit 1 (audit-and-alignment): layers 6 (`scope_assignments`),
+# 7 (`user_invites`) and 9 (`synthetic_orphan_users`) were REMOVED
+# because those tables were dropped under the single-login model
+# (Locked Decision #19; invites deferred, Open Decision #7). The
+# surviving canonical layers are listed below; access revocation for
+# the single account_owner is governed by the admins row (layer 10)
+# plus live-session revocation (layer 8).
 CANONICAL_CASCADE_LAYERS: tuple[tuple[int, str], ...] = (
     (1, "conversations"),
     (2, "identity_claims"),
     (3, "memory_items"),
     (4, "api_keys"),
     (5, "instances"),
-    (6, "scope_assignments"),
-    (7, "user_invites"),
     (8, "sessions"),
-    (9, "synthetic_orphan_users"),
     (10, "tenant_config"),
 )
 

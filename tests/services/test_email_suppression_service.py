@@ -40,13 +40,13 @@ EVENT_MODEL_PATH = REPO_ROOT / "app" / "models" / "email_send_event.py"
 AUDIT_LOG_PATH = REPO_ROOT / "app" / "models" / "admin_audit_log.py"
 MIGRATION_SUPPRESSION_PATH = (
     REPO_ROOT
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "b2e5f17a3d9c_arc8_wu6_email_suppression.py"
 )
 MIGRATION_EVENT_PATH = (
     REPO_ROOT
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "a91c4d2e7f08_arc8_wu6_email_send_event.py"
 )

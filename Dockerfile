@@ -47,7 +47,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy project files
 COPY pyproject.toml .
 COPY app/ app/
-COPY alembic/ alembic/
 COPY alembic.ini .
 COPY scripts/ scripts/
 

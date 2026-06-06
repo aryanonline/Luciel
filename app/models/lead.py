@@ -42,6 +42,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
@@ -52,6 +53,22 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
+
+# --- §3.9 conversion outcome literals (Unit 13d) ---
+# The lead's sales outcome, set by the admin who works the lead. NULL is
+# the default (not yet worked); the three terminal/in-flight values feed
+# the §3.9 conversion-rate metric. Kept as module constants so the model
+# CHECK constraint, the migration, the outcome endpoint, and the
+# AnalyticsService conversion query share one vocabulary.
+OUTCOME_CONVERTED = "converted"
+OUTCOME_LOST = "lost"
+OUTCOME_IN_PROGRESS = "in_progress"
+
+ALLOWED_LEAD_OUTCOMES: frozenset[str] = frozenset({
+    OUTCOME_CONVERTED,
+    OUTCOME_LOST,
+    OUTCOME_IN_PROGRESS,
+})
 
 
 class Lead(Base, TimestampMixin):
@@ -103,7 +120,22 @@ class Lead(Base, TimestampMixin):
     # --- §3.4.7 structured summary persisted alongside the lead ---
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # --- §3.9 conversion outcome (Unit 13d) ---
+    # The sales outcome the admin records for this lead. NULL = not yet
+    # worked (the capture default); the §3.9 conversion-rate metric reads
+    # this column. Set ONLY by the admin via PATCH .../outcome — capture
+    # never writes it. The DB CHECK pins the three-value vocabulary (or
+    # NULL) as the honesty backstop.
+    outcome: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+
     __table_args__ = (
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN "
+            "('converted', 'lost', 'in_progress')",
+            name="ck_leads_outcome_valid",
+        ),
         Index(
             "ix_leads_tenant_time",
             "admin_id",

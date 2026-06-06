@@ -11,9 +11,9 @@ creds.
 
 The ``store_ref`` is an ``s3://bucket/key`` URI. The bucket/key carry
 NO secret — they are a non-secret storage location held in the
-connection's ``config_json.store_ref`` (Architecture §3.2 / §3.8.2). Any
+connection's ``non_secret_config.store_ref`` (Architecture §3.2 / §3.8.2). Any
 credential needed to read the object (if ever) rides behind
-``credential_ref`` via the SecretStore — never config_json. In this
+``secret_ref`` via the SecretStore — never non_secret_config. In this
 build the object is a plain CSV needing only the task role's S3 grant.
 """
 from __future__ import annotations

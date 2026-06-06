@@ -28,6 +28,28 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from starlette.requests import Request
+
+
+def _make_platform_admin_request() -> Request:
+    """Build a real Starlette Request whose .state carries
+    platform_admin permissions and no admin_id. The slowapi
+    @limiter.limit decorator on internal_retrieve requires a real
+    Request instance -- a SimpleNamespace is rejected (mirrors the
+    helper in tests/api/test_internal_retrieve.py)."""
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/internal/v1/retrieve",
+        "headers": [(b"host", b"test")],
+        "query_string": b"",
+        "client": ("127.0.0.1", 0),
+    }
+    req = Request(scope)
+    req.state.permissions = ["platform_admin"]
+    req.state.admin_id = None
+    return req
+
 
 _PG_URL = os.environ.get("LUCIEL_LIVE_POSTGRES_URL")
 
@@ -53,11 +75,11 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
             for aid in (cls.admin_a, cls.admin_b):
                 cur.execute(
                     """
-                    INSERT INTO admins (id, email, tier, active)
-                    VALUES (%s, %s, 'free', true)
+                    INSERT INTO admins (id, name, tier, tier_source, active)
+                    VALUES (%s, %s, 'free', 'free_signup', true)
                     ON CONFLICT (id) DO NOTHING
                     """,
-                    (aid, f"{aid}@example.test"),
+                    (aid, f"luciel-{aid}"),
                 )
 
             # Seed instances + sources + chunks for both admins.
@@ -65,7 +87,7 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
             cls.source_pks: dict[str, int] = {}
             for aid in (cls.admin_a, cls.admin_b):
                 cur.execute(
-                    "SET LOCAL app.admin_id = %s", (aid,),
+                    "SELECT set_config('app.admin_id', %s, false)", (aid,),
                 )
                 cur.execute(
                     """
@@ -116,7 +138,7 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
     def tearDownClass(cls) -> None:
         with cls.conn.cursor() as cur:
             for aid in (cls.admin_a, cls.admin_b):
-                cur.execute("SET LOCAL app.admin_id = %s", (aid,))
+                cur.execute("SELECT set_config('app.admin_id', %s, false)", (aid,))
                 cur.execute(
                     "DELETE FROM knowledge_chunks WHERE admin_id = %s", (aid,),
                 )
@@ -150,12 +172,7 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
         )
         SessionLocal = sessionmaker(bind=engine, future=True)
 
-        platform_admin_request = SimpleNamespace(
-            state=SimpleNamespace(
-                permissions=["platform_admin"],
-                admin_id=None,
-            )
-        )
+        platform_admin_request = _make_platform_admin_request()
 
         try:
             with SessionLocal() as session:
@@ -210,9 +227,7 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
         )
         SessionLocal = sessionmaker(bind=engine, future=True)
 
-        platform_admin_request = SimpleNamespace(
-            state=SimpleNamespace(permissions=["platform_admin"], admin_id=None)
-        )
+        platform_admin_request = _make_platform_admin_request()
 
         try:
             with SessionLocal() as session:

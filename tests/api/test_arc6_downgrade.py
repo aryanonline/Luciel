@@ -111,12 +111,13 @@ class TestDowngradeSchemaShape:
         # Defensive: trialing subs without a current_period_end land
         # here as None and the frontend renders "end of period" as a
         # fall-back label. The schema must accept the null.
+        # Enterprise removed (Unit 1 excision); use pro -> free.
         from app.schemas.billing import DowngradeResponse
 
         r = DowngradeResponse(
             admin_id="adm-12345678",
-            old_tier="enterprise",
-            target_tier="pro",
+            old_tier="pro",
+            target_tier="free",
             effective_at=None,
             stripe_subscription_id="sub_test_xyz",
         )
@@ -164,12 +165,12 @@ class TestDowngradePreviewSchemaShape:
         assert r.archived_ids == ["7", "9"]
 
     def test_axis_overflow_response_with_null_cap_defensive(self):
-        # Enterprise destination has None cap -- route rejects that
-        # combination but the schema is defensive (cap: int | None).
+        # Enterprise/seats axis removed (Unit 1 excision).
+        # Use embed_keys to verify the defensive null-cap behaviour.
         from app.schemas.billing import AxisOverflowResponse
 
         r = AxisOverflowResponse(
-            axis="seats", cap=None, current=0, overflow=0,
+            axis="embed_keys", cap=None, current=0, overflow=0,
             archived_ids=[],
         )
         assert r.cap is None
@@ -188,6 +189,7 @@ class TestDowngradePreviewSchemaShape:
             AxisOverflowResponse, DowngradePreviewResponse,
         )
 
+        # seats axis removed (Unit 1 excision); use knowledge instead.
         r = DowngradePreviewResponse(
             admin_id="adm-12345678",
             current_tier="pro",
@@ -197,12 +199,12 @@ class TestDowngradePreviewSchemaShape:
                 AxisOverflowResponse(
                     axis=a, cap=0, current=0, overflow=0,
                 )
-                for a in ("instances", "embed_keys", "cnames", "seats")
+                for a in ("instances", "embed_keys", "cnames", "knowledge")
             ],
         )
         assert r.any_overflow is True
         assert [a.axis for a in r.axes] == [
-            "instances", "embed_keys", "cnames", "seats",
+            "instances", "embed_keys", "cnames", "knowledge",
         ]
 
 
@@ -297,15 +299,12 @@ class TestDowngradeServiceSignaturePins:
 
     def test_archive_service_axis_constants(self):
         from app.services.downgrade_archive_service import (
-            AXIS_CNAMES, AXIS_EMBED_KEYS, AXIS_INSTANCES, AXIS_SEATS,
+            AXIS_CNAMES, AXIS_EMBED_KEYS, AXIS_INSTANCES,
         )
-
-        # Pin the string values -- the frontend hard-codes these row
-        # labels in the soft-warn modal.
+        # AXIS_SEATS removed (Unit 1 excision — single-owner model, no multi-seat).
         assert AXIS_INSTANCES == "instances"
         assert AXIS_EMBED_KEYS == "embed_keys"
         assert AXIS_CNAMES == "cnames"
-        assert AXIS_SEATS == "seats"
 
     def test_stripe_client_exposes_schedule_cancellation(self):
         from app.integrations.stripe.client import StripeClient
@@ -373,16 +372,9 @@ class TestDowngradeAuditConstants:
         assert ACTION_SUBSCRIPTION_DOWNGRADE_APPLIED in ALLOWED_ACTIONS
 
     def test_end_reason_downgrade_overflow_archive(self):
-        from app.models.scope_assignment import EndReason
-
-        # The webhook archive path ends seat assignments with this
-        # reason so audit queries can isolate downgrade-driven seat
-        # ends from explicit owner removals.
-        assert hasattr(EndReason, "DOWNGRADE_OVERFLOW_ARCHIVE")
-        assert (
-            EndReason.DOWNGRADE_OVERFLOW_ARCHIVE.value
-            == "DOWNGRADE_OVERFLOW_ARCHIVE"
-        )
+        # scope_assignment model removed (Unit 1 excision — multi-seat/RBAC deferred).
+        # EndReason.DOWNGRADE_OVERFLOW_ARCHIVE is no longer applicable.
+        pass
 
 
 # ---------------------------------------------------------------------

@@ -46,8 +46,8 @@ os.environ.setdefault("OPENAI_API_KEY", "dummy")
 from app.channels.base import InactiveInstanceDrop
 from app.integrations.llm.base import LLMResponse
 from app.runtime.budget_ack import budget_exhausted_acknowledgement
-from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
-from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY
+from app.billing.metering import BudgetMeter, InMemoryBackend
+from app.runtime.handoff import CANNOT_ANSWER_REPLY
 from app.services.chat_service import ChatService
 
 
@@ -149,7 +149,7 @@ class _ScriptedRouter:
         self._model = model
         self.calls = []
 
-    def generate(self, request, *, preferred_provider=None):
+    def generate(self, request, *, preferred_provider=None, **kwargs):
         idx = min(len(self.calls), len(self._contents) - 1)
         self.calls.append(request)
         return LLMResponse(
@@ -325,7 +325,7 @@ class _LivePath:
             p(patch("app.db.session.SessionLocal", side_effect=_FakeDB))
         if self.meter is not None:
             p(patch(
-                "app.runtime.budget_meter.BudgetMeter",
+                "app.billing.metering.BudgetMeter",
                 return_value=self.meter,
             ))
         for patcher in self._patches:
@@ -360,12 +360,14 @@ class TestLifecycleGateLivePath(unittest.TestCase):
         roles = [m.role for m in svc.session_service.added]
         self.assertEqual(roles, ["user"])
 
-    def test_inactive_downgraded_instance_no_response_no_llm(self):
-        # GAP-5: a Pro→Free downgrade sets instance_status='inactive'.
-        # The same lifecycle gate treats it as non-active.
+    def test_nonactive_grace_window_instance_no_response_no_llm(self):
+        # The lifecycle gate drops ANY non-active instance state. Unit 4
+        # removed the non-spec 'inactive' state; ``grace_window`` is a
+        # spec-valid non-active state (§3.6.1) and must be gated
+        # identically (no response, no LLM call).
         router = _ScriptedRouter([_plan_json(reply="SHOULD NOT RUN")])
         svc = _make_chat_service(router=router)
-        drop = InactiveInstanceDrop(instance_id=7, status="inactive")
+        drop = InactiveInstanceDrop(instance_id=7, status="grace_window")
         with _LivePath(lifecycle_drop=drop):
             reply = svc.respond(session_id="s", message="hi")
         self.assertEqual(reply, "")

@@ -89,7 +89,7 @@ class Settings(BaseSettings):
 
     # --- Content-safety moderation gate (Step 30d Deliverable B) ---
     # Provider-agnostic moderation runs on every widget chat turn
-    # BEFORE the LLM call. See app/policy/moderation.py for the
+    # BEFORE the LLM call. See app/runtime/input_safety.py for the
     # provider abstraction and ARCHITECTURE.md §3.3 step 6.5 for the
     # design statement.
     #
@@ -154,8 +154,20 @@ class Settings(BaseSettings):
     # WARNING on construction so a misconfigured deploy is observable
     # in the application log stream the first time the module is
     # imported. Parallel discipline to NullModerationProvider /
-    # empty-list KeywordModerationProvider in app/policy/moderation.py.
+    # empty-list KeywordModerationProvider in app/runtime/input_safety.py.
     enable_stub_llm_provider: bool = False
+
+    # --- Hermetic stub embedding provider (Unit 10) ---
+    # When True, app.knowledge.embedder.embed_texts returns
+    # deterministic stub vectors (seeded from sha256 of each text)
+    # instead of calling OpenAI. Mirrors enable_stub_llm_provider:
+    # it exists so the two carried arc11 internal-retrieve live tests
+    # can run hermetically with no network call. The embedder emits a
+    # WARNING the first time the stub path runs so a production deploy
+    # that flips this flag is observable in the log stream.
+    #
+    # MUST be False in production so real OpenAI embeddings are used.
+    enable_stub_embedding_provider: bool = False
 
     # --- Retention purge batching (Step 28 Phase 2 Commit 8) ---
     # Retention purges run as a sequence of bounded DELETE/UPDATE
@@ -257,14 +269,9 @@ class Settings(BaseSettings):
     # --- Pro tier recurring Prices (flat-rate, self-serve via Checkout). ---
     stripe_price_pro_monthly: str = ""
     stripe_price_pro_annual: str = ""
-    # --- Enterprise tier recurring Prices (flat-rate, self-serve via
-    # Checkout — symmetric with Pro since Arc 7 Commit 1 retired the
-    # hybrid/metered shape). $2,800 CAD/mo or $24,000 CAD/yr (28.6%
-    # annual discount). Empty defaults
-    # keep boot safe: a missing slot causes the (enterprise, *) row in
-    # ``PRICE_ID_KEY`` to resolve to BillingNotConfiguredError → 501. ---
-    stripe_price_enterprise_monthly: str = ""
-    stripe_price_enterprise_annual: str = ""
+    # Enterprise tier recurring Price slots removed in Unit 1
+    # (Enterprise deferred -- Open Decision #8). The ratified model
+    # ships Free + Pro only.
     # --- Arc 18 (§3.4.1b) conversation-overage metered Prices. ---
     # The per-instance overage add-on billed at cycle close. These are
     # METERED (usage-record) Prices, distinct from the flat-rate recurring
@@ -273,12 +280,12 @@ class Settings(BaseSettings):
     # see ARC18_BACKEND_REPORT.md "supersedes" note). Founder provisions
     # these Prices in Stripe; the backend NEVER mints them. Resolved per
     # (tier, cadence) by ``entitlements.overage_price_config_key``:
-    #   Pro monthly → $15.00 / 100 conversations (1500 cents)
-    #   Pro annual  → $10.00 / 100 conversations (1000 cents)
-    # Enterprise overage is per-contract (no fixed Price) and is resolved
-    # via admin_tier_overrides, not a config slot. Empty defaults keep boot
-    # safe: a missing slot makes the usage-record report a no-op (the
-    # period still resets) and is surfaced as a documented gap.
+    #   Pro monthly → $35.00 / 100 conversations (3500 cents)
+    #   Pro annual  → $30.00 / 100 conversations (3000 cents)
+    # Empty defaults keep boot safe: a missing slot makes the
+    # usage-record report a no-op (the period still resets) and is
+    # surfaced as a documented gap. (Enterprise per-contract overage
+    # removed in Unit 1 -- Enterprise tier deferred.)
     stripe_price_overage_pro_monthly: str = ""
     stripe_price_overage_pro_annual: str = ""
     # The Stripe Billing Meter ``event_name`` the overage Prices read from.
@@ -289,10 +296,6 @@ class Settings(BaseSettings):
     # usage reporting is a no-op (period still resets). One meter serves
     # both Pro cadences; the (tier,cadence) Price gates the rate.
     stripe_meter_event_overage: str = ""
-    # Enterprise CSM recipient for the 80% budget heads-up (Vision §7:
-    # Enterprise gets a CSM-at-80 copy in addition to the admin email).
-    # Empty default → the CSM copy is skipped (logged, not an error).
-    budget_csm_alert_email: str = ""
     # --- One-time $100 CAD intro fee Price (retained from V1, control). ---
     # Used by BillingService when the buyer's email is first-time-ever
     # (see ``BillingService.is_first_time_customer``). Decoupled from the
@@ -836,11 +839,13 @@ class Settings(BaseSettings):
     # native HubSpot + Salesforce CRM OAuth).
     # -----------------------------------------------------------------
     #
-    # MASTER LIVE-SWITCH for the deferred connectors. Mirrors
-    # channels_live_provisioning_enabled exactly: when False (the
-    # boot-safe default) NO real provider call is ever made — the
-    # email_sender / sms_sender send tools return an HONEST no-op receipt
-    # and the CRM push tool round-trips deferred, so dev / CI / tests can
+    # MASTER LIVE-SWITCH for the deploy-gated connectors (the send/push
+    # code paths are BUILT; this switch gates whether they reach a live
+    # provider). Mirrors channels_live_provisioning_enabled exactly: when
+    # False (the boot-safe default) NO real provider call is ever made —
+    # the email_sender / sms_sender send tools return an HONEST no-op
+    # receipt and the CRM push tool round-trips an honest unconfigured, so
+    # dev / CI / tests can
     # exercise the full code path without billing or hitting any provider.
     # Production flips this True IN LOCKSTEP with the per-connector
     # credentials below landing in SSM. The OAuth client-creds gate

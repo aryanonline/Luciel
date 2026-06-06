@@ -48,7 +48,7 @@ def test_widget_imports_instance_status_enum():
     canonical 'active' member."""
     src = _read()
     assert (
-        "from app.models.instance_status import InstanceStatus" in src
+        "from app.lifecycle.state import InstanceStatus" in src
     ), "chat_widget.py must import InstanceStatus."
 
 

@@ -270,7 +270,7 @@ class _CountingRepo:
     def create_session(
         self, *, session_id, admin_id, user_id,
         channel, status="active", conversation_id=None,
-        luciel_instance_id=None,
+        luciel_instance_id=None, resolved_lead_id=None,
     ):
         # Arc 9.2 PR #99 follow-up 5: SessionRepository.create_session()
         # gained a luciel_instance_id kwarg threaded by SessionService.
@@ -278,6 +278,9 @@ class _CountingRepo:
         # type-error before reaching the contract assertions.
         # Arc 12 EX1b / EX3: agent_id and domain_id are excised from
         # the repository signature (columns dropped from sessions).
+        # Unit 13e §3.4.8: create_session() gained resolved_lead_id (the
+        # session-key participant id); the fake captures it for the
+        # wiring assertion.
         captured = {
             "session_id": session_id,
             "admin_id": admin_id,
@@ -286,6 +289,7 @@ class _CountingRepo:
             "status": status,
             "conversation_id": conversation_id,
             "luciel_instance_id": luciel_instance_id,
+            "resolved_lead_id": resolved_lead_id,
         }
         self.created_sessions.append(captured)
 
@@ -358,6 +362,9 @@ class TestEndToEndWiring:
         sess = repo.created_sessions[0]
         assert isinstance(sess["conversation_id"], uuid.UUID)
         assert sess["user_id"] == str(result.user_id)
+        # Unit 13e §3.4.8: identity-resolved session sets the session-key
+        # participant id to the resolved lead identity (str of User.id).
+        assert sess["resolved_lead_id"] == str(result.user_id)
         assert sess["admin_id"] == "t-1"
         # Arc 12 EX3: sessions.domain_id dropped — assert absence on
         # the repository call payload.

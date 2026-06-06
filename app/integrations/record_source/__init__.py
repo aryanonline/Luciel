@@ -4,7 +4,7 @@
 ``record_source`` connection on every call (Architecture §3.2
 correctness boundary) — it is NOT the knowledge store and is never
 blended with vector / graph retrieval. The connection's non-secret
-``config_json.store_ref`` names WHERE the records live; this package
+``non_secret_config.store_ref`` names WHERE the records live; this package
 resolves that location to a ``RecordSource`` and runs a deterministic,
 domain-agnostic query over the rows.
 

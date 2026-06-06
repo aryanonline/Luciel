@@ -3,26 +3,30 @@
 Two nightly Celery tasks, both running under the BYPASSRLS ops role
 (``OpsSessionLocal``) so a single cross-tenant sweep can process every
 admin's rows without binding ``app.admin_id`` — same posture as
-``app.worker.tasks.instance_retention``.
+``app.lifecycle.retention``.
 
 1. ``run_connection_token_refresh``
-   Re-verifies live (non-revoked) connections via
-   :class:`app.services.connection_health_service.ConnectionHealthService`.
-   The service decides the HONEST status:
-     * LIVE connectors (record_source / outbound_webhook) → config-presence
-       probe → connected / error.
-     * DEFERRED OAuth connectors → silent token refresh. DEPLOY-GATED on
-       OAuth client creds + a stored refresh token; absent them the row
+   Re-verifies ALL live (non-revoked) connections via
+   :class:`app.services.connection_health_service.ConnectionHealthService`,
+   which dispatches on the row's §3.8.5 ``auth_class``:
+     * ``api_key`` / ``long_lived_token`` (record_source / outbound_webhook)
+       → config-presence liveness probe → connected / error.
+     * ``provisioned_resource`` (email_sender / sms_sender) → sender-identity
+       presence probe → connected / error.
+     * ``oauth_token`` (calendar / crm) → silent token refresh. DEPLOY-GATED
+       on OAuth client creds + a stored refresh token; absent them the row
        stays an honest ``unconfigured`` (+ arc17_pending) and is SKIPPED
        (no status write, no audit) so the sweep does not churn rows it
        cannot honestly change. A real refresh → connected (+ rotated
-       credential_ref); a rejected token → expired.
-   Each status change writes one ``ACTION_CONNECTION_TOKEN_REFRESHED``
-   audit row (system actor) in the same per-row transaction.
+       secret_ref); a rejected token → expired (+ notify_admin marker).
+   Each honest check writes one ``ACTION_CONNECTION_TOKEN_REFRESHED`` audit
+   row (system actor); a status TRANSITION additionally writes a
+   ``ACTION_CONNECTION_STATUS_CHANGED`` row carrying the notify_admin
+   marker — both in the same per-row transaction.
 
 2. ``run_secret_cleanup_drain``
    Drains ``secret_cleanup_outbox`` (rows enqueued by the lifecycle
-   cascade when a connection with a non-null ``credential_ref`` was
+   cascade when a connection with a non-null ``secret_ref`` was
    revoked). For each pending row it calls ``SecretStore.delete`` on the
    POINTER (never a value) and marks the row done; a failure is retried
    on the next sweep until ``max_attempts``. The AWS deletion itself is
@@ -50,21 +54,21 @@ from app.core.config import settings
 from app.db.session import OpsSessionLocal
 from app.integrations.secrets import SecretStoreError, get_secret_store
 from app.models.admin_audit_log import (
+    ACTION_CONNECTION_STATUS_CHANGED,
     ACTION_CONNECTION_TOKEN_REFRESHED,
     RESOURCE_INSTANCE_CONNECTION,
 )
-from app.models.instance_connection import InstanceConnection
+from app.connections.instance_connection import InstanceConnection
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
 )
-from app.repositories.instance_connection_repository import (
+from app.connections.repository import (
     InstanceConnectionRepository,
 )
-from app.repositories.secret_cleanup_outbox_repository import (
+from app.connections.secret_cleanup_outbox_repository import (
     SecretCleanupOutboxRepository,
 )
-from app.schemas.connection import DEFERRED_CONNECTION_TYPES
 from app.services.connection_health_service import ConnectionHealthService
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -117,12 +121,12 @@ def run_connection_token_refresh(self):
 
     scan_db: "Session" = OpsSessionLocal()
     try:
-        eligible_ids = _scan_oauth_connection_ids(scan_db)
+        eligible_ids = _scan_due_connection_ids(scan_db)
     finally:
         scan_db.close()
 
     _log.info(
-        "connection_token_refresh scan: %d OAuth connection(s) eligible",
+        "connection_token_refresh scan: %d live connection(s) eligible",
         len(eligible_ids),
     )
 
@@ -165,21 +169,19 @@ def run_connection_token_refresh(self):
     return summary
 
 
-def _scan_oauth_connection_ids(db: "Session") -> list[int]:
-    """Return ids of live (non-revoked) OAuth-shaped connection rows.
+def _scan_due_connection_ids(db: "Session") -> list[int]:
+    """Return ids of ALL live (non-revoked) connection rows (§3.8.5).
 
-    Scoped to the DEFERRED (OAuth) connector types; LIVE connectors are
-    config-presence only and do not need a nightly token refresh. Ordered
-    by id for deterministic FIFO processing across interrupted runs.
+    Every auth_class is swept: the health service decides per-row whether
+    a check is honest (oauth refresh / config-presence liveness) or a
+    deploy-gated no-op (``checked_at=None`` → skipped). api_key /
+    provisioned_resource rows liveness-probe to confirm config presence;
+    oauth_token rows attempt a real refresh. Ordered by id for
+    deterministic FIFO processing across interrupted runs.
     """
     stmt = (
         select(InstanceConnection.id)
-        .where(
-            InstanceConnection.revoked_at.is_(None),
-            InstanceConnection.connection_type.in_(
-                tuple(DEFERRED_CONNECTION_TYPES)
-            ),
-        )
+        .where(InstanceConnection.revoked_at.is_(None))
         .order_by(InstanceConnection.id.asc())
     )
     return [row[0] for row in db.execute(stmt)]
@@ -215,6 +217,8 @@ def _refresh_one(
         )
         return "skipped"
 
+    prior_status = row.status
+
     repo = InstanceConnectionRepository(db)
     # Populate status_detail on the expired path (§3.8.5 / CJ §7 Reconnect chip).
     # HealthCheckResult.detail carries the human-readable message from the
@@ -224,12 +228,13 @@ def _refresh_one(
         row=row,
         status=result.status,
         last_health_check_at=result.checked_at,
-        credential_ref=result.new_credential_ref,
+        secret_ref=result.new_secret_ref,
         status_detail=result.detail if result.status == "expired" else None,
         autocommit=False,
     )
 
-    AdminAuditRepository(db).record(
+    audit = AdminAuditRepository(db)
+    audit.record(
         ctx=AuditContext.system(label="connection_token_refresh"),
         admin_id=row.admin_id,
         action=ACTION_CONNECTION_TOKEN_REFRESHED,
@@ -240,11 +245,39 @@ def _refresh_one(
         after={
             "connection_type": row.connection_type,
             "status": result.status,
-            "credential_rotated": result.new_credential_ref is not None,
+            "credential_rotated": result.new_secret_ref is not None,
         },
         note=f"Token refresh worker ({row.connection_type}={result.status}).",
         autocommit=False,
     )
+
+    # §3.8.5: on an honest status transition emit a second
+    # connection_status_changed audit (old→new). notify_admin rides in
+    # after_json on a refresh-fail→expired transition — the documented
+    # admin-reconnect seam (no new delivery channel here).
+    if result.status != prior_status:
+        audit.record(
+            ctx=AuditContext.system(label="connection_token_refresh"),
+            admin_id=row.admin_id,
+            action=ACTION_CONNECTION_STATUS_CHANGED,
+            resource_type=RESOURCE_INSTANCE_CONNECTION,
+            resource_pk=row.id,
+            resource_natural_id=f"{row.instance_id}:{row.connection_type}",
+            luciel_instance_id=row.instance_id,
+            before={"status": prior_status},
+            after={
+                "connection_type": row.connection_type,
+                "auth_class": getattr(row, "auth_class", None),
+                "status": result.status,
+                "notify_admin": result.notify_admin,
+            },
+            note=(
+                f"Connection status {prior_status}→{result.status} "
+                f"({row.connection_type})."
+            ),
+            autocommit=False,
+        )
+
     return "connected" if result.status == "connected" else "expired"
 
 
@@ -295,7 +328,7 @@ def run_secret_cleanup_drain(self):
                 # when connections_live_secrets_enabled selects the AWS
                 # store; otherwise the local fake performs the delete. The
                 # argument is the secret NAME/ARN pointer — never a value.
-                store.delete(outbox_row.credential_ref)
+                store.delete(outbox_row.secret_ref)
                 repo.mark_done(row=outbox_row, autocommit=False)
                 deleted += 1
             except SecretStoreError as exc:

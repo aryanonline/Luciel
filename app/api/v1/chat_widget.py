@@ -89,8 +89,8 @@ from app.middleware.rate_limit import (
 )
 from app.middleware.widget_token_bucket import check_widget_request as _check_widget_token_bucket
 from app.models.instance import Instance
-from app.models.instance_status import InstanceStatus
-from app.policy.moderation import ModerationGate
+from app.lifecycle.state import InstanceStatus
+from app.runtime.input_safety import ModerationGate
 from app.schemas.chat import ChatWidgetRequest
 from app.services.chat_service import ChatService
 from app.services.session_service import SessionService
@@ -112,7 +112,7 @@ logger = logging.getLogger(__name__)
 # and raises ConfigurationError immediately if 'openai' is selected
 # but openai_api_key is empty -- so a misconfigured production
 # deploy crash-loops on rollout rather than silently running with a
-# disabled gate. See app/policy/moderation.py.
+# disabled gate. See app/runtime/input_safety.py.
 _moderation_gate = ModerationGate.from_settings(settings)
 
 # Neutral refusal returned when the moderation gate blocks a turn.

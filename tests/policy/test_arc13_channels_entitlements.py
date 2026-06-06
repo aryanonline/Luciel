@@ -31,12 +31,10 @@ from app.policy.entitlements import (
     CHANNEL_EMAIL,
     CHANNEL_SMS,
     CHANNEL_WIDGET,
-    TIER_ENTERPRISE,
     TIER_FREE,
     TIER_PRO,
     TierEntitlement,
     channels_available,
-    sms_brokerage_routing_flag,
     sms_dedicated_number_entitled,
 )
 
@@ -56,15 +54,9 @@ def test_pro_channels_widget_email_sms() -> None:
     )
 
 
-def test_enterprise_channels_widget_email_sms() -> None:
-    assert channels_available(TIER_ENTERPRISE) == frozenset(
-        {CHANNEL_WIDGET, CHANNEL_EMAIL, CHANNEL_SMS}
-    )
-
-
 def test_widget_is_floor_on_every_tier() -> None:
-    """The widget is the entitlement floor — present on all three."""
-    for tier in (TIER_FREE, TIER_PRO, TIER_ENTERPRISE):
+    """The widget is the entitlement floor — present on both tiers."""
+    for tier in (TIER_FREE, TIER_PRO):
         assert CHANNEL_WIDGET in channels_available(tier), tier
 
 
@@ -100,26 +92,11 @@ def test_dedicated_number_pro_true() -> None:
     assert sms_dedicated_number_entitled(TIER_PRO) is True
 
 
-def test_dedicated_number_enterprise_true() -> None:
-    assert sms_dedicated_number_entitled(TIER_ENTERPRISE) is True
-
-
 def test_dedicated_number_requires_sms_channel() -> None:
     """Free has no SMS channel, so it can never be handed a dedicated
     number regardless of the tier branch."""
     assert CHANNEL_SMS not in channels_available(TIER_FREE)
     assert sms_dedicated_number_entitled(TIER_FREE) is False
-
-
-# ---------------------------------------------------------------------
-# Brokerage-routing flag (deferred — flag only).
-# ---------------------------------------------------------------------
-
-
-def test_brokerage_flag_only_enterprise() -> None:
-    assert sms_brokerage_routing_flag(TIER_FREE) is False
-    assert sms_brokerage_routing_flag(TIER_PRO) is False
-    assert sms_brokerage_routing_flag(TIER_ENTERPRISE) is True
 
 
 # ---------------------------------------------------------------------

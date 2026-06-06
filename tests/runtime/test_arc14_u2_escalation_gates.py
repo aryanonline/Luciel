@@ -27,7 +27,7 @@ from app.runtime.classifiers import (
 )
 from app.runtime.contracts import RuntimeRequest
 from app.runtime.escalation_judge import EscalationJudge
-from app.runtime.handoff_ack import CANNOT_ANSWER_REPLY, handoff_acknowledgement
+from app.runtime.handoff import CANNOT_ANSWER_REPLY, handoff_acknowledgement
 from app.runtime.orchestrator import LucielOrchestrator
 from app.tools.base import ToolResult
 
@@ -44,7 +44,7 @@ class _ScriptedRouter:
         self._model = model
         self.calls = []
 
-    def generate(self, request, *, preferred_provider=None):
+    def generate(self, request, *, preferred_provider=None, **kwargs):
         idx = min(len(self.calls), len(self._contents) - 1)
         self.calls.append(request)
         return LLMResponse(

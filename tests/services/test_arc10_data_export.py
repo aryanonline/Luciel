@@ -52,7 +52,7 @@ SERVICE_PATH = REPO_ROOT / "app" / "services" / "data_export_service.py"
 TASK_PATH = REPO_ROOT / "app" / "worker" / "tasks" / "data_export.py"
 CELERY_PATH = REPO_ROOT / "app" / "worker" / "celery_app.py"
 MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "arc10_lifecycle_subsystem.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "arc10_lifecycle_subsystem.py"
 )
 CONFIG_PATH = REPO_ROOT / "app" / "core" / "config.py"
 

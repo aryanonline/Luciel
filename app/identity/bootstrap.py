@@ -93,7 +93,48 @@ from typing import Optional
 from sqlalchemy import text as _sa_text
 from sqlalchemy.orm import Session
 
-from app.models.scope_assignment import EndReason, ScopeAssignment
+# Unit 1 excision: app.models.scope_assignment deleted (single-owner model).
+# ScopeAssignment / EndReason replaced with minimal inline types so callers
+# that only use has_scope / canonical_tenant_id keep working unchanged.
+
+from enum import Enum
+from dataclasses import dataclass as _dc, field as _field
+
+
+class EndReason(str, Enum):  # type: ignore[misc]
+    """Stub for EndReason -- column still returned by SECDEF function."""
+    REVOKED = "revoked"
+    CHECKOUT_ABANDONED = "checkout_abandoned"
+    DOWNGRADE = "downgrade"
+    DELETED = "deleted"
+    OTHER = "other"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "EndReason":
+        # Tolerate any string value from the DB without crashing.
+        obj = str.__new__(cls, str(value))
+        obj._value_ = str(value)
+        return obj
+
+
+@_dc
+class ScopeAssignment:  # type: ignore[misc]
+    """Minimal stub replacing the deleted ORM model.
+
+    Carries the same attribute names that IdentitySnapshot callers may
+    inspect (admin_id, role).  Not session-attached.
+    """
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    admin_id: str
+    role: str
+    started_at: "datetime"
+    ended_at: "Optional[datetime]" = None
+    ended_reason: "Optional[EndReason]" = None
+    ended_note: "Optional[str]" = None
+    ended_by_api_key_id: "Optional[int]" = None
+    active: bool = True
 
 logger = logging.getLogger(__name__)
 

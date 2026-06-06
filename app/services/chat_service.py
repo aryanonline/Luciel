@@ -42,8 +42,8 @@ from dataclasses import dataclass
 
 from app.cognition import CognitionService
 from app.core.config import settings
-from app.integrations.llm.router import ModelRouter
-from app.knowledge.retriever import KnowledgeRetriever
+from app.runtime.llm_router import ModelRouter
+from app.runtime.knowledge_retrieval import KnowledgeRetriever
 from app.memory.service import MemoryService
 from app.persona.composer import (
     compose_business_context_stanza,

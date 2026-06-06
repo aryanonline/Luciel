@@ -12,7 +12,7 @@ from app.persona.presets import (
     PRESET_CUSTOM,
     PRESET_WARM_CONCIERGE,
 )
-from app.policy.entitlements import TIER_ENTERPRISE, TIER_FREE, TIER_PRO
+from app.policy.entitlements import TIER_FREE, TIER_PRO
 from app.policy.instance_config import (
     check_business_context_length,
     check_custom_preset_allowed,
@@ -40,23 +40,6 @@ def test_business_context_over_free_cap_rejected() -> None:
     assert problems[0]["max_chars"] == 280
 
 
-def test_business_context_enterprise_allows_2000() -> None:
-    assert (
-        check_business_context_length(
-            tier=TIER_ENTERPRISE, business_context="x" * 2000
-        )
-        == []
-    )
-
-
-def test_business_context_enterprise_over_2000_rejected() -> None:
-    problems = check_business_context_length(
-        tier=TIER_ENTERPRISE, business_context="x" * 2001
-    )
-    assert len(problems) == 1
-    assert problems[0]["max_chars"] == 2000
-
-
 def test_business_context_none_is_ok() -> None:
     assert check_business_context_length(tier=TIER_FREE, business_context=None) == []
     assert check_business_context_length(tier=TIER_FREE, business_context="") == []
@@ -80,15 +63,6 @@ def test_custom_preset_rejected_on_free() -> None:
 def test_custom_preset_allowed_on_pro() -> None:
     assert (
         check_custom_preset_allowed(tier=TIER_PRO, personality_preset=PRESET_CUSTOM)
-        == []
-    )
-
-
-def test_custom_preset_allowed_on_enterprise() -> None:
-    assert (
-        check_custom_preset_allowed(
-            tier=TIER_ENTERPRISE, personality_preset=PRESET_CUSTOM
-        )
         == []
     )
 

@@ -40,11 +40,11 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKER_PATH = REPO_ROOT / "app" / "worker" / "tasks" / "instance_retention.py"
-MODEL_PATH = REPO_ROOT / "app" / "models" / "instance_status.py"
+WORKER_PATH = REPO_ROOT / "app" / "lifecycle" / "retention.py"
+MODEL_PATH = REPO_ROOT / "app" / "lifecycle" / "state.py"
 SERVICE_PATH = REPO_ROOT / "app" / "services" / "instance_service.py"
 MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "rescand_lifecycle_states.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "rescand_lifecycle_states.py"
 )
 
 
@@ -64,7 +64,7 @@ def _parse(p: Path) -> ast.Module:
 def test_instance_status_has_all_five_canonical_values():
     """All five §3.6.1 canonical values must be present."""
     # Import the live module so we test the actual enum.
-    from app.models.instance_status import InstanceStatus
+    from app.lifecycle.state import InstanceStatus
 
     values = {m.value for m in InstanceStatus}
     for expected in ("active", "paused", "deactivating", "grace_window", "hard_deleted"):
@@ -76,7 +76,7 @@ def test_instance_status_has_all_five_canonical_values():
 def test_instance_status_deleted_alias_present():
     """'deleted' is the deprecated alias for grace_window; it must still
     be a valid member so existing rows / queries are not orphaned."""
-    from app.models.instance_status import InstanceStatus
+    from app.lifecycle.state import InstanceStatus
 
     values = {m.value for m in InstanceStatus}
     assert "deleted" in values, (
@@ -88,7 +88,7 @@ def test_instance_status_deleted_alias_present():
 def test_instance_status_members_are_string_valued():
     """All InstanceStatus members must be strings so SQLAlchemy and
     Pydantic round-trip cleanly with the PG enum."""
-    from app.models.instance_status import InstanceStatus
+    from app.lifecycle.state import InstanceStatus
 
     for member in InstanceStatus:
         assert isinstance(member.value, str), (
@@ -100,7 +100,7 @@ def test_instance_grace_states_covers_both_aliases():
     """INSTANCE_GRACE_STATES must include both 'deleted' (legacy) and
     'grace_window' (new canonical) so transition logic treats them
     identically."""
-    from app.models.instance_status import INSTANCE_GRACE_STATES
+    from app.lifecycle.state import INSTANCE_GRACE_STATES
 
     assert "deleted" in INSTANCE_GRACE_STATES
     assert "grace_window" in INSTANCE_GRACE_STATES
@@ -108,7 +108,7 @@ def test_instance_grace_states_covers_both_aliases():
 
 def test_instance_status_values_tuple_is_complete():
     """INSTANCE_STATUS_VALUES must cover all 6 members (5 canonical + alias)."""
-    from app.models.instance_status import INSTANCE_STATUS_VALUES, InstanceStatus
+    from app.lifecycle.state import INSTANCE_STATUS_VALUES, InstanceStatus
 
     assert set(INSTANCE_STATUS_VALUES) == {m.value for m in InstanceStatus}
 
@@ -209,13 +209,15 @@ def test_service_has_transition_table_docstring():
     """The module docstring must encode the §3.6.1 transition table."""
     src = _read(SERVICE_PATH)
     # Key transitions must appear in the docstring.
+    # NOTE: 'manager' was removed from the required fragments in Unit 1 --
+    # the single-login model (Locked Decision #19) collapsed all roles to
+    # the single account owner; there is no manager role to document.
     for fragment in (
         "active",
         "paused",
         "deactivating",
         "grace_window",
         "owner",
-        "manager",
     ):
         assert fragment in src, (
             f"instance_service.py docstring must document the §3.6.1 "
@@ -241,14 +243,15 @@ _REQUIRED_CASCADE_TABLES = (
     # Newly added per §3.6.5:
     "leads",
     "escalation_events",      # session summaries
-    "sibling_call_grants",
-    "instance_composition_grants",
-    "knowledge_share_grants",
+    # sibling_call_grants / instance_composition_grants /
+    # knowledge_share_grants / user_role_assignments REMOVED in Unit 1:
+    # those tables were dropped (deferred multi-Luciel / custom-role
+    # surfaces -- Open Decisions #7/#8, Locked Decision #19), so the
+    # cascade no longer deletes from them.
     "instance_tool_authorizations",
     "byo_webhook_endpoints",
     "channel_routes",
     "tool_execution_log",
-    "user_role_assignments",
     "knowledge_graph_nodes",
     "knowledge_graph_edges",
     "instance_connections",
@@ -264,19 +267,16 @@ def test_cascade_deletes_every_required_table():
         )
 
 
-def test_sibling_call_grants_uses_or_predicate():
-    """sibling_call_grants has two instance FK columns (caller and callee);
-    the DELETE must use an OR predicate to catch both sides."""
+def test_sibling_call_grants_cascade_removed():
+    """Unit 1: sibling_call_grants was dropped (deferred multi-Luciel
+    surface, Open Decision #7). The worker cascade must NOT reference
+    the table -- a DELETE against it would crash UndefinedTable."""
     src = _read(WORKER_PATH)
-    # Find the sibling_call_grants delete statement.
-    idx = src.index("sibling_call_grants")
-    # Look in a window around the statement for both column references.
-    window = src[idx: idx + 200]
-    assert "caller_instance_id" in window, (
-        "sibling_call_grants DELETE must reference caller_instance_id."
-    )
-    assert "callee_instance_id" in window, (
-        "sibling_call_grants DELETE must reference callee_instance_id."
+    # The removal note in the source legitimately names the table; what
+    # must be gone is any ACTIVE DELETE statement against it.
+    assert "DELETE FROM sibling_call_grants" not in src, (
+        "Worker cascade must not DELETE FROM the dropped "
+        "sibling_call_grants table (Unit 1 excision)."
     )
 
 
@@ -352,15 +352,14 @@ def test_restrict_tables_deleted_before_instance_row():
 
     instance_delete_idx = body_src.index("DELETE FROM instances")
 
+    # sibling_call_grants / instance_composition_grants /
+    # knowledge_share_grants / user_role_assignments REMOVED in Unit 1
+    # (dropped tables -- deferred multi-Luciel / custom-role surfaces).
     for table in (
-        "sibling_call_grants",
-        "instance_composition_grants",
-        "knowledge_share_grants",
         "instance_tool_authorizations",
         "byo_webhook_endpoints",
         "channel_routes",
         "tool_execution_log",
-        "user_role_assignments",
         "knowledge_sources",
         "instance_connections",
     ):
@@ -423,7 +422,7 @@ def test_scan_predicate_ordered_by_oldest_first():
 
 def test_migration_file_exists():
     assert MIGRATION_PATH.exists(), (
-        "alembic/versions/rescand_lifecycle_states.py must exist."
+        "app/migrations/versions/rescand_lifecycle_states.py must exist."
     )
 
 

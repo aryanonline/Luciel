@@ -84,13 +84,15 @@ def test_pause_by_pk_sets_status_to_paused():
     assert "InstanceStatus.PAUSED" in src
 
 
-def test_pause_by_pk_refuses_deleted_rows():
+def test_pause_by_pk_refuses_grace_window_rows():
     """Lifecycle invariant: Pause is not a valid transition out of the
-    'deleted' state -- the right verb for that case is Restore. The
-    repo signals refusal by returning the row unchanged with no audit
-    emission (route layer maps that to 409)."""
+    grace window -- the right verb for that case is Restore. The repo
+    signals refusal by returning the row unchanged with no audit
+    emission (route layer maps that to 409). Post 5-state alignment the
+    guard keys off INSTANCE_GRACE_STATES (grace_window + legacy
+    'deleted'), not the bare DELETED alias."""
     src = ast.unparse(_method("pause_by_pk"))
-    assert "InstanceStatus.DELETED" in src
+    assert "INSTANCE_GRACE_STATES" in src
 
 
 # ---------------------------------------------------------------------
@@ -108,9 +110,9 @@ def test_resume_by_pk_sets_status_to_active():
     assert "InstanceStatus.ACTIVE" in src
 
 
-def test_resume_by_pk_refuses_deleted_rows():
+def test_resume_by_pk_refuses_grace_window_rows():
     src = ast.unparse(_method("resume_by_pk"))
-    assert "InstanceStatus.DELETED" in src
+    assert "INSTANCE_GRACE_STATES" in src
 
 
 # ---------------------------------------------------------------------
@@ -131,32 +133,38 @@ def test_delete_by_pk_stamps_soft_deleted_at():
     assert "datetime.now(timezone.utc)" in src or "datetime.now(tz=timezone.utc)" in src
 
 
-def test_delete_by_pk_is_idempotent_on_already_deleted():
-    """Spec: idempotent on already-deleted row -- preserve the original
-    soft_deleted_at clock, do not emit a second audit row."""
+def test_delete_by_pk_sets_grace_window_state():
+    """5-state machine (Architecture §3.6.1): deactivation lands the
+    instance in grace_window, NOT the legacy 'deleted' alias."""
     src = ast.unparse(_method("delete_by_pk"))
-    assert "InstanceStatus.DELETED" in src
+    assert "InstanceStatus.GRACE_WINDOW" in src
 
 
-def test_delete_by_pk_wires_sibling_grant_cascade():
-    """Arc 12 WU4 — Architecture §3.6.1 step 3 cascade. When an
-    Instance is soft-deleted, every non-revoked sibling_call_grants
-    row where the Instance appears as caller OR callee must be
-    revoked in the same transaction.
-
-    The cascade is wired via a call to
-    ``SiblingCallGrantService.revoke_all_touching_instance`` inside
-    ``delete_by_pk``. This test pins that wiring by AST search so a
-    refactor that drops the cascade by accident is caught."""
+def test_delete_by_pk_is_idempotent_on_already_in_grace():
+    """Spec: idempotent on a row already in the grace window -- preserve
+    the original soft_deleted_at clock, do not emit a second audit row.
+    Guard keys off INSTANCE_GRACE_STATES (grace_window + legacy
+    'deleted')."""
     src = ast.unparse(_method("delete_by_pk"))
-    assert "SiblingCallGrantService" in src, (
-        "Arc 12 WU4: delete_by_pk must instantiate "
-        "SiblingCallGrantService to fire the §3.6.1 step-3 cascade."
+    assert "INSTANCE_GRACE_STATES" in src
+
+
+def test_delete_by_pk_has_no_sibling_grant_cascade():
+    """Unit 1 (audit-and-alignment): the sibling-call-grant cascade was
+    REMOVED. ``call_sibling_luciel`` and the ``sibling_call_grants``
+    table are deferred-feature surfaces (multi-Luciel, Open Decision
+    #7) excised in this unit. The single-Luciel model has no sibling
+    grants, so ``delete_by_pk`` must NOT reference the deleted
+    SiblingCallGrantService. This test pins the removal so the cascade
+    is not accidentally reintroduced against a dropped table."""
+    src = ast.unparse(_method("delete_by_pk"))
+    assert "SiblingCallGrantService" not in src, (
+        "Unit 1: delete_by_pk must NOT reference the deleted "
+        "SiblingCallGrantService (multi-Luciel sibling grants deferred)."
     )
-    assert "revoke_all_touching_instance" in src, (
-        "Arc 12 WU4: delete_by_pk must call "
-        "revoke_all_touching_instance(...) to revoke caller-side AND "
-        "callee-side grants for the deactivated Instance."
+    assert "revoke_all_touching_instance" not in src, (
+        "Unit 1: the sibling-grant cascade call must be removed from "
+        "delete_by_pk (sibling_call_grants table dropped)."
     )
 
 

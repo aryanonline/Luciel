@@ -27,7 +27,7 @@ from app.policy.entitlements import (
 )
 from app.runtime.billing_period import BillingContext
 from app.runtime.budget_ack import budget_exhausted_acknowledgement
-from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
+from app.billing.metering import BudgetMeter, InMemoryBackend
 from app.runtime.classifiers import (
     INTENT_OTHER,
     INTENT_REQUEST_HUMAN,
@@ -52,7 +52,7 @@ class _ScriptedRouter:
         self._model = model
         self.calls = []
 
-    def generate(self, request, *, preferred_provider=None):
+    def generate(self, request, *, preferred_provider=None, **kwargs):
         idx = min(len(self.calls), len(self._contents) - 1)
         self.calls.append(request)
         return LLMResponse(
@@ -280,7 +280,7 @@ class TestIntakeBypassesBudget(unittest.TestCase):
 class TestProOverCapContinues(unittest.TestCase):
 
     def test_pro_over_cap_runs_loop_and_fires_alerts(self):
-        # Seed to cap so this session is the one that tips over 2000.
+        # Seed to cap so this session is the one that tips over 1000 (Pro Monthly).
         backend = InMemoryBackend()
         meter = BudgetMeter(backend=backend)
         # Cheat the counter directly to just under cap to keep the test fast.
@@ -288,7 +288,7 @@ class TestProOverCapContinues(unittest.TestCase):
             "luciel:budget:count:admin-1:7:2026-06-01", 999_999
         )
         backend._store["luciel:budget:count:admin-1:7:2026-06-01"] = (
-            "2000",
+            "1000",
             backend._store["luciel:budget:count:admin-1:7:2026-06-01"][1],
         )
         router = _ScriptedRouter([_plan_json(reply="served", confidence=0.95)])
@@ -302,7 +302,7 @@ class TestProOverCapContinues(unittest.TestCase):
         self.assertEqual(len(router.calls), 1)
         self.assertEqual(resp.message, "served")
         self.assertFalse(resp.escalation_flag)
-        # At 2001/2000 both 80% and 100% thresholds fire, once each.
+        # At 1001/1000 both 80% and 100% thresholds fire, once each.
         thresholds = sorted(a["threshold"] for a in alert_svc.alerts)
         self.assertEqual(thresholds, [80, 100])
 
@@ -310,7 +310,7 @@ class TestProOverCapContinues(unittest.TestCase):
         backend = InMemoryBackend()
         meter = BudgetMeter(backend=backend)
         backend._store["luciel:budget:count:admin-1:7:2026-06-01"] = (
-            "2000", float("inf"),
+            "1000", float("inf"),
         )
         alert_svc = _FakeAlertSvc()
 

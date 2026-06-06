@@ -26,9 +26,6 @@ from app.tools.implementations.book_appointment_tool import (
 from app.tools.implementations.bring_your_own_webhook_tool import (
     BringYourOwnWebhookTool,
 )
-from app.tools.implementations.call_sibling_luciel_tool import (
-    CallSiblingLucielTool,
-)
 from app.tools.implementations.lookup_record_tool import (
     LookupRecordTool,
 )
@@ -50,26 +47,28 @@ class ToolRegistry:
     def _register_defaults(self) -> None:
         """Register the built-in tools.
 
-        The registry holds the v1 catalog (Arc 12 WU3, §3.3.2): the
-        8 configurable tools every Pro/Enterprise instance can opt
-        into via the per-instance authorisation table (WU2). Some
-        carry interim execute() bodies per the 00_MASTER
-        "interim-body rule" (see each tool's module docstring for
-        the owning arc).
+        The registry holds the v1 catalog (§3.3.2 / Vision §3.2): the
+        7 configurable action tools every Pro instance can opt into via
+        the per-instance authorisation table (WU2). Some carry interim
+        execute() bodies per the 00_MASTER "interim-body rule" (see each
+        tool's module docstring for the owning arc).
+
+        (The 8th slot — call_sibling_luciel — was multi-Luciel residue
+        and was removed in the audit-and-alignment phase, Unit 1:
+        Locked Decision #12, one Luciel per account.)
 
         Cognition (escalate / save_memory / session_summary) is NOT
         registered here — Decision #20 + founder ruling 4. Its
         behaviour lives in ``app.cognition`` and is called directly
         by chat_service (no broker, no registry, no tier-gating).
         """
-        # v1 catalog (WU3) — exactly 8 tools, nothing cognition-shaped.
+        # v1 catalog (§3.3.2) — exactly 7 action tools, nothing cognition-shaped.
         self.register(BookAppointmentTool())
         self.register(SendEmailTool())
         self.register(SendSmsTool())
         self.register(LookupRecordTool())
         self.register(ScheduleCallbackTool())
         self.register(PushToCrmTool())
-        self.register(CallSiblingLucielTool())
         self.register(BringYourOwnWebhookTool())
 
     def register(self, tool: LucielTool) -> None:

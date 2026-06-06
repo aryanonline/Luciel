@@ -266,12 +266,10 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
         request.state.luciel_instance_id = luciel_instance_id
         request.state.actor_user_id = actor_user_id  # Step 24.5b
 
-        # Arc 11 Cleanup C item #8 — API-key callers don't resolve a
-        # User on this path (Step 24.5b doctrine), so no
-        # scope_assignments to load; set ``[]`` for shape uniformity
-        # so ScopePolicy's middleware-first resolution sees a list
-        # rather than an unset attribute.
-        request.state.scope_assignments = []
+        # request.state.scope_assignments removed in Unit 1: the
+        # scope_assignments table was dropped (single-login model,
+        # Locked Decision #19) and ScopePolicy no longer reads the
+        # attribute. API-key callers stamp scope via admin_id only.
 
         # Step 30b commit (c): widget fields surfaced for the widget
         # endpoint dependency. Other routes ignore these.

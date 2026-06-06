@@ -7,18 +7,27 @@ back the connection-settings panel:
   * POST   "/instances/{instance_id}/connections"  -- configure a row.
   * DELETE "/connections/{connection_id}"           -- soft-delete a row.
 
-This is the REAL Arc 17 ``instance_connections`` contract narrowed in
-surface — not a throwaway stub. Full OAuth / secrets-manager / health-
-worker flows stay deferred to full Arc 17.
+This is the REAL ``instance_connections`` contract. The OAuth
+initiate/callback connect paths, the secrets-store integration, the
+§3.8.5 auth_class fork, and the §3.8.5 health/refresh worker are BUILT
+(Unit 13c); what remains environment-dependent is the live provider
+credential / consent, which is deploy-gated, NOT unbuilt.
 
 Honesty invariant (non-negotiable, spec §115)
 ----------------------------------------------
 No endpoint returns ``connected`` for a connection with no real backing.
-Only CSV (``record_source``) and ``outbound_webhook`` connect LIVE in
-this slice → a real ``connected`` row. calendar / crm / email_sender /
-sms_sender are DEFERRED → an honest ``unconfigured`` row plus a
-structured ``arc17_pending`` payload. ``config_json`` carries NON-SECRET
-config ONLY; ``credential_ref`` stays NULL in this slice.
+A connection is ``connected`` when its credential SHAPE is present —
+``api_key`` config present (record_source / outbound_webhook),
+``provisioned_resource`` platform sender identity present (email_sender /
+sms_sender), ``oauth_token`` consent completed (calendar / crm). When the
+live credential/consent is absent it is an honest ``unconfigured`` row
+plus a structured ``arc17_pending`` payload that marks the connection as
+DEPLOY-GATED pending (the connect path is built; it needs live provider
+credentials to succeed in this environment). The ``arc17_pending`` field
+NAME is retained for API stability (renaming is a frontend-visible
+contract change, out of scope); it means "deploy-gated pending", not
+"feature not built". ``non_secret_config`` carries NON-SECRET config
+ONLY; ``secret_ref`` is NULL for shapes that have no per-tenant secret.
 
 Layered defences (mirrors admin_channels.py / admin_personality.py)
 -------------------------------------------------------------------
@@ -58,10 +67,15 @@ from app.models.admin_audit_log import (
     ACTION_CONNECTION_OAUTH_CONNECTED,
     ACTION_CONNECTION_OAUTH_INITIATED,
     ACTION_CONNECTION_REFRESHED,
+    ACTION_CONNECTION_STATUS_CHANGED,
     RESOURCE_INSTANCE_CONNECTION,
 )
 from app.models.instance import Instance
-from app.models.instance_connection import InstanceConnection
+from app.connections.instance_connection import (
+    CONNECTION_TYPES,
+    InstanceConnection,
+    auth_class_for,
+)
 from app.policy.permissions import (
     PERM_CONFIGURE_CONNECTIONS,
     PermissionResolver,
@@ -71,15 +85,13 @@ from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
 )
-from app.repositories.instance_connection_repository import (
+from app.connections.repository import (
     InstanceConnectionRepository,
 )
-from app.repositories.secret_cleanup_outbox_repository import (
+from app.connections.secret_cleanup_outbox_repository import (
     SecretCleanupOutboxRepository,
 )
 from app.schemas.connection import (
-    DEFERRED_CONNECTION_TYPES,
-    LIVE_CONNECTION_TYPES,
     Arc17Pending,
     ConnectionCreate,
     ConnectionCreateResponse,
@@ -87,6 +99,8 @@ from app.schemas.connection import (
     ConnectionListResponse,
     ConnectionRefreshResponse,
     ConnectionView,
+    ConnectorCatalogEntry,
+    ConnectorCatalogResponse,
     OAuthInitiateResponse,
 )
 from app.services.connection_health_service import ConnectionHealthService
@@ -100,14 +114,14 @@ router = APIRouter(
 )
 
 # Per-type required NON-SECRET config keys. The route refuses a configure
-# whose config_json is missing a required key (422). Keeps the contract
+# whose non_secret_config is missing a required key (422). Keeps the contract
 # honest: a LIVE connector needs its real backing reference present.
 _REQUIRED_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "record_source": ("store_ref",),
     "outbound_webhook": ("url",),
 }
 
-# Keys we explicitly REJECT in config_json — anything that looks like a
+# Keys we explicitly REJECT in non_secret_config — anything that looks like a
 # secret must not land in the non-secret column (spec §76 / §116).
 _FORBIDDEN_CONFIG_KEYS: frozenset[str] = frozenset(
     {
@@ -199,9 +213,73 @@ def _secret_name_for(
     ``AwsSecretsManagerStore._name_for``), so the on-AWS secret resolves
     to ``luciel/connections/{admin_id}/{instance_id}/{connection_type}``.
     The store returns the ARN, which is what we persist into
-    ``credential_ref`` — the name here is only the put-time logical key.
+    ``secret_ref`` — the name here is only the put-time logical key.
     """
     return f"{admin_id}/{instance_id}/{connection_type}"
+
+
+def _provisioned_resource_identity(
+    settings, connection_type: str
+) -> dict | None:
+    """Return the NON-SECRET sender identity for a provisioned_resource
+    connector when the platform resource is present in config, else None.
+
+    ``provisioned_resource`` connectors (email_sender / sms_sender)
+    authenticate via the platform's own transport (SES / Twilio), not a
+    per-tenant credential. The "connect" verification is therefore a
+    config-presence check of the platform-owned sender identity — mirrors
+    the ``is_configured()`` gate the send_email / send_sms tools already
+    apply (see send_email_tool / send_sms_tool). The returned dict carries
+    ONLY non-secret identifiers (the From address/name, the Twilio account
+    SID + messaging-service SID) — NEVER the Twilio auth token or any
+    secret, which stay in settings/SSM and never land in non_secret_config.
+    """
+    if connection_type == "email_sender":
+        from_address = settings.email_sender_from_address
+        if not from_address:
+            return None
+        identity = {"from_address": from_address}
+        if settings.email_sender_from_name:
+            identity["from_name"] = settings.email_sender_from_name
+        return identity
+    if connection_type == "sms_sender":
+        # Mirror send_sms_tool's gate: account_sid + auth_token must be
+        # present for a live send. auth_token is a SECRET — it is the gate
+        # but NEVER part of the non-secret identity we persist.
+        if not (settings.twilio_account_sid and settings.twilio_auth_token):
+            return None
+        identity = {"account_sid": settings.twilio_account_sid}
+        if settings.twilio_messaging_service_sid:
+            identity["messaging_service_sid"] = (
+                settings.twilio_messaging_service_sid
+            )
+        return identity
+    return None
+
+
+def _connector_is_ready(settings, connection_type: str) -> bool:
+    """Whether ``connection_type`` CAN connect live in this environment.
+
+    Read-only, no per-tenant data, no secrets, no network — purely a
+    config-presence check keyed on the §3.8.5 auth_class:
+      * ``api_key``              → always ready (per-tenant config supplies
+                                    the backing at configure time).
+      * ``provisioned_resource`` → platform sender identity present (same
+                                    gate as the configure path /
+                                    ``_provisioned_resource_identity``).
+      * ``oauth_token``          → OAuth client creds configured (same
+                                    ``provider.is_configured()`` gate the
+                                    connect path uses).
+    """
+    klass = auth_class_for(connection_type)
+    if klass == "api_key":
+        return True
+    if klass == "provisioned_resource":
+        return _provisioned_resource_identity(settings, connection_type) is not None
+    if klass == "oauth_token":
+        provider = get_oauth_provider(connection_type, settings)
+        return provider is not None and provider.is_configured()
+    return False
 
 
 def _view(row: InstanceConnection) -> ConnectionView:
@@ -212,33 +290,34 @@ def _view(row: InstanceConnection) -> ConnectionView:
         connection_type=row.connection_type,
         provider=row.provider,
         status=row.status,
-        config_json=row.config_json,
+        auth_class=row.auth_class,
+        non_secret_config=row.non_secret_config,
         last_health_check_at=row.last_health_check_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
 
 
-def _validate_config_json(
-    *, connection_type: str, config_json: dict | None
+def _validate_non_secret_config(
+    *, connection_type: str, non_secret_config: dict | None
 ) -> dict:
-    """Enforce the non-secret + required-key invariants on config_json.
+    """Enforce the non-secret + required-key invariants on non_secret_config.
 
     * Reject any forbidden (secret-looking) key → 422.
     * For a LIVE connector, require the per-type backing reference → 422.
     Returns the (possibly empty) config dict to persist.
     """
-    cfg = dict(config_json or {})
+    cfg = dict(non_secret_config or {})
 
     offending = sorted(k for k in cfg if k.lower() in _FORBIDDEN_CONFIG_KEYS)
     if offending:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
-                "error": "secret_in_config_json",
+                "error": "secret_in_non_secret_config",
                 "message": (
-                    "config_json carries non-secret config only; secrets "
-                    "ride behind credential_ref (NULL in this slice)."
+                    "non_secret_config carries non-secret config only; secrets "
+                    "ride behind secret_ref (NULL in this slice)."
                 ),
                 "forbidden_keys": offending,
             },
@@ -250,7 +329,7 @@ def _validate_config_json(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
-                "error": "config_json_missing_required_keys",
+                "error": "non_secret_config_missing_required_keys",
                 "connection_type": connection_type,
                 "missing_keys": missing,
                 "message": (
@@ -297,6 +376,33 @@ def list_connections(
     )
 
 
+@router.get(
+    "/connections/catalog",
+    response_model=ConnectorCatalogResponse,
+)
+def connector_catalog(request: Request) -> ConnectorCatalogResponse:
+    """Read-only connector-readiness catalog for the deploy environment.
+
+    Returns one entry per supported ``connection_type`` with its §3.8.5
+    ``auth_class`` and whether the connector CAN connect live here
+    (``is_ready``). Static + tenant-agnostic: no per-tenant data, no
+    secrets, no network — just a config-presence check (see
+    ``_connector_is_ready``). Requires an authenticated admin context like
+    the other connections routes. The UI uses it to render which
+    connectors are available to configure in this environment.
+    """
+    _require_admin_id(request)
+    entries = [
+        ConnectorCatalogEntry(
+            connection_type=ct,
+            auth_class=auth_class_for(ct),
+            is_ready=_connector_is_ready(app_settings, ct),
+        )
+        for ct in CONNECTION_TYPES
+    ]
+    return ConnectorCatalogResponse(connectors=entries)
+
+
 @router.post(
     "/instances/{instance_id}/connections",
     response_model=ConnectionCreateResponse,
@@ -314,11 +420,22 @@ def configure_connection(
 ) -> ConnectionCreateResponse:
     """Configure a connection for an instance.
 
-    CSV (``record_source``) and ``outbound_webhook`` connect LIVE → a
-    real ``connected`` row. calendar / crm / email_sender / sms_sender
-    are DEFERRED → an honest ``unconfigured`` row plus an
-    ``arc17_pending`` marker. The status is decided HERE (the policy
-    boundary); the repository never fabricates a status.
+    The status is decided HERE (the policy boundary, driven by the §3.8.5
+    auth_class) — the repository never fabricates a status:
+
+      * ``api_key`` (record_source / outbound_webhook): config present →
+        ``connected``.
+      * ``provisioned_resource`` (email_sender / sms_sender): platform
+        sender identity present in settings → ``connected``; absent →
+        honest ``unconfigured`` + a deploy-gated ``arc17_pending`` marker.
+      * ``oauth_token`` (calendar / crm): POST configure is NOT the connect
+        path — OAuth connects via the initiate/callback consent flow, so
+        this records an honest ``unconfigured`` row pointing the caller at
+        the initiate endpoint (live consent is deploy-gated on the OAuth
+        client credentials).
+
+    ``arc17_pending`` means "deploy-gated pending" (the connect path is
+    built; it needs the live credential/consent), NOT "feature not built".
     """
     admin_id = _require_admin_id(request)
     instance = _load_active_instance(
@@ -329,28 +446,67 @@ def configure_connection(
     _require_configure_connections(request, instance=instance)
 
     conn_type = body.connection_type
-    cfg = _validate_config_json(
-        connection_type=conn_type, config_json=body.config_json
+    cfg = _validate_non_secret_config(
+        connection_type=conn_type, non_secret_config=body.non_secret_config
     )
 
-    # --- The honesty fork: LIVE → connected; DEFERRED → unconfigured. ---
-    if conn_type in LIVE_CONNECTION_TYPES:
+    # --- The honesty fork, driven by the §3.8.5 auth_class (NOT a
+    # hardcoded LIVE/DEFERRED list). Each credential SHAPE has its own
+    # honest connect path; NONE ever fabricates 'connected' without a
+    # real backing.
+    #
+    #   api_key            (record_source / outbound_webhook):
+    #       config-presence already enforced by _validate_non_secret_config
+    #       (the required store_ref / url is present) → connected.
+    #   provisioned_resource (email_sender / sms_sender):
+    #       verify the platform-owned sender identity is present in
+    #       settings → connected + the NON-SECRET identity recorded in
+    #       non_secret_config; absent → unconfigured (honest, no fake).
+    #   oauth_token        (calendar / crm):
+    #       POST configure is NOT the connect path — OAuth connects via the
+    #       initiate/callback consent flow. Record an unconfigured row and
+    #       point the caller at the initiate endpoint. NEVER connected here.
+    klass = auth_class_for(conn_type)
+    pending: Arc17Pending | None = None
+
+    if klass == "api_key":
         new_status = "connected"
-        pending = None
-    elif conn_type in DEFERRED_CONNECTION_TYPES:
+    elif klass == "provisioned_resource":
+        identity = _provisioned_resource_identity(app_settings, conn_type)
+        if identity is not None:
+            new_status = "connected"
+            # Fold the verified non-secret sender identity into the config
+            # we persist (request body may add allowlist hints; the
+            # platform identity is authoritative for the live send).
+            cfg = {**cfg, **identity}
+        else:
+            new_status = "unconfigured"
+            pending = Arc17Pending(
+                connection_type=conn_type,
+                message=(
+                    f"{conn_type} is not yet provisioned on the platform "
+                    "(sender identity absent in config); the connection is "
+                    "recorded as 'unconfigured'. Provisioning the sender "
+                    "identity is deploy-gated."
+                ),
+            )
+    elif klass == "oauth_token":
         new_status = "unconfigured"
         pending = Arc17Pending(
             connection_type=conn_type,
             message=(
-                f"Connecting {conn_type!r} via a live credential flow is "
-                "available in Arc 17. The connection has been recorded as "
-                "'unconfigured'; dependent tools stay disabled until then."
+                f"{conn_type} connects via the OAuth consent flow: POST "
+                f"/admin/instances/{instance.id}/connections/oauth/"
+                f"{conn_type}/initiate, then complete consent. The "
+                "connection is recorded as 'unconfigured' until consent "
+                "completes; live consent is deploy-gated on the OAuth "
+                "client credentials."
             ),
         )
-    else:  # pragma: no cover — Literal makes this unreachable.
+    else:  # pragma: no cover — auth_class_for pins the four-value vocab.
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown connection_type {conn_type!r}.",
+            detail=f"Unhandled auth_class {klass!r} for {conn_type!r}.",
         )
 
     repo = InstanceConnectionRepository(db)
@@ -360,8 +516,8 @@ def configure_connection(
         connection_type=conn_type,
         provider=body.provider,
         status=new_status,
-        config_json=cfg or None,
-        credential_ref=None,  # secrets flow deferred to full Arc 17.
+        non_secret_config=cfg or None,
+        secret_ref=None,  # provisioned_resource has no per-tenant secret.
         autocommit=False,
     )
 
@@ -377,7 +533,8 @@ def configure_connection(
             "connection_type": conn_type,
             "provider": body.provider,
             "status": new_status,
-            # config_json is non-secret by contract; record only its keys
+            "auth_class": klass,
+            # non_secret_config is non-secret by contract; record only its keys
             # so the audit row stays bounded and free of payload bulk.
             "config_keys": sorted(cfg.keys()),
         },
@@ -409,9 +566,10 @@ def refresh_connection(
     re-enforces PERM_CONFIGURE_CONNECTIONS on the owning instance, then
     runs the shared health-check / token-refresh path:
 
-      * LIVE connector (record_source / outbound_webhook) → reachability
-        probe → ``connected`` / ``error`` + a fresh ``last_health_check_at``.
-      * DEFERRED OAuth connector → silent token refresh. The live flow is
+      * api_key connector (record_source / outbound_webhook) →
+        reachability probe → ``connected`` / ``error`` + a fresh
+        ``last_health_check_at``.
+      * OAuth connector → silent token refresh. The live flow is
         DEPLOY-GATED on OAuth client creds; absent them the row stays an
         HONEST ``unconfigured`` + ``arc17_pending`` — NEVER a fake
         ``connected``.
@@ -447,7 +605,7 @@ def refresh_connection(
         row=row,
         status=result.status,
         last_health_check_at=result.checked_at,
-        credential_ref=result.new_credential_ref,
+        secret_ref=result.new_secret_ref,
         status_detail=result.detail if result.status == "expired" else None,
         autocommit=False,
     )
@@ -459,7 +617,7 @@ def refresh_connection(
             message=result.detail
             or (
                 f"{row.connection_type} stays unconfigured "
-                "(live credential flow deferred to Arc 17 deploy)."
+                "(live credential flow deploy-gated on provider creds)."
             ),
         )
 
@@ -568,8 +726,8 @@ def initiate_oauth_connection(
             connection_type=connection_type,
             provider=provider.connection_type,
             status="unconfigured",
-            config_json=None,
-            credential_ref=None,
+            non_secret_config=None,
+            secret_ref=None,
             autocommit=False,
         )
 
@@ -644,7 +802,7 @@ def oauth_callback(
 
     On a verified state it runs the REAL ``provider.exchange_code`` against
     the provider, stores the refresh token via the SecretStore (the ref is
-    persisted into ``credential_ref`` — the token VALUE never touches
+    persisted into ``secret_ref`` — the token VALUE never touches
     Postgres), flips the row to 'connected', and audits
     ACTION_CONNECTION_OAUTH_CONNECTED. On any failure the row goes to
     'error' with an honest audit — never a fake 'connected'.
@@ -705,12 +863,43 @@ def oauth_callback(
             },
         )
 
+    # Capture the prior status BEFORE any mutation so the status-changed
+    # audit can record the honest old→new transition (§3.8.5 timeline).
+    prior_status = row.status
+
+    def _emit_status_changed(new_status: str) -> None:
+        """Emit the §3.8.5 status-transition audit (old→new) when the
+        callback moved the connection's status. No-op if unchanged."""
+        if new_status == prior_status:
+            return
+        audit_repo.record(
+            ctx=ctx,
+            admin_id=admin_id,
+            action=ACTION_CONNECTION_STATUS_CHANGED,
+            resource_type=RESOURCE_INSTANCE_CONNECTION,
+            resource_pk=row.id,
+            resource_natural_id=f"{instance_id}:{connection_type}",
+            luciel_instance_id=instance_id,
+            before={"status": prior_status},
+            after={
+                "connection_type": connection_type,
+                "auth_class": row.auth_class,
+                "status": new_status,
+                "notify_admin": False,
+            },
+            note=(
+                f"Connection status changed ({connection_type}: "
+                f"{prior_status}→{new_status})."
+            ),
+            autocommit=False,
+        )
+
     def _fail(detail: str) -> RedirectResponse:
         repo.apply_health_check(
             row=row,
             status="error",
             last_health_check_at=datetime.now(timezone.utc),
-            credential_ref=None,
+            secret_ref=None,
             autocommit=False,
         )
         audit_repo.record(
@@ -725,11 +914,12 @@ def oauth_callback(
                 "connection_type": connection_type,
                 "provider": row.provider,
                 "status": "error",
-                "credential_ref_present": False,
+                "secret_ref_present": False,
             },
             note=f"OAuth callback failed ({connection_type}): {detail}"[:256],
             autocommit=False,
         )
+        _emit_status_changed("error")
         db.commit()
         return _callback_redirect(connection_type, "error")
 
@@ -766,7 +956,7 @@ def oauth_callback(
         connection_type=connection_type,
     )
     try:
-        credential_ref = store.put(secret_name, refresh_token)
+        secret_ref = store.put(secret_name, refresh_token)
     except SecretStoreError as exc:
         return _fail(f"secret store write failed: {exc}")
 
@@ -774,7 +964,7 @@ def oauth_callback(
         row=row,
         status="connected",
         last_health_check_at=datetime.now(timezone.utc),
-        credential_ref=credential_ref,
+        secret_ref=secret_ref,
         autocommit=False,
     )
     audit_repo.record(
@@ -789,11 +979,12 @@ def oauth_callback(
             "connection_type": connection_type,
             "provider": row.provider,
             "status": "connected",
-            "credential_ref_present": True,
+            "secret_ref_present": True,
         },
         note=f"OAuth callback connected ({connection_type}).",
         autocommit=False,
     )
+    _emit_status_changed("connected")
     db.commit()
     return _callback_redirect(connection_type, "connected")
 
@@ -812,7 +1003,7 @@ def disconnect_connection(
 
     Idempotent: re-disconnecting an already-revoked row returns
     ``disconnected=False``. When the revoked row carried a non-null
-    ``credential_ref`` (a real stored secret — e.g. an OAuth refresh
+    ``secret_ref`` (a real stored secret — e.g. an OAuth refresh
     token), the same transaction enqueues a secret-cleanup outbox row
     (pointer only). The Celery drain worker performs the actual
     ``SecretStore.delete`` out of band; Postgres never holds the secret
@@ -833,7 +1024,7 @@ def disconnect_connection(
     instance_id = row.instance_id
     conn_type = row.connection_type
     # Capture the pointer BEFORE the soft-delete so we can enqueue cleanup.
-    credential_ref = row.credential_ref
+    secret_ref = row.secret_ref
 
     disconnected = repo.disconnect(
         admin_id=admin_id,
@@ -842,10 +1033,10 @@ def disconnect_connection(
     )
 
     secret_cleanup_enqueued = False
-    if disconnected and credential_ref:
+    if disconnected and secret_ref:
         SecretCleanupOutboxRepository(db).enqueue(
             admin_id=admin_id,
-            credential_ref=credential_ref,
+            secret_ref=secret_ref,
             instance_id=instance_id,
             connection_id=connection_id,
             autocommit=False,

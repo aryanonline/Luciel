@@ -450,8 +450,10 @@ def test_cognition_tool_files_were_removed_in_wu7() -> None:
 
 
 def test_registry_does_not_register_cognition_after_wu7() -> None:
-    """The shipped ToolRegistry must hold exactly the 8 §3.3.2
-    catalog tools — nothing cognition-shaped. This is the
+    """The shipped ToolRegistry must hold exactly the 7 §3.3.2
+    catalog action tools — nothing cognition-shaped. (The 8th slot,
+    call_sibling_luciel, was multi-Luciel residue removed in the
+    audit-and-alignment phase — Locked Decision #12.) This is the
     behavioural mirror of the file-removal AST check above."""
 
     import os
@@ -469,11 +471,10 @@ def test_registry_does_not_register_cognition_after_wu7() -> None:
         "lookup_record",
         "schedule_callback",
         "push_to_crm",
-        "call_sibling_luciel",
         "bring_your_own_webhook",
     }
     assert tool_ids == expected, (
-        f"Arc 12 WU7: registry must hold exactly the 8 catalog tools. "
+        f"registry must hold exactly the 7 catalog action tools. "
         f"Got {tool_ids!r}; expected {expected!r}."
     )
     cognition_intents = {

@@ -3,9 +3,7 @@
 Sends the admin-facing budget notifications that accompany the runtime
 budget gate (``app/runtime/orchestrator.py``):
 
-  * **80%** threshold — email only (Pro/Enterprise heads-up). Enterprise
-    additionally CCs the CSM address (``settings.budget_csm_alert_email``)
-    when configured.
+  * **80%** threshold — email only (Pro heads-up).
   * **100%** threshold — email + SMS (paying tiers over cap; conversations
     are billed as overage, never blocked).
   * **Free exhausted** — email only (the Free admin upgrade nudge). The
@@ -126,7 +124,6 @@ class BudgetAlertService:
             ESCALATION_NOTIFY_SMS,
             TIER_FREE,
             budget_alert_channels,
-            budget_csm_alert_at_80,
         )
 
         channels = budget_alert_channels(tier, threshold)
@@ -155,14 +152,7 @@ class BudgetAlertService:
                 tier,
             )
 
-        # Enterprise CSM CC at 80% (entitlements decides; we execute).
-        if budget_csm_alert_at_80(tier) and threshold < 100:
-            self._send_csm_copy(
-                threshold=threshold,
-                current=current,
-                cap=cap,
-                instance_label=instance_label,
-            )
+        # Unit 1 excision: CSM CC removed (Enterprise deferred; budget_csm_alert_at_80 deleted).
 
         # SMS leg — only when the tier-shaped channel set includes SMS
         # (100% for paying tiers). Recipient SMS number resolution is a
@@ -256,31 +246,7 @@ class BudgetAlertService:
             )
             return False
 
-    def _send_csm_copy(
-        self,
-        *,
-        threshold: int,
-        current: int,
-        cap: int,
-        instance_label: Optional[str],
-    ) -> None:
-        from app.core.config import settings
-
-        csm = getattr(settings, "budget_csm_alert_email", "") or ""
-        if not csm.strip():
-            logger.info(
-                "budget alert: Enterprise CSM-at-80 configured by tier but "
-                "budget_csm_alert_email unset — skipping CSM copy"
-            )
-            return
-        self._send_email(
-            to_email=csm,
-            threshold=threshold,
-            current=current,
-            cap=cap,
-            instance_label=instance_label,
-            exhausted=False,
-        )
+    # _send_csm_copy removed (Unit 1 excision) — Enterprise CSM deferred.
 
     def _send_sms(
         self,

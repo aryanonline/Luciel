@@ -81,16 +81,6 @@ class PersonalityConfigResponse(BaseModel):
     business_context: str | None = None
     updated_at: datetime | None = None
 
-    # --- Rescan ENT — approval workflow (Vision §7) -------------------
-    # The frontend approval banner keys on ``approval_state``.
+    # Single-login (Locked Dec #19): approval workflow removed.
+    # Changes always apply immediately; state is always 'live'.
     approval_state: Literal["live", "pending_approval"] = "live"
-    # Proposed pillars (populated only when approval_state ==
-    # 'pending_approval'). The proposal does NOT shape any customer turn
-    # until approved.
-    pending_personality_preset: PersonalityPreset | None = None
-    pending_personality_axes: dict[str, str] | None = None
-    pending_business_context: str | None = None
-    personality_submitted_by_user_id: str | None = None
-    personality_submitted_at: datetime | None = None
-    personality_approved_by_user_id: str | None = None
-    personality_approved_at: datetime | None = None

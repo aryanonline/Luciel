@@ -28,14 +28,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.integrations.llm.base import LLMMessage, LLMRequest, LLMResponse
-from app.integrations.llm.router import (
+from app.runtime.llm_router import (
     ModelRouter,
     _complexity_score,
     _qualifies_for_fast_route,
     _resolve_tier_model_pair,
     _TIER_FREE,
     _TIER_PRO,
-    _TIER_ENTERPRISE,
 )
 
 
@@ -123,13 +122,9 @@ class TestTierModelClassResolution:
         assert pro_pair.fallback_model != free_pair.fallback_model, \
             "Pro tier OpenAI fallback must differ from Free tier fallback"
 
-    def test_enterprise_tier_resolves_models(self):
-        ent_pair = _resolve_tier_model_pair(_TIER_ENTERPRISE)
-        assert ent_pair.primary_model, "Enterprise tier must have an Anthropic primary"
-        assert ent_pair.fallback_model, "Enterprise tier must have an OpenAI fallback"
-
-    def test_all_three_tiers_have_non_empty_models(self):
-        for tier in (_TIER_FREE, _TIER_PRO, _TIER_ENTERPRISE):
+    def test_all_tiers_have_non_empty_models(self):
+        # Enterprise removed (Unit 1 excision); Free/Pro only.
+        for tier in (_TIER_FREE, _TIER_PRO):
             pair = _resolve_tier_model_pair(tier)
             assert pair.primary_model, f"{tier}: Anthropic primary must be non-empty"
             assert pair.fallback_model, f"{tier}: OpenAI fallback must be non-empty"
@@ -174,20 +169,6 @@ class TestTierModelClassResolution:
         )
         assert anthropic.calls[0] == pro_pair.primary_model, \
             f"Pro tier should use {pro_pair.primary_model}, got {anthropic.calls[0]}"
-
-    def test_enterprise_tier_model_used_in_generate(self):
-        ent_pair = _resolve_tier_model_pair(_TIER_ENTERPRISE)
-        anthropic = _CountingProvider("anthropic")
-        router = _router_with_providers(anthropic_provider=anthropic)
-
-        router.generate(
-            _make_request("Complex analysis"),
-            tier=_TIER_ENTERPRISE,
-            user_message="Complex analysis",
-            context_token_estimate=5000,
-            has_tools=False,
-        )
-        assert anthropic.calls[0] == ent_pair.primary_model
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +258,7 @@ class TestAnthropicPrimaryOrderIndependence:
             anthropic_provider=anthropic,
             openai_provider=openai,
         )
-        with caplog.at_level(logging.WARNING, logger="app.integrations.llm.router"):
+        with caplog.at_level(logging.WARNING, logger="app.runtime.llm_router"):
             router.generate(
                 _make_request("Q"),
                 tier=_TIER_PRO,
@@ -390,21 +371,6 @@ class TestIntraTierFastRouting:
         router.generate(
             _make_request("ok"),
             tier=_TIER_FREE,
-            user_message="ok",
-            context_token_estimate=10,
-            has_tools=False,
-        )
-        assert anthropic.calls[0] == pair.fast_model_anthropic
-
-    def test_fast_route_on_enterprise_tier(self):
-        """Enterprise tier also uses the fast model when conditions hold."""
-        pair = _resolve_tier_model_pair(_TIER_ENTERPRISE)
-        anthropic = _CountingProvider("anthropic")
-        router = _router_with_providers(anthropic_provider=anthropic)
-
-        router.generate(
-            _make_request("ok"),
-            tier=_TIER_ENTERPRISE,
             user_message="ok",
             context_token_estimate=10,
             has_tools=False,

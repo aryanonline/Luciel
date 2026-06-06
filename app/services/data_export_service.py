@@ -74,7 +74,7 @@ from app.models.admin_audit_log import (
 logger = logging.getLogger(__name__)
 
 
-Tier = Literal["free", "pro", "enterprise"]
+Tier = Literal["free", "pro"]
 TriggeredBy = Literal["admin_request", "grace_window_request"]
 JobStatus = Literal["pending", "generating", "ready", "expired", "failed"]
 
@@ -83,11 +83,11 @@ JobStatus = Literal["pending", "generating", "ready", "expired", "failed"]
 # Tier-conditional signed-URL TTL.
 # ---------------------------------------------------------------------
 # Vision §7 tier matrix: pre-closure data export is "Yes (7-day
-# window)" on Free + Pro, "Yes (90-day window)" on Enterprise.
+# window)" on Free + Pro. (Enterprise tier deferred -- Open Decision
+# #8; removed in Unit 1.)
 _TIER_URL_TTL_SECONDS: dict[Tier, int] = {
     "free":       7  * 24 * 3600,
     "pro":        7  * 24 * 3600,
-    "enterprise": 90 * 24 * 3600,
 }
 
 # S3 bucket name comes from settings.
@@ -202,8 +202,8 @@ class DataExportService:
         if tier_at_request == "free" and closure_initiated_at is None:
             raise ExportFreeGateError(
                 "Free-tier accounts may only export data during the "
-                "account closure / grace window. Upgrade to Pro or "
-                "Enterprise for self-serve export at any time."
+                "account closure / grace window. Upgrade to Pro "
+                "for self-serve export at any time."
             )
 
         job_id = uuid.uuid4()
@@ -260,9 +260,10 @@ class DataExportService:
         )
 
         # RESCAN TIER-DE §5.10: emit data_export_self_serve for
-        # Pro/Enterprise non-closure exports so the forensics team can
-        # identify self-serve data-portability requests.
-        if tier_at_request in ("pro", "enterprise") and triggered_by == "admin_request":
+        # Pro non-closure exports so the forensics team can identify
+        # self-serve data-portability requests. (Enterprise tier
+        # deferred -- Open Decision #8; removed in Unit 1.)
+        if tier_at_request == "pro" and triggered_by == "admin_request":
             self.audit_repository.record(
                 ctx=audit_ctx,
                 admin_id=admin_id,
@@ -725,11 +726,11 @@ class DataExportService:
     ) -> None:
         """§5.10: instances.json — provider + non_secret_config + status.
 
-        RESCAN TIER-DE security invariant: credential_ref and any
+        RESCAN TIER-DE security invariant: secret_ref and any
         secret-bearing columns MUST NEVER be written here. We query the
         instance_connections table with an explicit column allowlist and
-        strip credential_ref entirely. The instances table itself carries
-        no secrets (those ride behind credential_ref on instance_connections).
+        strip secret_ref entirely. The instances table itself carries
+        no secrets (those ride behind secret_ref on instance_connections).
         """
         # Read instance rows (no secrets on the instances table itself).
         inst_rows = self.db.execute(
@@ -747,12 +748,12 @@ class DataExportService:
         )
 
         # Read instance_connections — provider + non_secret_config + status.
-        # credential_ref is EXCLUDED per §5.10 security invariant.
+        # secret_ref is EXCLUDED per §5.10 security invariant.
         conn_rows = self.db.execute(
             sql_text(
                 """
                 SELECT instance_id, connection_type, provider,
-                       config_json, status,
+                       non_secret_config, status,
                        last_health_check_at, created_at, updated_at
                   FROM instance_connections
                  WHERE admin_id = :aid
@@ -768,13 +769,13 @@ class DataExportService:
             conn_by_instance.setdefault(iid, []).append({
                 "connection_type": cr[1],
                 "provider": cr[2],
-                # config_json is non_secret_config (no credential_ref).
+                # non_secret_config is non_secret_config (no secret_ref).
                 "non_secret_config": cr[3],
                 "status": cr[4],
                 "last_health_check_at": _iso(cr[5]),
                 "created_at": _iso(cr[6]),
                 "updated_at": _iso(cr[7]),
-                # credential_ref intentionally omitted — NEVER secret material.
+                # secret_ref intentionally omitted — NEVER secret material.
             })
 
         instances_out = []

@@ -57,7 +57,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 from sqlalchemy import select
@@ -75,6 +75,26 @@ logger = logging.getLogger(__name__)
 # even if asked for more. Keeps the SQL row count bounded irrespective
 # of caller mistakes.
 MAX_LIMIT = 100
+
+# ---------------------------------------------------------------------------
+# Unit 13e §3.4.10 — cross-session memory INJECTION bound (platform
+# constants, NOT admin-configurable).
+# ---------------------------------------------------------------------------
+# §3.4.10: at injection time the runtime bulk-loads the N most-recent
+# summaries within a 12-month rolling window, subject to a token ceiling.
+# Older / beyond-N summaries are recall-eligible only on explicit
+# relevance match, not bulk-loaded.
+DEFAULT_RECENT_SUMMARIES_N = 10
+# 12-month rolling window. Summaries older than this are excluded from the
+# bulk injection. ~365 days; leap-year drift is immaterial at a 12-month
+# recall horizon.
+RECALL_WINDOW_DAYS = 365
+# Token ceiling for the bulk-injected block. Approximated by a chars/4
+# heuristic at injection time (the runtime's real tokenizer refines it);
+# kept as a platform constant so the bound is deterministic and testable.
+INJECTION_TOKEN_CEILING = 2000
+# chars-per-token heuristic for the deterministic token estimate.
+_CHARS_PER_TOKEN = 4
 
 
 @dataclass(frozen=True)
@@ -131,8 +151,9 @@ class CrossSessionRetriever:
         *,
         conversation_id: uuid.UUID,
         admin_id: str,
-        limit: int = 20,
+        limit: int = DEFAULT_RECENT_SUMMARIES_N,
         exclude_session_id: str | None = None,
+        within_days: int | None = RECALL_WINDOW_DAYS,
     ) -> list[CrossSessionPassage]:
         """Retrieve recent messages from sibling sessions in a conversation.
 
@@ -250,6 +271,12 @@ class CrossSessionRetriever:
         )
         if exclude_session_id is not None:
             stmt = stmt.where(SessionModel.id != exclude_session_id)
+        # Unit 13e §3.4.10 — 12-month rolling window. Rows older than the
+        # window are NOT bulk-loaded (they remain recall-eligible only on
+        # explicit relevance match, which is a different code path).
+        if within_days is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=within_days)
+            stmt = stmt.where(MessageModel.created_at >= cutoff)
 
         rows: Sequence[tuple[MessageModel, SessionModel]] = (
             self.db.execute(stmt).all()
@@ -311,3 +338,93 @@ class CrossSessionRetriever:
             )
 
         return passages
+
+
+# ---------------------------------------------------------------------------
+# Unit 13e §3.4.10 — deterministic injection-bound for session summaries.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class SummaryRecord:
+    """A persisted session summary considered for cross-session injection.
+
+    Mirrors the session_summaries store (BUILD 4). ``facts`` is the
+    structured fact map used for recency-precedence conflict resolution;
+    an empty dict means "no structured facts" (the summary still counts
+    toward the N / window / token bounds via its ``summary`` text).
+    """
+
+    resolved_lead_id: str
+    session_id: str
+    summary: str
+    created_at: datetime
+    facts: dict | None = None
+
+
+def _estimate_tokens(text: str) -> int:
+    """Deterministic token estimate (chars/4 heuristic, ceil)."""
+    if not text:
+        return 0
+    return -(-len(text) // _CHARS_PER_TOKEN)
+
+
+def bound_summaries_for_injection(
+    summaries: list[SummaryRecord],
+    *,
+    now: datetime | None = None,
+    n: int = DEFAULT_RECENT_SUMMARIES_N,
+    within_days: int = RECALL_WINDOW_DAYS,
+    token_ceiling: int = INJECTION_TOKEN_CEILING,
+) -> tuple[list[SummaryRecord], dict[str, object]]:
+    """Apply the §3.4.10 injection bound to a list of session summaries.
+
+    Deterministic (no LLM). Steps, in order:
+      1. 12-month window — drop summaries older than ``within_days``.
+      2. Newest-first ordering by ``created_at``.
+      3. Recency-precedence — when two summaries for the SAME
+         ``resolved_lead_id`` carry CONFLICTING facts (same fact key,
+         different value), the NEWER summary's fact wins; the older
+         summary's conflicting fact is shadowed. The newer summary is
+         what gets injected.
+      4. N cap — keep at most ``n`` most-recent summaries.
+      5. Token ceiling — stop adding summaries once the running token
+         estimate would exceed ``token_ceiling``.
+
+    Returns (selected_summaries_newest_first, resolved_facts_per_lead).
+    ``resolved_facts_per_lead`` maps resolved_lead_id → the winning
+    (recency-resolved) fact map, so the caller can inject a coherent,
+    non-conflicting fact view.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=within_days)
+
+    # 1 + 2: window filter, newest-first.
+    in_window = [s for s in summaries if s.created_at >= cutoff]
+    in_window.sort(key=lambda s: s.created_at, reverse=True)
+
+    # 3: recency-precedence fact resolution per lead. Walk newest→oldest;
+    # the first value seen for a (lead, fact_key) wins (it is the newest).
+    resolved_facts: dict[str, dict] = {}
+    for s in in_window:
+        if not s.facts:
+            continue
+        bucket = resolved_facts.setdefault(s.resolved_lead_id, {})
+        for k, v in s.facts.items():
+            if k not in bucket:  # newest wins — first seen, never overwritten
+                bucket[k] = v
+
+    # 4 + 5: N cap + token ceiling.
+    selected: list[SummaryRecord] = []
+    running_tokens = 0
+    for s in in_window:
+        if len(selected) >= n:
+            break
+        cost = _estimate_tokens(s.summary)
+        if selected and running_tokens + cost > token_ceiling:
+            # Keep at least one summary even if it alone exceeds the
+            # ceiling (so a single long summary is not silently dropped),
+            # but stop once a subsequent one would overflow.
+            break
+        selected.append(s)
+        running_tokens += cost
+
+    return selected, resolved_facts

@@ -71,9 +71,14 @@ def _build_session_with_connection(store_ref: str | None, *, with_row: bool = Tr
         Column("instance_id", Integer, nullable=False),
         Column("connection_type", String(64), nullable=False),
         Column("provider", String(64), nullable=False),
-        Column("config_json", Text, nullable=True),
-        Column("credential_ref", String(255), nullable=True),
+        Column("non_secret_config", Text, nullable=True),
+        Column("secret_ref", String(255), nullable=True),
         Column("status", String(32), nullable=False),
+        # §3.8.5 (Unit 13c) credential-shape class.
+        Column(
+            "auth_class", String(32),
+            nullable=False, server_default="api_key",
+        ),
         Column("last_health_check_at", DateTime(timezone=True), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), server_default=func.now()),
@@ -87,7 +92,7 @@ def _build_session_with_connection(store_ref: str | None, *, with_row: bool = Tr
     session = Session()
 
     if with_row:
-        from app.models.instance_connection import InstanceConnection
+        from app.connections.instance_connection import InstanceConnection
 
         config = {"store_ref": store_ref} if store_ref is not None else {}
         row = InstanceConnection(
@@ -95,7 +100,7 @@ def _build_session_with_connection(store_ref: str | None, *, with_row: bool = Tr
             instance_id=7,
             connection_type="record_source",
             provider="csv_upload",
-            config_json=config,
+            non_secret_config=config,
             status="connected",
         )
         session.add(row)

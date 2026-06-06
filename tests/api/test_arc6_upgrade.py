@@ -27,11 +27,9 @@ What is psycopg-gated (CI / runtime image only):
      Checkout URL when target_tier > current Admin.tier.
   6. Live route /upgrade -- 400 'not_an_upgrade' on same-tier or
      downgrade target.
-  7. Live route /upgrade -- 200 happy-path on (enterprise, monthly)
-     request. Arc 7 doctrine pivot (2026-05-24): Enterprise tier is
-     now FLAT-recurring with self-serve monthly + annual cadences
-     symmetric with Pro; the prior 400 'enterprise_monthly' reject
-     belonged to the retired hybrid-billing shape and is gone.
+  7. Upgrade schema rejects any target other than Pro. Enterprise
+     tier is deferred (Open Decision #8); the only self-serve upgrade
+     target in the ratified 2-tier model is Pro.
 
 The live-route classes monkey-patch the Stripe + service boundaries
 so the assertions land without a real Stripe account or a real DB
@@ -73,11 +71,14 @@ class TestUpgradeSchemaShape:
         r = UpgradeRequest(target_tier="pro", billing_cadence="annual")
         assert r.billing_cadence == "annual"
 
-    def test_upgrade_request_accepts_enterprise_annual(self):
+    def test_upgrade_request_rejects_enterprise_target(self):
+        # Enterprise tier deferred (Open Decision #8): the only valid
+        # upgrade target is Pro. The schema Literal["pro"] enforces this.
         from app.schemas.billing import UpgradeRequest
+        from pydantic import ValidationError
 
-        r = UpgradeRequest(target_tier="enterprise", billing_cadence="annual")
-        assert r.target_tier == "enterprise"
+        with pytest.raises(ValidationError):
+            UpgradeRequest(target_tier="enterprise", billing_cadence="annual")
 
     def test_upgrade_request_rejects_free_target(self):
         # Free has no Stripe row -- target_tier='free' is not a valid
@@ -155,7 +156,7 @@ class TestSubscriptionStatusFreeAdminShape:
         assert r.pilot_window_end is None
 
     def test_paid_admin_shape_still_works(self):
-        # Backward-compat: a Pro/Enterprise admin still produces the
+        # Backward-compat: a Pro admin still produces the
         # familiar shape with has_subscription=True and the full
         # Stripe-derived field set populated.
         from datetime import datetime, timezone
@@ -322,83 +323,12 @@ class TestMeFreeAdminLive:
     def test_free_admin_me_returns_200_with_has_subscription_false(
         self, monkeypatch
     ):
-        from app.api.v1 import billing as billing_module
-        from app.core.config import settings
-
-        # Stub the cookied-user resolver so we don't need a real
-        # session cookie or DB row.
-        class _FakeUser:
-            id = "user-uuid-12345678"
-            email = "alice@example.com"
-            display_name = "Alice"
-            active = True
-
-        class _FakeAssignment:
-            admin_id = "free-1a2b3c4d"
-            role = "owner"
-
-        class _FakeAdmin:
-            id = "free-1a2b3c4d"
-            tier = "free"
-            active = True
-
-        class _FakeSar:
-            def __init__(self, db):
-                pass
-
-            def list_for_user(self, _uid, active_only=True):
-                return [_FakeAssignment()]
-
-        # Stub the user-resolver helper to return the fake user
-        # without going through the JWT layer.
-        monkeypatch.setattr(
-            billing_module, "_resolve_cookied_user",
-            lambda *, db, session_cookie: _FakeUser(),
-        )
-        monkeypatch.setattr(
-            billing_module, "validate_session_token",
-            lambda _t: {"admin_id": "free-1a2b3c4d"},
-        )
-
-        # Patch the inline-imported ScopeAssignmentRepository so the
-        # route resolves the fake assignment instead of touching the
-        # DB.
-        from app.repositories import scope_assignment_repository as sar_mod
-        monkeypatch.setattr(
-            sar_mod, "ScopeAssignmentRepository", _FakeSar
-        )
-
-        # Patch db.get(Admin, ...) by monkey-patching the inline
-        # import. The route reads ``from app.models.admin import Admin
-        # as AdminModel`` then ``db.get(AdminModel, admin_id)``; we
-        # patch the Admin class so the SQLAlchemy mapper finds our
-        # _FakeAdmin under the same name. Simpler: patch the
-        # BillingService.get_active_subscription_for_user to return
-        # None and intercept the Admin lookup via a session fake.
-        from app.services.billing_service import BillingService
-        monkeypatch.setattr(
-            BillingService,
-            "get_active_subscription_for_user",
-            lambda self, *, user_id: None,
-        )
-
-        # Patch the inline AdminModel lookup. The cleanest seam is
-        # to monkey-patch ``db.get`` on the session yielded by
-        # DbSession -- but FastAPI's DI machinery wraps the session.
-        # Instead we patch app.models.admin.Admin so the inline
-        # import resolves to a class whose row we control via the
-        # session's get(). To keep this tractable in the sandbox
-        # harness, we accept that this test stays in the psycopg-
-        # gated bucket and lets the real DB answer the Admin lookup
-        # (the test runner seeds an admin row via fixture). For the
-        # sandbox shape pin, the schema + signature tests above are
-        # sufficient.
-        #
-        # In CI: a fixture (not shown here -- conftest provides
-        # ``free_admin_with_cookied_session``) seeds the DB rows.
-        # When that fixture is present, the test below is the live
-        # contract pin. When it is not, the test is auto-skipped by
-        # the @_skip_no_psycopg decorator at the class level.
+        # Single-login collapse (Locked Decision #19): scope resolution
+        # no longer flows through a ScopeAssignmentRepository -- the
+        # single account_owner is read directly off the Admin row. The
+        # live /me contract is exercised in CI against seeded fixtures
+        # (conftest ``free_admin_with_cookied_session``); the schema +
+        # signature shape pins above are the sandbox-runnable contract.
         pytest.skip(
             "live /me fixture lives in conftest -- contract is "
             "exercised in CI; sandbox shape pins above are the "
@@ -433,12 +363,7 @@ class TestUpgradeRouteLive:
             "live /upgrade fixture lives in conftest -- exercised in CI."
         )
 
-    def test_upgrade_enterprise_monthly_accepts_arc7_doctrine(self, monkeypatch):
-        # Arc 7 doctrine pivot (2026-05-24): the prior 400 reject on
-        # (enterprise, monthly) is RETIRED; Enterprise is now FLAT-recurring
-        # self-serve with monthly + annual cadences symmetric with Pro.
-        # The live route should return 200 with a Stripe Checkout URL
-        # backed by ``stripe_price_enterprise_monthly`` ($2,800 CAD/mo).
-        pytest.skip(
-            "live /upgrade fixture lives in conftest -- exercised in CI."
-        )
+    # NOTE: the former ``test_upgrade_enterprise_monthly_accepts_arc7_
+    # doctrine`` case was removed in the deferred-feature excision
+    # (Unit 1): Enterprise tier is deferred (Open Decision #8), the
+    # only valid upgrade target is Pro.

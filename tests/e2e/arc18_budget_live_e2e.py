@@ -43,14 +43,13 @@ def _run() -> list[_Row]:
     from app.policy.entitlements import (
         CADENCE_ANNUAL,
         CADENCE_MONTHLY,
-        TIER_ENTERPRISE,
         TIER_FREE,
         TIER_PRO,
         conversation_budget,
         overage_rate_per_100_cents,
     )
-    from app.runtime.budget_meter import BudgetMeter, InMemoryBackend
-    from app.services.overage_billing import (
+    from app.billing.metering import BudgetMeter, InMemoryBackend
+    from app.billing.overage import (
         overage_count,
         overage_line_item_description,
         overage_units,
@@ -62,20 +61,18 @@ def _run() -> list[_Row]:
     # 1. Ratified caps per (tier, cadence).
     caps_ok = (
         conversation_budget(TIER_FREE, CADENCE_MONTHLY) == 200
-        and conversation_budget(TIER_PRO, CADENCE_MONTHLY) == 2000
-        and conversation_budget(TIER_PRO, CADENCE_ANNUAL) == 2500
-        and conversation_budget(TIER_ENTERPRISE, CADENCE_MONTHLY) == 10000
+        and conversation_budget(TIER_PRO, CADENCE_MONTHLY) == 1000
+        and conversation_budget(TIER_PRO, CADENCE_ANNUAL) == 1200
     )
-    rows.append(_Row("ratified-caps", caps_ok, "Free200/Pro2000-2500/Ent10000"))
+    rows.append(_Row("ratified-caps", caps_ok, "Free200/ProMonthly1000/ProAnnual1200"))
 
     # 2. Overage rates in cents per 100.
     rate_ok = (
-        overage_rate_per_100_cents(TIER_PRO, CADENCE_MONTHLY) == 1500
-        and overage_rate_per_100_cents(TIER_PRO, CADENCE_ANNUAL) == 1000
+        overage_rate_per_100_cents(TIER_PRO, CADENCE_MONTHLY) == 3500
+        and overage_rate_per_100_cents(TIER_PRO, CADENCE_ANNUAL) == 3000
         and overage_rate_per_100_cents(TIER_FREE, CADENCE_MONTHLY) is None
-        and overage_rate_per_100_cents(TIER_ENTERPRISE, CADENCE_MONTHLY) is None
     )
-    rows.append(_Row("overage-rates", rate_ok, "Pro $15/$10 per 100; Free/Ent none"))
+    rows.append(_Row("overage-rates", rate_ok, "Pro $35/$30 per 100; Free none"))
 
     # 3. A multi-iteration session counts exactly once.
     meter = BudgetMeter(backend=InMemoryBackend())
@@ -99,15 +96,15 @@ def _run() -> list[_Row]:
     rows.append(_Row("per-instance-isolation", iso_ok, "inst1=1 inst2=1"))
 
     # 5. Overage rounding (ceil to hundreds) + EXACT line format.
-    over = overage_count(conversations_used=2355, budget_cap=2000)  # 355
+    over = overage_count(conversations_used=1355, budget_cap=1000)  # 355
     units = overage_units(over)  # ceil(355/100) = 4
     desc = overage_line_item_description(
         instance_name="Acme Bot",
         additional=over,
-        rate_str=rate_string_from_cents(1500),
+        rate_str=rate_string_from_cents(3500),
     )
     expected_desc = (
-        "Conversation overage — Acme Bot: 355 additional conversations × $15.00/100"
+        "Conversation overage — Acme Bot: 355 additional conversations × $35.00/100"
     )
     bill_ok = over == 355 and units == 4 and desc == expected_desc
     rows.append(_Row("overage-rounding+format", bill_ok, f"over={over} units={units}"))

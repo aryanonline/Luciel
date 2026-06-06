@@ -64,16 +64,12 @@ from app.models.admin_audit_log import (
     RESOURCE_KNOWLEDGE_SOURCE,
 )
 from app.policy.entitlements import (
-    TIER_ENTERPRISE,
     TIER_ENTITLEMENTS,
     TIER_FREE,
     TIER_PRO,
 )
 from app.policy.scope import (
-    ROLE_ADMIN_MANAGER,
     ROLE_ADMIN_OWNER,
-    ROLE_INSTANCE_OPERATOR,
-    ROLE_READ_ONLY_VIEWER,
     ScopePolicy,
     _KNOWLEDGE_ACTION_ROLES,
 )
@@ -353,26 +349,16 @@ class TestRequireKnowledgeRoleGuard(unittest.TestCase):
             )
 
     def test_action_role_matrix_matches_doctrine(self):
-        # Vision §5.2 + Architecture §3.2.2.
+        # Single-login model (Locked Dec #19): only ROLE_ADMIN_OWNER.
+        # Every action admits the owner; no other roles exist.
         expected = {
-            "list":   {ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER, ROLE_INSTANCE_OPERATOR},
-            "view":   {ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER, ROLE_INSTANCE_OPERATOR},
-            "edit":   {ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER},
-            "delete": {ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER},
+            "list":   {ROLE_ADMIN_OWNER},
+            "view":   {ROLE_ADMIN_OWNER},
+            "edit":   {ROLE_ADMIN_OWNER},
+            "delete": {ROLE_ADMIN_OWNER},
         }
-        # Convert frozensets to sets for comparison.
         actual = {k: set(v) for k, v in _KNOWLEDGE_ACTION_ROLES.items()}
         self.assertEqual(actual, expected)
-
-    def test_read_only_viewer_never_admitted(self):
-        """The read_only_viewer role is in the canonical role set
-        (so future read-only dashboards have a target) but it MUST
-        NOT appear in any allowed-role set for the four CRUD verbs."""
-        for action, roles in _KNOWLEDGE_ACTION_ROLES.items():
-            self.assertNotIn(
-                ROLE_READ_ONLY_VIEWER, roles,
-                f"read_only_viewer must NOT be allowed for action {action!r}",
-            )
 
 
 # ---------------------------------------------------------------------
@@ -430,20 +416,18 @@ class TestStructuredErrorPayloads(unittest.TestCase):
 class TestEntitlements(unittest.TestCase):
 
     def test_r9_per_file_caps_locked(self):
+        # Enterprise tier removed (Unit 1 excision). Free/Pro only.
         free = TIER_ENTITLEMENTS[TIER_FREE]
         pro = TIER_ENTITLEMENTS[TIER_PRO]
-        ent = TIER_ENTITLEMENTS[TIER_ENTERPRISE]
         self.assertEqual(free.knowledge_per_file_bytes_cap, 10 * 1024 * 1024)
         self.assertEqual(pro.knowledge_per_file_bytes_cap, 50 * 1024 * 1024)
-        self.assertEqual(ent.knowledge_per_file_bytes_cap, 500 * 1024 * 1024)
 
-    def test_r9_website_crawl_gated_to_pro_enterprise(self):
+    def test_r9_website_crawl_gated_to_pro(self):
+        # Enterprise removed; crawl gated to Pro only.
         free = TIER_ENTITLEMENTS[TIER_FREE]
         pro = TIER_ENTITLEMENTS[TIER_PRO]
-        ent = TIER_ENTITLEMENTS[TIER_ENTERPRISE]
         self.assertFalse(free.knowledge_website_crawl_enabled)
         self.assertTrue(pro.knowledge_website_crawl_enabled)
-        self.assertTrue(ent.knowledge_website_crawl_enabled)
 
     def test_r9_per_admin_total_caps_unchanged(self):
         """Don't accidentally drift the Arc 10 total caps."""
@@ -455,7 +439,6 @@ class TestEntitlements(unittest.TestCase):
             TIER_ENTITLEMENTS[TIER_PRO].knowledge_bytes_cap,
             5 * 1024 * 1024 * 1024,
         )
-        self.assertIsNone(TIER_ENTITLEMENTS[TIER_ENTERPRISE].knowledge_bytes_cap)
 
 
 # ---------------------------------------------------------------------
@@ -468,7 +451,7 @@ class TestLegacyRouteRemoved(unittest.TestCase):
     def test_r11_legacy_ingest_route_removed_from_admin_module(self):
         admin_src = (
             Path(__file__).resolve().parents[2]
-            / "app" / "api" / "v1" / "admin.py"
+            / "app" / "api" / "v1" / "admin" / "__init__.py"
         ).read_text(encoding="utf-8")
         # The legacy route's path + handler name are GONE.
         self.assertNotIn('@router.post("/knowledge/ingest"', admin_src)
@@ -554,34 +537,16 @@ class TestInternalRetrieveAuthZ(unittest.TestCase):
 
 
 class TestRoleCrudMatrix(unittest.TestCase):
-    """The 4×4 matrix from §0.6 / §8.3 — explicit enumeration so a
-    refactor of ``_KNOWLEDGE_ACTION_ROLES`` can't silently drift the
-    contract.
-
-    Cells: (role, action) → admitted? True/False.
+    """Single-login model (Locked Dec #19): only ROLE_ADMIN_OWNER.
+    All four CRUD actions admit the owner.
     """
 
     MATRIX = {
-        # admin_owner: full access
+        # admin_owner: full access on all actions
         (ROLE_ADMIN_OWNER, "list"):   True,
         (ROLE_ADMIN_OWNER, "view"):   True,
         (ROLE_ADMIN_OWNER, "edit"):   True,
         (ROLE_ADMIN_OWNER, "delete"): True,
-        # admin_manager: full access
-        (ROLE_ADMIN_MANAGER, "list"):   True,
-        (ROLE_ADMIN_MANAGER, "view"):   True,
-        (ROLE_ADMIN_MANAGER, "edit"):   True,
-        (ROLE_ADMIN_MANAGER, "delete"): True,
-        # instance_operator: read only (and scoped at the route layer)
-        (ROLE_INSTANCE_OPERATOR, "list"):   True,
-        (ROLE_INSTANCE_OPERATOR, "view"):   True,
-        (ROLE_INSTANCE_OPERATOR, "edit"):   False,
-        (ROLE_INSTANCE_OPERATOR, "delete"): False,
-        # read_only_viewer: denied everywhere
-        (ROLE_READ_ONLY_VIEWER, "list"):   False,
-        (ROLE_READ_ONLY_VIEWER, "view"):   False,
-        (ROLE_READ_ONLY_VIEWER, "edit"):   False,
-        (ROLE_READ_ONLY_VIEWER, "delete"): False,
     }
 
     def test_matrix(self):

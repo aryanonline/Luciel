@@ -77,12 +77,7 @@ TIER_RETENTION_DEFAULTS: dict[str, dict[str, int]] = {
         # summary window same as transcript for Pro
         # "summaries": 365,
     },
-    "enterprise": {
-        "sessions": 365 * 7,   # 2555 days
-        "messages": 365 * 7,   # 2555 days
-        # summary window same as transcript for Enterprise
-        # "summaries": 365 * 7,
-    },
+    # Enterprise tier deferred (Open Decision #8); removed in Unit 1.
 }
 
 # Summary retention (days) by tier — Architecture §3.4.10.
@@ -91,7 +86,7 @@ TIER_RETENTION_DEFAULTS: dict[str, dict[str, int]] = {
 TIER_SUMMARY_RETENTION_DAYS: dict[str, int] = {
     "free":       90,
     "pro":        365,
-    "enterprise": 365 * 7,  # 2555
+    # Enterprise tier deferred (Open Decision #8); removed in Unit 1.
 }
 
 # Transcript category names (sessions + messages share the transcript window).

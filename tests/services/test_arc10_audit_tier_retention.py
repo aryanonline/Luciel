@@ -34,7 +34,7 @@ AUDIT_SERVICE_PATH = (
 )
 AUDIT_MODEL_PATH = REPO_ROOT / "app" / "models" / "admin_audit_log.py"
 MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "arc10_lifecycle_subsystem.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "arc10_lifecycle_subsystem.py"
 )
 
 
@@ -43,7 +43,8 @@ MIGRATION_PATH = (
 # ---------------------------------------------------------------------
 
 def test_tier_window_days_match_vision_section_7():
-    """30d Free / 1y Pro / 7y Enterprise -- the canonical numbers."""
+    """30d Free / 1y Pro -- the canonical numbers. (Enterprise tier
+    deferred -- Open Decision #8; removed in Unit 1.)"""
     src = AUDIT_SERVICE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(src)
     target = None
@@ -78,7 +79,6 @@ def test_tier_window_days_match_vision_section_7():
     expected = {
         "free":       30,
         "pro":        365,
-        "enterprise": 365 * 7,
     }
     assert actual == expected, (
         f"Audit tier windows must match Vision 7 exactly. "
@@ -196,10 +196,10 @@ def test_audit_archiver_role_is_distinct_from_luciel_ops():
 # Service shape: per-tier loop + chain-extension at archive time.
 # ---------------------------------------------------------------------
 
-def test_audit_service_iterates_all_three_tiers():
-    """The retention service must iterate over all three tier names."""
+def test_audit_service_iterates_all_tiers():
+    """The retention service must iterate over all (Free/Pro) tier names."""
     src = AUDIT_SERVICE_PATH.read_text(encoding="utf-8")
-    for tier in ("free", "pro", "enterprise"):
+    for tier in ("free", "pro"):
         assert f'"{tier}"' in src, (
             f"Audit retention service must reference tier '{tier}' "
             f"by name."
@@ -314,7 +314,7 @@ def test_audit_retention_service_uses_canonical_action_constant():
 
 GAP6_MIGRATION_PATH = (
     REPO_ROOT
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "arc10_gap6_archiver_insert_grant.py"
 )
@@ -410,7 +410,7 @@ def test_gap6_migration_downgrade_only_revokes_insert():
 
 GAP6_SEQ_MIGRATION_PATH = (
     REPO_ROOT
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "arc10_gap6_archiver_sequence_grant.py"
 )
@@ -592,7 +592,7 @@ def test_cold_archive_hash_unchanged_by_instance_fix():
 
 GAP7_LOOSEN_MIGRATION_PATH = (
     REPO_ROOT
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "arc10_gap7_audit_loosen_instance_for_admin_scope.py"
 )

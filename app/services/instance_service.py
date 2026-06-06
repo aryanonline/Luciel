@@ -15,7 +15,7 @@ Responsibilities
    transaction as the Admin update.
 3. (TIER-DE) Transition table enforcement: validates the current state
    permits the requested transition and that the caller holds the
-   required role (owner+manager, or owner-only for restore).
+   required role (account owner -- single-login model, Locked Decision #19).
 
 V2 doctrine notes
 -----------------
@@ -34,9 +34,9 @@ no hardcoded role names.
 
 §3.6.1 Transition table
 -----------------------
-  active         → paused          (owner + manager)
-  paused         → active          (owner + manager)
-  active|paused  → deactivating    (owner + manager)
+  active         → paused          (account owner)
+  paused         → active          (account owner)
+  active|paused  → deactivating    (account owner)
   deactivating   → grace_window    (automatic — system)
   grace_window   → active          (owner only — /restore within 30d)
   grace_window   → hard_deleted    (automatic — retention worker)
@@ -56,7 +56,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.instance import Instance
-from app.models.instance_status import InstanceStatus, INSTANCE_GRACE_STATES
+from app.lifecycle.state import InstanceStatus, INSTANCE_GRACE_STATES
 from app.repositories.admin_audit_repository import AuditContext
 from app.repositories.instance_repository import InstanceRepository
 
@@ -105,8 +105,8 @@ class InstanceTransitionRoleError(InstanceServiceError):
     Route layer maps to 403 Forbidden.
 
     Transition role gates (§3.6.1):
-      active→paused / paused→active              : owner + manager
-      active|paused→deactivating                 : owner + manager
+      active→paused / paused→active              : account owner
+      active|paused→deactivating                 : account owner
       grace_window→active (restore)              : owner only
       deactivating→grace_window / grace_window→hard_deleted : automatic (no user gate)
     """
@@ -295,7 +295,7 @@ class InstanceService:
     ) -> Instance:
         """Pause an Instance (Customer Journey §4.5 Phase 8 "Pause").
 
-        §3.6.1 transition: active → paused (owner + manager).
+        §3.6.1 transition: active → paused (account owner).
 
         Widget begins returning 204 (empty <div>); knowledge + sessions
         are retained. Reactivatable instantly via /resume.
@@ -339,7 +339,7 @@ class InstanceService:
     ) -> Instance:
         """Resume a paused Instance.
 
-        §3.6.1 transition: paused → active (owner + manager).
+        §3.6.1 transition: paused → active (account owner).
 
         Raises:
           InstanceNotFoundError -> 404 when no row exists.
@@ -386,7 +386,7 @@ class InstanceService:
         the grace_window state, per Architecture §3.6.1.
 
         §3.6.1 transitions driven here:
-          active|paused → deactivating  (owner + manager)
+          active|paused → deactivating  (account owner)
           deactivating  → grace_window  (automatic, in same call)
 
         The ``deactivating`` state is a transient signal that grants
@@ -395,7 +395,7 @@ class InstanceService:
         status to ``grace_window`` (or, for backward-compat, the repo
         may use ``deleted`` for existing code paths — both are valid).
 
-        The retention worker (``app.worker.tasks.instance_retention``)
+        The retention worker (``app.lifecycle.retention``)
         hard-deletes the row + its customer-data cascade after the 30-
         day grace window expires. Restorable within the window via
         :meth:`restore_instance`.

@@ -14,7 +14,6 @@ from app.persona.composer import (
 from app.persona.luciel_core import build_system_prompt
 from app.persona.presets import NAMED_PRESETS, PRESET_CUSTOM
 from app.policy.entitlements import (
-    TIER_ENTERPRISE,
     TIER_FREE,
     TIER_PRO,
     business_context_max_chars,
@@ -109,17 +108,12 @@ def test_business_context_truncated_to_free_cap() -> None:
     assert len(body) <= cap
 
 
-def test_business_context_enterprise_allows_more() -> None:
+def test_business_context_pro_cap_is_280() -> None:
+    # Enterprise removed (Unit 1 excision). Both tiers are capped at 280.
     pro_cap = business_context_max_chars(TIER_PRO)
-    ent_cap = business_context_max_chars(TIER_ENTERPRISE)
-    assert ent_cap > pro_cap
-    text = "y" * ent_cap
-    stanza = compose_business_context_stanza(
-        business_context=text, tier=TIER_ENTERPRISE
-    )
-    assert stanza is not None
-    body = stanza.split("\n\n", 1)[1]
-    assert len(body) == ent_cap
+    free_cap = business_context_max_chars(TIER_FREE)
+    assert pro_cap == 280
+    assert free_cap == 280
 
 
 # ---------------------------------------------------------------------

@@ -33,9 +33,9 @@ class TenantOnboardRequest(BaseModel):
     # Arc 6 Commit 8 -- V2 tier vocabulary. Defaults match the
     # platform-admin onboarding intent (paid tier, stripe-webhook-
     # equivalent source); callers can override per their flow.
-    tier: Literal["free", "pro", "enterprise"] = Field(
+    tier: Literal["free", "pro"] = Field(
         default="pro",
-        description="V2 tier; one of 'free' / 'pro' / 'enterprise'",
+        description="V2 tier; one of 'free' / 'pro'",
     )
     tier_source: Literal[
         "stripe_webhook", "platform_admin", "free_signup"

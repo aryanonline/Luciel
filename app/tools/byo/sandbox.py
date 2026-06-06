@@ -126,7 +126,8 @@ class TransportError(Exception):
 
 
 class SubprocessTimeoutError(TransportError):
-    """30s hard timeout — subprocess was killed."""
+    """Hard timeout (``BYO_HARD_TIMEOUT_SECONDS`` = 10s, §3.8.6) —
+    subprocess was killed."""
 
 
 # ---------------------------------------------------------------------

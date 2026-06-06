@@ -68,9 +68,10 @@ if TYPE_CHECKING:
 
 TIER_FREE = "free"
 TIER_PRO = "pro"
-TIER_ENTERPRISE = "enterprise"
+# Enterprise tier DEFERRED (Locked Decision #35, Open Decision #8, Architecture
+# §6); excised in the audit-and-alignment phase (Unit 1).
 
-ALLOWED_TIERS = (TIER_FREE, TIER_PRO, TIER_ENTERPRISE)
+ALLOWED_TIERS = (TIER_FREE, TIER_PRO)
 
 
 # ---------------------------------------------------------------------
@@ -94,12 +95,11 @@ ALLOWED_BILLING_CADENCES = (BILLING_CADENCE_MONTHLY, BILLING_CADENCE_ANNUAL)
 #
 # CANONICAL_RECAP §14 forbids per-seat metering, so these caps are a
 # *billing-integrity* guardrail. The V2 values:
-#   Free       → 1 instance
-#   Pro        → 10 instances
-#   Enterprise → unlimited (sentinel 0 historically meant unlimited;
-#                in V2 we use None so callsites get a clean type
-#                signal via Optional[int]; comparison code at
-#                billing_service treats None as "no cap").
+#   Free → 1 instance, Pro → 1 instance (Locked Decision #12: one
+#   Luciel per account, both tiers). The multi-instance "Pro → 10 /
+#   Enterprise → unlimited" shape was removed in Unit 1 (Enterprise
+#   deferred) / reaffirmed in Unit 4. ``None`` historically signalled
+#   "no cap"; no tier uses it now.
 #
 # NOTE: The Domain layer is dead in V2 (D-arc5-aggressive-cleanup
 # amendment). The legacy TIER_PERMITTED_SCOPES + DOMAIN_COUNT_CAP_BY_TIER
@@ -111,10 +111,10 @@ ALLOWED_BILLING_CADENCES = (BILLING_CADENCE_MONTHLY, BILLING_CADENCE_ANNUAL)
 # for the single instance_count_cap axis; the full row is canonical.
 # ---------------------------------------------------------------------
 
+# One Luciel per account (Locked Decision #12): both tiers cap at 1 instance.
 TIER_INSTANCE_CAPS: dict[str, int | None] = {
-    TIER_FREE:       1,
-    TIER_PRO:        10,
-    TIER_ENTERPRISE: None,  # unlimited
+    TIER_FREE: 1,
+    TIER_PRO: 1,
 }
 
 
@@ -235,12 +235,11 @@ class Subscription(Base, TimestampMixin):
     instance_count_cap: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        # Default to Pro's cap (10) — historically Subscription rows
-        # were only created for paying customers (Individual/Team/Company).
-        # In V2 Free admins have no Subscription row at all (lazy-create
-        # on upgrade per Gap 1 lock), so any Subscription instantiated
-        # without an explicit cap is at least Pro — hence Pro's value
-        # is the safest module-import-time default. Service-layer code
+        # Default to Pro's cap (TIER_INSTANCE_CAPS[TIER_PRO] = 1 in the
+        # single-Luciel model, Locked Decision #12). Free admins have no
+        # Subscription row at all (lazy-create on upgrade per Gap 1 lock),
+        # so any Subscription instantiated without an explicit cap is at
+        # least Pro — and both tiers cap at 1. Service-layer code
         # at billing_service.compute_instance_cap_for_tier(tier) is the
         # canonical accessor and overrides this on actual creation.
         default=TIER_INSTANCE_CAPS[TIER_PRO],
@@ -248,7 +247,8 @@ class Subscription(Base, TimestampMixin):
         comment=(
             "Hard ceiling on active Instances under this subscription. "
             "Not a seat count (§14) — a billing-integrity guardrail. "
-            "None at the application layer means unlimited (Enterprise)."
+            "None at the application layer means unlimited (no tier "
+            "currently uncaps it in the Free/Pro model)."
         ),
     )
 
@@ -289,7 +289,7 @@ class Subscription(Base, TimestampMixin):
     # archive overflow); when NULL, run the V1 hard-cancel deactivate
     # path (preserved for manual Stripe-Dashboard cancels). CHECK
     # constraint at the DB level pins the legal values to {'free','pro'}
-    # — Enterprise is the top tier and is never a downgrade target.
+    # (Enterprise tier deferred — Open Decision #8, excised in Unit 1).
     pending_downgrade_target: Mapped[str | None] = mapped_column(
         String(16), nullable=True,
         comment=(

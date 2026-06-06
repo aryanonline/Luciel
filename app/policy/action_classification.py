@@ -51,7 +51,7 @@ chokepoint (the broker), fails closed on unknown tools, and emits a
 structured tier signal that survives any future tool surface
 addition (Step 34 workflow actions, Step 34a channel adapters).
 
-This mirrors the rationale for `app/policy/moderation.py` and is the
+This mirrors the rationale for `app/runtime/input_safety.py` and is the
 same pattern: a single gate in `app/policy/`, a `from_settings`
 factory, fail-closed defaults, and a pluggable provider so future
 work (an off-pattern detector, per-user trust calibration) can swap
@@ -176,7 +176,7 @@ class ConfigurationError(Exception):
     value the system cannot actually run. We fail loud at module
     import time rather than at first request so production deploys
     cannot ship with a silently-broken gate. Mirrors the
-    `ConfigurationError` doctrine in app/policy/moderation.py.
+    `ConfigurationError` doctrine in app/runtime/input_safety.py.
     """
 
 
@@ -305,7 +305,7 @@ class NullActionClassifier:
     WARNING line is loud by design: any production environment that
     wires this in by accident will surface it in the application log
     stream immediately. Parallel discipline to
-    NullModerationProvider in app/policy/moderation.py.
+    NullModerationProvider in app/runtime/input_safety.py.
     """
 
     name = "null"
@@ -400,7 +400,7 @@ class ActionClassificationGate:
     this factory so it never instantiates classifiers directly.
     Wiring lives in one place, the factory; the broker just calls
     .classify(tool). Mirrors the ModerationGate factory pattern in
-    app/policy/moderation.py.
+    app/runtime/input_safety.py.
     """
 
     @staticmethod

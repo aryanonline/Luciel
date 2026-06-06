@@ -24,7 +24,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKER_PATH = REPO_ROOT / "app" / "worker" / "tasks" / "instance_retention.py"
+WORKER_PATH = REPO_ROOT / "app" / "lifecycle" / "retention.py"
 CELERY_APP_PATH = REPO_ROOT / "app" / "worker" / "celery_app.py"
 
 
@@ -53,9 +53,9 @@ def test_worker_task_name_matches_celery_registration():
     Celery will receive a beat ping for a task it has not registered."""
     src = _read(WORKER_PATH)
     assert (
-        "app.worker.tasks.instance_retention.run_instance_retention_purge"
+        "app.lifecycle.retention.run_instance_retention_purge"
         in src
-    ), "task name must be app.worker.tasks.instance_retention.run_instance_retention_purge."
+    ), "task name must be app.lifecycle.retention.run_instance_retention_purge."
 
 
 def test_worker_function_is_decorated_shared_task():
@@ -104,8 +104,8 @@ def test_beat_schedule_routes_to_memory_tasks_queue():
 
 def test_celery_include_list_pulls_in_worker_module():
     src = _read(CELERY_APP_PATH)
-    assert "app.worker.tasks.instance_retention" in src, (
-        "celery_app.include must list app.worker.tasks.instance_retention "
+    assert "app.lifecycle.retention" in src, (
+        "celery_app.include must list app.lifecycle.retention "
         "or the worker boots without registering the task."
     )
 

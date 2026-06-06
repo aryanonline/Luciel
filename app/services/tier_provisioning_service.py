@@ -38,13 +38,12 @@ from typing import TYPE_CHECKING
 from sqlalchemy.orm import Session
 
 from app.models.admin import TIER_FREE
-from app.models.subscription import TIER_PRO, TIER_ENTERPRISE
+from app.models.subscription import TIER_PRO
 from app.models.admin_audit_log import (
     ACTION_UPDATE,
     RESOURCE_ADMIN,
 )
 from app.repositories.admin_audit_repository import AdminAuditRepository, AuditContext
-from app.repositories.scope_assignment_repository import ScopeAssignmentRepository
 from app.services.admin_service import AdminService
 from app.services.instance_service import InstanceService
 
@@ -68,12 +67,9 @@ _INSTANCE_SLUG_PRIMARY = "primary"
 # Audit / created_by label.
 _CREATED_BY = "tier_provisioning"
 
-# Role on the owner-side ScopeAssignment minted at self-serve
-# checkout. Buyer becomes ``admin_owner`` of their own Admin per the
-# canonical ``ScopeRole`` taxonomy (Arc 11 Cleanup C promoted
-# scope_assignments.role to a Postgres enum).
-from app.models.scope_assignment import ScopeRole as _ScopeRole
-_OWNER_ROLE = _ScopeRole.ADMIN_OWNER
+# Unit 1 excision: ScopeAssignment model + repository deleted.
+# Owner identity is carried by the Subscription row (user_id + admin_id);
+# no separate scope_assignments row is required for the single-owner model.
 
 # ---------------------------------------------------------------------
 # Email shape validation
@@ -348,7 +344,7 @@ class TierProvisioningService:
         # logic; routing through this service keeps the rule "there is
         # exactly ONE place that turns an Admin into a tier-shaped Admin"
         # honest.
-        if tier not in (TIER_FREE, TIER_PRO, TIER_ENTERPRISE):
+        if tier not in (TIER_FREE, TIER_PRO):
             raise ValueError(
                 f"TierProvisioningService.premint_for_tier: unknown or "
                 f"unsupported tier {tier!r}"
@@ -413,18 +409,10 @@ class TierProvisioningService:
             },
         }
 
-        # 1. Mint the owner-side ScopeAssignment binding the buyer to the
-        #    Admin with role="owner". Without this row the buyer has no
-        #    Admin binding and every cookied admin route fails 403.
-        #    Drift: D-step-30a-owner-scopeassignment-missing-self-serve-
-        #    checkout-2026-05-17.
-        self._ensure_owner_scope_assignment(
-            admin=admin,
-            primary_user=primary_user,
-            audit_ctx=audit_ctx,
-        )
+        # Unit 1 excision: _ensure_owner_scope_assignment removed.
+        # ScopeAssignment model deleted; owner identity is the Subscription row.
 
-        # 2. Arc 9 C18 — Instance pre-mint REMOVED.
+        # Arc 9 C18 — Instance pre-mint REMOVED.
         #
         #    Pre-mint was a legacy Arc 5/6 artifact preserving the "one
         #    Admin = one Luciel ready on day one" invariant from the old
@@ -455,11 +443,10 @@ class TierProvisioningService:
     # -----------------------------------------------------------------
 
     # Tier ordinal -- defines what counts as an "upgrade" vs "downgrade".
-    # Higher ordinal = strictly more capabilities. Free<Pro<Enterprise.
+    # Higher ordinal = strictly more capabilities. Free<Pro (Unit 1 excision).
     _TIER_ORDINAL: dict = {
         TIER_FREE: 0,
         TIER_PRO: 1,
-        TIER_ENTERPRISE: 2,
     }
 
     def upgrade_admin_tier(
@@ -569,7 +556,7 @@ class TierProvisioningService:
         # tier flip (the tier flip already committed above).
         # ------------------------------------------------------------------
         try:
-            from app.repositories.instance_connection_repository import (
+            from app.connections.repository import (
                 InstanceConnectionRepository,
             )
             conn_repo = InstanceConnectionRepository(self.db)
@@ -665,17 +652,6 @@ class TierProvisioningService:
             raise ValueError(
                 f"TierProvisioningService.downgrade_admin_tier: unknown new_tier {new_tier!r}"
             )
-        if new_tier == TIER_ENTERPRISE:
-            # Enterprise is never a downgrade target -- it is the top
-            # tier. Callers must not reach here with this argument; the
-            # route layer validates it, the schema CHECK on
-            # subscriptions.pending_downgrade_target also rejects it,
-            # and this is the third layer of the same gate.
-            raise ValueError(
-                "downgrade_admin_tier: new_tier='enterprise' is an upgrade, "
-                "not a downgrade. Use upgrade_admin_tier."
-            )
-
         admin = self.admin.get_tenant_config(admin_id)
         if admin is None or not getattr(admin, "active", False):
             raise ValueError(
@@ -723,67 +699,6 @@ class TierProvisioningService:
             "new_tier_source": new_tier_source,
         }
 
-    # -----------------------------------------------------------------
-    # Owner ScopeAssignment provisioning
-    # -----------------------------------------------------------------
-
-    def _ensure_owner_scope_assignment(
-        self,
-        *,
-        admin: "AdminConfig",
-        primary_user: "User",
-        audit_ctx: AuditContext,
-    ) -> None:
-        """Resolve-or-create the owner-role ScopeAssignment for the buyer.
-
-        Idempotent on retry: a Stripe webhook redeliver after a partial
-        success must not create a second active assignment. We look up
-        any currently-active assignment for (user, admin) first — there
-        should be at most one per (user, admin) in steady state. If we
-        find one, we log and return without touching it.
-
-        Writes an ACTION_CREATE / RESOURCE_SCOPE_ASSIGNMENT audit row in
-        the same transaction as the INSERT (Invariant 4), via the repo's
-        ``audit_ctx`` passthrough.
-
-        Commits so the immediate subsequent Instance create sees the same
-        transactional state.
-        """
-        sar = ScopeAssignmentRepository(self.db)
-
-        # ScopeAssignmentRepository.get_active_for_user_in_tenant() still
-        # carries the legacy kwarg name ``admin_id`` during the migration
-        # window; the new Admin.id replaces tenant_configs.admin_id 1:1
-        # (same String(100) semantic slug per Q1 lock). The kwarg renames
-        # to ``admin_id`` in a follow-up after Revision C lands.
-        existing = sar.get_active_for_user_in_tenant(
-            user_id=primary_user.id,
-            admin_id=admin.id,
-        )
-        if existing is not None:
-            logger.info(
-                "tier_provisioning: reusing existing owner scope assignment "
-                "admin=%s user=%s assignment_id=%s role=%s",
-                admin.id,
-                primary_user.id,
-                existing.id,
-                existing.role,
-            )
-            return
-
-        sar.create(
-            user_id=primary_user.id,
-            admin_id=admin.id,
-            role=_OWNER_ROLE,
-            autocommit=False,  # we commit below, after the audit row lands
-            audit_ctx=audit_ctx,
-        )
-
-        self.db.commit()
-        logger.info(
-            "tier_provisioning: created owner scope assignment admin=%s "
-            "user=%s role=%s",
-            admin.id,
-            primary_user.id,
-            _OWNER_ROLE,
-        )
+    # _ensure_owner_scope_assignment removed (Unit 1 excision).
+    # ScopeAssignment model deleted. Single-owner binding is the
+    # Subscription row (user_id + admin_id); no separate assignment table.

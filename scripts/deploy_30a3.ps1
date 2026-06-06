@@ -49,7 +49,7 @@ if ($dirty) {
 
 # ----- Preflight 0b: migration file present + chain correct -----
 $RepoRoot = (git rev-parse --show-toplevel).Trim()
-$MigrationFile = Join-Path $RepoRoot "alembic/versions/a3c1f08b9d42_step30a_3_users_password_hash.py"
+$MigrationFile = Join-Path $RepoRoot "app/migrations/versions/a3c1f08b9d42_step30a_3_users_password_hash.py"
 if (-not (Test-Path $MigrationFile)) {
     Write-Host "ERROR: expected migration file not found:" -ForegroundColor Red
     Write-Host "       $MigrationFile" -ForegroundColor Red
@@ -61,7 +61,7 @@ if ($migContent -notmatch 'revision\s*=\s*"a3c1f08b9d42"' -or
     Write-Host "ERROR: migration chain mismatch -- expected a3c1f08b9d42 down_revision dfea1a04e037" -ForegroundColor Red
     exit 1
 }
-Write-Host "    migration: alembic/versions/a3c1f08b9d42_step30a_3_users_password_hash.py" -ForegroundColor Gray
+Write-Host "    migration: app/migrations/versions/a3c1f08b9d42_step30a_3_users_password_hash.py" -ForegroundColor Gray
 Write-Host "    chain:     a3c1f08b9d42 -> dfea1a04e037 (verified)" -ForegroundColor Gray
 
 # ----- Resolve image tag -----

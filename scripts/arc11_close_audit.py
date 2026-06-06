@@ -295,52 +295,10 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
                 )
             )
 
-        # Cleanup C: scope_assignments.role promoted to PG enum.
-        from sqlalchemy import Enum as _SAEnum
-
-        from app.models.scope_assignment import ScopeAssignment, ScopeRole
-        role_col = ScopeAssignment.__table__.columns["role"]
-        if isinstance(role_col.type, _SAEnum) and role_col.type.name == "scope_role":
-            out.append(
-                _pass(
-                    section,
-                    "scope_assignments_role_is_pg_enum",
-                    "role column uses scope_role PG enum (Cleanup C)",
-                )
-            )
-        else:
-            out.append(
-                _fail(
-                    section,
-                    "scope_assignments_role_is_pg_enum",
-                    f"role column is {role_col.type!r}, expected "
-                    f"Enum(name='scope_role')",
-                )
-            )
-
-        # Cleanup C: the four canonical enum members are present.
-        expected_members = {
-            "admin_owner", "admin_manager",
-            "instance_operator", "read_only_viewer",
-        }
-        actual_members = {m.value for m in ScopeRole}
-        if actual_members == expected_members:
-            out.append(
-                _pass(
-                    section,
-                    "scope_role_canonical_values",
-                    f"ScopeRole values match canonical four",
-                )
-            )
-        else:
-            out.append(
-                _fail(
-                    section,
-                    "scope_role_canonical_values",
-                    f"ScopeRole values drift: expected={expected_members} "
-                    f"actual={actual_members}",
-                )
-            )
+        # Unit 1 excision: app.models.scope_assignment deleted (single-owner
+        # model has no multi-seat scope_assignments table). Cleanup C checks
+        # for scope_role PG enum are removed; ScopeRole now lives inline in
+        # app/policy/scope.py with a single ADMIN_OWNER member.
 
     except Exception as exc:  # noqa: BLE001
         out.append(
@@ -437,7 +395,6 @@ def section_2_entitlements() -> list[CheckResult]:
         )
         os.environ.setdefault("MODERATION_PROVIDER", "null")
         from app.policy.entitlements import (
-            TIER_ENTERPRISE,
             TIER_ENTITLEMENTS,
             TIER_FREE,
             TIER_PRO,
@@ -451,6 +408,7 @@ def section_2_entitlements() -> list[CheckResult]:
             )
         ]
 
+    # Unit 1 excision: TIER_ENTERPRISE removed; only Free + Pro exist.
     expectations = {
         TIER_FREE: {
             "knowledge_bytes_cap": 100 * 1024 * 1024,
@@ -460,11 +418,6 @@ def section_2_entitlements() -> list[CheckResult]:
         TIER_PRO: {
             "knowledge_bytes_cap": 5 * 1024 * 1024 * 1024,
             "knowledge_per_file_bytes_cap": 50 * 1024 * 1024,
-            "knowledge_website_crawl_enabled": True,
-        },
-        TIER_ENTERPRISE: {
-            "knowledge_bytes_cap": None,
-            "knowledge_per_file_bytes_cap": 500 * 1024 * 1024,
             "knowledge_website_crawl_enabled": True,
         },
     }
@@ -926,7 +879,7 @@ def _section_7b_instance_lifecycle_routes_present(section: str) -> CheckResult:
     are all present. Pure text assertion -- the deeper behavioural
     contract is covered by tests/api/test_instance_lifecycle_arc11_closeout.py.
     """
-    admin_path = REPO_ROOT / "app" / "api" / "v1" / "admin.py"
+    admin_path = REPO_ROOT / "app" / "api" / "v1" / "admin" / "__init__.py"
     if not admin_path.exists():
         return _fail(
             section,
@@ -992,7 +945,15 @@ def section_8_no_internal_arc_strings() -> list[CheckResult]:
     # historical substring (the contract test asserts on its
     # absence), and the migration's backfill clause is the one
     # grandfathered place the substring is permitted.
+    #
+    # Unit 13f relocated the Alembic tree from ``alembic/`` to
+    # ``app/migrations/`` (config-coupled move, zero behavior change).
+    # The migration backfill clause therefore now lives *under* app/,
+    # so the AST scan below explicitly prunes ``app/migrations/`` to
+    # preserve the original "migrations are excluded" invariant. Before
+    # the move this exclusion was implicit (the tree lived outside app/).
     app_root = REPO_ROOT / "app"
+    migrations_root = app_root / "migrations"
     if not app_root.is_dir():
         return [
             _fail(
@@ -1013,8 +974,8 @@ def section_8_no_internal_arc_strings() -> list[CheckResult]:
     # one that leaked into the cross-repo data contract via the
     # crawl-stub. After PR-B, the only remaining occurrence permitted
     # in the repo is the migration's grandfathered legacy-data
-    # backfill clause (and that file lives outside app/, so this scan
-    # never sees it). The broader "any Arc-NN literal" sweep is
+    # backfill clause (which the loop below skips via migrations_root,
+    # so this scan never sees it). The broader "any Arc-NN literal" sweep is
     # premature — many of those are doctrine-anchor strings in audit
     # notes that legitimately reference the arc the row was written
     # in. Tightening to the documented leak prevents false positives.
@@ -1022,6 +983,10 @@ def section_8_no_internal_arc_strings() -> list[CheckResult]:
 
     offenders: list[str] = []
     for path in sorted(app_root.rglob("*.py")):
+        # Prune the relocated Alembic tree (Unit 13f) so the migration
+        # backfill clause stays excluded, exactly as before the move.
+        if migrations_root in path.parents:
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:

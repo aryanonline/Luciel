@@ -77,6 +77,7 @@ class OnboardingService:
         *,
         admin_id: str,
         display_name: str,
+        owner_user_id=None,
         tier: str = TIER_PRO,
         tier_source: str = TIER_SOURCE_STRIPE_WEBHOOK,
         description: str | None = None,
@@ -135,9 +136,16 @@ class OnboardingService:
             # updated_at. We write the five business-meaningful ones; the
             # timestamps are server-defaulted; stripe_customer_id and
             # legacy_tenant_id are set elsewhere (webhook / data migration).
+            # owner_user_id (Unit 1, single-login model, Locked Decision
+            # #19): the durable user->admin owner binding that replaced
+            # the dropped scope_assignments table. Set here at signup so
+            # the arc9_c22_bootstrap_identity SECDEF function can resolve
+            # the canonical Admin for this user on login + every cookied
+            # request -- symmetric for Free and Pro.
             tenant = Admin(
                 id=admin_id,
                 name=display_name,
+                owner_user_id=owner_user_id,
                 tier=tier,
                 tier_source=tier_source,
                 active=True,

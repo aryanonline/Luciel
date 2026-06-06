@@ -9,11 +9,9 @@ from app.models.retention import RetentionPolicy, DeletionLog
 from app.models.user_consent import UserConsent
 from app.models.admin_audit_log import AdminAuditLog  # noqa: F401  (Step 24.5 — File 6.5a)
 from app.models.user import User  # noqa: F401  (Step 24.5b)
-from app.models.scope_assignment import ScopeAssignment, EndReason  # noqa: F401  (Step 24.5b)
 from app.models.conversation import Conversation  # noqa: F401  (Step 24.5c)
 from app.models.identity_claim import IdentityClaim, ClaimType  # noqa: F401  (Step 24.5c)
 from app.models.subscription import Subscription  # noqa: F401  (Step 30a)
-from app.models.user_invite import UserInvite, InviteStatus  # noqa: F401  (Step 30a.4)
 from app.models.email_send_event import (  # noqa: F401  (Arc 8 WU-6)
     EmailSendEvent,
     SES_EVENT_TYPES,
@@ -36,9 +34,8 @@ from app.models.admin import (  # noqa: F401
     ALLOWED_TIER_SOURCES,
     TIER_FREE,
     TIER_PRO,
-    TIER_ENTERPRISE,
 )
-# Arc 6 A — admin_widget_domains allowlist (Free/Pro/Enterprise widget domain control).
+# Arc 6 A — admin_widget_domains allowlist (Free/Pro widget domain control).
 from app.models.admin_widget_domain import AdminWidgetDomain  # noqa: F401
 from app.models.instance import Instance  # noqa: F401
 # Arc 13 — channel inbound-addressing → Instance routing map.
@@ -47,40 +44,14 @@ from app.models.channel_route import ChannelRoute  # noqa: F401
 from app.models.instance_tool_authorization import (  # noqa: F401
     InstanceToolAuthorization,
 )
-# Arc 15 WU4 — per-instance external-system connections (Arc 17 slice).
-from app.models.instance_connection import (  # noqa: F401
-    InstanceConnection,
-    CONNECTION_TYPES,
-    CONNECTION_STATUSES,
-)
-# Arc 17 — lifecycle secret-cleanup transactional outbox.
-from app.models.secret_cleanup_outbox import (  # noqa: F401
-    SecretCleanupOutbox,
-    OUTBOX_STATUSES,
-)
-# Arc 12 WU4 — sibling-Luciel composition grants (§3.3.4).
-from app.models.sibling_call_grant import (  # noqa: F401
-    SiblingCallGrant,
-    APPROVAL_STATE_LIVE,
-    APPROVAL_STATE_PENDING,
-    APPROVAL_STATE_REVOKED,
-    ALLOWED_APPROVAL_STATES,
-)
-# Arc 12b — permission-based custom roles (Enterprise).
-from app.models.permission_model import (  # noqa: F401
-    Permission,
-    CustomRole,
-    RolePermission,
-    UserRoleAssignment,
-    LOCKED_ROLE_ADMIN_OWNER,
-    LOCKED_ROLE_ADMIN_MANAGER,
-    LOCKED_ROLE_INSTANCE_OPERATOR,
-    LOCKED_ROLE_READ_ONLY_VIEWER,
-    ALL_LOCKED_ROLES,
-    SCOPE_TYPE_ALL_INSTANCES,
-    SCOPE_TYPE_INSTANCE_SPECIFIC,
-    ALL_SCOPE_TYPES,
-)
+# Arc 15 WU4 / Arc 17 — Connections Layer (§3.8) models, relocated to
+# app.connections (Unit 12 §8). Bare ``import`` (not ``from … import``)
+# registers the ORM classes on Base.metadata via module execution while
+# deferring attribute access, so a cold import of a connection submodule
+# (which imports app.models.base, triggering this __init__) cannot
+# deadlock on the app.models ⇄ app.connections cycle.
+import app.connections.instance_connection  # noqa: F401
+import app.connections.secret_cleanup_outbox  # noqa: F401
 # Arc 14 U2 — §3.4.5 escalation judgment event store.
 from app.models.escalation_event import (  # noqa: F401
     EscalationEvent,
@@ -98,8 +69,15 @@ from app.models.escalation_event import (  # noqa: F401
 from app.models.conversation_overage_ledger import (  # noqa: F401
     ConversationOverageLedger,
 )
+# Unit 13g — §3.4.1b+§4.5 budget counter write-through (Postgres authoritative).
+from app.models.conversation_budget_counter import (  # noqa: F401
+    ConversationBudgetCounter,
+    ConversationCountedSession,
+)
 # Arc 14 U4 — §3.4.4 lead capture + §3.4.7 summarization (cognition).
 from app.models.lead import Lead  # noqa: F401
+# Unit 13e — §3.4.10 persisted session-summary store (cross-session memory).
+from app.models.session_summary import SessionSummary  # noqa: F401
 # Arc 12 WU6 — BYO webhook config + general-purpose tool execution log.
 from app.models.byo_webhook_endpoint import ByoWebhookEndpoint  # noqa: F401
 from app.models.tool_execution_log import (  # noqa: F401
@@ -134,14 +112,10 @@ __all__ = [
     "KnowledgeSource",
     "AdminAuditLog",
     "User",
-    "ScopeAssignment",
-    "EndReason",
     "Conversation",
     "IdentityClaim",
     "ClaimType",
     "Subscription",
-    "UserInvite",
-    "InviteStatus",
     # Arc 8 WU-6 -- SES feedback / suppression cohort
     "EmailSendEvent",
     "SES_EVENT_TYPES",
@@ -161,7 +135,6 @@ __all__ = [
     "ALLOWED_TIER_SOURCES",
     "TIER_FREE",
     "TIER_PRO",
-    "TIER_ENTERPRISE",
     # Arc 6 A -- widget domain allowlist.
     "AdminWidgetDomain",
     # Arc 13 -- channel routing map.
@@ -175,12 +148,6 @@ __all__ = [
     # Arc 17 -- lifecycle secret-cleanup outbox.
     "SecretCleanupOutbox",
     "OUTBOX_STATUSES",
-    # Arc 12 WU4 -- sibling-Luciel composition grants.
-    "SiblingCallGrant",
-    "APPROVAL_STATE_LIVE",
-    "APPROVAL_STATE_PENDING",
-    "APPROVAL_STATE_REVOKED",
-    "ALLOWED_APPROVAL_STATES",
     # Arc 14 U2 -- escalation judgment event store.
     "EscalationEvent",
     "SIGNAL_EXPLICIT_HUMAN_REQUEST",
@@ -194,8 +161,13 @@ __all__ = [
     "SIGNAL_BUDGET_EXHAUSTED",
     # Arc 18 -- §3.4.1b conversation-overage durable billing ledger.
     "ConversationOverageLedger",
+    # Unit 13g -- §3.4.1b+§4.5 budget counter write-through.
+    "ConversationBudgetCounter",
+    "ConversationCountedSession",
     # Arc 14 U4 -- §3.4.4 lead capture + §3.4.7 summarization.
     "Lead",
+    # Unit 13e -- §3.4.10 persisted session-summary store.
+    "SessionSummary",
     # Arc 12 WU6 -- BYO webhook config + tool execution log.
     "ByoWebhookEndpoint",
     "ToolExecutionLog",
@@ -211,16 +183,4 @@ __all__ = [
     "CB_STATE_HALF_OPEN",
     "CB_STATE_OPEN",
     # Arc 12b -- permission-based custom roles.
-    "Permission",
-    "CustomRole",
-    "RolePermission",
-    "UserRoleAssignment",
-    "LOCKED_ROLE_ADMIN_OWNER",
-    "LOCKED_ROLE_ADMIN_MANAGER",
-    "LOCKED_ROLE_INSTANCE_OPERATOR",
-    "LOCKED_ROLE_READ_ONLY_VIEWER",
-    "ALL_LOCKED_ROLES",
-    "SCOPE_TYPE_ALL_INSTANCES",
-    "SCOPE_TYPE_INSTANCE_SPECIFIC",
-    "ALL_SCOPE_TYPES",
 ]

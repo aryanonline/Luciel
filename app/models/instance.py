@@ -41,7 +41,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
-from app.models.instance_status import InstanceStatus
+from app.lifecycle.state import InstanceStatus
 from app.persona.presets import ALL_PRESETS, DEFAULT_PRESET
 
 
@@ -185,48 +185,11 @@ class Instance(Base):
     # (280 Free/Pro, 2000 Enterprise — Vision §3.5); NOT capped at DB.
     business_context: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # --- Rescan ENT — Enterprise personality approval (Vision §7) ------
-    # On Enterprise, a personality change is staged here in
-    # 'pending_approval' (the live personality_* columns above are left
-    # untouched) until a SECOND admin approves it. On Free/Pro the PUT
-    # applies immediately and this state stays 'live'. Mirrors the
-    # custom-role (§3.7.3) + sibling-grant (§3.3.4) approval columns.
-    # Default 'live' backfills every existing row to the no-pending state.
-    personality_approval_state: Mapped[str] = mapped_column(
-        String(20),
-        nullable=False,
-        server_default=PERSONALITY_APPROVAL_STATE_LIVE,
-    )
-    # Proposed (not yet applied) personality pillars awaiting approval.
-    # All NULL when no change is pending. ``pending_personality_axes`` is
-    # populated only when the proposed preset is 'custom'.
-    pending_personality_preset: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
-    pending_personality_axes: Mapped[dict | None] = mapped_column(
-        JSONB, nullable=True
-    )
-    pending_business_context: Mapped[str | None] = mapped_column(
-        Text, nullable=True
-    )
-    # Who submitted the pending change (the proposer).
-    personality_submitted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
-    personality_submitted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    # Who approved the pending change (populated on pending -> live).
-    personality_approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
-    personality_approved_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    # (Enterprise personality second-admin-approval columns removed in the
+    # audit-and-alignment phase, Unit 1: single-login (Locked Dec #19) has no
+    # second admin to approve, so personality changes apply immediately. The
+    # pending_personality_*, personality_approval_state, and
+    # personality_submitted/approved_* columns were dropped from the schema.)
     # Lead routing config. Shape:
     #   {"strategy": "round_robin|geographic|specialty_match|single_contact",
     #    "rules": [...]}
@@ -246,10 +209,6 @@ class Instance(Base):
             "admin_id", "instance_slug", name="uq_instances_admin_id_slug"
         ),
         Index("ix_instances_active", "active"),
-        CheckConstraint(
-            "personality_approval_state IN ('live', 'pending_approval')",
-            name="ck_instances_personality_approval_state",
-        ),
     )
 
     def __repr__(self) -> str:  # pragma: no cover

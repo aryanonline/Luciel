@@ -14,19 +14,17 @@ Design decisions
   restart-safe exactly-once guarantee is maintained.
 
 * **Retry**: 3 attempts per channel (immediate / 30 s / 2 min). After 3
-  failures the Pro path falls back to admin_owner email + records a
-  delivery_failed audit row. Enterprise advances the chain (if the failed
-  step is not the last one) or executes the owner-email fallback.
+  failures the path falls back to admin_owner email + records a
+  delivery_failed audit row.
 
 * **Customer reply first**: This service is called AFTER the customer reply
   has been sent. Delivery must NEVER block or crash the turn — every public
   method is wrapped in try/except and degrades to a warning log on error.
 
-* **Tier dispatch**:
+* **Tier dispatch** (Unit 1: Free + Pro only):
   - Free  → single email, one contact, one attempt with retry.
   - Pro   → per-signal routing rules + fan-out (multiple contacts per
               signal). Each contact gets retry-with-fallback.
-  - Enterprise → chain walker (see EscalationChainWalker / Celery task).
 
 * **Dry-run**: when CHANNELS_LIVE_PROVISIONING_ENABLED is False, records the
   full routing+attempt decision and the escalation_notification_sent audit
@@ -57,8 +55,7 @@ logger = logging.getLogger(__name__)
 _RETRY_DELAYS = (0, 30, 120)
 _MAX_ATTEMPTS = 3
 
-# First-step SLA window for Enterprise chains (§9 item 11).
-ENTERPRISE_FIRST_STEP_SLA_SECONDS = 300  # 5 minutes
+# ENTERPRISE_FIRST_STEP_SLA_SECONDS removed (Unit 1 excision) — Enterprise chains deferred.
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +336,7 @@ class EscalationDeliveryService:
         gate: str,
         contact: EscalationContact,
     ) -> None:
-        from app.policy.entitlements import TIER_ENTERPRISE, TIER_FREE, TIER_PRO
+        from app.policy.entitlements import TIER_FREE, TIER_PRO
 
         db = None
         try:
@@ -416,22 +413,6 @@ class EscalationDeliveryService:
                     body=body,
                     escalation_config=escalation_config,
                 )
-            elif tier == TIER_ENTERPRISE:
-                self._deliver_enterprise(
-                    db=db,
-                    event_id=event_id,
-                    admin_id=admin_id,
-                    luciel_instance_id=luciel_instance_id,
-                    session_id=session_id,
-                    signal=signal,
-                    gate=gate,
-                    email_to=email_to,
-                    sms_to=sms_to,
-                    slack_to=slack_to,
-                    subject=subject,
-                    body=body,
-                    escalation_config=escalation_config,
-                )
             else:
                 # Unknown tier — degrade to Free (email only).
                 self._deliver_free(
@@ -492,6 +473,89 @@ class EscalationDeliveryService:
                 "escalation delivery: mark_delivered failed event_id=%s exc=%s",
                 event_id, type(exc).__name__,
             )
+
+    # ------------------------------------------------------------------
+    # Ack mechanism (§3.5.4 / §3.5.5)
+    # ------------------------------------------------------------------
+
+    def mark_acked(
+        self,
+        *,
+        event_id: int,
+        admin_id: str,
+        actor_user_id: str | None,
+        db=None,
+    ) -> str | None:
+        """Transition an escalation event's delivery_status → 'acked'.
+
+        Tenant-fenced on ``admin_id`` (returns None if the event is not
+        found or belongs to another tenant). Idempotent: a second ack on
+        an already-'acked' event is a no-op success. Emits an
+        ACTION_ESCALATION_ACKED audit row (best-effort). Returns the new
+        delivery_status, or None when the event is not the caller's.
+
+        Accepts an optional caller-supplied ``db`` session (the admin
+        endpoint passes its TenantScopedDbSession so the transition +
+        audit commit atomically in the request transaction). When no
+        session is supplied a private one is opened/committed/closed.
+        """
+        from sqlalchemy import select, update
+        from app.models.escalation_event import (
+            EscalationEvent,
+            DELIVERY_STATUS_ACKED,
+        )
+        from app.models.admin_audit_log import ACTION_ESCALATION_ACKED
+
+        owns_session = db is None
+        if owns_session:
+            db = self._open_session()
+        try:
+            row = db.execute(
+                select(EscalationEvent).where(
+                    EscalationEvent.id == event_id,
+                    EscalationEvent.admin_id == admin_id,
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                # Not found or other tenant — do not leak existence.
+                return None
+
+            if row.delivery_status == DELIVERY_STATUS_ACKED:
+                # Idempotent no-op success.
+                return DELIVERY_STATUS_ACKED
+
+            db.execute(
+                update(EscalationEvent)
+                .where(EscalationEvent.id == event_id)
+                .values(delivery_status=DELIVERY_STATUS_ACKED)
+            )
+            _write_delivery_audit(
+                db,
+                admin_id=admin_id,
+                luciel_instance_id=row.luciel_instance_id,
+                event_id=event_id,
+                session_id=row.session_id,
+                signal=row.signal,
+                gate=row.gate,
+                action=ACTION_ESCALATION_ACKED,
+                after={
+                    "event_id": event_id,
+                    "session_id": row.session_id,
+                    "signal": row.signal,
+                    "gate": row.gate,
+                    "actor_user_id": str(actor_user_id) if actor_user_id else None,
+                },
+                note=f"escalation:{row.signal} acked",
+            )
+            if owns_session:
+                db.commit()
+            return DELIVERY_STATUS_ACKED
+        finally:
+            if owns_session and db is not None:
+                try:
+                    db.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     # ------------------------------------------------------------------
     # Tier-specific delivery
@@ -599,6 +663,7 @@ class EscalationDeliveryService:
         from app.models.admin_audit_log import (
             ACTION_ESCALATION_NOTIFICATION_SENT,
             ACTION_ESCALATION_DELIVERY_FAILED,
+            ACTION_ESCALATION_OWNER_FALLBACK,
         )
 
         contacts = self._resolve_pro_contacts(
@@ -675,6 +740,28 @@ class EscalationDeliveryService:
                     )
                     # Pro fallback: send to admin_owner email.
                     if channel != NOTIFY_EMAIL and email_to:
+                        # §3.5.5: emit the dedicated owner-fallback INVOCATION
+                        # event before the actual owner-email send.
+                        _write_delivery_audit(
+                            db,
+                            admin_id=admin_id,
+                            luciel_instance_id=luciel_instance_id,
+                            event_id=event_id,
+                            session_id=session_id,
+                            signal=signal,
+                            gate=gate,
+                            action=ACTION_ESCALATION_OWNER_FALLBACK,
+                            after={
+                                "signal": signal,
+                                "gate": gate,
+                                "channel": NOTIFY_EMAIL,
+                                "to": email_to,
+                                "original_channel": channel,
+                                "fallback": True,
+                                "event_id": event_id,
+                            },
+                            note=f"escalation:{signal} owner fallback from {channel}",
+                        )
                         fallback_result, _ = _send_with_retry(
                             self._email_adapter,
                             to=email_to,
@@ -754,185 +841,7 @@ class EscalationDeliveryService:
 
         return contacts
 
-    def _deliver_enterprise(
-        self,
-        *,
-        db,
-        event_id: int | None,
-        admin_id: str,
-        luciel_instance_id: int | None,
-        session_id: str,
-        signal: str,
-        gate: str,
-        email_to: str | None,
-        sms_to: str | None,
-        slack_to: str | None,
-        subject: str,
-        body: str,
-        escalation_config: dict | None,
-    ) -> None:
-        """Enterprise tier: chain walker with SLA timer via Celery.
-
-        Notifies the first step immediately, then enqueues a Celery task
-        to advance the chain on SLA timeout. Each transition is audited
-        with escalation_chain_step. If no chains are configured, degrades
-        to Pro fan-out.
-        """
-        from app.models.admin_audit_log import (
-            ACTION_ESCALATION_NOTIFICATION_SENT,
-            ACTION_ESCALATION_CHAIN_STEP,
-        )
-        from app.policy.entitlements import escalation_chains_enabled, TIER_ENTERPRISE
-
-        chains = (escalation_config or {}).get("chains")
-        if not chains or not isinstance(chains, list) or not escalation_chains_enabled(TIER_ENTERPRISE):
-            # No chains configured: degrade to Pro fan-out.
-            logger.info(
-                "escalation delivery (Enterprise): no chains configured "
-                "session=%s signal=%s — degrading to Pro fan-out",
-                session_id, signal,
-            )
-            self._deliver_pro(
-                db=db,
-                event_id=event_id,
-                admin_id=admin_id,
-                luciel_instance_id=luciel_instance_id,
-                session_id=session_id,
-                signal=signal,
-                gate=gate,
-                email_to=email_to,
-                sms_to=sms_to,
-                subject=subject,
-                body=body,
-                escalation_config=escalation_config,
-            )
-            return
-
-        # Notify step 1.
-        step_contact = chains[0] if chains else {}
-        step_channel = step_contact.get("channel", NOTIFY_EMAIL)
-        step_to = step_contact.get("value") or email_to
-        step_sla = step_contact.get("sla_minutes", 5) * 60  # convert to seconds
-
-        adapter = self._adapter_for_channel(step_channel)
-        result, attempts = _send_with_retry(
-            adapter,
-            to=step_to,
-            subject=subject,
-            body=body,
-            signal=signal,
-            session_id=session_id,
-        )
-
-        if db is not None:
-            _write_delivery_audit(
-                db,
-                admin_id=admin_id,
-                luciel_instance_id=luciel_instance_id,
-                event_id=event_id,
-                session_id=session_id,
-                signal=signal,
-                gate=gate,
-                action=ACTION_ESCALATION_NOTIFICATION_SENT,
-                after={
-                    "signal": signal,
-                    "gate": gate,
-                    "channel": step_channel,
-                    "to": step_to,
-                    "sent": result.sent,
-                    "dry_run": result.dry_run,
-                    "provider_id": result.provider_id,
-                    "attempts": attempts,
-                    "chain_step": 0,
-                    "event_id": event_id,
-                },
-                note=f"escalation:{signal} Enterprise chain step 0",
-            )
-            _write_delivery_audit(
-                db,
-                admin_id=admin_id,
-                luciel_instance_id=luciel_instance_id,
-                event_id=event_id,
-                session_id=session_id,
-                signal=signal,
-                gate=gate,
-                action=ACTION_ESCALATION_CHAIN_STEP,
-                after={
-                    "signal": signal,
-                    "session_id": session_id,
-                    "step": 0,
-                    "contact": step_to,
-                    "chain_action": "notified",
-                    "sla_seconds": step_sla,
-                },
-                note=f"escalation chain step 0 notified",
-            )
-            db.commit()
-
-        # Enqueue the SLA advance task.
-        if event_id is not None:
-            self._enqueue_chain_advance(
-                event_id=event_id,
-                admin_id=admin_id,
-                luciel_instance_id=luciel_instance_id,
-                session_id=session_id,
-                signal=signal,
-                gate=gate,
-                current_step=0,
-                chain=chains,
-                email_to=email_to,
-                subject=subject,
-                body=body,
-                sla_seconds=step_sla,
-            )
-
-    def _enqueue_chain_advance(
-        self,
-        *,
-        event_id: int,
-        admin_id: str,
-        luciel_instance_id: int | None,
-        session_id: str,
-        signal: str,
-        gate: str,
-        current_step: int,
-        chain: list,
-        email_to: str | None,
-        subject: str,
-        body: str,
-        sla_seconds: int,
-    ) -> None:
-        """Enqueue the Celery chain-walker SLA-advance task."""
-        try:
-            from app.worker.tasks.escalation_chain_walker import advance_escalation_chain
-            advance_escalation_chain.apply_async(
-                kwargs={
-                    "event_id": event_id,
-                    "admin_id": admin_id,
-                    "luciel_instance_id": luciel_instance_id,
-                    "session_id": session_id,
-                    "signal": signal,
-                    "gate": gate,
-                    "current_step": current_step,
-                    "chain": chain,
-                    "email_to": email_to,
-                    "subject": subject,
-                    "body": body,
-                },
-                countdown=sla_seconds,
-                queue="luciel-memory-tasks",
-            )
-            logger.info(
-                "escalation chain: SLA advance task enqueued event_id=%d "
-                "session=%s step=%d sla_seconds=%d",
-                event_id, session_id, current_step, sla_seconds,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "escalation chain: failed to enqueue advance task "
-                "event_id=%s session=%s exc=%s",
-                event_id, session_id, type(exc).__name__,
-            )
+    # _deliver_enterprise + _enqueue_chain_advance removed (Unit 1 excision) — Enterprise chains deferred.
 
     def _adapter_for_channel(self, channel: str):
         """Return the adapter for a given channel id."""

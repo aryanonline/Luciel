@@ -390,12 +390,13 @@ class AdminService:
           3.  memory_items              (broadest leaf below)
           4.  api_keys
           5.  instances                 (V2 instance layer)
-          6.  scope_assignments         (Step 30a.7 -- privilege revocation)
-          7.  user_invites              (Step 30a.7 -- pending-invite revoke)
+          6/7/9. REMOVED in Unit 1     (scope_assignments / user_invites /
+                                         synthetic_orphan_users -- those
+                                         tables were dropped under the
+                                         single-login model; access is
+                                         governed by the admins row +
+                                         live sessions)
           8.  sessions                  (Step 30a.7 -- session-cookie revoke)
-          9.  synthetic_orphan_users    (Step 30a.7 -- test-fixture cleanup,
-                                         synthetic=True AND zero remaining
-                                         active scope_assignments)
           10. tenant_config             (active=False, deactivated_at=now())
 
         Layers 6+7 of the pre-Arc-10 cascade (`agents` and
@@ -406,9 +407,7 @@ class AdminService:
         D-arc10-close-path-imports-deleted-agent-repository-2026-05-27.
 
         Each in-function layer emits exactly one ``cascade_deactivate``-shape
-        audit row per touched row, with the documented exception of layer 10
-        (``user_invites``) which uses ``invite_revoked`` for parity with the
-        user-driven revoke path. Any step failure rolls back the entire
+        audit row per touched row. Any step failure rolls back the entire
         cascade -- no partial deactivation is possible.
 
         audit_ctx is REQUIRED. Tenant deactivation is the most privileged
@@ -473,26 +472,23 @@ class AdminService:
         from app.models.conversation import Conversation
         # DomainConfig: REMOVED (Arc 5 Path A) - V2 has no Domain layer
         from app.models.identity_claim import IdentityClaim
-        # Step 30a.7 -- privilege-revocation layer models.
-        from app.models.scope_assignment import EndReason, ScopeAssignment
+        # Step 30a.7 -- privilege-revocation layer models. The
+        # scope_assignments / user_invites model imports (and their
+        # cascade steps 6/7/9) were removed in Unit 1 -- those tables
+        # were dropped (single-login model, Locked Decision #19;
+        # invites deferred, Open Decision #7).
         from app.models.session import SessionModel
-        from app.models.user import User
-        from app.models.user_invite import InviteStatus, UserInvite
         from app.services.api_key_service import ApiKeyService
         from app.repositories.admin_audit_repository import AdminAuditRepository
         from app.models.admin_audit_log import (
             ACTION_CASCADE_DEACTIVATE,
             ACTION_DEACTIVATE,
-            ACTION_INVITE_REVOKED,
             RESOURCE_AGENT,
             RESOURCE_CONVERSATION,
             RESOURCE_DOMAIN,
             RESOURCE_IDENTITY_CLAIM,
-            RESOURCE_SCOPE_ASSIGNMENT,
             RESOURCE_SESSION,
             RESOURCE_TENANT,
-            RESOURCE_USER,
-            RESOURCE_USER_INVITE,
         )
 
         if audit_ctx is None:
@@ -702,127 +698,17 @@ class AdminService:
             # layer to cascade. Cascade proceeds directly to the
             # privilege-revocation layers below.
 
-            # --- 6. scope_assignments cascade (Step 30a.7) -------------
-            # Privilege-revocation layer. scope_assignments is the single
-            # source of truth for tenant binding (post Step-30a.5 invitee
-            # resolver fix); leaving rows active=True against a soft-
-            # deleted tenant lets the RBAC resolver return a binding for
-            # a dead tenant. Stamp active=False + ended_at=now() +
-            # ended_reason=DEACTIVATED + ended_by_api_key_id=NULL (NULL
-            # because this is a system-initiated cascade end, not an
-            # API-key-initiated promotion/demotion/departure). Capture
-            # affected ids/user_ids first so the synthetic-orphan-users
-            # layer (12) below can read them.
-            affected_scope_assignments = (
-                self.db.query(ScopeAssignment.id, ScopeAssignment.user_id)
-                .filter(
-                    ScopeAssignment.admin_id == admin_id,
-                    ScopeAssignment.active.is_(True),
-                )
-                .all()
-            )
-            sa_pks = [pk for pk, _ in affected_scope_assignments]
-            sa_user_ids = [uid for _, uid in affected_scope_assignments]
-            sa_updated = (
-                self.db.query(ScopeAssignment)
-                .filter(
-                    ScopeAssignment.admin_id == admin_id,
-                    ScopeAssignment.active.is_(True),
-                )
-                .update(
-                    {
-                        ScopeAssignment.active: False,
-                        ScopeAssignment.ended_at: func.now(),
-                        ScopeAssignment.ended_reason: EndReason.DEACTIVATED,
-                        ScopeAssignment.ended_by_api_key_id: None,
-                    },
-                    synchronize_session=False,
-                )
-            )
-            if sa_updated:
-                AdminAuditRepository(self.db).record(
-                    ctx=audit_ctx,
-                    admin_id=admin_id,
-                    action=ACTION_CASCADE_DEACTIVATE,
-                    resource_type=RESOURCE_SCOPE_ASSIGNMENT,
-                    resource_pk=None,
-                    resource_natural_id=None,
-                    after={
-                        "count": int(sa_updated),
-                        # Step 30a.7 caller-hygiene
-                        # (D-jsonb-uuid-serializer-engine-default-2026-05-20):
-                        # scope_assignments.id is uuid.UUID; coerce to str at
-                        # the call site for explicit traceability, even though
-                        # the engine-level json_serializer hook would catch it.
-                        "affected_pks": [str(pk) for pk in sa_pks],
-                        "affected_user_ids": [str(uid) for uid in sa_user_ids],
-                        "table": "scope_assignments",
-                        "ended_reason": EndReason.DEACTIVATED.value,
-                        "trigger": "tenant_deactivate",
-                    },
-                    note=(
-                        f"Cascade scope_assignments from tenant "
-                        f"{admin_id} deactivation (Step 30a.7)"
-                    ),
-                    autocommit=False,
-                )
-
-            # --- 7. user_invites cascade (Step 30a.7) ------------------
-            # Pending invites against a soft-deleted tenant are by
-            # definition revocable -- the JWT is still redeemable until
-            # expires_at unless we flip status='revoked' here. Reuse
-            # ACTION_INVITE_REVOKED (NOT cascade_deactivate) so downstream
-            # audit-search tooling that already keys on the user-driven
-            # revoke action sees cascade-triggered revokes uniformly.
-            # ended_by_api_key_id-equivalent column is revoked_by_api_key_id
-            # (per UserInvite model); NULL for system-initiated cascade.
-            affected_invites = (
-                self.db.query(UserInvite.id)
-                .filter(
-                    UserInvite.admin_id == admin_id,
-                    UserInvite.status == InviteStatus.PENDING,
-                )
-                .all()
-            )
-            ui_pks = [pk for (pk,) in affected_invites]
-            ui_updated = (
-                self.db.query(UserInvite)
-                .filter(
-                    UserInvite.admin_id == admin_id,
-                    UserInvite.status == InviteStatus.PENDING,
-                )
-                .update(
-                    {
-                        UserInvite.status: InviteStatus.REVOKED,
-                        UserInvite.revoked_at: func.now(),
-                    },
-                    synchronize_session=False,
-                )
-            )
-            if ui_updated:
-                AdminAuditRepository(self.db).record(
-                    ctx=audit_ctx,
-                    admin_id=admin_id,
-                    action=ACTION_INVITE_REVOKED,
-                    resource_type=RESOURCE_USER_INVITE,
-                    resource_pk=None,
-                    resource_natural_id=None,
-                    after={
-                        "count": int(ui_updated),
-                        # Step 30a.7 caller-hygiene
-                        # (D-jsonb-uuid-serializer-engine-default-2026-05-20):
-                        # user_invites.id is uuid.UUID; coerce at call site.
-                        "affected_pks": [str(pk) for pk in ui_pks],
-                        "table": "user_invites",
-                        "revoked_via": "tenant_deactivate_cascade",
-                        "trigger": "tenant_deactivate",
-                    },
-                    note=(
-                        f"Cascade revoke pending user_invites from "
-                        f"tenant {admin_id} deactivation (Step 30a.7)"
-                    ),
-                    autocommit=False,
-                )
+            # --- 6/7. scope_assignments + user_invites cascade REMOVED
+            #          in Unit 1 --------------------------------------
+            # The scope_assignments and user_invites tables were dropped
+            # (single-login model, Locked Decision #19; invites are a
+            # deferred team feature, Open Decision #7). There is no
+            # per-tenant privilege-binding row to revoke: the single
+            # account_owner's access is governed by the admins row
+            # (active flag, flipped in step 10) and the live session
+            # rows (revoked in step 8 below). NOTE for Unit 4 (lifecycle):
+            # re-confirm this cascade against the ratified 5-state
+            # machine when that unit lands.
 
             # --- 8. sessions cascade (Step 30a.7) ----------------------
             # session.status='active' is the runtime authenticator for
@@ -879,72 +765,14 @@ class AdminService:
                     autocommit=False,
                 )
 
-            # --- 9. synthetic_orphan_users cascade (Step 30a.7) --------
-            # users is a GLOBAL table -- users have no admin_id column
-            # (binding lives in scope_assignments). A blanket
-            # users.active=False on cascade would wrongly deactivate real
-            # users who hold scope on multiple tenants. Narrow case where
-            # deactivation IS correct: synthetic=True users whose ONLY
-            # active scope_assignment was for this tenant (and was just
-            # flipped in layer 9 above). Real users (synthetic=False) are
-            # NEVER deactivated by the cascade -- real-user deactivation
-            # is a separate operator-initiated path. Uses sa_user_ids
-            # captured in layer 9 above as the candidate set.
-            synthetic_deactivated_user_ids: list[str] = []
-            if sa_user_ids:
-                # Step 1: filter to synthetic users only.
-                synthetic_candidates = (
-                    self.db.query(User.id)
-                    .filter(
-                        User.id.in_(sa_user_ids),
-                        User.synthetic.is_(True),
-                        User.active.is_(True),
-                    )
-                    .all()
-                )
-                synthetic_candidate_ids = [uid for (uid,) in synthetic_candidates]
-                # Step 2: per-candidate, only flip if zero remaining
-                # active scope_assignments on ANY other tenant.
-                for user_id in synthetic_candidate_ids:
-                    remaining = (
-                        self.db.query(ScopeAssignment.id)
-                        .filter(
-                            ScopeAssignment.user_id == user_id,
-                            ScopeAssignment.active.is_(True),
-                        )
-                        .count()
-                    )
-                    if remaining == 0:
-                        (
-                            self.db.query(User)
-                            .filter(User.id == user_id)
-                            .update(
-                                {User.active: False},
-                                synchronize_session=False,
-                            )
-                        )
-                        synthetic_deactivated_user_ids.append(str(user_id))
-                        AdminAuditRepository(self.db).record(
-                            ctx=audit_ctx,
-                            admin_id=admin_id,
-                            action=ACTION_CASCADE_DEACTIVATE,
-                            resource_type=RESOURCE_USER,
-                            resource_pk=None,
-                            resource_natural_id=str(user_id),
-                            after={
-                                "user_id": str(user_id),
-                                "synthetic": True,
-                                "remaining_active_scopes": 0,
-                                "table": "users",
-                                "trigger": "tenant_deactivate",
-                            },
-                            note=(
-                                f"Cascade deactivate synthetic orphan user "
-                                f"{user_id} from tenant {admin_id} "
-                                f"deactivation (Step 30a.7)"
-                            ),
-                            autocommit=False,
-                        )
+            # --- 9. synthetic_orphan_users cascade REMOVED in Unit 1 ----
+            # This layer keyed off the scope_assignments rows captured in
+            # step 6 (now removed) to deactivate synthetic users orphaned
+            # by a tenant teardown. In the single-login model there is no
+            # scope_assignments table and no multi-tenant synthetic-user
+            # binding, so there is no orphan set to compute. NOTE for
+            # Unit 4 (lifecycle): re-confirm user teardown against the
+            # ratified 5-state machine + hard-delete cascade.
 
             # --- 10. tenant_config itself ------------------------------
             # Step 30a.2: also stamp deactivated_at = now() so the
@@ -1235,12 +1063,14 @@ class AdminService:
         #     knowledge_chunks->knowledge_sources pair (chunks before
         #     sources to respect their own FK), then connections.
         for _child_sql in (
-            # grants / authorizations / logs referencing instances
-            "DELETE FROM instance_composition_grants WHERE admin_id = :tid",
-            "DELETE FROM knowledge_share_grants WHERE admin_id = :tid",
-            "DELETE FROM sibling_call_grants WHERE admin_id = :tid",
+            # grants / authorizations / logs referencing instances.
+            # NOTE: instance_composition_grants, knowledge_share_grants,
+            # sibling_call_grants and user_role_assignments were DROPPED
+            # in Unit 1 (deferred multi-Luciel / custom-role surfaces);
+            # their DELETE statements were removed here so the hard-
+            # delete path does not crash UndefinedTable on a dropped
+            # table.
             "DELETE FROM instance_tool_authorizations WHERE admin_id = :tid",
-            "DELETE FROM user_role_assignments WHERE admin_id = :tid",
             "DELETE FROM tool_execution_log WHERE admin_id = :tid",
             "DELETE FROM byo_webhook_endpoints WHERE admin_id = :tid",
             "DELETE FROM channel_routes WHERE admin_id = :tid",

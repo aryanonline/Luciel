@@ -40,7 +40,7 @@ from pydantic import BaseModel, EmailStr, Field
 from app.api.deps import DbSession
 from app.api.v1.billing import _set_session_cookie  # reuse the canonical cookie stamp
 from app.core.config import settings
-from app.services.auth_service import (
+from app.auth.access import (
     AuthError,
     PasswordTooShortError,
     request_password_reset,

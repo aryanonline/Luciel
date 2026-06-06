@@ -464,8 +464,8 @@ def test_health_service_crm_unconfigured_honest(monkeypatch) -> None:
     class _Conn:
         id = 1
         connection_type = "crm"
-        config_json = None
-        credential_ref = None
+        non_secret_config = None
+        secret_ref = None
 
     svc = ConnectionHealthService(settings)
     res = svc.check_health(_Conn())

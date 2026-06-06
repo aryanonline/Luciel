@@ -96,7 +96,8 @@ def test_admin_routes_use_tier_aware_decorator() -> None:
     """
     route_files = [
         "app/api/v1/chat.py",
-        "app/api/v1/admin.py",
+        "app/api/v1/admin/__init__.py",
+        "app/api/v1/admin/usage.py",
         "app/api/v1/admin_forensics.py",
         "app/api/v1/audit_log.py",
         "app/api/v1/consent.py",
@@ -148,7 +149,6 @@ def test_admin_routes_use_tier_aware_decorator() -> None:
     [
         ("tier:free:admin:abc:inst:1", "30/minute"),
         ("tier:pro:admin:xyz:inst:7", "300/minute"),
-        ("tier:enterprise:admin:big:inst:none", "3000/minute"),
         # Anonymous bucket -> Free.
         ("ip:1.2.3.4", "30/minute"),
         # Malformed / unknown tier -> Free (defence in depth).
@@ -224,15 +224,15 @@ def test_key_func_returns_tier_bucket_with_instance() -> None:
 
 
 def test_key_func_returns_tier_bucket_no_instance() -> None:
-    """admin_id set, instance_id NULL -> inst:none."""
+    """admin_id set, instance_id NULL -> inst:none. Uses Pro tier."""
     _reset_admin_tier_cache()
     with patch(
-        "app.middleware.rate_limit._lookup_admin_tier", return_value="enterprise"
+        "app.middleware.rate_limit._lookup_admin_tier", return_value="pro"
     ):
         req = _StubRequest(admin_id="big-co", instance_id=None)
         key = get_tier_aware_key(req)
-    assert key == "tier:enterprise:admin:big-co:inst:none"
-    assert get_tier_rate_limit_for_key(key) == "3000/minute"
+    assert key == "tier:pro:admin:big-co:inst:none"
+    assert get_tier_rate_limit_for_key(key) == "300/minute"
 
 
 def test_key_func_fails_safe_to_free_on_lookup_error() -> None:
@@ -335,18 +335,6 @@ def test_e2e_pro_admin_passes_where_free_would_429(monkeypatch) -> None:
                 f"Pro admin must accept ≥31 rpm; req {i} returned "
                 f"{r.status_code}: {r.text}"
             )
-
-
-def test_e2e_enterprise_admin_passes_where_pro_floor_holds(monkeypatch) -> None:
-    """Enterprise=3000rpm. Pin the same 31-req baseline to prove
-    Enterprise is at least as generous as Pro (it is 10x)."""
-    _reset_admin_tier_cache()
-    app, fake = _build_test_app({"ent-admin": "enterprise"})
-    monkeypatch.setattr("app.middleware.rate_limit._lookup_admin_tier", fake)
-    with TestClient(app) as client:
-        for i in range(31):
-            r = client.get("/", headers={"X-Admin": "ent-admin", "X-Instance": "1"})
-            assert r.status_code == 200
 
 
 def test_e2e_per_instance_isolation(monkeypatch) -> None:

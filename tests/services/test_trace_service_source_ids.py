@@ -25,7 +25,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from app.knowledge.retriever import RetrievedChunk, collect_source_pks
+from app.runtime.knowledge_retrieval import RetrievedChunk, collect_source_pks
 from app.models.trace import Trace
 from app.services.trace_service import TraceService
 

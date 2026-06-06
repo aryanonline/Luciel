@@ -79,16 +79,16 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.db.tenant_scope import bind_tenant_scope  # Arc 9 C4.4
-from app.integrations.llm.router import ModelRouter
+from app.runtime.llm_router import ModelRouter
 from app.memory.service import MemoryService
 from app.models.admin_audit_log import (
     ACTION_WORKER_USER_INACTIVE,
     ACTION_WORKER_IDENTITY_SPOOF_REJECT,
     ACTION_WORKER_PERMANENT_FAILURE,
 )
-# Arc 5 Path A: Agent table REMOVED. The cross-tenant identity-spoof
-# gate now checks ScopeAssignment (the V2 binding from User to Admin).
-from app.models.scope_assignment import ScopeAssignment
+# Unit 1 excision: ScopeAssignment model deleted. Gate 6 now checks
+# Subscription (user_id + admin_id) as the single-owner binding.
+from app.models.subscription import Subscription as _Subscription
 from app.models.api_key import ApiKey
 from app.models.instance import Instance as LucielInstance
 from app.models.message import MessageModel
@@ -384,19 +384,18 @@ def extract_memory_from_turn(
                     )
 
             # ---------- Gate 6: cross-tenant identity-spoof guard (Step 24.5b -- Q6) ----------
-            # Arc 12 EX1b: v2 binding is ScopeAssignment(user_id, admin_id)
-            # only (the Agent layer was excised per §3.7.2). When
-            # ``actor_user_uuid`` is present we assert that the actor
-            # has an active ScopeAssignment under this admin.
+            # Unit 1 excision: ScopeAssignment deleted. Single-owner binding is
+            # the active Subscription row (user_id + admin_id). Assert the actor
+            # user is the subscription owner for this admin.
             if actor_user_uuid is not None:
-                spoof_agent = db.scalars(
-                    select(ScopeAssignment).where(
-                        ScopeAssignment.admin_id == admin_id,
-                        ScopeAssignment.user_id == actor_user_uuid,
-                        ScopeAssignment.active.is_(True),
+                spoof_sub = db.scalars(
+                    select(_Subscription).where(
+                        _Subscription.admin_id == admin_id,
+                        _Subscription.user_id == actor_user_uuid,
+                        _Subscription.active.is_(True),
                     ).limit(1)
                 ).first()
-                if spoof_agent is None:
+                if spoof_sub is None:
                     logger.warning(
                         "gate6 identity spoof task=%s payload_actor_user=%s "
                         "tenant=%s",
@@ -413,8 +412,8 @@ def extract_memory_from_turn(
                         actor_key_prefix=actor_key_prefix,
                         note=(
                             f"actor_user_id mismatch: payload claims "
-                            f"{actor_user_uuid}, no active "
-                            f"ScopeAssignment under admin={admin_id}"
+                            f"{actor_user_uuid}, no active Subscription "
+                            f"binding under admin={admin_id}"
                         ),
                         task_id=task_id,
                         trace_id=trace_id,

@@ -74,13 +74,12 @@ class CheckoutSessionRequest(BaseModel):
         description="DEPRECATED / ignored. Identity is taken from the "
                     "session cookie. Retained optional for back-compat.",
     )
-    tier: Literal["pro", "enterprise"] = Field(
+    tier: Literal["pro"] = Field(
         default="pro",
         description=(
-            "V2 tier slug. Arc 6 vocab: 'pro' or 'enterprise'. Free has "
-            "its own no-card route (POST /signup-free) and never reaches "
-            "this endpoint. The (tier, cadence) pair must have a "
-            "configured Stripe Price ID or the route returns 501."
+            "V2 tier slug. 'pro' only (Unit 1). Free uses POST /signup-free. "
+            "The (tier, cadence) pair must have a configured Stripe Price ID "
+            "or the route returns 501."
         ),
     )
     billing_cadence: Literal["monthly", "annual"] = Field(
@@ -131,20 +130,16 @@ class UpgradeRequest(BaseModel):
     metadata key and routes into the upgrade-branch (tier-flip on the
     existing Admin) instead of the default mint-new-Admin path.
     """
-    target_tier: Literal["pro", "enterprise"] = Field(
+    target_tier: Literal["pro"] = Field(
         ...,
         description=(
-            "Tier to upgrade to. Must be strictly higher than the "
-            "caller's current tier (free<pro<enterprise); otherwise "
-            "the route returns 400 with detail='not_an_upgrade'."
+            "Tier to upgrade to (Unit 1: 'pro' only). Must be strictly "
+            "higher than the caller's current tier (free<pro)."
         ),
     )
     billing_cadence: Literal["monthly", "annual"] = Field(
         default="monthly",
-        description=(
-            "Cadence for the upgrade subscription. Enterprise is "
-            "annual-only; the route 400s on (enterprise, monthly)."
-        ),
+        description="Cadence for the upgrade subscription.",
     )
 
 
@@ -190,9 +185,8 @@ class DowngradeRequest(BaseModel):
         ...,
         description=(
             "Tier to downgrade to. Must be strictly lower than the "
-            "caller's current tier (free<pro<enterprise); otherwise "
-            "the route returns 400 with detail='not_a_downgrade'. "
-            "Enterprise is never a downgrade target (it is the top)."
+            "caller's current tier (free<pro); otherwise the route "
+            "returns 400 with detail='not_a_downgrade'."
         ),
     )
 
@@ -213,7 +207,7 @@ class DowngradeResponse(BaseModel):
     "end of current billing period" as a fall-back label.
     """
     admin_id: str = Field(..., description="Admin (tenant) id being downgraded.")
-    old_tier: Literal["free", "pro", "enterprise"] = Field(
+    old_tier: Literal["free", "pro"] = Field(
         ..., description="Current tier at the moment the downgrade was armed.",
     )
     target_tier: Literal["free", "pro"] = Field(
@@ -264,15 +258,15 @@ class AxisOverflowResponse(BaseModel):
                         when ``DowngradeArchiveService.archive_overflow_for_admin``
                         commits the writes).
     """
-    axis: Literal["instances", "embed_keys", "cnames", "seats"] = Field(
+    axis: Literal["instances", "embed_keys", "cnames", "knowledge"] = Field(
         ..., description="Which entitlement axis this overflow row is for.",
     )
     cap: int | None = Field(
         ...,
         description=(
             "Target tier's cap on this axis. ``None`` means unlimited "
-            "(only possible when destination is Enterprise, which the "
-            "downgrade route layer already rejects -- defensive shape)."
+            "(no tier currently uncaps any axis in the Free/Pro model; "
+            "retained as a defensive shape)."
         ),
     )
     current: int = Field(..., description="Admin's currently-active count.")
@@ -299,7 +293,7 @@ class DowngradePreviewResponse(BaseModel):
     convenience flag so the modal can short-circuit rendering.
     """
     admin_id: str = Field(..., description="Admin (tenant) id being previewed.")
-    current_tier: Literal["free", "pro", "enterprise"] = Field(
+    current_tier: Literal["free", "pro"] = Field(
         ..., description="Admin's current tier (unchanged by preview).",
     )
     target_tier: Literal["free", "pro"] = Field(
@@ -449,22 +443,13 @@ class SubscriptionStatusResponse(BaseModel):
                     "None otherwise. Surfaced as its own field so the UI "
                     "can ignore ``trial_end`` when not in a pilot.",
     )
-    # Step 30a.5 addition: surface the cookied user's role within their
-    # active scope_assignment so the dashboard can gate the CompanyTab
-    # (visible iff tier=='company' AND role in ('tenant_admin','owner'))
-    # and the TeamTab (visible iff tier in ('team','company') AND role
-    # in ('tenant_admin','owner','department_lead')). Gating on tier
-    # alone would leak Company-tier Domain visibility to invited
-    # department leads -- see design doc §11 Q5 (resolved 2026-05-18:
-    # tier AND role). The role is read off the cookied user's active
-    # ScopeAssignment; users with no active assignment surface as None.
+    # Unit 1: single-owner model — always 'owner'. ScopeAssignment deleted.
+    # Field retained for frontend compat; value is always 'owner' or None.
     active_role: str | None = Field(
         default=None,
-        description="Role on the cookied user's active ScopeAssignment. "
-                    "Canonical values (Arc 11 Cleanup C, Architecture §3.2.2): "
-                    "'admin_owner', 'admin_manager', 'instance_operator', "
-                    "'read_only_viewer'. Used by the frontend to gate "
-                    "org-building UI surfaces.",
+        description="Single-owner role for the cookied user. Always 'owner' "
+                    "in the Free/Pro single-owner model (Unit 1). None when "
+                    "no active admin session.",
     )
     # Arc 12b: server-side resolved Wall-2 permission set for the cookied
     # caller (admin-scoped, no Instance), so the dashboard can gate the

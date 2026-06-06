@@ -53,6 +53,7 @@ from uuid import uuid4
 
 from app.core.config import settings
 from app.integrations.llm.base import LLMMessage, LLMRequest
+from app.runtime import grounding as _grounding
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.contracts import RuntimeRequest, RuntimeResponse
 from app.runtime.plan_parser import (
@@ -173,7 +174,47 @@ class LucielOrchestrator:
         if self._is_session_human_controlled(req.session_id):
             return self._finalize_human_controlled_turn(req)
 
-        # 2. CONTEXT ASSEMBLY — flag-gated Retrieve + prompt composition.
+        # Resolve the Admin's tier ONCE per turn and thread it into the
+        # gates + PLAN. The budget gate keys its cap on it, the OUTCOME
+        # gate reads it for the grounding floor, and PLAN passes it to the
+        # tier-aware router (per-tier model class + intra-tier fast route).
+        tier = self._resolve_tier(req)
+
+        # §3.4.1 diagram order (Unit 7 alignment): BUDGET GATE → ESCALATION
+        # GATE 1 (intake) → RETRIEVE (context assembly) → PLAN. The budget
+        # gate runs FIRST so a Free-at-cap session short-circuits with ZERO
+        # retrieval cost and ZERO LLM cost; the intake gate runs next so an
+        # intake-escalated session also skips retrieval/PLAN. Retrieval has
+        # NOT run when either gate fires, so both finalizers cite source_ids=[].
+
+        # BUDGET GATE — Arc 18 (§3.4.1b). READ-ONLY peek: it never
+        # increments here (the increment fires on the FIRST model call in
+        # the PLAN path, §3.4.1b line 454). For Free at cap it returns a
+        # budget_exhausted EscalationDecision → short-circuit with NO LLM
+        # call and NO increment. Otherwise it returns (None, budget_ctx):
+        # budget_ctx carries the resolved (tier, cap, period_start) so the
+        # PLAN path can increment with the SAME key the gate peeked.
+        budget_decision, budget_ctx = self._budget_gate(req, tier=tier)
+        if budget_decision is not None:
+            return self._finalize_budget_escalation(
+                req=req, decision=budget_decision, source_ids=[]
+            )
+
+        # ESCALATION GATE 1 — INTAKE (pre-PLAN). §3.4.5 signals (a)+(b).
+        #    If it fires we SKIP plan/act/reflect and emit a templated
+        #    handoff acknowledgement instead of an LLM-generated reply
+        #    (the LLM may be exactly what's failing the customer). An
+        #    intake-escalated turn never reaches PLAN, so it never
+        #    increments the budget counter (§3.4.1b line 454).
+        intake_decision = self._intake_gate(req)
+        if intake_decision is not None:
+            return self._finalize_intake_escalation(
+                req=req, decision=intake_decision, source_ids=[]
+            )
+
+        # RETRIEVE / CONTEXT ASSEMBLY — flag-gated Retrieve + prompt
+        # composition. Runs AFTER the gates so a short-circuited turn pays
+        # zero retrieval cost.
         chunks: list = []
         source_ids: list[int] = []
         retrieval_attempted = False
@@ -187,33 +228,12 @@ class LucielOrchestrator:
 
         base_prompt = self.context.build_prompt(req, retrieved_chunks=chunks)
 
-        # 3. ESCALATION GATE 1 — INTAKE (pre-PLAN). §3.4.5 signals (a)+(b).
-        #    If it fires we SKIP plan/act/reflect and emit a templated
-        #    handoff acknowledgement instead of an LLM-generated reply
-        #    (the LLM may be exactly what's failing the customer).
-        intake_decision = self._intake_gate(req)
-        if intake_decision is not None:
-            return self._finalize_intake_escalation(
-                req=req, decision=intake_decision, source_ids=source_ids
-            )
-
-        # 3b. CONVERSATION BUDGET GATE — Arc 18 (§3.4.1b). Position is
-        #     LOAD-BEARING: AFTER intake Gate 1 (an intake-escalated
-        #     session returned above and NEVER reaches here, so it never
-        #     consumes budget) and BEFORE PLAN (the first LLM call). The
-        #     gate counts this conversation ONCE (idempotent across the
-        #     REFLECT loop). For Free at cap it returns a budget_exhausted
-        #     EscalationDecision → short-circuit with NO LLM call. For
-        #     Pro/Enterprise it never blocks (returns None) — it only
-        #     increments the counter and fires 80%/100% alerts.
-        budget_decision = self._budget_gate(req)
-        if budget_decision is not None:
-            return self._finalize_budget_escalation(
-                req=req, decision=budget_decision, source_ids=source_ids
-            )
-
-        # 4. PLAN → ACT → REFLECT — bounded at MAX_LOOP_ITERATIONS.
-        loop = self._run_plan_act_reflect(req, base_prompt)
+        # 4. PLAN → ACT → REFLECT — bounded at MAX_LOOP_ITERATIONS. The
+        #    budget counter increments on the FIRST model call inside the
+        #    loop (idempotent across iterations) using budget_ctx.
+        loop = self._run_plan_act_reflect(
+            req, base_prompt, tier=tier, budget_ctx=budget_ctx
+        )
 
         # Thread the CONTEXT-step retrieval outcome onto the loop result
         # so the OUTCOME gate can read grounding + retrieval-failure
@@ -233,27 +253,64 @@ class LucielOrchestrator:
 
         # 5. ESCALATION GATE 2 — OUTCOME (post-REFLECT). §3.4.5 (c)+(d).
         #    NEVER reads loop.bound_hit (§3.4.1 locked #17).
-        outcome_decision = self._outcome_gate(req, loop)
-        escalation_flag = outcome_decision is not None
-        if outcome_decision is not None:
-            self._record_escalation_best_effort(outcome_decision)
+        #
+        #    Unit 9 (part 2) — Architecture line 1354: if BOTH LLM
+        #    providers were down this turn there is no meaningful loop
+        #    output to evaluate, so the llm_unavailable escalation takes
+        #    PRECEDENCE over the normal outcome gate. We fire a dedicated
+        #    SIGNAL_LLM_UNAVAILABLE escalation at GATE_OUTCOME (known
+        #    post-loop), notify the admin via the SAME delivery path the
+        #    other outcome escalations use (best-effort inside
+        #    _record_escalation_best_effort), and swap the customer reply
+        #    to the canonical "I've let the team know" phrase. This branch
+        #    runs once per turn (post-loop, not inside the PLAN loop).
+        if loop.llm_unavailable:
+            from app.models.escalation_event import (
+                GATE_OUTCOME,
+                SIGNAL_LLM_UNAVAILABLE,
+            )
+            from app.policy.escalation import EscalationDecision
+            from app.runtime.handoff import llm_unavailable_reply
 
-        # 6. RESPOND — the §3.4.2 channel arbiter picks the outbound
-        #    channel (replaces U1's "emit on inbound channel"). The pick
-        #    defaults safely to the inbound channel when channel info is
-        #    sparse, so this never breaks the turn.
-        #    When SIGNAL_CANNOT_CONFIDENTLY_ANSWER fired, replace the LLM
-        #    reply with the §3.4.13 canonical phrase so the anti-hallucination
-        #    promise (Vision §1) is upheld: we never send an ungrounded answer.
-        from app.models.escalation_event import SIGNAL_CANNOT_CONFIDENTLY_ANSWER
-        if (
-            outcome_decision is not None
-            and outcome_decision.signal == SIGNAL_CANNOT_CONFIDENTLY_ANSWER
-        ):
-            from app.runtime.handoff_ack import cannot_answer_reply
-            message = cannot_answer_reply()
+            outcome_decision = EscalationDecision(
+                signal=SIGNAL_LLM_UNAVAILABLE,
+                gate=GATE_OUTCOME,
+                admin_id=req.admin_id,
+                session_id=req.session_id,
+                luciel_instance_id=req.luciel_instance_id,
+                user_id=req.user_id,
+                signal_confidence=1.0,
+                reasoning_excerpt="All LLM providers unavailable",
+                signal_inputs={"all_providers_down": True},
+            )
+            escalation_flag = True
+            self._record_escalation_best_effort(outcome_decision)
+            message = llm_unavailable_reply()
         else:
-            message = loop.reply
+            outcome_decision = self._outcome_gate(req, loop)
+            escalation_flag = outcome_decision is not None
+            if outcome_decision is not None:
+                self._record_escalation_best_effort(outcome_decision)
+
+            # 6. RESPOND — the §3.4.2 channel arbiter picks the outbound
+            #    channel (replaces U1's "emit on inbound channel"). The pick
+            #    defaults safely to the inbound channel when channel info is
+            #    sparse, so this never breaks the turn.
+            #    When SIGNAL_CANNOT_CONFIDENTLY_ANSWER fired, replace the LLM
+            #    reply with the §3.4.13 canonical phrase so the
+            #    anti-hallucination promise (Vision §1) is upheld: we never
+            #    send an ungrounded answer.
+            from app.models.escalation_event import (
+                SIGNAL_CANNOT_CONFIDENTLY_ANSWER,
+            )
+            if (
+                outcome_decision is not None
+                and outcome_decision.signal == SIGNAL_CANNOT_CONFIDENTLY_ANSWER
+            ):
+                from app.runtime.handoff import cannot_answer_reply
+                message = cannot_answer_reply()
+            else:
+                message = loop.reply
         choice = self._arbitrate_channel(
             req, reply=message, escalation_fired=escalation_flag
         )
@@ -595,7 +652,7 @@ class LucielOrchestrator:
         we ALSO transition the session to human_controlled='luciel_escalated'
         so the next inbound message hits the gate above.
         """
-        from app.runtime.handoff_ack import handoff_acknowledgement
+        from app.runtime.handoff import handoff_acknowledgement
 
         self._record_escalation_best_effort(decision)
 
@@ -856,7 +913,10 @@ class LucielOrchestrator:
                     admin_id=admin_id,
                     action=ACTION_HUMAN_TAKEOVER_STARTED,
                     resource_type=RESOURCE_SESSION,
-                    resource_pk=session_id,
+                    # sessions.id is a 36-char UUID string; resource_pk is an
+                    # integer column. The session id lives in
+                    # resource_natural_id only.
+                    resource_pk=None,
                     resource_natural_id=session_id,
                     luciel_instance_id=luciel_instance_id,
                     before={"control_mode": "luciel"},
@@ -919,36 +979,79 @@ class LucielOrchestrator:
 
     def _budget_meter_inst(self):
         """Lazy BudgetMeter accessor. Built from settings.redis_url on
-        first use; injectable for tests."""
-        if self._budget_meter is None:
-            from app.runtime.budget_meter import BudgetMeter
+        first use; injectable for tests.
 
-            self._budget_meter = BudgetMeter()
+        Unit 13g (§4.5): in production the meter is WRITE-THROUGH — Redis is
+        the hot cache and a ``PostgresCounterStore`` (bound to the app
+        ``SessionLocal``) is the authoritative source of truth. The store
+        sets the ``app.admin_id`` RLS GUC itself per operation, so it works
+        whether or not the caller is inside a tenant-scoped request context.
+        """
+        if self._budget_meter is None:
+            from app.billing.metering import BudgetMeter, PostgresCounterStore
+
+            self._budget_meter = BudgetMeter(
+                counter_store=PostgresCounterStore.from_session_factory()
+            )
         return self._budget_meter
 
-    def _budget_gate(self, req: RuntimeRequest):
-        """CONVERSATION BUDGET GATE — Arc 18 §3.4.1b.
+    def _instance_has_authorized_tools(self, req: RuntimeRequest, db) -> bool:
+        """Return True iff the instance has ≥1 authorized tool.
 
-        Counts this conversation ONCE per session (idempotent across the
-        REFLECT loop). Returns a ``budget_exhausted`` EscalationDecision
-        (Free at/over cap → short-circuit, no LLM call) or ``None``
-        (proceed to PLAN).
+        Reuses the caller's already-open ``db`` session (the budget gate's
+        billing-context session) — no new session, no per-iteration query.
+        Best-effort: any failure degrades to True (conservative — keeps fast
+        routing disabled rather than risk mis-routing a tool-needing turn).
+        """
+        if req.luciel_instance_id is None:
+            return True
+        try:
+            from app.repositories.instance_tool_authorization_repository import (
+                InstanceToolAuthorizationRepository,
+            )
 
-        Pro/Enterprise NEVER block: capacity is never cut off
-        mid-conversation (Vision §2). When a paying instance is over cap
-        the counter still increments (overage) and the 80%/100% alerts
-        fire — but the turn proceeds to PLAN. Never raises: any failure
-        degrades to None (proceed) so a metering hiccup never blocks a
-        legitimate turn.
+            tool_ids = InstanceToolAuthorizationRepository(db).list_authorized_tool_ids(
+                admin_id=req.admin_id,
+                instance_id=req.luciel_instance_id,
+            )
+            return len(tool_ids) > 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "authorized-tools lookup failed: exc_class=%s — has_tools=True "
+                "(conservative: fast routing stays disabled)",
+                type(exc).__name__,
+            )
+            return True
+
+    def _budget_gate(self, req: RuntimeRequest, *, tier: str | None = None):
+        """CONVERSATION BUDGET GATE — Arc 18 §3.4.1b. READ-ONLY peek.
+
+        Returns a ``(decision, budget_ctx)`` tuple:
+          * ``(EscalationDecision, None)`` — Free at cap → short-circuit
+            with NO LLM call and NO increment.
+          * ``(None, _BudgetPlanContext)`` — proceed to PLAN; the carrier
+            holds the resolved (tier, cap, period_start) so the PLAN path
+            can increment the counter with the SAME key this gate peeked.
+          * ``(None, None)`` — no per-instance scope or a metering hiccup;
+            proceed with no budget accounting.
+
+        §3.4.1b line 454: the counter increments exactly once per session,
+        on the FIRST model call — NOT here. So this gate only PEEKS
+        (``current_count``) and never increments. Free is denied when the
+        peeked count is already AT/over cap (``current_count >= cap``):
+        peeking pre-increment, the conversation that would push usage to
+        cap+1 is the one denied, and it consumes no unit. Pro never blocks;
+        its overage alerts fire AFTER the increment in the PLAN path.
+
+        Never raises: any failure degrades to ``(None, None)`` (proceed) so
+        a metering hiccup never blocks a legitimate turn.
         """
         # No per-instance scope → no per-instance budget to meter. Proceed.
         if req.luciel_instance_id is None:
-            return None
+            return None, None
 
         try:
             from app.policy.entitlements import (
-                ALERT_THRESHOLD_80,
-                ALERT_THRESHOLD_100,
                 TIER_FREE,
                 conversation_budget,
             )
@@ -959,10 +1062,66 @@ class LucielOrchestrator:
             db = SessionLocal()
             try:
                 ctx = resolve_billing_context(db, admin_id=req.admin_id)
+                # has_tools = "does this instance have ANY authorized tools?"
+                # Resolved ONCE here on the SAME session already open for the
+                # billing context (no second session, no per-PLAN-iteration
+                # query). An instance with zero authorized tools can never need
+                # a tool, so fast routing is provably safe for it; an instance
+                # with ≥1 tool stays conservative (has_tools=True).
+                has_tools = self._instance_has_authorized_tools(req, db)
             finally:
                 db.close()
 
             cap = conversation_budget(ctx.tier, ctx.cadence)
+            meter = self._budget_meter_inst()
+            # READ-ONLY peek — no increment here (§3.4.1b line 454).
+            count = meter.current_count(
+                admin_id=req.admin_id,
+                instance_id=req.luciel_instance_id,
+                period_start=ctx.period_start,
+            )
+
+            # Free at/over cap → graceful single-turn handoff, no LLM call,
+            # no increment. Peeking pre-increment means we compare >= cap.
+            if ctx.tier == TIER_FREE and count >= cap:
+                return (
+                    self._build_budget_decision(
+                        req=req, ctx=ctx, count=count, cap=cap
+                    ),
+                    None,
+                )
+
+            # Proceed. Hand the resolved billing context to the PLAN path so
+            # it increments once (idempotent) on the first model call and so
+            # the tier-aware router gets the instance-level has_tools signal.
+            return None, _BudgetPlanContext(ctx=ctx, cap=cap, has_tools=has_tools)
+        except Exception as exc:  # noqa: BLE001 — never block a turn on metering
+            logger.warning(
+                "budget gate evaluation failed: exc_class=%s — proceeding to PLAN",
+                type(exc).__name__,
+            )
+            return None, None
+
+    def _count_session_and_alert(
+        self, req: RuntimeRequest, budget_ctx
+    ) -> None:
+        """First-model-call budget increment (§3.4.1b line 454).
+
+        Called from the PLAN path BEFORE the first ``generate`` call. The
+        meter's ``count_session_once`` is idempotent per session (SETNX
+        marker), so calling it on loop entry counts the conversation
+        exactly ONCE regardless of how many PLAN iterations run. For paying
+        tiers the post-increment count drives the 80%/100% overage alerts.
+
+        Best-effort: a metering failure NEVER crashes the turn. Skips
+        cleanly when there is no per-instance scope or no resolved context.
+        """
+        if budget_ctx is None or req.luciel_instance_id is None:
+            return
+        try:
+            from app.policy.entitlements import TIER_FREE
+
+            ctx = budget_ctx.ctx
             meter = self._budget_meter_inst()
             count = meter.count_session_once(
                 admin_id=req.admin_id,
@@ -970,26 +1129,17 @@ class LucielOrchestrator:
                 period_start=ctx.period_start,
                 session_id=req.session_id,
             )
-
-            # Free at/over cap → graceful single-turn handoff, no LLM call.
-            if ctx.tier == TIER_FREE and count > cap:
-                return self._build_budget_decision(
-                    req=req, ctx=ctx, count=count, cap=cap
-                )
-
-            # Pro/Enterprise: never block. Fire threshold alerts (idempotent)
-            # then proceed. Alerts are best-effort side effects.
+            # Pro/Enterprise overage alerts fire on the post-increment count.
             if ctx.tier != TIER_FREE:
                 self._maybe_fire_budget_alerts(
-                    req=req, ctx=ctx, count=count, cap=cap
+                    req=req, ctx=ctx, count=count, cap=budget_ctx.cap
                 )
-            return None
-        except Exception as exc:  # noqa: BLE001 — never block a turn on metering
+        except Exception as exc:  # noqa: BLE001 — metering never crashes a turn
             logger.warning(
-                "budget gate evaluation failed: exc_class=%s — proceeding to PLAN",
+                "budget increment on first model call failed: exc_class=%s — "
+                "turn proceeds (conversation may be undercounted)",
                 type(exc).__name__,
             )
-            return None
 
     def _build_budget_decision(self, *, req: RuntimeRequest, ctx, count: int, cap: int):
         """Construct the budget_exhausted EscalationDecision (GATE_INTAKE,
@@ -1255,6 +1405,9 @@ class LucielOrchestrator:
         self,
         req: RuntimeRequest,
         base_prompt: str,
+        *,
+        tier: str | None = None,
+        budget_ctx=None,
     ) -> "_LoopResult":
         """Drive the bounded plan→act→reflect loop.
 
@@ -1275,11 +1428,30 @@ class LucielOrchestrator:
         result = _LoopResult(reply="")
         prompt = base_prompt
 
+        # FIRST MODEL CALL — increment the conversation budget counter once
+        # (§3.4.1b line 454). Idempotent per session, so doing it at loop
+        # entry counts the conversation exactly once across all iterations.
+        # Best-effort: never crashes the turn.
+        self._count_session_and_alert(req, budget_ctx)
+
+        # Instance-level has_tools resolved once by the budget gate (on its
+        # already-open session). When there's no budget context (no
+        # per-instance scope / legacy test contexts) default True — the
+        # conservative fallback that leaves fast routing disabled.
+        has_tools = budget_ctx.has_tools if budget_ctx is not None else True
+
         for iteration in range(1, MAX_LOOP_ITERATIONS + 1):
             result.iterations = iteration
 
             # PLAN
-            plan = self._plan(prompt, result, provider=req.provider)
+            plan = self._plan(
+                prompt,
+                result,
+                provider=req.provider,
+                tier=tier,
+                req=req,
+                has_tools=has_tools,
+            )
 
             result.reply = plan.reply
             result.confidence = plan.confidence
@@ -1319,7 +1491,14 @@ class LucielOrchestrator:
         return result
 
     def _plan(
-        self, prompt: str, result: "_LoopResult", *, provider: str | None = None
+        self,
+        prompt: str,
+        result: "_LoopResult",
+        *,
+        provider: str | None = None,
+        tier: str | None = None,
+        req: RuntimeRequest | None = None,
+        has_tools: bool = True,
     ) -> Plan:
         """PLAN step — one ModelRouter.generate call + tolerant parse.
 
@@ -1330,11 +1509,12 @@ class LucielOrchestrator:
         providers down) PLAN degrades to a low-confidence no-tool reply
         rather than crashing the turn (§3.4.1).
 
-        ``provider`` (RESCAN CORE serving-path) is the preferred-provider
-        hint resolved by the ChatService adapter (instance.preferred_
-        provider or a caller override). Defaults None ⇒ the ModelRouter
-        picks its own default, the pre-rewiring behaviour every existing
-        test relies on.
+        ``tier`` (Unit 7 alignment) is the resolved Admin tier, threaded
+        from ``run()``. Passing it engages the router's tier-aware path
+        (per-tier model class + intra-tier fast routing); without it the
+        router takes the legacy global-default path. When a tier is passed
+        the router ignores ``preferred_provider`` (tier wins), so a tier
+        is always preferred over the legacy hint.
         """
         llm_request = LLMRequest(
             messages=[
@@ -1345,16 +1525,52 @@ class LucielOrchestrator:
                 ),
             ]
         )
+        # Cheap deterministic prompt-size estimate for the fast-route 4K
+        # context check (~4 chars/token); no tokenizer dependency.
+        context_token_estimate = len(prompt) // 4
+        # has_tools: whether the instance has ANY authorized tools. Resolved
+        # once by the budget gate (reusing its open db session) and threaded
+        # in via _BudgetPlanContext — an instance with no authorized tools can
+        # never need a tool this turn, so intra-tier fast routing is safe to
+        # engage; one with ≥1 keeps fast routing off (stays True).
         try:
-            response = self._router().generate(
-                llm_request, preferred_provider=provider
-            )
+            if tier is not None:
+                response = self._router().generate(
+                    llm_request,
+                    tier=tier,
+                    user_message=(req.message if req is not None else ""),
+                    context_token_estimate=context_token_estimate,
+                    has_tools=has_tools,
+                )
+            else:
+                response = self._router().generate(
+                    llm_request, preferred_provider=provider
+                )
         except Exception as exc:  # noqa: BLE001
             # Provider-agnostic firewall: a PLAN call must never crash
             # the turn. Degrade to a graceful low-confidence reply.
+            #
+            # Unit 9 (part 2) — Architecture line 1354. The router raises
+            # RuntimeError("All LLM providers failed ...") ONLY when EVERY
+            # provider (anthropic, openai, stub) is unavailable. In that
+            # specific case Luciel must NOT fabricate a degraded reply: it
+            # escalates llm_unavailable + notifies the admin + returns the
+            # canonical "I've let the team know" phrase. We mark the loop
+            # result here; the TURN layer (run()) reads the flag post-loop
+            # so the escalation fires exactly once per turn. Ordinary
+            # single-call failures (no provider configured, one provider
+            # erroring) keep the generic degraded reply below unchanged.
+            is_all_providers_down = (
+                isinstance(exc, RuntimeError)
+                and "All LLM providers failed" in str(exc)
+            )
+            if is_all_providers_down:
+                result.llm_unavailable = True
             logger.warning(
-                "PLAN LLM call failed: exc_class=%s — degrading turn",
+                "PLAN LLM call failed: exc_class=%s all_providers_down=%s — "
+                "degrading turn",
                 type(exc).__name__,
+                is_all_providers_down,
             )
             return Plan(
                 reply=(
@@ -1451,7 +1667,7 @@ class LucielOrchestrator:
         raise inside ``generate``; PLAN catches that and degrades.
         """
         if self._model_router is None:
-            from app.integrations.llm.router import ModelRouter
+            from app.runtime.llm_router import ModelRouter
 
             self._model_router = ModelRouter()
         return self._model_router
@@ -1532,7 +1748,7 @@ class LucielOrchestrator:
         try:
             from app.db.session import SessionLocal
             from app.db.tenant_scope import bind_tenant_scope
-            from app.knowledge.retriever import KnowledgeRetriever
+            from app.runtime.knowledge_retrieval import KnowledgeRetriever
             from app.repositories.knowledge_repository import KnowledgeRepository
         except Exception as exc:  # noqa: BLE001 — defensive
             logger.warning(
@@ -1654,129 +1870,15 @@ class LucielOrchestrator:
                 merged.append(chunk)
         return merged
 
-    @staticmethod
-    def _grounding_from_chunks(
-        chunks: Sequence, answer: str = ""
-    ) -> float | None:
-        """Derive a [0,1] composite grounding score from retrieved chunks.
-
-        §3.4.13 requires a COMPOSITE of two components:
-
-          (a) Retrieval relevance  — ``1 - best_cosine_distance`` (best =
-              smallest distance = closest match) using the chunk distances
-              already computed during retrieval. Measures how well the top
-              retrieved chunk matched the query.
-
-          (b) Citation overlap  — fraction of the answer's sentences whose
-              token-overlap with any retrieved chunk exceeds a threshold.
-              For each sentence we compute Jaccard similarity of its
-              unigram set against the unigram set of each chunk's content;
-              a sentence is "covered" when any chunk exceeds the threshold.
-              This is deterministic, dependency-free, and cheap (no
-              embedding call). Coverage = covered_sentences / total_sentences.
-              An empty answer or an answer with no extractable sentences
-              contributes a citation-overlap of 0.0.
-
-        Combination: weighted average with equal weights 0.5/0.5:
-
-            grounding = 0.5 * retrieval_relevance + 0.5 * citation_overlap
-
-        The combined score is clamped to [0,1]. Returns ``None`` when
-        nothing was retrieved (the OUTCOME gate treats None as below every
-        floor only in concert with the retrieval-failed flag). If chunks
-        exist but none carry a distance, retrieval_relevance is 0.0 (no
-        distance information means we cannot claim relevance) and citation
-        overlap is still computed against chunk content. It never raises:
-        a malformed chunk degrades gracefully.
-
-        Citation-overlap threshold: CITATION_JACCARD_THRESHOLD = 0.10.
-        This is deliberately low so that any meaningful vocabulary overlap
-        between an answer sentence and a chunk counts as a citation hit;
-        a higher threshold would produce false negatives on paraphrased
-        answers. The threshold is a module constant so it can be tuned
-        from audit data without changing the algorithm.
-        """
-        if not chunks:
-            return None
-        try:
-            # --- (a) Retrieval relevance ---
-            distances = [
-                c.distance
-                for c in chunks
-                if getattr(c, "distance", None) is not None
-            ]
-            if distances:
-                best = min(distances)
-                retrieval_relevance = max(0.0, min(1.0, 1.0 - float(best)))
-            else:
-                retrieval_relevance = 0.0
-
-            # --- (b) Citation overlap ---
-            citation_overlap = LucielOrchestrator._citation_overlap(
-                answer, chunks
-            )
-
-            # --- Combine (0.5 / 0.5 weighted average) ---
-            grounding = 0.5 * retrieval_relevance + 0.5 * citation_overlap
-            return max(0.0, min(1.0, grounding))
-        except Exception:  # noqa: BLE001
-            return None
-
-    # Citation-overlap threshold (Jaccard similarity). A sentence is
-    # "covered" when its unigram Jaccard against any chunk >= this value.
-    _CITATION_JACCARD_THRESHOLD: float = 0.10
-
-    @staticmethod
-    def _citation_overlap(answer: str, chunks: Sequence) -> float:
-        """Fraction of answer sentences whose unigram Jaccard similarity
-        to at least one retrieved chunk exceeds _CITATION_JACCARD_THRESHOLD.
-
-        Algorithm (deterministic, no external deps):
-          1. Tokenise by splitting on whitespace/punctuation to lowercase
-             unigrams. Strip common punctuation so "fact." and "fact" match.
-          2. For each answer sentence, compute Jaccard against every chunk
-             and mark it covered if any pair exceeds the threshold.
-          3. Return covered_count / total_sentences, or 0.0 when the answer
-             has no usable sentences.
-        """
-        import re
-
-        def _tokens(text: str) -> frozenset:
-            return frozenset(w.lower() for w in re.split(r"[\s,.!?;:]+", text) if w)
-
-        # Split answer into sentences on '.', '!', '?' or newlines.
-        sentences = [
-            s.strip()
-            for s in re.split(r"(?<=[.!?])\s+|\n+", answer.strip())
-            if s.strip()
-        ]
-        if not sentences:
-            return 0.0
-
-        # Pre-compute chunk token sets (defensive: use content attr or str).
-        chunk_token_sets = []
-        for c in chunks:
-            content = getattr(c, "content", None) or getattr(c, "formatted", "") or ""
-            if content:
-                chunk_token_sets.append(_tokens(str(content)))
-        if not chunk_token_sets:
-            return 0.0
-
-        threshold = LucielOrchestrator._CITATION_JACCARD_THRESHOLD
-        covered = 0
-        for sent in sentences:
-            sent_tokens = _tokens(sent)
-            if not sent_tokens:
-                continue
-            for chunk_tokens in chunk_token_sets:
-                union = sent_tokens | chunk_tokens
-                if not union:
-                    continue
-                jaccard = len(sent_tokens & chunk_tokens) / len(union)
-                if jaccard >= threshold:
-                    covered += 1
-                    break
-        return covered / len(sentences)
+    # Answer grounding & anti-hallucination (§3.4.13). The implementation
+    # lives in the standalone ``app.runtime.grounding`` module (Unit 12 §8
+    # doctrine-path normalization); it is re-bound here as class attributes
+    # so existing call sites (self._grounding_from_chunks(...),
+    # LucielOrchestrator._citation_overlap(...),
+    # LucielOrchestrator._CITATION_JACCARD_THRESHOLD) are unchanged.
+    _CITATION_JACCARD_THRESHOLD: float = _grounding._CITATION_JACCARD_THRESHOLD
+    _grounding_from_chunks = staticmethod(_grounding._grounding_from_chunks)
+    _citation_overlap = staticmethod(_grounding._citation_overlap)
 
     @staticmethod
     def _collect_source_pks(chunks: Sequence) -> list[int]:
@@ -1785,7 +1887,7 @@ class LucielOrchestrator:
         unavailable (truncated install, broken import), fall back
         to ``[]`` rather than crashing the turn."""
         try:
-            from app.knowledge.retriever import collect_source_pks
+            from app.runtime.knowledge_retrieval import collect_source_pks
 
             return collect_source_pks(chunks)
         except Exception as exc:  # noqa: BLE001
@@ -1883,6 +1985,27 @@ class LucielOrchestrator:
 
 
 # =====================================================================
+# Internal budget-context carrier (gate → PLAN-path increment)
+# =====================================================================
+
+
+class _BudgetPlanContext:
+    """Resolved budget context the READ-ONLY budget gate hands to the
+    PLAN path so the first-model-call increment uses the SAME key the
+    gate peeked with (no second billing-context lookup). Carries the
+    ``BillingContext`` (tier + period_start), the resolved cap, and the
+    instance-level ``has_tools`` signal (whether the instance has ANY
+    authorized tools) for the tier-aware router's fast-route decision."""
+
+    __slots__ = ("ctx", "cap", "has_tools")
+
+    def __init__(self, *, ctx, cap: int, has_tools: bool = True) -> None:
+        self.ctx = ctx
+        self.cap = cap
+        self.has_tools = has_tools
+
+
+# =====================================================================
 # Internal loop-state carrier
 # =====================================================================
 
@@ -1915,6 +2038,12 @@ class _LoopResult:
         # RESCAN TIER-C — weighted composite lead score [0, 1] from
         # lead_capture.detect(), populated before the OUTCOME gate.
         "lead_score",
+        # Unit 9 (part 2) — set True by the _plan firewall ONLY when BOTH
+        # LLM providers are down (RuntimeError "All LLM providers failed").
+        # The turn layer reads it post-loop to fire the llm_unavailable
+        # escalation (Architecture line 1354). Ordinary single-call
+        # failures leave it False (generic degraded reply unchanged).
+        "llm_unavailable",
     )
 
     def __init__(self, *, reply: str) -> None:
@@ -1935,3 +2064,5 @@ class _LoopResult:
         self.retrieval_failed: bool = False
         self.lead_value: float | None = None
         self.lead_score: float = 0.0
+        # Unit 9 (part 2) — both-providers-down marker (set by _plan).
+        self.llm_unavailable: bool = False

@@ -201,12 +201,11 @@ class TestCannotConfidentlyAnswer(unittest.TestCase):
         self.assertIsNone(judge.evaluate_outcome(_req(), out))
 
     def test_retrieval_failure_is_below_every_floor(self):
-        # Retrieval failed → grounding treated as 0.0 (below every floor,
-        # including Enterprise at 0.55). Low confidence + retrieval failure
-        # fires on all tiers.
+        # Retrieval failed → grounding treated as 0.0 (below every floor).
+        # Low confidence + retrieval failure fires on all tiers.
         judge = _judge()
         out = OutcomeContext(
-            confidence=0.5, tier="enterprise", retrieval_failed=True
+            confidence=0.5, tier="pro", retrieval_failed=True
         )
         d = judge.evaluate_outcome(_req(), out)
         self.assertIsNotNone(d)
@@ -221,7 +220,8 @@ class TestCannotConfidentlyAnswer(unittest.TestCase):
         self.assertEqual(d.signal_inputs["grounding"], 0.0)
 
     def test_per_tier_floors_match_spec_section_9(self):
-        # §9 items 21/22/23: Free 0.45 / Pro 0.50 / Enterprise 0.55.
+        # §9 items 21/22: Free 0.45 / Pro 0.50. (Enterprise floor 0.55,
+        # §9 item 23, removed in Unit 1 -- Enterprise tier deferred.)
         # Cognition-parity: the MECHANISM is identical; only the floor
         # VALUE differs per tier.
         from app.runtime.escalation_judge import (
@@ -231,12 +231,12 @@ class TestCannotConfidentlyAnswer(unittest.TestCase):
 
         self.assertEqual(GROUNDING_FLOOR_BY_TIER["free"], 0.45)        # §9 item 21
         self.assertEqual(GROUNDING_FLOOR_BY_TIER["pro"], 0.50)         # §9 item 22
-        self.assertEqual(GROUNDING_FLOOR_BY_TIER["enterprise"], 0.55)  # §9 item 23
+        self.assertNotIn("enterprise", GROUNDING_FLOOR_BY_TIER)
         # Default fails open to the most permissive floor (free).
         self.assertEqual(_DEFAULT_GROUNDING_FLOOR, 0.45)
 
         judge = _judge()
-        # Score 0.47 is below Pro (0.50) and Enterprise (0.55) but above Free (0.45).
+        # Score 0.47 is below Pro (0.50) but above Free (0.45).
         self.assertIsNone(
             judge.evaluate_outcome(
                 _req(),
@@ -251,28 +251,14 @@ class TestCannotConfidentlyAnswer(unittest.TestCase):
             ),
             "0.47 < Pro floor 0.50 — must fire on pro",
         )
-        self.assertIsNotNone(
-            judge.evaluate_outcome(
-                _req(),
-                OutcomeContext(confidence=0.4, tier="enterprise", grounding_score=0.47),
-            ),
-            "0.47 < Enterprise floor 0.55 — must fire on enterprise",
-        )
 
-        # Score 0.52: between Pro floor (0.50) and Enterprise floor (0.55).
+        # Score 0.52 is at/above the Pro floor (0.50).
         self.assertIsNone(
             judge.evaluate_outcome(
                 _req(),
                 OutcomeContext(confidence=0.4, tier="pro", grounding_score=0.52),
             ),
             "0.52 >= Pro floor 0.50 — must NOT fire on pro",
-        )
-        self.assertIsNotNone(
-            judge.evaluate_outcome(
-                _req(),
-                OutcomeContext(confidence=0.4, tier="enterprise", grounding_score=0.52),
-            ),
-            "0.52 < Enterprise floor 0.55 — must fire on enterprise",
         )
 
         # Score 0.35 is below every floor — fires on all three.

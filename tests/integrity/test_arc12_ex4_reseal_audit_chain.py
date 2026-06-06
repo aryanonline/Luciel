@@ -45,7 +45,7 @@ def _migration_path() -> pathlib.Path:
     project_root = here.parents[2]
     return (
         project_root
-        / "alembic"
+        / "app" / "migrations"
         / "versions"
         / "arc12_ex4_reseal_audit_chain_drop_agent_domain.py"
     )

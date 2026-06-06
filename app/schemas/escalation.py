@@ -45,8 +45,8 @@ class EscalationConfigUpdate(BaseModel):
         default_factory=dict,
         description=(
             "Escalation CONTACT + ROUTING config: primary_email (Free), "
-            "primary_contact / secondary_contact / routing_rules (Pro), "
-            "chains (Enterprise). NEVER escalation triggers."
+            "primary_contact / secondary_contact / routing_rules (Pro). "
+            "NEVER escalation triggers."
         ),
     )
 

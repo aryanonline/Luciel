@@ -31,7 +31,7 @@ from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 from app.integrations.llm.base import LLMResponse
-from app.knowledge.retriever import RetrievedChunk
+from app.runtime.knowledge_retrieval import RetrievedChunk
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.contracts import RuntimeRequest, RuntimeResponse
 from app.runtime.orchestrator import LucielOrchestrator
@@ -51,7 +51,7 @@ class _FakeRouter:
     def __init__(self) -> None:
         self.calls: list = []
 
-    def generate(self, request, *, preferred_provider=None) -> LLMResponse:
+    def generate(self, request, *, preferred_provider=None, **kwargs) -> LLMResponse:
         self.calls.append(request)
         return LLMResponse(
             content='{"reply": "ok", "tool_calls": [], "confidence": 0.8}',
@@ -250,7 +250,7 @@ class TestW4RetrieverRaises(unittest.TestCase):
         every exception so ``run`` never sees one. We simulate by
         patching the lazy-imported retriever class to raise inside
         ``retrieve_with_sources``."""
-        from app.knowledge.retriever import KnowledgeRetriever
+        from app.runtime.knowledge_retrieval import KnowledgeRetriever
 
         orch = _orch(_StubTraceService())
 
@@ -265,7 +265,7 @@ class TestW4RetrieverRaises(unittest.TestCase):
                 raise RuntimeError("deep boom")
 
         with patch(
-            "app.knowledge.retriever.KnowledgeRetriever", _BoomRetriever,
+            "app.runtime.knowledge_retrieval.KnowledgeRetriever", _BoomRetriever,
         ), patch(
             "app.db.session.SessionLocal",
             return_value=MagicMock(),

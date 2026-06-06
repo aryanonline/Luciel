@@ -74,7 +74,7 @@ scripts are part of platform operational tooling once they target a
 stable, repeatedly-used SSM path).
 
 Cross-references:
-  - Migration that creates the role: alembic/versions/
+  - Migration that creates the role: app/migrations/versions/
     f392a842f885_step28_create_luciel_worker_role.py (Commit 7,
     SHA 40d9fb8)
   - Operator anchor for prod execution: Architecture v1 §6

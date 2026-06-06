@@ -84,7 +84,7 @@ class TestUserPasswordHashColumn:
 
 class TestStep30a3Migration:
     MIGRATION_PATH = (
-        REPO_ROOT / "alembic" / "versions"
+        REPO_ROOT / "app" / "migrations" / "versions"
         / "a3c1f08b9d42_step30a_3_users_password_hash.py"
     )
 
@@ -124,15 +124,15 @@ class TestStep30a3Migration:
 
 class TestAuthService:
     def test_module_imports(self):
-        import app.services.auth_service as auth_service  # noqa: F401
+        import app.auth.access as auth_service  # noqa: F401
 
     def test_exception_classes_exist(self):
-        from app.services.auth_service import AuthError, PasswordTooShortError
+        from app.auth.access import AuthError, PasswordTooShortError
         assert issubclass(PasswordTooShortError, ValueError)
         assert issubclass(AuthError, Exception)
 
     def test_verify_password_signature(self):
-        from app.services.auth_service import verify_password
+        from app.auth.access import verify_password
         sig = inspect.signature(verify_password)
         # All three args must be keyword-only.
         params = sig.parameters
@@ -141,7 +141,7 @@ class TestAuthService:
             assert params[name].kind == inspect.Parameter.KEYWORD_ONLY
 
     def test_set_password_signature(self):
-        from app.services.auth_service import set_password
+        from app.auth.access import set_password
         sig = inspect.signature(set_password)
         params = sig.parameters
         for name in ("db", "user_id", "password"):
@@ -149,7 +149,7 @@ class TestAuthService:
             assert params[name].kind == inspect.Parameter.KEYWORD_ONLY
 
     def test_request_password_reset_signature(self):
-        from app.services.auth_service import request_password_reset
+        from app.auth.access import request_password_reset
         sig = inspect.signature(request_password_reset)
         params = sig.parameters
         for name in ("db", "email"):

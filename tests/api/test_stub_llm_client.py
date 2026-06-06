@@ -86,5 +86,5 @@ def test_stub_construction_emits_warning(caplog) -> None:
         "The construction WARNING must mention 'production' so an "
         "operator scanning the log stream understands why this "
         "warning matters. (Same intent-pin as the discipline in "
-        "app/policy/moderation.py for NullModerationProvider.)"
+        "app/runtime/input_safety.py for NullModerationProvider.)"
     )
