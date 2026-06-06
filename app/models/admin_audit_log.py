@@ -367,7 +367,8 @@ ACTION_OVERAGE_REPORTED = "overage_reported"
 #            or 'admin_initiated' (admin dashboard action).
 #   after_json carries {session_id, resolved_lead_id, instance_id,
 #   actor_user_id, trigger, channel}.
-#   resource_type = RESOURCE_SESSION; resource_pk = sessions.id;
+#   resource_type = RESOURCE_SESSION; resource_pk = None (sessions.id is a
+#   36-char UUID string, NOT the integer resource_pk column);
 #   resource_natural_id = sessions.id.
 #
 # ACTION_HUMAN_TAKEOVER_ENDED — a session transitioned back from
