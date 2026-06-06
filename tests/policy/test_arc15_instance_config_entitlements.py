@@ -38,17 +38,14 @@ from __future__ import annotations
 from dataclasses import fields
 
 from app.policy.entitlements import (
-    ESCALATION_NOTIFY_CUSTOM,
     ESCALATION_NOTIFY_EMAIL,
     ESCALATION_NOTIFY_SLACK,
     ESCALATION_NOTIFY_SMS,
-    TIER_ENTERPRISE,
     TIER_FREE,
     TIER_PRO,
     TierEntitlement,
     business_context_max_chars,
     custom_personality_enabled,
-    escalation_chains_enabled,
     escalation_notify_channels,
     escalation_secondary_contact_enabled,
     lead_routing_enabled,
@@ -68,10 +65,6 @@ def test_business_context_cap_pro() -> None:
     assert business_context_max_chars(TIER_PRO) == 280
 
 
-def test_business_context_cap_enterprise() -> None:
-    assert business_context_max_chars(TIER_ENTERPRISE) == 2000
-
-
 def test_business_context_cap_unknown_tier_fails_closed_to_free() -> None:
     assert business_context_max_chars("not-a-tier") == 280
 
@@ -87,10 +80,6 @@ def test_custom_preset_free_false() -> None:
 
 def test_custom_preset_pro_true() -> None:
     assert custom_personality_enabled(TIER_PRO) is True
-
-
-def test_custom_preset_enterprise_true() -> None:
-    assert custom_personality_enabled(TIER_ENTERPRISE) is True
 
 
 def test_custom_preset_unknown_fails_closed() -> None:
@@ -110,10 +99,6 @@ def test_lead_routing_pro_true() -> None:
     assert lead_routing_enabled(TIER_PRO) is True
 
 
-def test_lead_routing_enterprise_true() -> None:
-    assert lead_routing_enabled(TIER_ENTERPRISE) is True
-
-
 def test_lead_routing_unknown_fails_closed() -> None:
     assert lead_routing_enabled("not-a-tier") is False
 
@@ -129,20 +114,10 @@ def test_escalation_channels_free_email_only() -> None:
     )
 
 
-def test_escalation_channels_pro_email_sms() -> None:
+def test_escalation_channels_pro_email_sms_slack() -> None:
+    # Enterprise removed (Unit 1 excision). Pro = email+sms+slack.
     assert escalation_notify_channels(TIER_PRO) == frozenset(
-        {ESCALATION_NOTIFY_EMAIL, ESCALATION_NOTIFY_SMS}
-    )
-
-
-def test_escalation_channels_enterprise_all() -> None:
-    assert escalation_notify_channels(TIER_ENTERPRISE) == frozenset(
-        {
-            ESCALATION_NOTIFY_EMAIL,
-            ESCALATION_NOTIFY_SMS,
-            ESCALATION_NOTIFY_SLACK,
-            ESCALATION_NOTIFY_CUSTOM,
-        }
+        {ESCALATION_NOTIFY_EMAIL, ESCALATION_NOTIFY_SMS, ESCALATION_NOTIFY_SLACK}
     )
 
 
@@ -153,7 +128,7 @@ def test_escalation_channels_unknown_fails_closed_to_email() -> None:
 
 
 def test_email_is_escalation_floor_on_every_tier() -> None:
-    for tier in (TIER_FREE, TIER_PRO, TIER_ENTERPRISE):
+    for tier in (TIER_FREE, TIER_PRO):
         assert ESCALATION_NOTIFY_EMAIL in escalation_notify_channels(tier), tier
 
 
@@ -165,13 +140,6 @@ def test_email_is_escalation_floor_on_every_tier() -> None:
 def test_secondary_contact_gating() -> None:
     assert escalation_secondary_contact_enabled(TIER_FREE) is False
     assert escalation_secondary_contact_enabled(TIER_PRO) is True
-    assert escalation_secondary_contact_enabled(TIER_ENTERPRISE) is True
-
-
-def test_escalation_chains_enterprise_only() -> None:
-    assert escalation_chains_enabled(TIER_FREE) is False
-    assert escalation_chains_enabled(TIER_PRO) is False
-    assert escalation_chains_enabled(TIER_ENTERPRISE) is True
 
 
 # ---------------------------------------------------------------------

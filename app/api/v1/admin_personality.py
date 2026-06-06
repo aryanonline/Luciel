@@ -208,8 +208,8 @@ def put_personality_config(
                 "error": "custom_preset_not_available_on_tier",
                 "tier": admin_tier,
                 "message": (
-                    "The 'custom' personality preset is available on Pro and "
-                    "Enterprise only. Choose one of the named presets."
+                    "The 'custom' personality preset is available on Pro "
+                    "only. Choose one of the named presets."
                 ),
                 "upgrade_required": True,
             },

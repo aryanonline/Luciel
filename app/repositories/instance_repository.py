@@ -487,30 +487,11 @@ class InstanceRepository:
                 autocommit=False,
             )
 
-            # Arc 12 WU4 — sibling-grant cascade per Architecture
-            # §3.6.1 step 3. Wired here so the grant revocations
-            # commit atomically with the instance-status flip. The
-            # service handles the per-grant audit emission.
-            # Imported lazily to avoid a circular import (the
-            # service constructs an AdminAuditRepository internally
-            # which imports back into this module's models).
-            from app.services.sibling_call_grant_service import (
-                SiblingCallGrantService,
-            )
-
-            grant_service = SiblingCallGrantService(self.db)
-            revoked_grants = grant_service.revoke_all_touching_instance(
-                admin_id=instance.admin_id,
-                instance_id=instance.id,
-                audit_ctx=audit_ctx,
-                autocommit=False,
-            )
-            if revoked_grants:
-                logger.info(
-                    "Instance delete cascade revoked %s sibling-call "
-                    "grant(s) touching pk=%s admin=%s",
-                    len(revoked_grants), instance.id, instance.admin_id,
-                )
+            # Sibling-call-grant cascade removed in Unit 1: the
+            # call_sibling_luciel tool and sibling_call_grants table are
+            # deferred-feature surfaces (multi-Luciel, Open Decision #7)
+            # excised in this unit. The single-Luciel model has no
+            # sibling grants to revoke on instance delete.
 
             # Arc 17 Task 4 — connection cascade. In the same transaction
             # as the soft-delete, revoke every live instance_connections

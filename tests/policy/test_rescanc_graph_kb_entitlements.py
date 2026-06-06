@@ -37,12 +37,6 @@ def test_pro_tier_graph_enabled():
     )
 
 
-def test_enterprise_tier_graph_enabled():
-    from app.policy.entitlements import TIER_ENTITLEMENTS, TIER_ENTERPRISE
-    assert TIER_ENTITLEMENTS[TIER_ENTERPRISE].knowledge_graph_enabled is True, (
-        "Enterprise tier must have knowledge_graph_enabled (Vision §7)."
-    )
-
 
 def test_resolve_entitlement_free():
     from app.policy.entitlements import resolve_entitlement
@@ -56,15 +50,11 @@ def test_resolve_entitlement_pro():
     assert result is True
 
 
-def test_resolve_entitlement_enterprise():
-    from app.policy.entitlements import resolve_entitlement
-    result = resolve_entitlement(tier="enterprise", axis="knowledge_graph_enabled")
-    assert result is True
-
 
 def test_all_tiers_have_field():
-    """All three tiers must have the field set (no missing/None)."""
+    """Both Free/Pro tiers must have the knowledge_graph_enabled field set."""
     from app.policy.entitlements import ALL_TIERS_V2, TIER_ENTITLEMENTS
+    # ALL_TIERS_V2 = (free, pro) — Enterprise removed in Unit 1 excision.
     for tier in ALL_TIERS_V2:
         row = TIER_ENTITLEMENTS[tier]
         assert hasattr(row, "knowledge_graph_enabled"), (

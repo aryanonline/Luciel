@@ -95,7 +95,7 @@ logger = logging.getLogger(__name__)
 _TIER_WINDOW_DAYS: dict[str, int] = {
     "free":       30,
     "pro":        365,
-    "enterprise": 365 * 7,
+    # Enterprise tier deferred (Open Decision #8); removed in Unit 1.
 }
 
 _S3_COLD_PREFIX = "audit-cold-archive"

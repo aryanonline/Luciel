@@ -302,7 +302,7 @@ def validate_escalation_config_for_tier(
                 "reason": "secondary_contact_not_available_on_tier",
                 "message": (
                     "A secondary contact and per-signal routing_rules are "
-                    "available on Pro and Enterprise only."
+                    "available on Pro only."
                 ),
                 "tier": tier,
                 "upgrade_required": True,

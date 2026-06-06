@@ -8,7 +8,7 @@ Covers:
   G5  Citation overlap: answer fully paraphrasing chunk content → non-zero overlap.
   G6  Per-tier floor escalation boundary: 0.47 fires on Pro+Enterprise but NOT Free.
   G7  Per-tier floor escalation boundary: 0.52 fires on Enterprise only.
-  G8  Score 0.35 fires on all three tiers.
+  G8  Score 0.35 fires on both tiers (Free + Pro).
   G9  cannot_answer reply contains the exact canonical §3.4.13 phrase.
   G10 handoff_ack.CANNOT_ANSWER_REPLY is the canonical phrase.
   G11 cannot_answer_reply() function returns the canonical phrase.
@@ -137,7 +137,7 @@ class TestCompositeGroundingScore(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestPerTierGroundingFloors(unittest.TestCase):
-    """§9 items 21-23: Free 0.45 / Pro 0.50 / Enterprise 0.55."""
+    """§9 items 21-22: Free 0.45 / Pro 0.50. (Enterprise deferred.)"""
 
     def setUp(self):
         from app.runtime.classifiers import INTENT_OTHER, IntentResult, SentimentResult
@@ -182,32 +182,22 @@ class TestPerTierGroundingFloors(unittest.TestCase):
         self.assertIsNotNone(d)
         self.assertEqual(d.signal, SIGNAL_CANNOT_CONFIDENTLY_ANSWER)
 
-    def test_0_47_escalates_on_enterprise(self):
-        """0.47 < Enterprise floor 0.55 → must fire on enterprise."""
-        from app.models.escalation_event import SIGNAL_CANNOT_CONFIDENTLY_ANSWER
-        d = self._judge.evaluate_outcome(self._req, self._make_ctx("enterprise", 0.47))
-        self.assertIsNotNone(d)
-        self.assertEqual(d.signal, SIGNAL_CANNOT_CONFIDENTLY_ANSWER)
+    # test_0_47_escalates_on_enterprise removed: Enterprise tier excised in Unit 1.
 
-    # --- 0.52: above Pro floor, below Enterprise floor ---
+    # --- 0.52: at/above Pro floor (Enterprise tier deferred) ---
     def test_0_52_does_not_escalate_on_pro(self):
         """0.52 >= Pro floor 0.50 → must NOT fire on pro."""
         self.assertIsNone(
             self._judge.evaluate_outcome(self._req, self._make_ctx("pro", 0.52))
         )
 
-    def test_0_52_escalates_on_enterprise(self):
-        """0.52 < Enterprise floor 0.55 → must fire on enterprise."""
-        from app.models.escalation_event import SIGNAL_CANNOT_CONFIDENTLY_ANSWER
-        d = self._judge.evaluate_outcome(self._req, self._make_ctx("enterprise", 0.52))
-        self.assertIsNotNone(d)
-        self.assertEqual(d.signal, SIGNAL_CANNOT_CONFIDENTLY_ANSWER)
+    # test_0_52_escalates_on_enterprise removed: Enterprise tier excised in Unit 1.
 
     # --- 0.35: below every floor ---
     def test_0_35_escalates_on_all_tiers(self):
-        """0.35 < all floors (0.45/0.50/0.55) → fires on all three."""
+        """0.35 < all floors (0.45/0.50) → fires on both tiers."""
         from app.models.escalation_event import SIGNAL_CANNOT_CONFIDENTLY_ANSWER
-        for tier in ("free", "pro", "enterprise"):
+        for tier in ("free", "pro"):
             d = self._judge.evaluate_outcome(self._req, self._make_ctx(tier, 0.35))
             self.assertIsNotNone(d, f"Expected escalation on {tier}")
             self.assertEqual(d.signal, SIGNAL_CANNOT_CONFIDENTLY_ANSWER)
@@ -225,16 +215,12 @@ class TestPerTierGroundingFloors(unittest.TestCase):
             self._judge.evaluate_outcome(self._req, self._make_ctx("pro", 0.50))
         )
 
-    def test_enterprise_floor_at_exactly_0_55(self):
-        """At exactly 0.55 (enterprise floor) → no escalation."""
-        self.assertIsNone(
-            self._judge.evaluate_outcome(self._req, self._make_ctx("enterprise", 0.55))
-        )
+    # test_enterprise_floor_at_exactly_0_55 removed: Enterprise tier excised in Unit 1.
 
     def test_cognition_parity_algorithm_identical_across_tiers(self):
         """Cognition-parity: the judge calls _cannot_confidently_answer the same
         way for all tiers; only the floor value in GROUNDING_FLOOR_BY_TIER differs.
-        Verified by checking all three tiers share the SAME judge method."""
+        Verified by checking both tiers share the SAME judge method."""
         # The judge is a single instance handling all tiers — no tier-branching
         # in the algorithm itself.
         from app.runtime.escalation_judge import EscalationJudge

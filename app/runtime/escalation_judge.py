@@ -81,7 +81,7 @@ LOW_CONFIDENCE_THRESHOLD: float = 0.6
 GROUNDING_FLOOR_BY_TIER: dict[str, float] = {
     "free": 0.45,       # §9 item 21
     "pro": 0.50,        # §9 item 22
-    "enterprise": 0.55, # §9 item 23
+    # Enterprise tier deferred (Open Decision #8); removed in Unit 1.
 }
 _DEFAULT_GROUNDING_FLOOR = 0.45  # fail-open to the most permissive floor
 # (d) high-value lead — §3.4.5 weighted composite scoring (RESCAN TIER-C).

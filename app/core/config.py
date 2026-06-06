@@ -257,14 +257,9 @@ class Settings(BaseSettings):
     # --- Pro tier recurring Prices (flat-rate, self-serve via Checkout). ---
     stripe_price_pro_monthly: str = ""
     stripe_price_pro_annual: str = ""
-    # --- Enterprise tier recurring Prices (flat-rate, self-serve via
-    # Checkout — symmetric with Pro since Arc 7 Commit 1 retired the
-    # hybrid/metered shape). $2,800 CAD/mo or $24,000 CAD/yr (28.6%
-    # annual discount). Empty defaults
-    # keep boot safe: a missing slot causes the (enterprise, *) row in
-    # ``PRICE_ID_KEY`` to resolve to BillingNotConfiguredError → 501. ---
-    stripe_price_enterprise_monthly: str = ""
-    stripe_price_enterprise_annual: str = ""
+    # Enterprise tier recurring Price slots removed in Unit 1
+    # (Enterprise deferred -- Open Decision #8). The ratified model
+    # ships Free + Pro only.
     # --- Arc 18 (§3.4.1b) conversation-overage metered Prices. ---
     # The per-instance overage add-on billed at cycle close. These are
     # METERED (usage-record) Prices, distinct from the flat-rate recurring
@@ -275,10 +270,10 @@ class Settings(BaseSettings):
     # (tier, cadence) by ``entitlements.overage_price_config_key``:
     #   Pro monthly → $15.00 / 100 conversations (1500 cents)
     #   Pro annual  → $10.00 / 100 conversations (1000 cents)
-    # Enterprise overage is per-contract (no fixed Price) and is resolved
-    # via admin_tier_overrides, not a config slot. Empty defaults keep boot
-    # safe: a missing slot makes the usage-record report a no-op (the
-    # period still resets) and is surfaced as a documented gap.
+    # Empty defaults keep boot safe: a missing slot makes the
+    # usage-record report a no-op (the period still resets) and is
+    # surfaced as a documented gap. (Enterprise per-contract overage
+    # removed in Unit 1 -- Enterprise tier deferred.)
     stripe_price_overage_pro_monthly: str = ""
     stripe_price_overage_pro_annual: str = ""
     # The Stripe Billing Meter ``event_name`` the overage Prices read from.
@@ -289,10 +284,6 @@ class Settings(BaseSettings):
     # usage reporting is a no-op (period still resets). One meter serves
     # both Pro cadences; the (tier,cadence) Price gates the rate.
     stripe_meter_event_overage: str = ""
-    # Enterprise CSM recipient for the 80% budget heads-up (Vision §7:
-    # Enterprise gets a CSM-at-80 copy in addition to the admin email).
-    # Empty default → the CSM copy is skipped (logged, not an error).
-    budget_csm_alert_email: str = ""
     # --- One-time $100 CAD intro fee Price (retained from V1, control). ---
     # Used by BillingService when the buyer's email is first-time-ever
     # (see ``BillingService.is_first_time_customer``). Decoupled from the

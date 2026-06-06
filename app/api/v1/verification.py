@@ -94,13 +94,10 @@ _PROBES: list[tuple[str, str | None, Any, list[str]]] = [
     #   Listed here so the observations dict shows "users: no_tenant_scope"
     #   for traceability rather than silently omitting the table.
     ("users",                None,     "*",                            ["admin_id"]),
-    # - scope_assignments: tenant-scoped active assignments. Per-tenant
-    #   teardown should leave 0 active rows for the audited tenant.
-    #   Q6 doctrine: end-and-recreate, never UPDATE in place; teardown
-    #   cascades end every active SA via end_assignment with reason=
-    #   DEACTIVATED. Probe enforces live=0 to catch a stuck-assignment
-    #   scenario after Pillar 14 / UserService.deactivate_user runs.
-    ("scope_assignments",    "active", 0,                              ["admin_id"]),
+    # scope_assignments probe REMOVED in Unit 1: the table was dropped
+    # under the single-login model (Locked Decision #19). There is no
+    # per-tenant scope-assignment residue to verify; owner access is
+    # the admins row (probed above) plus live sessions.
 ]
 
 

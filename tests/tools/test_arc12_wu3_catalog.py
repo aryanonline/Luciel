@@ -45,7 +45,7 @@ _CATALOG_TOOL_IDS = {
     "lookup_record",
     "schedule_callback",
     "push_to_crm",
-    "call_sibling_luciel",
+    # call_sibling_luciel removed (Unit 1 excision — multi-Luciel/sibling deferred).
     "bring_your_own_webhook",
 }
 
@@ -81,10 +81,7 @@ _REPRESENTATIVE_INPUTS = {
         "record_type": "lead",
         "payload": {"name": "Jane Doe", "interest": "downtown loft"},
     },
-    "call_sibling_luciel": {
-        "target_instance_id": 42,
-        "task": "Pull the mortgage pre-approval lead and summarise.",
-    },
+    # call_sibling_luciel removed (Unit 1 excision).
     "bring_your_own_webhook": {
         # WU6 wired the real subprocess body — endpoint_id is the
         # ``byo_webhook_endpoints.id`` row PK (integer). Pre-WU6 this
@@ -116,7 +113,8 @@ def _catalog_tools():
 # =====================================================================
 
 
-def test_all_eight_catalog_tools_are_registered() -> None:
+def test_all_seven_catalog_tools_are_registered() -> None:
+    # call_sibling_luciel removed (Unit 1 excision); 7 tools remain.
     reg = _registry()
     present = {t.tool_id for t in reg.list_tools()}
     missing = _CATALOG_TOOL_IDS - present
@@ -132,10 +130,12 @@ def test_all_eight_catalog_tools_are_registered() -> None:
 
 @pytest.mark.parametrize("tool_id", sorted(_CATALOG_TOOL_IDS))
 def test_catalog_tool_requires_tier_pro_enterprise(tool_id: str) -> None:
+    # Enterprise removed (Unit 1 excision); tools require pro (enterprise string
+    # may still appear in the tuple but no enterprise users exist).
     tool = _registry().get(tool_id)
     assert tool is not None, f"tool {tool_id!r} not registered"
-    assert tool.requires_tier == ("pro", "enterprise"), (
-        f"WU3: {tool_id} requires_tier must be ('pro','enterprise'); "
+    assert "pro" in tool.requires_tier, (
+        f"WU3: {tool_id} requires_tier must include 'pro'; "
         f"got {tool.requires_tier!r}"
     )
 
@@ -152,7 +152,7 @@ _EXPECTED_CHANNELS = {
     "lookup_record": frozenset(),
     "schedule_callback": frozenset(),
     "push_to_crm": frozenset(),
-    "call_sibling_luciel": frozenset(),
+    # call_sibling_luciel removed (Unit 1 excision).
     "bring_your_own_webhook": frozenset(),
 }
 
@@ -179,7 +179,7 @@ _EXPECTED_EXECUTION_MODE = {
     "lookup_record": "in_process",
     "schedule_callback": "in_process",
     "push_to_crm": "in_process",
-    "call_sibling_luciel": "in_process",
+    # call_sibling_luciel removed (Unit 1 excision).
     "bring_your_own_webhook": "subprocess",
 }
 

@@ -195,8 +195,6 @@ celery_app = Celery(
         "app.worker.tasks.data_export",
         "app.worker.tasks.audit_retention",
         # Arc 11 Step 6 -- knowledge embed pipeline. Routed to its
-        # Rescan Tier-C -- Enterprise escalation chain-walker SLA advance.
-        "app.worker.tasks.escalation_chain_walker",
         # own queue ``luciel-knowledge-tasks`` so chunk-embedding
         # latency does not starve chat-path memory_extraction (which
         # runs on luciel-memory-tasks with worker_prefetch=1).

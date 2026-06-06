@@ -13,7 +13,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.policy.entitlements import TIER_ENTERPRISE, TIER_FREE, TIER_PRO
+from app.policy.entitlements import TIER_FREE, TIER_PRO
 from app.services.budget_alert_service import BudgetAlertService
 
 
@@ -85,20 +85,6 @@ class TestChannelSelection(unittest.TestCase):
             )
         self.assertEqual(len(emails), 1)
         self.assertEqual(len(smses), 1)
-
-    def test_enterprise_80_emails_admin_and_csm(self):
-        emails, smses = [], []
-        with _no_audit(), patch(
-            "app.core.config.settings.budget_csm_alert_email", "csm@vantage.com"
-        ):
-            _svc(emails, smses).send_budget_alert(
-                admin_id="a1", instance_id=7, tier=TIER_ENTERPRISE,
-                threshold=80, current=8000, cap=10000,
-            )
-        # Admin email + CSM copy = two email sends, no SMS at 80%.
-        recipients = sorted(e["to_email"] for e in emails)
-        self.assertIn("csm@vantage.com", recipients)
-        self.assertEqual(smses, [])
 
     def test_no_billing_email_degrades_to_audit_only(self):
         emails, smses = [], []

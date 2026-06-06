@@ -11,7 +11,7 @@ Arc 12 WU1 migrated this base off the v1 `name`/`description`/
                          selection time
   * ``input_schema``   : JSON Schema validated BEFORE ``execute()``
   * ``output_schema``  : JSON Schema validated AFTER ``execute()``
-  * ``requires_tier``  : tuple subset of ('free','pro','enterprise')
+  * ``requires_tier``  : tuple subset of ('free','pro')
   * ``requires_channels`` : frozenset of channel ids (e.g. {'sms'});
                          the broker denies dispatch if the channel
                          adapter is not enabled. Most tools use
@@ -297,8 +297,9 @@ class LucielTool(ABC):
     @abstractmethod
     def requires_tier(self) -> tuple[str, ...]:
         """Tuple of tier ids this tool is available on. Subset of
-        ('free','pro','enterprise'). The broker denies dispatch if
-        the admin's tier is not in this tuple."""
+        ('free','pro'). The broker denies dispatch if the admin's
+        tier is not in this tuple. (Enterprise deferred -- Open
+        Decision #8, ratified 2-tier Free/Pro model.)"""
 
     @property
     @abstractmethod

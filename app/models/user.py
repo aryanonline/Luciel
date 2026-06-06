@@ -52,7 +52,7 @@ from app.models.base import Base
 if TYPE_CHECKING:
     from app.models.identity_claim import IdentityClaim
     from app.models.memory import MemoryItem
-    from app.models.scope_assignment import ScopeAssignment
+    # ScopeAssignment import removed in Unit 1 (model deleted; single-login).
 
 
 class User(Base):

@@ -95,7 +95,9 @@ class SendEmailTool(LucielTool):
 
     @property
     def requires_tier(self) -> tuple[str, ...]:
-        return ("pro", "enterprise")
+        # Action tools are Pro-only; Enterprise tier deferred
+        # (Open Decision #8 -- ratified 2-tier Free/Pro model).
+        return ("pro",)
 
     @property
     def execution_mode(self) -> str:

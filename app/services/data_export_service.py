@@ -74,7 +74,7 @@ from app.models.admin_audit_log import (
 logger = logging.getLogger(__name__)
 
 
-Tier = Literal["free", "pro", "enterprise"]
+Tier = Literal["free", "pro"]
 TriggeredBy = Literal["admin_request", "grace_window_request"]
 JobStatus = Literal["pending", "generating", "ready", "expired", "failed"]
 
@@ -83,11 +83,11 @@ JobStatus = Literal["pending", "generating", "ready", "expired", "failed"]
 # Tier-conditional signed-URL TTL.
 # ---------------------------------------------------------------------
 # Vision §7 tier matrix: pre-closure data export is "Yes (7-day
-# window)" on Free + Pro, "Yes (90-day window)" on Enterprise.
+# window)" on Free + Pro. (Enterprise tier deferred -- Open Decision
+# #8; removed in Unit 1.)
 _TIER_URL_TTL_SECONDS: dict[Tier, int] = {
     "free":       7  * 24 * 3600,
     "pro":        7  * 24 * 3600,
-    "enterprise": 90 * 24 * 3600,
 }
 
 # S3 bucket name comes from settings.
@@ -202,8 +202,8 @@ class DataExportService:
         if tier_at_request == "free" and closure_initiated_at is None:
             raise ExportFreeGateError(
                 "Free-tier accounts may only export data during the "
-                "account closure / grace window. Upgrade to Pro or "
-                "Enterprise for self-serve export at any time."
+                "account closure / grace window. Upgrade to Pro "
+                "for self-serve export at any time."
             )
 
         job_id = uuid.uuid4()
@@ -260,9 +260,10 @@ class DataExportService:
         )
 
         # RESCAN TIER-DE §5.10: emit data_export_self_serve for
-        # Pro/Enterprise non-closure exports so the forensics team can
-        # identify self-serve data-portability requests.
-        if tier_at_request in ("pro", "enterprise") and triggered_by == "admin_request":
+        # Pro non-closure exports so the forensics team can identify
+        # self-serve data-portability requests. (Enterprise tier
+        # deferred -- Open Decision #8; removed in Unit 1.)
+        if tier_at_request == "pro" and triggered_by == "admin_request":
             self.audit_repository.record(
                 ctx=audit_ctx,
                 admin_id=admin_id,

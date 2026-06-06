@@ -15,8 +15,7 @@ Covers the binding-spec assertions for the new admin tools router:
   6. Authorize is rejected when the Admin's tier is not in
      ``tool.requires_tier`` (Free admin attempting an enterprise-only
      tool -> 403).
-  7. Wall-2: read_only_viewer cannot toggle; owner + manager can;
-     instance_operator cannot toggle.
+  7. Wall-2: single-login — only the account_owner can toggle (Locked Dec #19).
   8. Wall-1 / Wall-3: a caller scoped to a different Admin / Instance
      cannot toggle.
 
@@ -409,22 +408,13 @@ def test_admin_tools_router_mounted_in_api_router() -> None:
 
 
 def test_toggle_role_set_excludes_operator_and_viewer() -> None:
-    """Tool toggle is admin-level configuration. read_only_viewer and
-    instance_operator must NOT be in the toggle set. owner + manager
-    only."""
+    """Single-login model (Locked Decision #19): the only tenant role is the
+    account owner. Tool toggle collapses to {ROLE_ADMIN_OWNER}; there are no
+    manager / operator / viewer roles to exclude — they no longer exist."""
     from app.api.v1.admin_tools import _TOGGLE_ROLES
-    from app.policy.scope import (
-        ROLE_ADMIN_MANAGER,
-        ROLE_ADMIN_OWNER,
-        ROLE_INSTANCE_OPERATOR,
-        ROLE_READ_ONLY_VIEWER,
-    )
+    from app.policy.scope import ROLE_ADMIN_OWNER
 
-    assert ROLE_INSTANCE_OPERATOR not in _TOGGLE_ROLES
-    assert ROLE_READ_ONLY_VIEWER not in _TOGGLE_ROLES
-    assert _TOGGLE_ROLES == frozenset(
-        {ROLE_ADMIN_OWNER, ROLE_ADMIN_MANAGER}
-    )
+    assert _TOGGLE_ROLES == frozenset({ROLE_ADMIN_OWNER})
 
 
 def test_read_role_set_allows_full_four_role_matrix() -> None:
@@ -446,8 +436,9 @@ def test_read_role_set_allows_full_four_role_matrix() -> None:
 def test_get_returns_8_v1_catalog_tools_no_cognition() -> None:
     """Cognition behaviours (escalate / save_memory / session_summary)
     are NOT registered per Decision #20. The GET response must
-    therefore contain exactly the 8 v1 catalog tools and zero
-    cognition rows."""
+    therefore contain exactly the 7 v1 catalog action tools and zero
+    cognition rows. (The 8th slot, call_sibling_luciel, was multi-Luciel
+    residue removed in the audit-and-alignment phase — Locked Decision #12.)"""
     from app.api.v1.admin_tools import list_tools_for_instance
 
     admin_id = "admin-pro-1"
@@ -477,7 +468,7 @@ def test_get_returns_8_v1_catalog_tools_no_cognition() -> None:
     assert response.admin_tier == "pro"
 
     tool_ids = {t.tool_id for t in response.tools}
-    # Exactly the 8 v1 catalog tools (WU3 §3.3.2).
+    # Exactly the 7 v1 catalog action tools (§3.3.2).
     expected = {
         "book_appointment",
         "send_email",
@@ -485,11 +476,10 @@ def test_get_returns_8_v1_catalog_tools_no_cognition() -> None:
         "lookup_record",
         "schedule_callback",
         "push_to_crm",
-        "call_sibling_luciel",
         "bring_your_own_webhook",
     }
     assert tool_ids == expected, (
-        f"Expected exactly the 8 v1 catalog tools; got {tool_ids}"
+        f"Expected exactly the 7 v1 catalog tools; got {tool_ids}"
     )
     # Cognition behaviours are explicitly absent.
     for cognition_name in ("escalate", "save_memory", "session_summary"):
@@ -533,7 +523,7 @@ def test_get_response_carries_contract_fields_and_availability() -> None:
         assert isinstance(tool.description, str)
         assert isinstance(tool.requires_tier, list)
         assert all(
-            t in {"free", "pro", "enterprise"} for t in tool.requires_tier
+            t in {"free", "pro"} for t in tool.requires_tier
         )
         assert isinstance(tool.requires_channels, list)
         assert tool.execution_mode in {"in_process", "subprocess"}
@@ -543,14 +533,15 @@ def test_get_response_carries_contract_fields_and_availability() -> None:
         assert tool.authorized_at is None
         assert tool.authorized_by_user_id is None
 
-    # On a Free admin, tools whose requires_tier excludes 'free' must
-    # surface tier_available=False so the UI can grey them out.
-    # call_sibling_luciel is pro/enterprise-only per WU3.
-    sibling = next(
-        t for t in response.tools if t.tool_id == "call_sibling_luciel"
+    # On a Free admin, action tools (Pro-only) must surface
+    # tier_available=False so the UI can grey them out. Free has cognition
+    # only; every action tool is Pro-only (§3.3.2). book_appointment stands
+    # in for the catalog here (call_sibling_luciel was removed — Locked Dec #12).
+    pro_only = next(
+        t for t in response.tools if t.tool_id == "book_appointment"
     )
-    assert sibling.tier_available is False
-    assert "free" not in sibling.requires_tier
+    assert pro_only.tier_available is False
+    assert "free" not in pro_only.requires_tier
 
     # send_email and send_sms declare requires_channels={"email"} /
     # {"sms"}; channel adapters land in Arc 13 so channels_available
@@ -886,12 +877,12 @@ def test_authorize_rejects_when_tier_excludes_tool() -> None:
     instance = _fake_instance(instance_id=instance_id, admin_id=admin_id)
     instance_service = _fake_instance_service(instance)
 
-    # call_sibling_luciel is pro/enterprise-only per WU3.
+    # Action tools are Pro-only; a Free admin cannot authorise one.
     with pytest.raises(HTTPException) as exc:
         authorize_tool_on_instance(
             request=request,
             instance_id=instance_id,
-            tool_id="call_sibling_luciel",
+            tool_id="book_appointment",
             db=session,
             instance_service=instance_service,
             audit_ctx=_audit_ctx(admin_id),
@@ -943,82 +934,19 @@ def test_authorize_404_for_unknown_tool_id() -> None:
 # =====================================================================
 
 
-def test_read_only_viewer_cannot_authorize() -> None:
-    """A read_only_viewer (the most restricted of the four scope
-    roles) cannot toggle tool authorization."""
-    from fastapi import HTTPException
-
-    from app.api.v1.admin_tools import authorize_tool_on_instance
-
-    admin_id = "admin-pro-viewer"
-    instance_id = 1201
-    user_id = uuid.uuid4()
-    session = _build_sqlite_session()
-    _seed_admin_instance_user(
-        session, admin_id=admin_id, instance_id=instance_id,
-        user_id=user_id, tier="pro",
-    )
-
-    request = _fake_request(
-        admin_id=admin_id,
-        actor_user_id=user_id,
-        role="read_only_viewer",
-    )
-    instance = _fake_instance(instance_id=instance_id, admin_id=admin_id)
-    instance_service = _fake_instance_service(instance)
-
-    with pytest.raises(HTTPException) as exc:
-        authorize_tool_on_instance(
-            request=request,
-            instance_id=instance_id,
-            tool_id="book_appointment",
-            db=session,
-            instance_service=instance_service,
-            audit_ctx=_audit_ctx(admin_id),
-        )
-    assert exc.value.status_code == 403
-
-
-def test_instance_operator_cannot_authorize() -> None:
-    """instance_operator is excluded from the toggle set per the
-    §3.2.2-analogue policy: operator is list/view-scoped on Knowledge
-    and the analogous gate here is "read tool state, cannot toggle"."""
-    from fastapi import HTTPException
-
-    from app.api.v1.admin_tools import authorize_tool_on_instance
-
-    admin_id = "admin-pro-operator"
-    instance_id = 1301
-    user_id = uuid.uuid4()
-    session = _build_sqlite_session()
-    _seed_admin_instance_user(
-        session, admin_id=admin_id, instance_id=instance_id,
-        user_id=user_id, tier="pro",
-    )
-
-    request = _fake_request(
-        admin_id=admin_id,
-        actor_user_id=user_id,
-        role="instance_operator",
-        luciel_instance_id=instance_id,  # bound to this instance
-    )
-    instance = _fake_instance(instance_id=instance_id, admin_id=admin_id)
-    instance_service = _fake_instance_service(instance)
-
-    with pytest.raises(HTTPException) as exc:
-        authorize_tool_on_instance(
-            request=request,
-            instance_id=instance_id,
-            tool_id="book_appointment",
-            db=session,
-            instance_service=instance_service,
-            audit_ctx=_audit_ctx(admin_id),
-        )
-    assert exc.value.status_code == 403
+# (test_read_only_viewer_cannot_authorize and
+# test_instance_operator_cannot_authorize were removed in the
+# audit-and-alignment phase — Locked Decision #19 collapses the role model to
+# a single account_owner, so the read_only_viewer and instance_operator roles
+# no longer exist. Owner-only authorization is covered by
+# test_toggle_role_set_excludes_operator_and_viewer above and by the
+# cross-Admin guard tests.)
 
 
 def test_admin_manager_can_authorize() -> None:
-    """admin_manager is in the toggle set alongside admin_owner."""
+    """The account owner can toggle tool authorization. (Single-login,
+    Locked Decision #19: admin_owner is the only tenant role; the former
+    admin_manager role was removed in the audit-and-alignment phase.)"""
     from app.api.v1.admin_tools import authorize_tool_on_instance
 
     admin_id = "admin-pro-mgr"
@@ -1033,7 +961,7 @@ def test_admin_manager_can_authorize() -> None:
     request = _fake_request(
         admin_id=admin_id,
         actor_user_id=user_id,
-        role="admin_manager",
+        role="admin_owner",
     )
     instance = _fake_instance(instance_id=instance_id, admin_id=admin_id)
     instance_service = _fake_instance_service(instance)

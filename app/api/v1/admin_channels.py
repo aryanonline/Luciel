@@ -433,7 +433,7 @@ def set_sms_channel(
                     "tier": admin_tier,
                     "message": (
                         f"SMS is not available on the {admin_tier} tier. "
-                        "Upgrade to Pro or Enterprise to enable SMS."
+                        "Upgrade to Pro to enable SMS."
                     ),
                     "upgrade_required": True,
                 },
@@ -547,7 +547,7 @@ def _toggle_simple_channel(
                 "tier": admin_tier,
                 "message": (
                     f"{channel} is not available on the {admin_tier} tier. "
-                    "Upgrade to Pro or Enterprise to enable it."
+                    "Upgrade to Pro to enable it."
                 ),
                 "upgrade_required": True,
             },

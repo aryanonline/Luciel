@@ -214,16 +214,18 @@ class TestArc13ChannelsSlice2(unittest.TestCase):
             FakePhoneNumberProvider,
             PhoneNumberProvisioningService,
         )
-        from app.policy.entitlements import TIER_ENTERPRISE
+        from app.policy.entitlements import TIER_PRO
 
         svc = PhoneNumberProvisioningService(
             self.db, provider=FakePhoneNumberProvider()
         )
+        # Shared/brokerage routing is unimplemented regardless of tier;
+        # the mode check fires before the tier check.
         with self.assertRaises(BrokerageRoutingNotImplementedError):
             svc.provision(
                 admin_id=self.admin_id,
                 instance_id=self.instance.id,
-                tier=TIER_ENTERPRISE,
+                tier=TIER_PRO,
                 mode=SMS_MODE_SHARED,
             )
 

@@ -422,7 +422,7 @@ def test_ez6_free_allowed_during_closure():
 # EZ-7: Pro/Enterprise self-serve allowed.
 # -----------------------------------------------------------------------
 
-@pytest.mark.parametrize("tier", ["pro", "enterprise"])
+@pytest.mark.parametrize("tier", ["pro"])
 def test_ez7_pro_enterprise_self_serve_allowed(tier: str):
     """Pro/Enterprise may export at any time (no closure required)."""
     db = _FakeDB()
@@ -447,7 +447,7 @@ def test_ez7_pro_enterprise_self_serve_allowed(tier: str):
 # EZ-8: data_export_self_serve audit emitted for Pro/Enterprise.
 # -----------------------------------------------------------------------
 
-@pytest.mark.parametrize("tier", ["pro", "enterprise"])
+@pytest.mark.parametrize("tier", ["pro"])
 def test_ez8_self_serve_audit_emitted_for_pro_enterprise(tier: str):
     """Pro/Enterprise non-closure export emits data_export_self_serve audit."""
     db = _FakeDB()

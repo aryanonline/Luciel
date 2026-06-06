@@ -149,11 +149,10 @@ def _set_session_cookie(response: Response, token: str) -> None:
 # POST /checkout
 # ---------------------------------------------------------------------
 
-# Stable identifier the marketing site keys its "Talk to sales" copy off
-# (mirrors the detail-string-as-identifier convention the pilot-refund
-# errors use). Returned as the ``reason`` field of the 422 body so the
-# frontend can branch without parsing English.
-ENTERPRISE_CONTACT_SALES_REASON = "contact_sales"
+# (The Enterprise "contact_sales" reason constant was removed in Unit 1
+# -- Enterprise tier is deferred, Open Decision #8. The checkout schema
+# accepts only tier="pro"; any other value is rejected at the schema
+# layer with a 422 validation error.)
 
 
 @router.post(
@@ -178,13 +177,10 @@ def create_checkout(
         session cookie) so the marketing Pricing CTA routes the user
         through Free signup → dashboard "Upgrade to Pro" first.
 
-      * Enterprise is PROCUREMENT-LED. "Dana will not click 'Start free'
-        ... Enterprise signup is a process, not a click ... MSA + DPA ...
-        Once paid the Enterprise admin record is provisioned" back-office
-        via the existing contract/webhook path. The API therefore cannot
-        self-provision Enterprise: a tier=enterprise checkout attempt
-        returns 422 with ``reason="contact_sales"`` as the primary (and
-        only) outcome. No Stripe session is created.
+      * Enterprise tier is deferred (Open Decision #8). The checkout
+        request schema accepts only ``tier="pro"``; any other tier is
+        rejected at the schema layer with a 422 validation error. No
+        Enterprise self-serve or contact-sales path exists.
 
     The authenticated Pro path reuses ``BillingService.create_checkout``
     unchanged so the $100/90-day first-time pilot (and its refund
@@ -629,14 +625,11 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
       4. Optional Subscription lookup -> Stripe-derived fields when
          the admin is on a paid tier; null when Free.
 
-    Step 30a.5: also surfaces ``active_role`` -- the cookied user's
-    role on their active ScopeAssignment (preferring the assignment
-    matching the session JWT's admin_id, falling back to the first
-    active assignment for single-tenant common case). The dashboard
-    gates the CompanyTab on (tier=='enterprise' AND role in
-    ('tenant_admin','owner')) and the TeamTab on (tier in
-    ('pro','enterprise') AND role in ('tenant_admin','owner',
-    'department_lead')) -- see design doc §11 Q5.
+    Also surfaces ``active_role`` -- in the single-login model
+    (Locked Decision #19) the cookied user is always the single
+    account ``owner``; there are no custom roles, team seats, or
+    CompanyTab/TeamTab multi-user surfaces (those were team/Enterprise
+    features, both deferred -- Open Decisions #7/#8).
     """
     cookie = request.cookies.get(settings.session_cookie_name)
     user = _resolve_cookied_user(db=db, session_cookie=cookie)
@@ -1328,6 +1321,11 @@ async def signup_free(
         onboarding.onboard_tenant(
             admin_id=admin_id,
             display_name=display_name,
+            # Single-login owner binding (Locked Decision #19): the
+            # resolved User is the durable account_owner for this Free
+            # Admin. Persisted on admins.owner_user_id so the identity
+            # bootstrap SECDEF resolves login for Free users.
+            owner_user_id=user.id,
             tier="free",
             tier_source="free_signup",
             description=f"Self-serve Free signup -- email={email}",

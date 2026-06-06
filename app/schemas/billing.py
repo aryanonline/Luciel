@@ -185,9 +185,8 @@ class DowngradeRequest(BaseModel):
         ...,
         description=(
             "Tier to downgrade to. Must be strictly lower than the "
-            "caller's current tier (free<pro<enterprise); otherwise "
-            "the route returns 400 with detail='not_a_downgrade'. "
-            "Enterprise is never a downgrade target (it is the top)."
+            "caller's current tier (free<pro); otherwise the route "
+            "returns 400 with detail='not_a_downgrade'."
         ),
     )
 
@@ -266,8 +265,8 @@ class AxisOverflowResponse(BaseModel):
         ...,
         description=(
             "Target tier's cap on this axis. ``None`` means unlimited "
-            "(only possible when destination is Enterprise, which the "
-            "downgrade route layer already rejects -- defensive shape)."
+            "(no tier currently uncaps any axis in the Free/Pro model; "
+            "retained as a defensive shape)."
         ),
     )
     current: int = Field(..., description="Admin's currently-active count.")

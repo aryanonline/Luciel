@@ -7,6 +7,8 @@ add it to that `include` list AND import it here.
 """
 from app.worker.tasks import memory_extraction  # noqa: F401
 from app.worker.tasks import retention  # noqa: F401  # Step 30a.2
-from app.worker.tasks import escalation_chain_walker  # noqa: F401  # Rescan Tier-C
+# escalation_chain_walker removed (Unit 1 excision) -- Enterprise
+# escalation chains are deferred; delivery is a flat per-signal map
+# (Architecture §3.5.3). No SLA chain-advance task in the Free/Pro model.
 
-__all__ = ["memory_extraction", "retention", "escalation_chain_walker"]
+__all__ = ["memory_extraction", "retention"]

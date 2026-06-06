@@ -13,15 +13,14 @@ BUG-1 fix). New tables added:
 
   - leads               (SET NULL FK; purged for GDPR/PIPEDA completeness)
   - escalation_events   (SET NULL FK; "session summaries" per §3.6.5)
-  - sibling_call_grants (RESTRICT FK via caller_instance_id AND
-                         callee_instance_id; blocks instance DELETE)
-  - instance_composition_grants (RESTRICT FK; blocks instance DELETE)
-  - knowledge_share_grants      (RESTRICT FK via source/target; blocks DELETE)
+  # sibling_call_grants / instance_composition_grants /
+  # knowledge_share_grants / user_role_assignments REMOVED in Unit 1:
+  # those tables were dropped (deferred multi-Luciel / custom-role
+  # surfaces -- Open Decisions #7/#8, Locked Decision #19).
   - instance_tool_authorizations (RESTRICT FK; blocks instance DELETE)
   - byo_webhook_endpoints        (RESTRICT FK; blocks instance DELETE)
   - channel_routes               (RESTRICT FK; blocks instance DELETE)
   - tool_execution_log           (RESTRICT FK; blocks instance DELETE)
-  - user_role_assignments        (RESTRICT FK; blocks instance DELETE)
   - knowledge_graph_nodes        (CASCADE FK; would auto-delete but
                                   explicit for per-step audit completeness)
   - knowledge_graph_edges        (CASCADE FK; edges cascade from nodes)
@@ -52,11 +51,10 @@ the two beat tasks do not contend for the worker's prefetch slot):
    RESTRICT children (block the instance DELETE — must go first):
        knowledge_graph_edges         (CASCADE but explicit for audit)
        knowledge_graph_nodes         (CASCADE but explicit for audit)
-       instance_composition_grants   WHERE caller_instance_id|callee_instance_id = ?
-       knowledge_share_grants        WHERE source_instance_id|target_instance_id = ?
-       sibling_call_grants           WHERE caller_instance_id|callee_instance_id = ?
+       # instance_composition_grants / knowledge_share_grants /
+       # sibling_call_grants / user_role_assignments REMOVED in Unit 1
+       # (dropped tables -- deferred surfaces).
        instance_tool_authorizations  WHERE instance_id = ?
-       user_role_assignments         WHERE instance_id = ?
        tool_execution_log            WHERE instance_id = ?
        byo_webhook_endpoints         WHERE instance_id = ?
        channel_routes                WHERE luciel_instance_id = ?
@@ -339,51 +337,18 @@ def _hard_delete_instance_cascade(
     # ------------------------------------------------------------------
     # Step 2: RESTRICT children — grant/authorization/log tables.
     # These MUST be cleared before instances.id can be DELETEd.
-    # The sibling_call_grants and knowledge_share_grants / instance_
-    # composition_grants tables have TWO FK columns pointing at
-    # instances.id (caller+callee or source+target) so we use an OR
-    # predicate to catch rows where this instance appears on either side.
+    # NOTE: instance_composition_grants, knowledge_share_grants,
+    # sibling_call_grants and user_role_assignments were DROPPED in
+    # Unit 1 (deferred multi-Luciel / custom-role surfaces -- Open
+    # Decisions #7/#8, Locked Decision #19). Their per-instance purge
+    # DELETEs were removed here so the retention worker does not crash
+    # UndefinedTable on a dropped table.
     # ------------------------------------------------------------------
-
-    # instance_composition_grants: both caller_instance_id and
-    # callee_instance_id are RESTRICT FKs to instances.id.
-    counts["instance_composition_grants"] = _delete_count(
-        db,
-        "DELETE FROM instance_composition_grants "
-        "WHERE caller_instance_id = :iid OR callee_instance_id = :iid",
-        {"iid": instance_id},
-    )
-
-    # knowledge_share_grants: source_instance_id and target_instance_id
-    # are both RESTRICT FKs to instances.id.
-    counts["knowledge_share_grants"] = _delete_count(
-        db,
-        "DELETE FROM knowledge_share_grants "
-        "WHERE source_instance_id = :iid OR target_instance_id = :iid",
-        {"iid": instance_id},
-    )
-
-    # sibling_call_grants: caller_instance_id AND callee_instance_id
-    # are both RESTRICT FKs to instances.id. An instance may appear as
-    # caller OR callee in any grant row.
-    counts["sibling_call_grants"] = _delete_count(
-        db,
-        "DELETE FROM sibling_call_grants "
-        "WHERE caller_instance_id = :iid OR callee_instance_id = :iid",
-        {"iid": instance_id},
-    )
 
     # instance_tool_authorizations: instance_id is a RESTRICT FK.
     counts["instance_tool_authorizations"] = _delete_count(
         db,
         "DELETE FROM instance_tool_authorizations WHERE instance_id = :iid",
-        {"iid": instance_id},
-    )
-
-    # user_role_assignments: instance_id is a RESTRICT FK.
-    counts["user_role_assignments"] = _delete_count(
-        db,
-        "DELETE FROM user_role_assignments WHERE instance_id = :iid",
         {"iid": instance_id},
     )
 

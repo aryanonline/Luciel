@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "unit1_excise_deferred_features"
@@ -67,6 +68,112 @@ _PERSONALITY_APPROVAL_COLS = [
     "personality_approved_by_user_id",
     "personality_approved_at",
 ]
+
+
+# Single-login rewrite of the identity-bootstrap SECDEF function.
+# Resolves the canonical owner Admin from admins.owner_user_id and
+# returns exactly one synthetic owner scope row (or zero rows if the
+# user owns no Admin). RETURN shape is identical to the pre-Unit-1
+# scope_assignments-backed function so app/identity/bootstrap.py is
+# unchanged. scope_assignment_id is synthesized deterministically from
+# the admin_id via md5 so it is stable across calls.
+_BOOTSTRAP_FN_SINGLE_LOGIN = """
+CREATE OR REPLACE FUNCTION public.arc9_c22_bootstrap_identity(p_user_id uuid)
+RETURNS TABLE(
+    canonical_tenant_id character varying,
+    canonical_tier      character varying,
+    scope_assignment_id uuid,
+    admin_id            character varying,
+    role                character varying,
+    started_at          timestamp with time zone,
+    ended_at            timestamp with time zone,
+    ended_reason        character varying,
+    ended_note          text,
+    ended_by_api_key_id integer,
+    active              boolean
+)
+LANGUAGE sql
+STABLE SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $function$
+    WITH owned AS (
+        SELECT
+            a.id   AS aid,
+            COALESCE(a.tier, '')::varchar AS tier,
+            a.created_at AS created_at
+        FROM public.admins a
+        WHERE a.owner_user_id = p_user_id
+          AND a.active = true
+        ORDER BY a.created_at DESC
+        LIMIT 1
+    )
+    SELECT
+        COALESCE((SELECT aid  FROM owned), '')::varchar,
+        COALESCE((SELECT tier FROM owned), '')::varchar,
+        md5(o.aid)::uuid,
+        o.aid::varchar,
+        'admin_owner'::varchar,
+        o.created_at,
+        NULL::timestamptz,
+        NULL::varchar,
+        NULL::text,
+        NULL::integer,
+        true
+    FROM owned o
+$function$
+"""
+
+# Pre-Unit-1 (scope_assignments-backed) definition, restored on
+# downgrade so the function matches the recreated scope_assignments
+# table shape.
+_BOOTSTRAP_FN_SCOPE_ASSIGNMENTS = """
+CREATE OR REPLACE FUNCTION public.arc9_c22_bootstrap_identity(p_user_id uuid)
+RETURNS TABLE(
+    canonical_tenant_id character varying,
+    canonical_tier      character varying,
+    scope_assignment_id uuid,
+    admin_id            character varying,
+    role                character varying,
+    started_at          timestamp with time zone,
+    ended_at            timestamp with time zone,
+    ended_reason        character varying,
+    ended_note          text,
+    ended_by_api_key_id integer,
+    active              boolean
+)
+LANGUAGE sql
+STABLE SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $function$
+    WITH active_scopes AS (
+        SELECT
+            sa.id, sa.user_id, sa.admin_id, sa.role, sa.started_at,
+            sa.ended_at, sa.ended_reason, sa.ended_note,
+            sa.ended_by_api_key_id, sa.active
+        FROM public.scope_assignments AS sa
+        WHERE sa.user_id = p_user_id
+          AND sa.active = true
+          AND sa.ended_at IS NULL
+    ),
+    canonical AS (
+        SELECT admin_id FROM active_scopes
+        ORDER BY (role = 'admin_owner') DESC, started_at DESC
+        LIMIT 1
+    ),
+    canonical_with_tier AS (
+        SELECT c.admin_id AS aid, COALESCE(a.tier, '')::varchar AS tier
+        FROM canonical c
+        LEFT JOIN public.admins a ON a.id = c.admin_id
+    )
+    SELECT
+        COALESCE((SELECT aid  FROM canonical_with_tier), '')::varchar,
+        COALESCE((SELECT tier FROM canonical_with_tier), '')::varchar,
+        s.id, s.admin_id, s.role, s.started_at, s.ended_at,
+        s.ended_reason, s.ended_note, s.ended_by_api_key_id, s.active
+    FROM active_scopes s
+    ORDER BY s.started_at ASC
+$function$
+"""
 
 
 def _tighten_tier_check(table: str, col: str, constraint: str) -> None:
@@ -107,6 +214,54 @@ def upgrade() -> None:
             "WHERE tier_at_close='enterprise'"
         )
 
+    # 0.5 Single-login owner binding (Locked Decision #19). Add the
+    #     durable admins.owner_user_id column that replaces the
+    #     scope_assignments owner-row binding. Backfill from the
+    #     existing active owner ScopeAssignment (best source) BEFORE
+    #     that table is dropped below; fall back to the Subscription
+    #     user_id for paid admins.
+    admin_cols = {c["name"] for c in insp.get_columns("admins")}
+    if "owner_user_id" not in admin_cols:
+        op.add_column(
+            "admins",
+            sa.Column(
+                "owner_user_id",
+                postgresql.UUID(as_uuid=True),
+                sa.ForeignKey("users.id", ondelete="SET NULL"),
+                nullable=True,
+            ),
+        )
+        op.create_index(
+            "ix_admins_owner_user_id", "admins", ["owner_user_id"]
+        )
+    # Backfill (a): active owner ScopeAssignment, if the table is still
+    # present at upgrade time.
+    if "scope_assignments" in existing:
+        op.execute(
+            """
+            UPDATE admins a
+               SET owner_user_id = sa.user_id
+              FROM scope_assignments sa
+             WHERE sa.admin_id = a.id
+               AND sa.role = 'admin_owner'
+               AND sa.active = true
+               AND sa.ended_at IS NULL
+               AND a.owner_user_id IS NULL
+            """
+        )
+    # Backfill (b): paid admins via the Subscription user_id.
+    if "subscriptions" in existing:
+        op.execute(
+            """
+            UPDATE admins a
+               SET owner_user_id = s.user_id
+              FROM subscriptions s
+             WHERE s.admin_id = a.id
+               AND s.user_id IS NOT NULL
+               AND a.owner_user_id IS NULL
+            """
+        )
+
     # 1. Drop deferred-feature tables (FK-safe order). IF EXISTS via guard.
     for tbl in _DROP_ORDER:
         if tbl in existing:
@@ -136,6 +291,16 @@ def upgrade() -> None:
 
     # 4. Drop the now-unused scope_role enum type (scope_assignments gone).
     op.execute("DROP TYPE IF EXISTS scope_role")
+
+    # 5. Rewrite the arc9_c22_bootstrap_identity SECDEF function so it
+    #    resolves owner identity from admins.owner_user_id instead of
+    #    the dropped scope_assignments table. The RETURN shape is
+    #    UNCHANGED (11 columns) so app/identity/bootstrap.py needs no
+    #    edit: it returns exactly one synthetic owner scope row per
+    #    Admin the user owns (single-login => 0 or 1 rows). role is
+    #    always 'admin_owner'; the lifecycle columns are synthesized
+    #    (started_at = admin.created_at, never-ended, active=true).
+    op.execute(_BOOTSTRAP_FN_SINGLE_LOGIN)
 
 
 def downgrade() -> None:
@@ -246,7 +411,14 @@ def downgrade() -> None:
         # here so SQLAlchemy does not attempt to re-CREATE the type).
         sa.Column("role", sa.String(32), nullable=False),
         sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+        # The full lifecycle column set is restored here (not just a
+        # minimal shell) because the restored arc9_c22_bootstrap_identity
+        # SECDEF function reads started_at / ended_* off this table.
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("ended_reason", sa.String(50), nullable=True),
+        sa.Column("ended_note", sa.Text(), nullable=True),
+        sa.Column("ended_by_api_key_id", sa.Integer(), nullable=True),
     )
     op.create_table(
         "user_invites",
@@ -277,3 +449,18 @@ def downgrade() -> None:
         sa.Column("source_instance_id", sa.Integer(), nullable=False),
         sa.Column("target_instance_id", sa.Integer(), nullable=False),
     )
+
+    # 5. Restore the scope_assignments-backed bootstrap SECDEF function
+    #    (now that the table shell exists again) and drop the
+    #    single-login owner_user_id column + its index. Re-inspect
+    #    against the live connection so the introspection reflects the
+    #    tables just recreated above (the top-of-function ``insp`` is
+    #    stale after the create_table calls).
+    op.execute(_BOOTSTRAP_FN_SCOPE_ASSIGNMENTS)
+    insp2 = sa.inspect(op.get_bind())
+    admin_indexes = {i["name"] for i in insp2.get_indexes("admins")}
+    if "ix_admins_owner_user_id" in admin_indexes:
+        op.drop_index("ix_admins_owner_user_id", table_name="admins")
+    admin_cols = {c["name"] for c in insp2.get_columns("admins")}
+    if "owner_user_id" in admin_cols:
+        op.drop_column("admins", "owner_user_id")

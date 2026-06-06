@@ -241,14 +241,15 @@ _REQUIRED_CASCADE_TABLES = (
     # Newly added per §3.6.5:
     "leads",
     "escalation_events",      # session summaries
-    "sibling_call_grants",
-    "instance_composition_grants",
-    "knowledge_share_grants",
+    # sibling_call_grants / instance_composition_grants /
+    # knowledge_share_grants / user_role_assignments REMOVED in Unit 1:
+    # those tables were dropped (deferred multi-Luciel / custom-role
+    # surfaces -- Open Decisions #7/#8, Locked Decision #19), so the
+    # cascade no longer deletes from them.
     "instance_tool_authorizations",
     "byo_webhook_endpoints",
     "channel_routes",
     "tool_execution_log",
-    "user_role_assignments",
     "knowledge_graph_nodes",
     "knowledge_graph_edges",
     "instance_connections",
@@ -264,19 +265,16 @@ def test_cascade_deletes_every_required_table():
         )
 
 
-def test_sibling_call_grants_uses_or_predicate():
-    """sibling_call_grants has two instance FK columns (caller and callee);
-    the DELETE must use an OR predicate to catch both sides."""
+def test_sibling_call_grants_cascade_removed():
+    """Unit 1: sibling_call_grants was dropped (deferred multi-Luciel
+    surface, Open Decision #7). The worker cascade must NOT reference
+    the table -- a DELETE against it would crash UndefinedTable."""
     src = _read(WORKER_PATH)
-    # Find the sibling_call_grants delete statement.
-    idx = src.index("sibling_call_grants")
-    # Look in a window around the statement for both column references.
-    window = src[idx: idx + 200]
-    assert "caller_instance_id" in window, (
-        "sibling_call_grants DELETE must reference caller_instance_id."
-    )
-    assert "callee_instance_id" in window, (
-        "sibling_call_grants DELETE must reference callee_instance_id."
+    # The removal note in the source legitimately names the table; what
+    # must be gone is any ACTIVE DELETE statement against it.
+    assert "DELETE FROM sibling_call_grants" not in src, (
+        "Worker cascade must not DELETE FROM the dropped "
+        "sibling_call_grants table (Unit 1 excision)."
     )
 
 
@@ -352,15 +350,14 @@ def test_restrict_tables_deleted_before_instance_row():
 
     instance_delete_idx = body_src.index("DELETE FROM instances")
 
+    # sibling_call_grants / instance_composition_grants /
+    # knowledge_share_grants / user_role_assignments REMOVED in Unit 1
+    # (dropped tables -- deferred multi-Luciel / custom-role surfaces).
     for table in (
-        "sibling_call_grants",
-        "instance_composition_grants",
-        "knowledge_share_grants",
         "instance_tool_authorizations",
         "byo_webhook_endpoints",
         "channel_routes",
         "tool_execution_log",
-        "user_role_assignments",
         "knowledge_sources",
         "instance_connections",
     ):

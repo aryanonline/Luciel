@@ -138,25 +138,22 @@ def test_delete_by_pk_is_idempotent_on_already_deleted():
     assert "InstanceStatus.DELETED" in src
 
 
-def test_delete_by_pk_wires_sibling_grant_cascade():
-    """Arc 12 WU4 — Architecture §3.6.1 step 3 cascade. When an
-    Instance is soft-deleted, every non-revoked sibling_call_grants
-    row where the Instance appears as caller OR callee must be
-    revoked in the same transaction.
-
-    The cascade is wired via a call to
-    ``SiblingCallGrantService.revoke_all_touching_instance`` inside
-    ``delete_by_pk``. This test pins that wiring by AST search so a
-    refactor that drops the cascade by accident is caught."""
+def test_delete_by_pk_has_no_sibling_grant_cascade():
+    """Unit 1 (audit-and-alignment): the sibling-call-grant cascade was
+    REMOVED. ``call_sibling_luciel`` and the ``sibling_call_grants``
+    table are deferred-feature surfaces (multi-Luciel, Open Decision
+    #7) excised in this unit. The single-Luciel model has no sibling
+    grants, so ``delete_by_pk`` must NOT reference the deleted
+    SiblingCallGrantService. This test pins the removal so the cascade
+    is not accidentally reintroduced against a dropped table."""
     src = ast.unparse(_method("delete_by_pk"))
-    assert "SiblingCallGrantService" in src, (
-        "Arc 12 WU4: delete_by_pk must instantiate "
-        "SiblingCallGrantService to fire the §3.6.1 step-3 cascade."
+    assert "SiblingCallGrantService" not in src, (
+        "Unit 1: delete_by_pk must NOT reference the deleted "
+        "SiblingCallGrantService (multi-Luciel sibling grants deferred)."
     )
-    assert "revoke_all_touching_instance" in src, (
-        "Arc 12 WU4: delete_by_pk must call "
-        "revoke_all_touching_instance(...) to revoke caller-side AND "
-        "callee-side grants for the deactivated Instance."
+    assert "revoke_all_touching_instance" not in src, (
+        "Unit 1: the sibling-grant cascade call must be removed from "
+        "delete_by_pk (sibling_call_grants table dropped)."
     )
 
 

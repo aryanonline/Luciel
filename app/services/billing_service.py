@@ -140,24 +140,13 @@ PRICE_ID_KEY: dict[tuple[str, str], str] = {
     #     POST /api/v1/billing/signup-free route (Arc 6 Commit 8), NOT
     #     this checkout machinery.
     #   * Pro        — flat-rate self-serve, monthly + annual cadences.
-    #   * Enterprise — flat-rate self-serve, monthly + annual cadences
-    #     SYMMETRIC WITH PRO since Arc 7 Commit 1 retired the hybrid/
-    #     metered-overage shape (partner doctrine pivot 2026-05-24:
-    #     "Since we have abuse limits for each tier I don't think we
-    #     need to include the metering option for enterprise"). The
-    #     prior `stripe_price_enterprise_floor_annual` slot is RETIRED;
-    #     the new slots are `stripe_price_enterprise_monthly` ($2,800
-    #     CAD/mo) + `stripe_price_enterprise_annual` ($24,000 CAD/yr,
-    #     28.6% annual discount matching Pro's ratio). The (enterprise,
-    #     monthly) 400 reject at app/api/v1/billing.py is REMOVED in the
-    #     same commit. Rate-limit ceilings (api_rate_limit_rpm,
-    #     Arc 7 Commit 4 tier-aware middleware) + instance_count_cap +
-    #     embed_key_count_cap are now the entitlement gates that
-    #     separate Pro from Enterprise — see app/policy/entitlements.py
-    #     TIER_* rows. ``leads_per_month_cap`` was retired entirely at
-    #     Arc 7 Commit 5 (2026-05-24); rate-limit is the abuse boundary
-    #     and a monthly count cap on a flat-recurring customer punishes
-    #     success without protecting any surface RPM does not already.
+    #     ``leads_per_month_cap`` was retired entirely at Arc 7 Commit 5
+    #     (2026-05-24); rate-limit (api_rate_limit_rpm, Arc 7 Commit 4
+    #     tier-aware middleware) is the abuse boundary.
+    #
+    # Enterprise tier deferred (Open Decision #8); its Price rows and
+    # config slots were removed in Unit 1. The ratified model is
+    # Free + Pro only.
     #
     # If a future tier is added: add a row here and a parallel
     # ``stripe_price_*`` field on ``Settings``. No code change in

@@ -249,7 +249,8 @@ class Subscription(Base, TimestampMixin):
         comment=(
             "Hard ceiling on active Instances under this subscription. "
             "Not a seat count (§14) — a billing-integrity guardrail. "
-            "None at the application layer means unlimited (Enterprise)."
+            "None at the application layer means unlimited (no tier "
+            "currently uncaps it in the Free/Pro model)."
         ),
     )
 

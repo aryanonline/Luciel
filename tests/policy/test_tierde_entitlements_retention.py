@@ -54,19 +54,7 @@ def test_pro_uptime_sla_pct_is_99_9() -> None:
     )
 
 
-def test_enterprise_uptime_sla_pct_is_99_95() -> None:
-    """Enterprise uptime SLA must be 99.95% per Vision §7 / §5.6 / §9 item 7.
-
-    The prior value (99.9) encoded a drift between the code and the
-    contractual/publicly-stated SLA. Corrected in RESCAN TIER-DE(ent).
-    """
-    from app.policy.entitlements import TIER_ENTERPRISE, TIER_ENTITLEMENTS
-
-    assert TIER_ENTITLEMENTS[TIER_ENTERPRISE].uptime_sla_pct == 99.95, (
-        "Enterprise uptime_sla_pct must be 99.95 per Vision §7 / §5.6 / §9 item 7. "
-        "If this test fails, check that the RESCAN TIER-DE(ent) correction "
-        "was applied to app/policy/entitlements.py."
-    )
+# test_enterprise_uptime_sla_pct_is_99_95 removed: Enterprise tier excised in Unit 1.
 
 
 def test_free_uptime_sla_pct_is_none() -> None:
@@ -116,22 +104,7 @@ def test_pro_transcript_retention_is_365_days() -> None:
         )
 
 
-def test_enterprise_transcript_retention_is_2555_days() -> None:
-    """Enterprise tier: sessions/messages must resolve to 2555 days = 7 years
-    (Architecture §3.4.10)."""
-    from app.policy.retention_rules import resolve_retention_days
-
-    for cat in ("sessions", "messages"):
-        result = resolve_retention_days(
-            data_category=cat,
-            tier="enterprise",
-            tenant_override_days=None,
-            platform_default_days=730,
-        )
-        assert result == 2555, (
-            f"Enterprise tier {cat!r} must resolve to 2555 days (7 years, "
-            f"Architecture §3.4.10). Got {result}."
-        )
+# test_enterprise_transcript_retention removed: Enterprise tier excised in Unit 1.
 
 
 # =========================================================================
@@ -270,13 +243,7 @@ def test_summary_retention_pro_is_365_days() -> None:
     )
 
 
-def test_summary_retention_enterprise_is_2555_days() -> None:
-    """Enterprise tier summary retention must be 2555 days (Architecture §3.4.10)."""
-    from app.policy.retention_rules import TIER_SUMMARY_RETENTION_DAYS
-
-    assert TIER_SUMMARY_RETENTION_DAYS["enterprise"] == 2555, (
-        "Enterprise tier summary retention must be 2555 days (7y) per Architecture §3.4.10."
-    )
+# test_summary_retention_enterprise removed: Enterprise tier excised in Unit 1.
 
 
 # =========================================================================
@@ -284,10 +251,10 @@ def test_summary_retention_enterprise_is_2555_days() -> None:
 # =========================================================================
 
 def test_tier_retention_defaults_all_tiers_present() -> None:
-    """TIER_RETENTION_DEFAULTS must have entries for all three tiers."""
+    """TIER_RETENTION_DEFAULTS must have entries for Free and Pro."""
     from app.policy.retention_rules import TIER_RETENTION_DEFAULTS
 
-    for tier in ("free", "pro", "enterprise"):
+    for tier in ("free", "pro"):
         assert tier in TIER_RETENTION_DEFAULTS, (
             f"TIER_RETENTION_DEFAULTS must contain an entry for tier {tier!r}."
         )
@@ -297,7 +264,7 @@ def test_tier_retention_defaults_transcript_categories_present() -> None:
     """Each tier must have both sessions and messages in TIER_RETENTION_DEFAULTS."""
     from app.policy.retention_rules import TIER_RETENTION_DEFAULTS
 
-    for tier in ("free", "pro", "enterprise"):
+    for tier in ("free", "pro"):
         for cat in ("sessions", "messages"):
             assert cat in TIER_RETENTION_DEFAULTS[tier], (
                 f"TIER_RETENTION_DEFAULTS[{tier!r}] must contain {cat!r}."
@@ -391,28 +358,21 @@ def test_repo_get_effective_returns_platform_default_for_non_tier_category() -> 
 # 7. Enterprise channel-matrix — voice/WhatsApp NOT in gate set
 # =========================================================================
 
-def test_enterprise_channel_gate_does_not_include_voice_or_whatsapp() -> None:
-    """Voice and WhatsApp must NOT be in the Enterprise tier-gate set.
+def test_pro_channel_gate_does_not_include_voice_or_whatsapp() -> None:
+    """Voice and WhatsApp must NOT be in the Pro (or Free) tier-gate set.
 
-    RESCAN TIER-DE(ent) decision: adding v2-deferred channels to the gate
-    while no adapter exists would let an admin 'enable' a dead channel,
-    silently dropping all traffic. The §7 'all channels' statement is
-    aspirational; the adapter layer is the actual ship gate.
-
-    When voice/WhatsApp adapters ship (v2/post-v1), this test must be
-    updated IN LOCKSTEP with the gate change, documenting the adapter
-    availability as the justification.
+    Enterprise removed in Unit 1 excision. The guard remains for Pro:
+    deferred channels (voice/WhatsApp) must not appear in any tier's gate.
     """
-    from app.policy.entitlements import channels_available, TIER_ENTERPRISE
+    from app.policy.entitlements import channels_available, TIER_PRO, TIER_FREE
 
-    gate = channels_available(TIER_ENTERPRISE)
-    assert "voice" not in gate, (
-        "DECISION GUARD: 'voice' must NOT be in the Enterprise channel gate "
-        "until the voice adapter ships (v2-deferred). See entitlements.py "
-        "RESCAN TIER-DE(ent) comment for the full rationale."
-    )
-    assert "whatsapp" not in gate, (
-        "DECISION GUARD: 'whatsapp' must NOT be in the Enterprise channel gate "
-        "until the WhatsApp adapter ships (post-v1). See entitlements.py "
-        "RESCAN TIER-DE(ent) comment for the full rationale."
-    )
+    for tier in (TIER_FREE, TIER_PRO):
+        gate = channels_available(tier)
+        assert "voice" not in gate, (
+            f"DECISION GUARD: 'voice' must NOT be in the {tier} channel gate "
+            "until the voice adapter ships (v2-deferred)."
+        )
+        assert "whatsapp" not in gate, (
+            f"DECISION GUARD: 'whatsapp' must NOT be in the {tier} channel gate "
+            "until the WhatsApp adapter ships (post-v1)."
+        )

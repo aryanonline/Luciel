@@ -75,7 +75,7 @@ def check_custom_preset_allowed(
                 "reason": "custom_preset_not_available_on_tier",
                 "message": (
                     "The 'custom' personality preset is available on Pro "
-                    "and Enterprise only. Choose one of the named presets "
+                    "only. Choose one of the named presets "
                     "(warm_concierge, professional_advisor, "
                     "friendly_expert, trusted_authority)."
                 ),
@@ -96,7 +96,7 @@ def check_lead_routing_allowed(
                 "field": "lead_routing",
                 "reason": "lead_routing_not_available_on_tier",
                 "message": (
-                    "lead_routing is available on Pro and Enterprise "
+                    "lead_routing is available on Pro "
                     "only. Free instances must leave it unset."
                 ),
                 "tier": tier,

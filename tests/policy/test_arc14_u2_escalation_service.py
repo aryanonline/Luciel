@@ -25,7 +25,7 @@ from app.policy.escalation_routing import (
     NOTIFY_SLACK,
     NOTIFY_SMS,
 )
-from app.policy.entitlements import TIER_ENTERPRISE, TIER_FREE, TIER_PRO
+from app.policy.entitlements import TIER_FREE, TIER_PRO
 
 
 # ---------------------------------------------------------------------
@@ -166,15 +166,12 @@ class TestTierRouting(unittest.TestCase):
         self.assertEqual(routing.tier, TIER_FREE)
         self.assertEqual(routing.channels, (NOTIFY_EMAIL,))
 
-    def test_pro_is_email_and_sms(self):
+    def test_pro_is_email_sms_slack(self):
+        # Pro tier has email+SMS+slack (Enterprise removed in Unit 1 excision).
         routing = _ServiceHarness(tier=TIER_PRO).run(_decision())
-        self.assertEqual(routing.channels, (NOTIFY_EMAIL, NOTIFY_SMS))
-
-    def test_enterprise_is_email_sms_slack_custom(self):
-        routing = _ServiceHarness(tier=TIER_ENTERPRISE).run(_decision())
         self.assertIn(NOTIFY_SLACK, routing.channels)
         self.assertEqual(routing.channels[0], NOTIFY_EMAIL)
-        self.assertEqual(len(routing.channels), 4)
+        self.assertEqual(len(routing.channels), 3)
 
     def test_notify_is_dry_run_when_live_switch_off(self):
         # Default config has the live-switch False → no real send.
@@ -190,7 +187,8 @@ class TestTierRouting(unittest.TestCase):
 class TestAudit(unittest.TestCase):
 
     def test_audit_row_written_with_signal_and_channels(self):
-        h = _ServiceHarness(tier=TIER_ENTERPRISE)
+        # Use Pro tier (Enterprise removed in Unit 1 excision).
+        h = _ServiceHarness(tier=TIER_PRO)
         h.run(_decision())
 
         self.assertEqual(len(h.audit_calls), 1)
@@ -200,7 +198,7 @@ class TestAudit(unittest.TestCase):
         self.assertEqual(call["admin_id"], "admin-1")
         self.assertEqual(call["luciel_instance_id"], 7)
         self.assertEqual(call["after"]["signal"], SIGNAL_EXPLICIT_HUMAN_REQUEST)
-        self.assertEqual(call["after"]["tier"], TIER_ENTERPRISE)
+        self.assertEqual(call["after"]["tier"], TIER_PRO)
         self.assertIn(NOTIFY_SLACK, call["after"]["notify_channels"])
 
 
@@ -245,7 +243,10 @@ class TestBestEffort(unittest.TestCase):
             routing = h.svc.record_escalation(_decision())
 
         # No raise; routing still carries the tier-shaped channel set.
-        self.assertEqual(routing.channels, (NOTIFY_EMAIL, NOTIFY_SMS))
+        # Pro = email + sms + slack (3 channels, Unit 1 aligned).
+        self.assertEqual(
+            routing.channels, (NOTIFY_EMAIL, NOTIFY_SMS, NOTIFY_SLACK)
+        )
         self.assertTrue(h.session.rolled_back)
         self.assertIsNone(routing.event_id)
 

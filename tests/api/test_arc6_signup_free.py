@@ -150,7 +150,9 @@ class TestOnboardingServiceV2Guard:
         assert hasattr(svc, "ALLOWED_TIERS_V2")
         assert "free" in svc.ALLOWED_TIERS_V2
         assert "pro" in svc.ALLOWED_TIERS_V2
-        assert "enterprise" in svc.ALLOWED_TIERS_V2
+        # Enterprise tier deferred (Open Decision #8); only Free/Pro
+        # are valid v2 tiers (Locked Decision: 2-tier model).
+        assert "enterprise" not in svc.ALLOWED_TIERS_V2
 
     def test_v1_vocab_not_in_allowed(self):
         import app.services.onboarding_service as svc

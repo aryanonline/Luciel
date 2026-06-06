@@ -128,7 +128,7 @@ class _UpgradeBranchFallthrough(Exception):
 _TIER_PREFIX = {
     "free":       "free",
     "pro":        "pro",
-    "enterprise": "ent",
+    # Enterprise tier deferred (Open Decision #8); removed in Unit 1.
 }
 
 
@@ -434,6 +434,11 @@ class BillingWebhookService:
             onboarding.onboard_tenant(
                 admin_id=admin_id,
                 display_name=display_name,
+                # Single-login owner binding (Locked Decision #19): the
+                # buyer User is the durable account_owner for this paid
+                # Admin (also redundantly carried on the Subscription
+                # row written below).
+                owner_user_id=user.id,
                 tier=tier,
                 tier_source="stripe_webhook",
                 description=f"Self-serve {tier} subscription -- "
@@ -656,9 +661,12 @@ class BillingWebhookService:
         three ways:
 
           1. We RESOLVE an existing User (not create) and verify the
-             User is the active owner of the named Admin. Owner-check
-             is via the ScopeAssignment table; a missing owner row is
-             a fall-through (not a mint of a new owner).
+             User is the owner of the named Admin. Owner-proof in the
+             single-login model (Locked Decision #19) is established at
+             the route layer (admin_id derived from the cookied session
+             JWT); the webhook re-verifies via the durable Subscription
+             user_id binding. (The pre-Unit-1 ScopeAssignment owner-row
+             check was removed when that table was dropped.)
           2. We UPDATE the existing Admin row's tier via
              ``TierProvisioningService.upgrade_admin_tier`` -- no
              re-running of ``onboard_tenant`` (which would attempt to
@@ -686,7 +694,6 @@ class BillingWebhookService:
         TierUpgradeNoopError trap.
         """
         from app.models.admin import Admin as AdminModel
-        from app.models.scope_assignment import ScopeAssignment
         from app.services.tier_provisioning_service import (
             TierProvisioningService,
             TierUpgradeNoopError,
@@ -708,23 +715,26 @@ class BillingWebhookService:
         if not getattr(admin, "active", False):
             raise _UpgradeBranchFallthrough("admin_inactive")
 
-        # 3. Verify the buyer owns this Admin (active owner-role
-        #    ScopeAssignment). This closes the cross-Admin upgrade-
-        #    attack vector: even if the buyer somehow guesses or
-        #    intercepts another tenant's admin_id, Stripe metadata
-        #    is buyer-influenceable only via the upgrade route, and
-        #    that route derives admin_id from the cookied session.
-        #    Here at the webhook we re-verify.
-        from app.models.scope_assignment import ScopeRole
-        owner_row = self.db.execute(
-            select(ScopeAssignment).where(
-                ScopeAssignment.admin_id == admin_id,
-                ScopeAssignment.user_id == user.id,
-                ScopeAssignment.role == ScopeRole.ADMIN_OWNER,
-                ScopeAssignment.active.is_(True),
-            )
+        # 3. Verify the buyer owns this Admin (single-login model,
+        #    Locked Decision #19). The previous owner-role
+        #    ScopeAssignment lookup was removed in Unit 1 when the
+        #    scope_assignments table was dropped. Owner-proof in the
+        #    single-login model is established at the ROUTE layer: the
+        #    upgrade route derives admin_id from the cookied session
+        #    JWT (minted for this user at signup), so only the account
+        #    owner can stamp this admin_id into Stripe metadata. Here
+        #    at the webhook we re-verify the durable invariants that
+        #    survive the table drop: the buyer's resolved User must
+        #    match the customer email on record for this Admin's
+        #    subscriptions (cross-Admin upgrade-attack mitigation).
+        prior_sub = self.db.execute(
+            select(Subscription).where(
+                Subscription.admin_id == admin_id,
+            ).order_by(Subscription.created_at.desc())
         ).scalars().first()
-        if owner_row is None:
+        if prior_sub is not None and prior_sub.user_id != user.id:
+            # A subscription already exists for this Admin under a
+            # DIFFERENT user -- the buyer is not the owner.
             raise _UpgradeBranchFallthrough("user_not_owner_of_admin")
 
         # 4. Write the Subscription row + its audit row in one commit.

@@ -64,7 +64,7 @@ class AccountCloseResponse(BaseModel):
 class ReactivationStageRequest(BaseModel):
     """POST /admin/account/reactivate/stage body."""
 
-    target_tier: Literal["free", "pro", "enterprise"]
+    target_tier: Literal["free", "pro"]
     success_url: str = Field(..., min_length=1, max_length=2048)
     cancel_url: str = Field(..., min_length=1, max_length=2048)
 
@@ -126,7 +126,7 @@ class DataExportJobResponse(BaseModel):
     admin_id: str
     status: Literal["pending", "generating", "ready", "expired", "failed"]
     requested_at: datetime
-    tier_at_request: Literal["free", "pro", "enterprise"]
+    tier_at_request: Literal["free", "pro"]
     triggered_by: Literal["admin_request", "grace_window_request"]
     ready_at: datetime | None = None
     signed_url_expires_at: datetime | None = None
@@ -161,7 +161,7 @@ class DowngradeGraceStatus(BaseModel):
     """
 
     in_grace: bool
-    target_tier: Literal["free", "pro", "enterprise"] | None = None
+    target_tier: Literal["free", "pro"] | None = None
     initiated_at: datetime | None = None
     expires_at: datetime | None = None
 

@@ -27,8 +27,19 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, String, func
+import uuid
+
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    func,
+)
 from sqlalchemy.dialects.postgresql import INET
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -72,6 +83,22 @@ class Admin(Base):
     )
     stripe_customer_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True
+    )
+    # Unit 1 (single-login model, Locked Decision #19): the single
+    # account_owner User for this Admin/Luciel. This is the DURABLE
+    # user->admin owner binding that replaced the dropped
+    # scope_assignments table -- symmetric for Free and Pro (Free has
+    # no Subscription row, so the owner binding cannot live there).
+    # Set at signup (onboard_tenant). The arc9_c22_bootstrap_identity
+    # SECDEF function resolves owner identity via this column.
+    # Nullable: pre-migration rows and in-flight paid webhooks may not
+    # have a resolved owner yet; ON DELETE SET NULL so a hard user
+    # delete does not block on this FK.
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     # ``legacy_tenant_id`` Mapped column removed at hotfix
     # demo-day-2026-05-25 (Phase A). The DB column was dropped at

@@ -47,43 +47,6 @@ def _client():
 # Enterprise is procurement-only on BOTH self-serve checkout surfaces.
 # ---------------------------------------------------------------------
 
-class TestEnterpriseIsContactSalesOnly:
-
-    def test_checkout_enterprise_returns_422_contact_sales(self):
-        resp = _client().post(
-            "/api/v1/billing/checkout",
-            json={"tier": "enterprise", "billing_cadence": "monthly"},
-        )
-        assert resp.status_code == 422, resp.text
-        detail = resp.json()["detail"]
-        assert detail["reason"] == "contact_sales", detail
-
-    def test_checkout_enterprise_annual_also_contact_sales(self):
-        # Cadence is irrelevant: Enterprise is never self-served.
-        resp = _client().post(
-            "/api/v1/billing/checkout",
-            json={"tier": "enterprise", "billing_cadence": "annual"},
-        )
-        assert resp.status_code == 422, resp.text
-        assert resp.json()["detail"]["reason"] == "contact_sales"
-
-    def test_upgrade_enterprise_returns_422_contact_sales(self):
-        # The authenticated in-dashboard upgrade surface is gated too,
-        # ahead of the cookie/DB resolution, so this needs no auth fixture.
-        resp = _client().post(
-            "/api/v1/billing/upgrade",
-            json={"target_tier": "enterprise", "billing_cadence": "annual"},
-        )
-        assert resp.status_code == 422, resp.text
-        assert resp.json()["detail"]["reason"] == "contact_sales"
-
-    def test_upgrade_enterprise_monthly_also_contact_sales(self):
-        resp = _client().post(
-            "/api/v1/billing/upgrade",
-            json={"target_tier": "enterprise", "billing_cadence": "monthly"},
-        )
-        assert resp.status_code == 422, resp.text
-        assert resp.json()["detail"]["reason"] == "contact_sales"
 
 
 # ---------------------------------------------------------------------

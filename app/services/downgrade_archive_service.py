@@ -594,7 +594,7 @@ def _validate_target_tier(target_tier: str) -> None:
         raise ValueError(
             f"DowngradeArchiveService: target_tier {target_tier!r} is not a "
             f"legal downgrade destination; expected one of "
-            f"{{{TIER_FREE!r}, {TIER_PRO!r}}}. Enterprise is the top tier."
+            f"{{{TIER_FREE!r}, {TIER_PRO!r}}}."
         )
 
 

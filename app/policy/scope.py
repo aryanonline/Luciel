@@ -276,15 +276,11 @@ class ScopePolicy:
         if required_permission in perms:
             return
 
-        # The authenticated account owner holds every tenant-scoped permission.
-        # If an instance is supplied, confirm ownership; otherwise the bound
-        # admin_id on the request is itself the owner identity.
+        # The authenticated account owner holds every tenant-scoped permission
+        # when an instance scope can be confirmed.
         if instance is not None:
             if cls._resolve_role_on_instance(request, instance) is ROLE_ADMIN_OWNER:
                 return
-        elif caller_admin is not None:
-            # Admin-scoped action with an authenticated owner identity.
-            return
 
         logger.warning(
             "Action denied: action=%s required_permission=%s transport_perms=%s",

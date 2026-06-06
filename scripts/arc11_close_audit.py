@@ -295,52 +295,10 @@ def section_1_migrations_and_schema(*, live: bool) -> list[CheckResult]:
                 )
             )
 
-        # Cleanup C: scope_assignments.role promoted to PG enum.
-        from sqlalchemy import Enum as _SAEnum
-
-        from app.models.scope_assignment import ScopeAssignment, ScopeRole
-        role_col = ScopeAssignment.__table__.columns["role"]
-        if isinstance(role_col.type, _SAEnum) and role_col.type.name == "scope_role":
-            out.append(
-                _pass(
-                    section,
-                    "scope_assignments_role_is_pg_enum",
-                    "role column uses scope_role PG enum (Cleanup C)",
-                )
-            )
-        else:
-            out.append(
-                _fail(
-                    section,
-                    "scope_assignments_role_is_pg_enum",
-                    f"role column is {role_col.type!r}, expected "
-                    f"Enum(name='scope_role')",
-                )
-            )
-
-        # Cleanup C: the four canonical enum members are present.
-        expected_members = {
-            "admin_owner", "admin_manager",
-            "instance_operator", "read_only_viewer",
-        }
-        actual_members = {m.value for m in ScopeRole}
-        if actual_members == expected_members:
-            out.append(
-                _pass(
-                    section,
-                    "scope_role_canonical_values",
-                    f"ScopeRole values match canonical four",
-                )
-            )
-        else:
-            out.append(
-                _fail(
-                    section,
-                    "scope_role_canonical_values",
-                    f"ScopeRole values drift: expected={expected_members} "
-                    f"actual={actual_members}",
-                )
-            )
+        # Unit 1 excision: app.models.scope_assignment deleted (single-owner
+        # model has no multi-seat scope_assignments table). Cleanup C checks
+        # for scope_role PG enum are removed; ScopeRole now lives inline in
+        # app/policy/scope.py with a single ADMIN_OWNER member.
 
     except Exception as exc:  # noqa: BLE001
         out.append(
@@ -437,7 +395,6 @@ def section_2_entitlements() -> list[CheckResult]:
         )
         os.environ.setdefault("MODERATION_PROVIDER", "null")
         from app.policy.entitlements import (
-            TIER_ENTERPRISE,
             TIER_ENTITLEMENTS,
             TIER_FREE,
             TIER_PRO,
@@ -451,6 +408,7 @@ def section_2_entitlements() -> list[CheckResult]:
             )
         ]
 
+    # Unit 1 excision: TIER_ENTERPRISE removed; only Free + Pro exist.
     expectations = {
         TIER_FREE: {
             "knowledge_bytes_cap": 100 * 1024 * 1024,
@@ -460,11 +418,6 @@ def section_2_entitlements() -> list[CheckResult]:
         TIER_PRO: {
             "knowledge_bytes_cap": 5 * 1024 * 1024 * 1024,
             "knowledge_per_file_bytes_cap": 50 * 1024 * 1024,
-            "knowledge_website_crawl_enabled": True,
-        },
-        TIER_ENTERPRISE: {
-            "knowledge_bytes_cap": None,
-            "knowledge_per_file_bytes_cap": 500 * 1024 * 1024,
             "knowledge_website_crawl_enabled": True,
         },
     }
