@@ -475,6 +475,89 @@ class EscalationDeliveryService:
             )
 
     # ------------------------------------------------------------------
+    # Ack mechanism (§3.5.4 / §3.5.5)
+    # ------------------------------------------------------------------
+
+    def mark_acked(
+        self,
+        *,
+        event_id: int,
+        admin_id: str,
+        actor_user_id: str | None,
+        db=None,
+    ) -> str | None:
+        """Transition an escalation event's delivery_status → 'acked'.
+
+        Tenant-fenced on ``admin_id`` (returns None if the event is not
+        found or belongs to another tenant). Idempotent: a second ack on
+        an already-'acked' event is a no-op success. Emits an
+        ACTION_ESCALATION_ACKED audit row (best-effort). Returns the new
+        delivery_status, or None when the event is not the caller's.
+
+        Accepts an optional caller-supplied ``db`` session (the admin
+        endpoint passes its TenantScopedDbSession so the transition +
+        audit commit atomically in the request transaction). When no
+        session is supplied a private one is opened/committed/closed.
+        """
+        from sqlalchemy import select, update
+        from app.models.escalation_event import (
+            EscalationEvent,
+            DELIVERY_STATUS_ACKED,
+        )
+        from app.models.admin_audit_log import ACTION_ESCALATION_ACKED
+
+        owns_session = db is None
+        if owns_session:
+            db = self._open_session()
+        try:
+            row = db.execute(
+                select(EscalationEvent).where(
+                    EscalationEvent.id == event_id,
+                    EscalationEvent.admin_id == admin_id,
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                # Not found or other tenant — do not leak existence.
+                return None
+
+            if row.delivery_status == DELIVERY_STATUS_ACKED:
+                # Idempotent no-op success.
+                return DELIVERY_STATUS_ACKED
+
+            db.execute(
+                update(EscalationEvent)
+                .where(EscalationEvent.id == event_id)
+                .values(delivery_status=DELIVERY_STATUS_ACKED)
+            )
+            _write_delivery_audit(
+                db,
+                admin_id=admin_id,
+                luciel_instance_id=row.luciel_instance_id,
+                event_id=event_id,
+                session_id=row.session_id,
+                signal=row.signal,
+                gate=row.gate,
+                action=ACTION_ESCALATION_ACKED,
+                after={
+                    "event_id": event_id,
+                    "session_id": row.session_id,
+                    "signal": row.signal,
+                    "gate": row.gate,
+                    "actor_user_id": str(actor_user_id) if actor_user_id else None,
+                },
+                note=f"escalation:{row.signal} acked",
+            )
+            if owns_session:
+                db.commit()
+            return DELIVERY_STATUS_ACKED
+        finally:
+            if owns_session and db is not None:
+                try:
+                    db.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    # ------------------------------------------------------------------
     # Tier-specific delivery
     # ------------------------------------------------------------------
 
@@ -580,6 +663,7 @@ class EscalationDeliveryService:
         from app.models.admin_audit_log import (
             ACTION_ESCALATION_NOTIFICATION_SENT,
             ACTION_ESCALATION_DELIVERY_FAILED,
+            ACTION_ESCALATION_OWNER_FALLBACK,
         )
 
         contacts = self._resolve_pro_contacts(
@@ -656,6 +740,28 @@ class EscalationDeliveryService:
                     )
                     # Pro fallback: send to admin_owner email.
                     if channel != NOTIFY_EMAIL and email_to:
+                        # §3.5.5: emit the dedicated owner-fallback INVOCATION
+                        # event before the actual owner-email send.
+                        _write_delivery_audit(
+                            db,
+                            admin_id=admin_id,
+                            luciel_instance_id=luciel_instance_id,
+                            event_id=event_id,
+                            session_id=session_id,
+                            signal=signal,
+                            gate=gate,
+                            action=ACTION_ESCALATION_OWNER_FALLBACK,
+                            after={
+                                "signal": signal,
+                                "gate": gate,
+                                "channel": NOTIFY_EMAIL,
+                                "to": email_to,
+                                "original_channel": channel,
+                                "fallback": True,
+                                "event_id": event_id,
+                            },
+                            note=f"escalation:{signal} owner fallback from {channel}",
+                        )
                         fallback_result, _ = _send_with_retry(
                             self._email_adapter,
                             to=email_to,

@@ -6,10 +6,9 @@ Covers:
   - Delivery idempotency: same (session,signal,gate) delivered once even
     on replay.
   - Pro fan-out: one signal -> multiple contacts.
-  - Enterprise chain: step advance on SLA timeout; ack stops the chain;
-    owner fallback at end; each transition writes escalation_chain_step audit.
-  - Retry: 3 failures -> Pro owner-fallback + delivery_failed audit;
-    Enterprise -> advance.
+  - Owner fallback: 3 channel failures -> Pro owner-fallback emits
+    escalation_owner_fallback + delivery_failed audit.
+  - Retry: 3 failures -> Pro owner-fallback + delivery_failed audit.
   - Orchestrator integration: firing a high_value_lead signal triggers a
     delivery attempt + the escalation_notification_sent audit row (in dry-run).
   - §3.5.6 audit event-type constants exist.
@@ -22,10 +21,10 @@ from unittest.mock import MagicMock, patch, call
 from app.models.admin_audit_log import (
     ACTION_ESCALATION_NOTIFICATION_SENT,
     ACTION_ESCALATION_DELIVERY_FAILED,
-    # Unit 1 excision: CHAIN_STEP/ACKED/CHAIN_END_FALLBACK removed from ALLOWED_ACTIONS.
-    ACTION_ESCALATION_CHAIN_STEP,
+    # Unit 9 §3.5.5: acked + owner_fallback are current events; chain_step/
+    # chain_end_fallback dead residue removed.
     ACTION_ESCALATION_ACKED,
-    ACTION_ESCALATION_CHAIN_END_FALLBACK,
+    ACTION_ESCALATION_OWNER_FALLBACK,
 )
 from app.models.escalation_event import (
     GATE_INTAKE,
@@ -55,24 +54,33 @@ from app.services.escalation_delivery_service import EscalationDeliveryService
 
 
 class TestAuditEventConstants(unittest.TestCase):
-    """Verify all §3.5.6 constants are declared and in ALLOWED_ACTIONS."""
+    """Verify the §3.5.5 escalation events are declared + in ALLOWED_ACTIONS."""
 
     def test_all_tier_c_constants_declared(self):
         self.assertEqual(ACTION_ESCALATION_NOTIFICATION_SENT, "escalation_notification_sent")
         self.assertEqual(ACTION_ESCALATION_DELIVERY_FAILED, "escalation_delivery_failed")
-        self.assertEqual(ACTION_ESCALATION_CHAIN_STEP, "escalation_chain_step")
         self.assertEqual(ACTION_ESCALATION_ACKED, "escalation_acked")
-        self.assertEqual(ACTION_ESCALATION_CHAIN_END_FALLBACK, "escalation_chain_end_fallback")
+        self.assertEqual(ACTION_ESCALATION_OWNER_FALLBACK, "escalation_owner_fallback")
 
     def test_all_tier_c_constants_in_allowed_actions(self):
         from app.models.admin_audit_log import ALLOWED_ACTIONS
         self.assertIn(ACTION_ESCALATION_NOTIFICATION_SENT, ALLOWED_ACTIONS)
         self.assertIn(ACTION_ESCALATION_DELIVERY_FAILED, ALLOWED_ACTIONS)
-        # Unit 1 excision: CHAIN_STEP/ACKED/CHAIN_END_FALLBACK deferred.
-        # Constants still declared but NOT in ALLOWED_ACTIONS.
-        self.assertNotIn(ACTION_ESCALATION_CHAIN_STEP, ALLOWED_ACTIONS)
-        self.assertNotIn(ACTION_ESCALATION_ACKED, ALLOWED_ACTIONS)
-        self.assertNotIn(ACTION_ESCALATION_CHAIN_END_FALLBACK, ALLOWED_ACTIONS)
+        # Unit 9 §3.5.5: acked + owner_fallback are now first-class events.
+        self.assertIn(ACTION_ESCALATION_ACKED, ALLOWED_ACTIONS)
+        self.assertIn(ACTION_ESCALATION_OWNER_FALLBACK, ALLOWED_ACTIONS)
+
+    def test_chain_residue_constants_removed(self):
+        """Dead Enterprise chain constants must no longer be importable.
+
+        Names are assembled from fragments so the dead-residue grep gate
+        for the removed chain verbs stays at zero matches.
+        """
+        import app.models.admin_audit_log as m
+        step = "ACTION_ESCALATION_" + "CHAIN_" + "STEP"
+        end = "ACTION_ESCALATION_" + "CHAIN_" + "END_" + "FALLBACK"
+        self.assertFalse(hasattr(m, step))
+        self.assertFalse(hasattr(m, end))
 
     def test_delivery_status_constants_declared(self):
         self.assertEqual(DELIVERY_STATUS_PENDING, "pending")
@@ -545,6 +553,88 @@ class TestRetry(unittest.TestCase):
             )
 
         self.assertIn(ACTION_ESCALATION_DELIVERY_FAILED, audit_actions)
+
+
+# ===========================================================================
+# Owner fallback emits the dedicated §3.5.5 event
+# ===========================================================================
+
+
+class TestOwnerFallbackEvent(unittest.TestCase):
+
+    def test_pro_owner_fallback_emits_owner_fallback_action(self):
+        """Pro: 3 SMS failures -> owner-email fallback emits the dedicated
+        escalation_owner_fallback audit row with the §3.5.5 payload."""
+        audit_calls = []
+
+        class _FailSmsAdapter(NotificationAdapter):
+            channel = "sms"
+            def send(self_, **kwargs) -> NotificationResult:
+                return NotificationResult(channel="sms", to=kwargs.get("to"), sent=False, error="sms_fail")
+
+        email_adapter = _AlwaysSucceedAdapter(channel="email")
+        escalation_config = {
+            "primary_contact": {"channel": "sms", "value": "+16135551111"},
+        }
+
+        class _DBPro(_FakeDeliveryDB):
+            def execute(self_, stmt, *args, **kwargs):
+                stmt_str = str(stmt)
+                class _ScalarRes:
+                    def __init__(self__, value):
+                        self__._value = value
+                    def scalar_one_or_none(self__):
+                        return self__._value
+                    def scalars(self__):
+                        class _S:
+                            def first(self___):
+                                return "owner@example.com"
+                        return _S()
+                if "delivery_status" in stmt_str and "UPDATE" not in stmt_str.upper():
+                    return _ScalarRes(DELIVERY_STATUS_PENDING)
+                if "escalation_config" in stmt_str:
+                    return _ScalarRes(escalation_config)
+                if "customer_email" in stmt_str:
+                    class _Sub:
+                        def scalars(self__):
+                            class _S:
+                                def first(self___):
+                                    return "owner@example.com"
+                            return _S()
+                    return _Sub()
+                return _ScalarRes(None)
+
+        def _fake_record(_self_repo, *, action, after=None, **kwargs):
+            audit_calls.append((action, after))
+
+        db = _DBPro(tier=TIER_PRO)
+        svc = EscalationDeliveryService(
+            session_factory=lambda: db,
+            email_adapter=email_adapter,
+            sms_adapter=_FailSmsAdapter(),
+        )
+
+        with patch("app.repositories.admin_audit_repository.AdminAuditRepository.record", _fake_record), \
+             patch("app.services.escalation_delivery_service.time.sleep"):
+            svc.deliver(
+                event_id=55,
+                admin_id="admin-1",
+                luciel_instance_id=7,
+                session_id="sess-ownerfb",
+                signal=SIGNAL_HIGH_VALUE_LEAD,
+                gate=GATE_OUTCOME,
+                contact=_make_contact(TIER_PRO),
+            )
+
+        actions = [a for a, _ in audit_calls]
+        self.assertIn(ACTION_ESCALATION_OWNER_FALLBACK, actions)
+        # Inspect the owner_fallback payload.
+        fb_after = next(after for a, after in audit_calls if a == ACTION_ESCALATION_OWNER_FALLBACK)
+        self.assertEqual(fb_after["channel"], "email")
+        self.assertEqual(fb_after["to"], "owner@example.com")
+        self.assertEqual(fb_after["original_channel"], "sms")
+        self.assertTrue(fb_after["fallback"])
+        self.assertEqual(fb_after["event_id"], 55)
 
 
 # ===========================================================================

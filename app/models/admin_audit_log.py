@@ -321,26 +321,20 @@ ACTION_PILOT_REFUND_EMAIL_SEND_FAILED = "pilot_refund_email_send_failed"
 #   after_json carries {signal, gate, channel, to, attempts, last_error,
 #   idempotency_key}. resource_type = RESOURCE_ESCALATION_EVENT.
 #
-# ACTION_ESCALATION_CHAIN_STEP
-#   Emitted by the Enterprise chain walker on every step transition:
-#   step notified -> SLA started, SLA timeout -> step advanced, ack
-#   received -> chain resolved. after_json carries {signal, session_id,
-#   step, contact, chain_action, timestamp}.
-#
 # ACTION_ESCALATION_ACKED
-#   Emitted when an Enterprise escalation chain is acknowledged (dashboard
-#   open/read OR explicit "I'm on it"). Chain stops. after_json carries
-#   {signal, gate, session_id, step, acked_by}.
+#   §3.5.5: emitted when an escalation is acknowledged (dashboard open
+#   OR explicit "I'm on it"). The delivery_status transitions to 'acked'.
+#   after_json carries {event_id, session_id, signal, gate, actor_user_id}.
 #
-# ACTION_ESCALATION_CHAIN_END_FALLBACK
-#   Emitted when the Enterprise chain is exhausted without acknowledgement.
-#   Falls back to admin_owner email. after_json carries {signal, gate,
-#   session_id, chain_length, fallback_email}.
+# ACTION_ESCALATION_OWNER_FALLBACK
+#   §3.5.5: "Owner fallback invoked" — emitted when all configured
+#   channels fail and delivery falls back to the account-owner email.
+#   after_json carries {signal, gate, channel:"email", to:owner_email,
+#   original_channel, fallback:True, event_id}.
 ACTION_ESCALATION_NOTIFICATION_SENT = "escalation_notification_sent"
 ACTION_ESCALATION_DELIVERY_FAILED = "escalation_delivery_failed"
-ACTION_ESCALATION_CHAIN_STEP = "escalation_chain_step"
 ACTION_ESCALATION_ACKED = "escalation_acked"
-ACTION_ESCALATION_CHAIN_END_FALLBACK = "escalation_chain_end_fallback"
+ACTION_ESCALATION_OWNER_FALLBACK = "escalation_owner_fallback"
 
 # Arc 18 -- conversation-budget metering (§3.4.1b).
 # ACTION_BUDGET_EXHAUSTED: a Free instance hit its per-instance
@@ -936,7 +930,11 @@ ALLOWED_ACTIONS = (
     # Rescan Tier-C — §3.5 escalation delivery layer.
     ACTION_ESCALATION_NOTIFICATION_SENT,
     ACTION_ESCALATION_DELIVERY_FAILED,
-    # ACTION_ESCALATION_CHAIN_STEP/ACKED/CHAIN_END_FALLBACK: DEFERRED (Unit 1 excision) — Enterprise chains removed.
+    # Unit 9 — §3.5.5 audit-vocabulary alignment: chain_step/chain_end_fallback
+    # removed (Enterprise chains deferred, Unit 1). acked + owner_fallback are
+    # current §3.5.5 events and ARE wired here.
+    ACTION_ESCALATION_ACKED,
+    ACTION_ESCALATION_OWNER_FALLBACK,
     # Arc 14 U4 — §3.4.4 lead capture cognition.
     ACTION_LEAD_CAPTURED,
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
