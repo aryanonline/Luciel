@@ -360,12 +360,14 @@ class TestLifecycleGateLivePath(unittest.TestCase):
         roles = [m.role for m in svc.session_service.added]
         self.assertEqual(roles, ["user"])
 
-    def test_inactive_downgraded_instance_no_response_no_llm(self):
-        # GAP-5: a Pro→Free downgrade sets instance_status='inactive'.
-        # The same lifecycle gate treats it as non-active.
+    def test_nonactive_grace_window_instance_no_response_no_llm(self):
+        # The lifecycle gate drops ANY non-active instance state. Unit 4
+        # removed the non-spec 'inactive' state; ``grace_window`` is a
+        # spec-valid non-active state (§3.6.1) and must be gated
+        # identically (no response, no LLM call).
         router = _ScriptedRouter([_plan_json(reply="SHOULD NOT RUN")])
         svc = _make_chat_service(router=router)
-        drop = InactiveInstanceDrop(instance_id=7, status="inactive")
+        drop = InactiveInstanceDrop(instance_id=7, status="grace_window")
         with _LivePath(lifecycle_drop=drop):
             reply = svc.respond(session_id="s", message="hi")
         self.assertEqual(reply, "")

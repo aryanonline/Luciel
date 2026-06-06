@@ -45,7 +45,7 @@ from app.models.admin_audit_log import (
     RESOURCE_INSTANCE_CONNECTION,
 )
 from app.models.instance import Instance
-from app.models.instance_status import InstanceStatus
+from app.models.instance_status import InstanceStatus, INSTANCE_GRACE_STATES
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
@@ -319,11 +319,11 @@ class InstanceRepository:
         instance = self.get_by_pk(pk)
         if instance is None:
             return None
-        if instance.instance_status == InstanceStatus.DELETED:
+        if instance.instance_status.value in INSTANCE_GRACE_STATES:
             # No-op signal — route layer maps this to 409. Caller can
-            # distinguish "already paused" (idempotent) from "deleted"
-            # (conflict) by reading instance.instance_status off the
-            # returned row.
+            # distinguish "already paused" (idempotent) from a grace-window
+            # instance (conflict) by reading instance.instance_status off
+            # the returned row. (Accepts grace_window + legacy 'deleted'.)
             return instance
 
         before_status = instance.instance_status
@@ -382,7 +382,7 @@ class InstanceRepository:
         instance = self.get_by_pk(pk)
         if instance is None:
             return None
-        if instance.instance_status == InstanceStatus.DELETED:
+        if instance.instance_status.value in INSTANCE_GRACE_STATES:
             return instance
 
         before_status = instance.instance_status
@@ -452,15 +452,21 @@ class InstanceRepository:
         instance = self.get_by_pk(pk)
         if instance is None:
             return None
-        if instance.instance_status == InstanceStatus.DELETED:
-            # Idempotent — preserve the original soft_deleted_at clock.
+        if instance.instance_status.value in INSTANCE_GRACE_STATES:
+            # Idempotent — already in the grace window (grace_window, or a
+            # legacy 'deleted' row). Preserve the original soft_deleted_at
+            # clock.
             return instance
 
         before_status = instance.instance_status
         was_active = bool(instance.active)
         now = datetime.now(timezone.utc)
 
-        instance.instance_status = InstanceStatus.DELETED
+        # 5-state machine (Architecture §3.6.1): deactivation lands the
+        # instance in ``grace_window`` (the 30-day soft-delete state),
+        # NOT the legacy 3-state ``deleted`` alias. ``soft_deleted_at`` is
+        # the grace clock the retention worker reads.
+        instance.instance_status = InstanceStatus.GRACE_WINDOW
         instance.active = False
         instance.soft_deleted_at = now
 
@@ -479,7 +485,7 @@ class InstanceRepository:
                     "soft_deleted_at": None,
                 },
                 after={
-                    "instance_status": InstanceStatus.DELETED.value,
+                    "instance_status": InstanceStatus.GRACE_WINDOW.value,
                     "active": False,
                     "soft_deleted_at": now.isoformat(),
                     "grace_window_days": INSTANCE_RESTORE_GRACE_DAYS,
@@ -649,16 +655,17 @@ class InstanceRepository:
         instance = self.get_by_pk(pk)
         if instance is None:
             return None
-        if instance.instance_status != InstanceStatus.DELETED:
-            # Not deleted -- restore is a no-op transition. The route
-            # layer treats this as 409 (not 410: the grace window is
-            # not the question; the row is already live).
+        if instance.instance_status.value not in INSTANCE_GRACE_STATES:
+            # Not in the grace window -- restore is a no-op transition.
+            # The route layer treats this as 409 (not 410: the grace
+            # window is not the question; the row is already live).
+            # (Accepts grace_window + legacy 'deleted'.)
             return instance
         if instance.soft_deleted_at is None:
-            # Shape invariant violated: deleted rows must carry a
+            # Shape invariant violated: grace-window rows must carry a
             # soft_deleted_at. Refuse to restore rather than guess.
             logger.error(
-                "Instance restore refused: pk=%s is 'deleted' but "
+                "Instance restore refused: pk=%s is in a grace state but "
                 "soft_deleted_at is NULL (shape invariant violation)",
                 instance.id,
             )

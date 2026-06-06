@@ -209,13 +209,15 @@ def test_service_has_transition_table_docstring():
     """The module docstring must encode the §3.6.1 transition table."""
     src = _read(SERVICE_PATH)
     # Key transitions must appear in the docstring.
+    # NOTE: 'manager' was removed from the required fragments in Unit 1 --
+    # the single-login model (Locked Decision #19) collapsed all roles to
+    # the single account owner; there is no manager role to document.
     for fragment in (
         "active",
         "paused",
         "deactivating",
         "grace_window",
         "owner",
-        "manager",
     ):
         assert fragment in src, (
             f"instance_service.py docstring must document the §3.6.1 "

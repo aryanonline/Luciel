@@ -491,23 +491,16 @@ class DowngradeArchiveService:
             return
 
         if axis == AXIS_INSTANCES:
-            # RESCAN CORE(serving-path) GAP-5 (§3.6.7) — set the
-            # system-imposed pause on the column the live lifecycle gates
-            # actually read. Pre-fix this branch wrote only the deprecated
-            # ``active`` boolean; the gates key off ``instance_status``, so
-            # an over-cap downgraded instance kept ``instance_status =
-            # 'active'`` and kept serving + accruing budget. Stamping
-            # INACTIVE makes check_instance_lifecycle (SMS/email) and the
-            # widget gate drop it, and the orchestrator's lifecycle gate
-            # short-circuits the /chat paths too.
-            from app.models.instance_status import InstanceStatus
-
-            for row in self.db.scalars(
-                select(Instance).where(Instance.id.in_(ids_list))
-            ).all():
-                row.active = False
-                row.instance_status = InstanceStatus.INACTIVE
-                row.pending_downgrade_archived_at = archived_at
+            # Unit 4 (lifecycle alignment): this over-cap instance-archival
+            # branch is unreachable in the single-Luciel model (Locked
+            # Decision #12: instance_count_cap = 1 on BOTH tiers, so a
+            # downgrade never leaves "instances over the new cap" — the
+            # overflow is always 0 and no instance is selected). It is also
+            # contrary to §3.6.7, which keeps the single Luciel ``active``
+            # (widget-only) across a downgrade rather than inactivating it.
+            # The former code stamped a non-spec ``INACTIVE`` instance
+            # state, which was removed with the enum member. Left as an
+            # explicit no-op so the axis dispatcher stays total.
             return
 
         if axis == AXIS_EMBED_KEYS:

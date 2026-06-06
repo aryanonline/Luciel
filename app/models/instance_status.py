@@ -60,14 +60,6 @@ class InstanceStatus(str, enum.Enum):
 
     ACTIVE = "active"
     PAUSED = "paused"
-    # RESCAN CORE(serving-path) GAP-5 — system-imposed pause (§3.6.7).
-    # Set by the Pro→Free downgrade enforcement for instances over the
-    # Free instance cap. Distinct from PAUSED (owner-initiated, §4.5
-    # Phase 8): INACTIVE is imposed by the platform when a plan change
-    # leaves more instances than the new tier allows. Treated as
-    # non-active by every lifecycle gate (only ACTIVE serves + accrues
-    # budget). The owner reactivates by upgrading or removing instances.
-    INACTIVE = "inactive"
     # Deprecated alias for grace_window; retained so existing rows and
     # queries using the 3-state vocabulary stay valid.  New code must
     # use GRACE_WINDOW.  See module docstring for the mapping rationale.
@@ -75,6 +67,12 @@ class InstanceStatus(str, enum.Enum):
     DEACTIVATING = "deactivating"
     GRACE_WINDOW = "grace_window"
     HARD_DELETED = "hard_deleted"
+    # NOTE: the non-spec ``INACTIVE`` member was REMOVED in Unit 4
+    # (lifecycle alignment). It existed only for a multi-instance
+    # over-cap downgrade path that is unreachable in the single-Luciel
+    # model (instance_count_cap = 1) and contradicted the ratified
+    # 5-state machine (§3.6.1). The PG enum value is dropped by the
+    # unit4_drop_instance_status_inactive migration.
 
 
 # Convenience set: states that represent "instance is in some form of

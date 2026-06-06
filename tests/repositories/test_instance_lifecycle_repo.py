@@ -84,13 +84,15 @@ def test_pause_by_pk_sets_status_to_paused():
     assert "InstanceStatus.PAUSED" in src
 
 
-def test_pause_by_pk_refuses_deleted_rows():
+def test_pause_by_pk_refuses_grace_window_rows():
     """Lifecycle invariant: Pause is not a valid transition out of the
-    'deleted' state -- the right verb for that case is Restore. The
-    repo signals refusal by returning the row unchanged with no audit
-    emission (route layer maps that to 409)."""
+    grace window -- the right verb for that case is Restore. The repo
+    signals refusal by returning the row unchanged with no audit
+    emission (route layer maps that to 409). Post 5-state alignment the
+    guard keys off INSTANCE_GRACE_STATES (grace_window + legacy
+    'deleted'), not the bare DELETED alias."""
     src = ast.unparse(_method("pause_by_pk"))
-    assert "InstanceStatus.DELETED" in src
+    assert "INSTANCE_GRACE_STATES" in src
 
 
 # ---------------------------------------------------------------------
@@ -108,9 +110,9 @@ def test_resume_by_pk_sets_status_to_active():
     assert "InstanceStatus.ACTIVE" in src
 
 
-def test_resume_by_pk_refuses_deleted_rows():
+def test_resume_by_pk_refuses_grace_window_rows():
     src = ast.unparse(_method("resume_by_pk"))
-    assert "InstanceStatus.DELETED" in src
+    assert "INSTANCE_GRACE_STATES" in src
 
 
 # ---------------------------------------------------------------------
@@ -131,11 +133,20 @@ def test_delete_by_pk_stamps_soft_deleted_at():
     assert "datetime.now(timezone.utc)" in src or "datetime.now(tz=timezone.utc)" in src
 
 
-def test_delete_by_pk_is_idempotent_on_already_deleted():
-    """Spec: idempotent on already-deleted row -- preserve the original
-    soft_deleted_at clock, do not emit a second audit row."""
+def test_delete_by_pk_sets_grace_window_state():
+    """5-state machine (Architecture §3.6.1): deactivation lands the
+    instance in grace_window, NOT the legacy 'deleted' alias."""
     src = ast.unparse(_method("delete_by_pk"))
-    assert "InstanceStatus.DELETED" in src
+    assert "InstanceStatus.GRACE_WINDOW" in src
+
+
+def test_delete_by_pk_is_idempotent_on_already_in_grace():
+    """Spec: idempotent on a row already in the grace window -- preserve
+    the original soft_deleted_at clock, do not emit a second audit row.
+    Guard keys off INSTANCE_GRACE_STATES (grace_window + legacy
+    'deleted')."""
+    src = ast.unparse(_method("delete_by_pk"))
+    assert "INSTANCE_GRACE_STATES" in src
 
 
 def test_delete_by_pk_has_no_sibling_grant_cascade():
