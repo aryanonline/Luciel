@@ -58,10 +58,14 @@ from app.models.admin_audit_log import (
     ACTION_CONNECTION_OAUTH_CONNECTED,
     ACTION_CONNECTION_OAUTH_INITIATED,
     ACTION_CONNECTION_REFRESHED,
+    ACTION_CONNECTION_STATUS_CHANGED,
     RESOURCE_INSTANCE_CONNECTION,
 )
 from app.models.instance import Instance
-from app.connections.instance_connection import InstanceConnection
+from app.connections.instance_connection import (
+    InstanceConnection,
+    auth_class_for,
+)
 from app.policy.permissions import (
     PERM_CONFIGURE_CONNECTIONS,
     PermissionResolver,
@@ -78,8 +82,6 @@ from app.connections.secret_cleanup_outbox_repository import (
     SecretCleanupOutboxRepository,
 )
 from app.schemas.connection import (
-    DEFERRED_CONNECTION_TYPES,
-    LIVE_CONNECTION_TYPES,
     Arc17Pending,
     ConnectionCreate,
     ConnectionCreateResponse,
@@ -204,6 +206,45 @@ def _secret_name_for(
     return f"{admin_id}/{instance_id}/{connection_type}"
 
 
+def _provisioned_resource_identity(
+    settings, connection_type: str
+) -> dict | None:
+    """Return the NON-SECRET sender identity for a provisioned_resource
+    connector when the platform resource is present in config, else None.
+
+    ``provisioned_resource`` connectors (email_sender / sms_sender)
+    authenticate via the platform's own transport (SES / Twilio), not a
+    per-tenant credential. The "connect" verification is therefore a
+    config-presence check of the platform-owned sender identity — mirrors
+    the ``is_configured()`` gate the send_email / send_sms tools already
+    apply (see send_email_tool / send_sms_tool). The returned dict carries
+    ONLY non-secret identifiers (the From address/name, the Twilio account
+    SID + messaging-service SID) — NEVER the Twilio auth token or any
+    secret, which stay in settings/SSM and never land in non_secret_config.
+    """
+    if connection_type == "email_sender":
+        from_address = settings.email_sender_from_address
+        if not from_address:
+            return None
+        identity = {"from_address": from_address}
+        if settings.email_sender_from_name:
+            identity["from_name"] = settings.email_sender_from_name
+        return identity
+    if connection_type == "sms_sender":
+        # Mirror send_sms_tool's gate: account_sid + auth_token must be
+        # present for a live send. auth_token is a SECRET — it is the gate
+        # but NEVER part of the non-secret identity we persist.
+        if not (settings.twilio_account_sid and settings.twilio_auth_token):
+            return None
+        identity = {"account_sid": settings.twilio_account_sid}
+        if settings.twilio_messaging_service_sid:
+            identity["messaging_service_sid"] = (
+                settings.twilio_messaging_service_sid
+            )
+        return identity
+    return None
+
+
 def _view(row: InstanceConnection) -> ConnectionView:
     return ConnectionView(
         id=row.id,
@@ -212,6 +253,7 @@ def _view(row: InstanceConnection) -> ConnectionView:
         connection_type=row.connection_type,
         provider=row.provider,
         status=row.status,
+        auth_class=row.auth_class,
         non_secret_config=row.non_secret_config,
         last_health_check_at=row.last_health_check_at,
         created_at=row.created_at,
@@ -333,24 +375,63 @@ def configure_connection(
         connection_type=conn_type, non_secret_config=body.non_secret_config
     )
 
-    # --- The honesty fork: LIVE → connected; DEFERRED → unconfigured. ---
-    if conn_type in LIVE_CONNECTION_TYPES:
+    # --- The honesty fork, driven by the §3.8.5 auth_class (NOT a
+    # hardcoded LIVE/DEFERRED list). Each credential SHAPE has its own
+    # honest connect path; NONE ever fabricates 'connected' without a
+    # real backing.
+    #
+    #   api_key            (record_source / outbound_webhook):
+    #       config-presence already enforced by _validate_non_secret_config
+    #       (the required store_ref / url is present) → connected.
+    #   provisioned_resource (email_sender / sms_sender):
+    #       verify the platform-owned sender identity is present in
+    #       settings → connected + the NON-SECRET identity recorded in
+    #       non_secret_config; absent → unconfigured (honest, no fake).
+    #   oauth_token        (calendar / crm):
+    #       POST configure is NOT the connect path — OAuth connects via the
+    #       initiate/callback consent flow. Record an unconfigured row and
+    #       point the caller at the initiate endpoint. NEVER connected here.
+    klass = auth_class_for(conn_type)
+    pending: Arc17Pending | None = None
+
+    if klass == "api_key":
         new_status = "connected"
-        pending = None
-    elif conn_type in DEFERRED_CONNECTION_TYPES:
+    elif klass == "provisioned_resource":
+        identity = _provisioned_resource_identity(app_settings, conn_type)
+        if identity is not None:
+            new_status = "connected"
+            # Fold the verified non-secret sender identity into the config
+            # we persist (request body may add allowlist hints; the
+            # platform identity is authoritative for the live send).
+            cfg = {**cfg, **identity}
+        else:
+            new_status = "unconfigured"
+            pending = Arc17Pending(
+                connection_type=conn_type,
+                message=(
+                    f"{conn_type} is not yet provisioned on the platform "
+                    "(sender identity absent in config); the connection is "
+                    "recorded as 'unconfigured'. Provisioning the sender "
+                    "identity is deploy-gated."
+                ),
+            )
+    elif klass == "oauth_token":
         new_status = "unconfigured"
         pending = Arc17Pending(
             connection_type=conn_type,
             message=(
-                f"Connecting {conn_type!r} via a live credential flow is "
-                "available in Arc 17. The connection has been recorded as "
-                "'unconfigured'; dependent tools stay disabled until then."
+                f"{conn_type} connects via the OAuth consent flow: POST "
+                f"/admin/instances/{instance.id}/connections/oauth/"
+                f"{conn_type}/initiate, then complete consent. The "
+                "connection is recorded as 'unconfigured' until consent "
+                "completes; live consent is deploy-gated on the OAuth "
+                "client credentials."
             ),
         )
-    else:  # pragma: no cover — Literal makes this unreachable.
+    else:  # pragma: no cover — auth_class_for pins the four-value vocab.
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown connection_type {conn_type!r}.",
+            detail=f"Unhandled auth_class {klass!r} for {conn_type!r}.",
         )
 
     repo = InstanceConnectionRepository(db)
@@ -361,7 +442,7 @@ def configure_connection(
         provider=body.provider,
         status=new_status,
         non_secret_config=cfg or None,
-        secret_ref=None,  # secrets flow deferred to full Arc 17.
+        secret_ref=None,  # provisioned_resource has no per-tenant secret.
         autocommit=False,
     )
 
@@ -377,6 +458,7 @@ def configure_connection(
             "connection_type": conn_type,
             "provider": body.provider,
             "status": new_status,
+            "auth_class": klass,
             # non_secret_config is non-secret by contract; record only its keys
             # so the audit row stays bounded and free of payload bulk.
             "config_keys": sorted(cfg.keys()),
@@ -705,6 +787,37 @@ def oauth_callback(
             },
         )
 
+    # Capture the prior status BEFORE any mutation so the status-changed
+    # audit can record the honest old→new transition (§3.8.5 timeline).
+    prior_status = row.status
+
+    def _emit_status_changed(new_status: str) -> None:
+        """Emit the §3.8.5 status-transition audit (old→new) when the
+        callback moved the connection's status. No-op if unchanged."""
+        if new_status == prior_status:
+            return
+        audit_repo.record(
+            ctx=ctx,
+            admin_id=admin_id,
+            action=ACTION_CONNECTION_STATUS_CHANGED,
+            resource_type=RESOURCE_INSTANCE_CONNECTION,
+            resource_pk=row.id,
+            resource_natural_id=f"{instance_id}:{connection_type}",
+            luciel_instance_id=instance_id,
+            before={"status": prior_status},
+            after={
+                "connection_type": connection_type,
+                "auth_class": row.auth_class,
+                "status": new_status,
+                "notify_admin": False,
+            },
+            note=(
+                f"Connection status changed ({connection_type}: "
+                f"{prior_status}→{new_status})."
+            ),
+            autocommit=False,
+        )
+
     def _fail(detail: str) -> RedirectResponse:
         repo.apply_health_check(
             row=row,
@@ -730,6 +843,7 @@ def oauth_callback(
             note=f"OAuth callback failed ({connection_type}): {detail}"[:256],
             autocommit=False,
         )
+        _emit_status_changed("error")
         db.commit()
         return _callback_redirect(connection_type, "error")
 
@@ -794,6 +908,7 @@ def oauth_callback(
         note=f"OAuth callback connected ({connection_type}).",
         autocommit=False,
     )
+    _emit_status_changed("connected")
     db.commit()
     return _callback_redirect(connection_type, "connected")
 

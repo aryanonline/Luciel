@@ -59,6 +59,46 @@ CONNECTION_STATUSES = (
     "dormant",   # Pro→Free downgrade preserve; restore on re-upgrade
 )
 
+# §3.8.5 auth_class — the credential SHAPE that drives the health/refresh
+# worker's cadence + action, decoupled from the (vertical-leaning)
+# connection_type. The four classes mirror the four real credential
+# lifecycles the worker must service. The CHECK constraint on the column
+# (unit13c migration) pins this vocabulary at the DB layer.
+AUTH_CLASSES = (
+    "oauth_token",          # refreshable OAuth (calendar / crm): 15-min check + proactive refresh
+    "long_lived_token",     # long-lived bearer: 60-min check, re-issue/flag
+    "api_key",              # static key (record_source / outbound_webhook): 60-min liveness, no refresh
+    "provisioned_resource", # platform-owned transport (email_sender / sms_sender): 4-h liveness only
+)
+
+# Single source of truth mapping a connection_type → its auth_class
+# (§3.8.5 "no worker change" goal: a new connector type maps to a class
+# in ONE place and the auth_class-driven worker services it unchanged).
+AUTH_CLASS_BY_TYPE: dict[str, str] = {
+    "calendar": "oauth_token",
+    "crm": "oauth_token",
+    "email_sender": "provisioned_resource",
+    "sms_sender": "provisioned_resource",
+    "record_source": "api_key",
+    "outbound_webhook": "api_key",
+}
+
+
+def auth_class_for(connection_type: str) -> str:
+    """Return the §3.8.5 auth_class for a connection_type.
+
+    The single mapping point — the migration backfill, the repository's
+    ``configure``, and the health service all derive the class here so a
+    new connector type is classified in exactly one place. Unknown types
+    fail loud rather than silently mis-classifying a credential lifecycle.
+    """
+    try:
+        return AUTH_CLASS_BY_TYPE[connection_type]
+    except KeyError as exc:  # pragma: no cover - guarded by the type enum
+        raise ValueError(
+            f"no auth_class mapping for connection_type {connection_type!r}"
+        ) from exc
+
 _conn_type_enum = ENUM(
     *CONNECTION_TYPES, name="connection_type", create_type=False
 )
@@ -97,6 +137,16 @@ class InstanceConnection(Base):
         _conn_status_enum,
         nullable=False,
         server_default="unconfigured",
+    )
+    # §3.8.5 credential-shape class — drives the health/refresh worker's
+    # cadence + action (oauth_token / long_lived_token / api_key /
+    # provisioned_resource). NOT NULL; derived from connection_type via
+    # ``auth_class_for`` at create time. A CHECK constraint (unit13c
+    # migration) pins the vocabulary at the DB layer.
+    auth_class: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default="api_key",
     )
     last_health_check_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

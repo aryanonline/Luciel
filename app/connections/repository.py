@@ -28,7 +28,10 @@ from typing import Optional
 from sqlalchemy import and_, select, update
 from sqlalchemy.orm import Session
 
-from app.connections.instance_connection import InstanceConnection
+from app.connections.instance_connection import (
+    InstanceConnection,
+    auth_class_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +116,13 @@ class InstanceConnectionRepository:
         """Insert a new live connection row.
 
         ``status`` is decided by the caller (the route): connectors with
-        a real backing land ``connected``; deferred connectors land
-        ``unconfigured``. The repository never fabricates a status.
+        a real backing land ``connected``; connectors awaiting credentials
+        land ``unconfigured``. The repository never fabricates a status.
+
+        ``auth_class`` is derived from ``connection_type`` via the single
+        ``auth_class_for`` mapping (§3.8.5) so the credential-shape class
+        is set in one place and the auth_class-driven health worker can
+        service a new connector type with no change.
         """
         row = InstanceConnection(
             admin_id=admin_id,
@@ -122,6 +130,7 @@ class InstanceConnectionRepository:
             connection_type=connection_type,
             provider=provider,
             status=status,
+            auth_class=auth_class_for(connection_type),
             non_secret_config=non_secret_config,
             secret_ref=secret_ref,
             last_health_check_at=last_health_check_at,

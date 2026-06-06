@@ -84,6 +84,8 @@ class ConnectionView(BaseModel):
     connection_type: ConnectionType
     provider: str
     status: ConnectionStatus
+    # §3.8.5 credential-shape class driving the health/refresh worker.
+    auth_class: str
     non_secret_config: Optional[dict[str, Any]]
     last_health_check_at: Optional[datetime]
     created_at: datetime

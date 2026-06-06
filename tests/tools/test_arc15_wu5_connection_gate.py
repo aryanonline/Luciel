@@ -90,6 +90,12 @@ def _build_sqlite_session():
             "status", String(32),
             nullable=False, server_default="unconfigured",
         ),
+        # §3.8.5 (Unit 13c): credential-shape class, NOT NULL on the live
+        # table; the repository derives it via auth_class_for at configure.
+        Column(
+            "auth_class", String(32),
+            nullable=False, server_default="api_key",
+        ),
         Column("last_health_check_at", DateTime(timezone=True), nullable=True),
         Column(
             "created_at", DateTime(timezone=True),

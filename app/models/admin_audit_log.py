@@ -807,6 +807,24 @@ ACTION_CONNECTION_REVOKED = "connection_revoked"
 ACTION_CONNECTION_OAUTH_INITIATED = "connection_oauth_initiated"
 ACTION_CONNECTION_OAUTH_CONNECTED = "connection_oauth_connected"
 
+# Unit 13c (§3.8.5) — connection status transition audit.
+#
+# ACTION_CONNECTION_STATUS_CHANGED -- emitted whenever a connection row's
+#   ``status`` transitions from one value to another along a connect /
+#   refresh / health-check path (e.g. unconfigured→connected on an OAuth
+#   callback, connected→expired on a refresh-token rejection). Distinct
+#   from ACTION_CONNECTION_OAUTH_CONNECTED / ACTION_CONNECTION_TOKEN_REFRESHED
+#   (which capture the OPERATION) so an auditor can reconstruct the
+#   status TIMELINE of a connection by filtering this verb alone.
+#   before_json carries {status: <old>}; after_json carries
+#   {connection_type, auth_class, status: <new>, notify_admin}. The
+#   ``notify_admin`` flag is True on a refresh-fail→expired transition
+#   (§3.8.5: the admin must be told to reconnect) — it is a documented
+#   seam: the connection-health notification channel is deploy-phase, so
+#   the marker records the INTENT in the audit trail without a delivery
+#   leg. resource_type = RESOURCE_INSTANCE_CONNECTION.
+ACTION_CONNECTION_STATUS_CHANGED = "connection_status_changed"
+
 ALLOWED_ACTIONS = (
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -951,6 +969,8 @@ ALLOWED_ACTIONS = (
     # Arc 17 — OAuth callback completion (initiate + callback endpoints).
     ACTION_CONNECTION_OAUTH_INITIATED,
     ACTION_CONNECTION_OAUTH_CONNECTED,
+    # Unit 13c (§3.8.5) — connection status transition timeline.
+    ACTION_CONNECTION_STATUS_CHANGED,
     # Arc 18 — conversation-budget metering, overage billing (§3.4.1b).
     ACTION_BUDGET_EXHAUSTED,
     ACTION_BUDGET_ALERT_SENT,
