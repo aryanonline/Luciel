@@ -47,8 +47,9 @@ class TestOverageUnitsRounding(unittest.TestCase):
 class TestRateString(unittest.TestCase):
 
     def test_formats_cents_per_100(self):
-        self.assertEqual(rate_string_from_cents(1500), "$15.00/100")
-        self.assertEqual(rate_string_from_cents(1000), "$10.00/100")
+        # Ratified Pro rates (Locked Decision #15): $35/100 monthly, $30/100 annual.
+        self.assertEqual(rate_string_from_cents(3500), "$35.00/100")
+        self.assertEqual(rate_string_from_cents(3000), "$30.00/100")
 
 
 class TestLineItemDescription(unittest.TestCase):

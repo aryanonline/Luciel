@@ -1,9 +1,11 @@
 """Arc 18 — budget/overage entitlement resolution per (tier, cadence).
 
-The founder ratified (2026-06-03): Free 200 (no overage), Pro monthly
-2000 ($15/100), Pro annual 2500 ($10/100), Enterprise 10000 (per-contract,
-no platform overage price). These tests pin those values and the
-fail-closed behaviour for unknown tiers/cadences.
+Ratified tier matrix (Vision §7 + Open Decision #6 RESOLVED; Architecture
+§3.4.1b + Locked Decision #15; Legal §A2; Customer Journey): Free 200
+(hard cap, no overage), Pro Monthly 1,000 ($35/100), Pro Annual 1,200
+($30/100). (Enterprise deferred -- Open Decision #8 -- excised in Unit 1.)
+These tests pin those values and the fail-closed behaviour for unknown
+tiers/cadences.
 """
 from __future__ import annotations
 
@@ -28,23 +30,23 @@ class TestConversationBudget(unittest.TestCase):
         # Enterprise removed (Unit 1 excision). Free/Pro only.
         self.assertEqual(conversation_budget(TIER_FREE, CADENCE_MONTHLY), 200)
         self.assertEqual(conversation_budget(TIER_FREE, CADENCE_ANNUAL), 200)
-        self.assertEqual(conversation_budget(TIER_PRO, CADENCE_MONTHLY), 2000)
-        self.assertEqual(conversation_budget(TIER_PRO, CADENCE_ANNUAL), 2500)
+        self.assertEqual(conversation_budget(TIER_PRO, CADENCE_MONTHLY), 1000)
+        self.assertEqual(conversation_budget(TIER_PRO, CADENCE_ANNUAL), 1200)
 
     def test_unknown_tier_fails_closed_to_free_cap(self):
         self.assertEqual(conversation_budget("mystery", CADENCE_ANNUAL), 200)
 
     def test_unknown_cadence_normalises_to_monthly(self):
-        # Pro + garbage cadence → monthly cap (the conservative 2000).
-        self.assertEqual(conversation_budget(TIER_PRO, "weekly"), 2000)
-        self.assertEqual(conversation_budget(TIER_PRO, None), 2000)
+        # Pro + garbage cadence → monthly cap (the conservative 1000).
+        self.assertEqual(conversation_budget(TIER_PRO, "weekly"), 1000)
+        self.assertEqual(conversation_budget(TIER_PRO, None), 1000)
 
 
 class TestOverageRate(unittest.TestCase):
 
     def test_rates_in_cents_per_100(self):
-        self.assertEqual(overage_rate_per_100_cents(TIER_PRO, CADENCE_MONTHLY), 1500)
-        self.assertEqual(overage_rate_per_100_cents(TIER_PRO, CADENCE_ANNUAL), 1000)
+        self.assertEqual(overage_rate_per_100_cents(TIER_PRO, CADENCE_MONTHLY), 3500)
+        self.assertEqual(overage_rate_per_100_cents(TIER_PRO, CADENCE_ANNUAL), 3000)
 
     def test_free_has_no_platform_rate(self):
         # Enterprise removed (Unit 1 excision).

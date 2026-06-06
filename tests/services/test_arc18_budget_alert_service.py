@@ -71,7 +71,7 @@ class TestChannelSelection(unittest.TestCase):
         with _no_audit():
             _svc(emails, smses).send_budget_alert(
                 admin_id="a1", instance_id=7, tier=TIER_PRO,
-                threshold=80, current=1600, cap=2000,
+                threshold=80, current=800, cap=1000,
             )
         self.assertEqual(len(emails), 1)
         self.assertEqual(smses, [])
@@ -81,7 +81,7 @@ class TestChannelSelection(unittest.TestCase):
         with _no_audit():
             _svc(emails, smses).send_budget_alert(
                 admin_id="a1", instance_id=7, tier=TIER_PRO,
-                threshold=100, current=2001, cap=2000,
+                threshold=100, current=1001, cap=1000,
             )
         self.assertEqual(len(emails), 1)
         self.assertEqual(len(smses), 1)
@@ -114,7 +114,7 @@ class TestChannelSelection(unittest.TestCase):
             # Must not propagate — best-effort posture.
             svc.send_budget_alert(
                 admin_id="a1", instance_id=7, tier=TIER_PRO,
-                threshold=100, current=2001, cap=2000,
+                threshold=100, current=1001, cap=1000,
             )
 
 

@@ -283,25 +283,29 @@ def escalation_secondary_contact_enabled(tier: str) -> bool:
 # distinct budget/rate rows. Cadence lives on subscriptions.billing_cadence.
 # Money is in CENTS to avoid float drift.
 #
-# NOTE: the Pro values here are the pre-existing (drifted) figures; Unit 2
-# corrects them to Locked Decision #15 (1000/1200 conv, $35/$30 per 100).
+# Values are the ratified figures (Vision §7 + Open Decision #6 RESOLVED;
+# Architecture §3.4.1b + Locked Decision #15; Legal §A2; Customer Journey):
+#   Free            : 200 conversations/month hard cap, no overage.
+#   Pro Monthly     : 1,000 conversations/month, overage $35 / 100.
+#   Pro Annual      : 1,200 conversations/month, overage $30 / 100.
+# Overage is billed in 100-conversation blocks (rounded up) at cycle close.
 # ---------------------------------------------------------------------
 
 CADENCE_MONTHLY = "monthly"
 CADENCE_ANNUAL = "annual"
 
 _CONVERSATION_BUDGET: dict[tuple[str, str], int] = {
-    (TIER_FREE, CADENCE_MONTHLY): 200,
-    (TIER_FREE, CADENCE_ANNUAL): 200,
-    (TIER_PRO, CADENCE_MONTHLY): 2000,
-    (TIER_PRO, CADENCE_ANNUAL): 2500,
+    (TIER_FREE, CADENCE_MONTHLY): 200,    # Vision §7 hard cap
+    (TIER_FREE, CADENCE_ANNUAL): 200,     # Free has no annual cadence; cap parity
+    (TIER_PRO, CADENCE_MONTHLY): 1000,    # Vision §7 / Locked Decision #15
+    (TIER_PRO, CADENCE_ANNUAL): 1200,     # Vision §7 / Locked Decision #15
 }
 
 _OVERAGE_RATE_PER_100_CENTS: dict[tuple[str, str], int | None] = {
-    (TIER_FREE, CADENCE_MONTHLY): None,
+    (TIER_FREE, CADENCE_MONTHLY): None,   # at-cap graceful reply + escalate
     (TIER_FREE, CADENCE_ANNUAL): None,
-    (TIER_PRO, CADENCE_MONTHLY): 1500,
-    (TIER_PRO, CADENCE_ANNUAL): 1000,
+    (TIER_PRO, CADENCE_MONTHLY): 3500,    # $35.00 / 100 (Locked Decision #15)
+    (TIER_PRO, CADENCE_ANNUAL): 3000,     # $30.00 / 100 (Locked Decision #15)
 }
 
 _OVERAGE_PRICE_CONFIG_KEY: dict[tuple[str, str], str | None] = {

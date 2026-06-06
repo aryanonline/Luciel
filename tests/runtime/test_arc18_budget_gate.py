@@ -280,7 +280,7 @@ class TestIntakeBypassesBudget(unittest.TestCase):
 class TestProOverCapContinues(unittest.TestCase):
 
     def test_pro_over_cap_runs_loop_and_fires_alerts(self):
-        # Seed to cap so this session is the one that tips over 2000.
+        # Seed to cap so this session is the one that tips over 1000 (Pro Monthly).
         backend = InMemoryBackend()
         meter = BudgetMeter(backend=backend)
         # Cheat the counter directly to just under cap to keep the test fast.
@@ -288,7 +288,7 @@ class TestProOverCapContinues(unittest.TestCase):
             "luciel:budget:count:admin-1:7:2026-06-01", 999_999
         )
         backend._store["luciel:budget:count:admin-1:7:2026-06-01"] = (
-            "2000",
+            "1000",
             backend._store["luciel:budget:count:admin-1:7:2026-06-01"][1],
         )
         router = _ScriptedRouter([_plan_json(reply="served", confidence=0.95)])
@@ -302,7 +302,7 @@ class TestProOverCapContinues(unittest.TestCase):
         self.assertEqual(len(router.calls), 1)
         self.assertEqual(resp.message, "served")
         self.assertFalse(resp.escalation_flag)
-        # At 2001/2000 both 80% and 100% thresholds fire, once each.
+        # At 1001/1000 both 80% and 100% thresholds fire, once each.
         thresholds = sorted(a["threshold"] for a in alert_svc.alerts)
         self.assertEqual(thresholds, [80, 100])
 
@@ -310,7 +310,7 @@ class TestProOverCapContinues(unittest.TestCase):
         backend = InMemoryBackend()
         meter = BudgetMeter(backend=backend)
         backend._store["luciel:budget:count:admin-1:7:2026-06-01"] = (
-            "2000", float("inf"),
+            "1000", float("inf"),
         )
         alert_svc = _FakeAlertSvc()
 

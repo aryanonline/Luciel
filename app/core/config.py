@@ -268,8 +268,8 @@ class Settings(BaseSettings):
     # see ARC18_BACKEND_REPORT.md "supersedes" note). Founder provisions
     # these Prices in Stripe; the backend NEVER mints them. Resolved per
     # (tier, cadence) by ``entitlements.overage_price_config_key``:
-    #   Pro monthly → $15.00 / 100 conversations (1500 cents)
-    #   Pro annual  → $10.00 / 100 conversations (1000 cents)
+    #   Pro monthly → $35.00 / 100 conversations (3500 cents)
+    #   Pro annual  → $30.00 / 100 conversations (3000 cents)
     # Empty defaults keep boot safe: a missing slot makes the
     # usage-record report a no-op (the period still resets) and is
     # surfaced as a documented gap. (Enterprise per-contract overage

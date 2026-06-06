@@ -16,7 +16,7 @@ Two decisions are locked here and asserted by tests:
   * **Invoice line-item format** (spec §33), EXACTLY:
     ``Conversation overage — [Instance name]: Z additional conversations × rate``
     where ``Z`` is the RAW additional-conversation count (not the rounded
-    unit count) and ``rate`` is the human rate string (e.g. ``$15.00/100``).
+    unit count) and ``rate`` is the human rate string (e.g. ``$35.00/100``).
     The em-dash (U+2014) and the multiplication sign (U+00D7) are literal.
 """
 
@@ -44,7 +44,7 @@ def overage_units(overage: int) -> int:
 
 
 def rate_string_from_cents(rate_per_100_cents: int) -> str:
-    """Render the per-100 rate as a human string, e.g. 1500 → ``$15.00/100``."""
+    """Render the per-100 rate as a human string, e.g. 3500 → ``$35.00/100``."""
     dollars = rate_per_100_cents / 100
     return f"${dollars:.2f}/100"
 
