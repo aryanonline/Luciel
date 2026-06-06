@@ -315,64 +315,9 @@ def put_personality_config(
     )
     audit_repo = AdminAuditRepository(db)
 
-    # --- Rescan ENT (Vision §7): tier-conditional immediate vs pending. ---
-    # On Enterprise the change must NOT apply immediately; it is staged in
-    # ``pending_approval`` (the LIVE personality_* columns are left
-    # untouched) until a SECOND admin approves it. Free/Pro apply
-    # immediately as before. Mirrors the sibling-grant (§3.3.4) +
-    # custom-role (§3.7.3) tier-conditional approval shape.
-    if admin_tier == TIER_ENTERPRISE:
-        actor_user_id = _require_actor_user_id(request)
-        now = datetime.now(tz=timezone.utc)
-
-        # Stage the proposal. Do NOT touch the live personality_* columns.
-        instance.pending_personality_preset = body.personality_preset
-        instance.pending_personality_axes = proposed_axes
-        instance.pending_business_context = body.business_context
-        instance.personality_approval_state = (
-            PERSONALITY_APPROVAL_STATE_PENDING
-        )
-        instance.personality_submitted_by_user_id = actor_user_id
-        instance.personality_submitted_at = now
-        # A fresh proposal supersedes any prior approval stamp.
-        instance.personality_approved_by_user_id = None
-        instance.personality_approved_at = None
-
-        audit_repo.record(
-            ctx=audit_ctx,
-            admin_id=admin_id,
-            action=ACTION_PERSONALITY_SUBMITTED,
-            resource_type=RESOURCE_INSTANCE_PERSONALITY,
-            resource_pk=instance.id,
-            resource_natural_id=instance.instance_slug,
-            luciel_instance_id=instance.id,
-            before={"approval_state": PERSONALITY_APPROVAL_STATE_LIVE},
-            after={
-                "approval_state": PERSONALITY_APPROVAL_STATE_PENDING,
-                "personality_preset": body.personality_preset,
-                "personality_axes": proposed_axes,
-                # Never copy the free-text body into the audit chain.
-                "business_context_len": len(body.business_context or ""),
-                "submitted_by_user_id": str(actor_user_id),
-            },
-            note=(
-                "Enterprise personality change submitted for second-admin "
-                "approval (Vision §7); live config unchanged until approved."
-            ),
-        )
-
-        db.commit()
-        db.refresh(instance)
-        logger.info(
-            "Personality change submitted for approval instance=%s "
-            "admin=%s submitter=%s",
-            instance.id, admin_id, actor_user_id,
-        )
-        return _response(
-            admin_id=admin_id, admin_tier=admin_tier, instance=instance
-        )
-
-    # --- Free/Pro: apply immediately (unchanged). ---
+    # Single-login (Locked Dec #19): there is no second admin to approve a
+    # change, so personality edits always apply immediately. The Enterprise
+    # second-admin pending-approval branch was excised in Unit 1.
     before = {
         "personality_preset": instance.personality_preset,
         "personality_axes": instance.personality_axes,

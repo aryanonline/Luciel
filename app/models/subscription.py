@@ -68,9 +68,10 @@ if TYPE_CHECKING:
 
 TIER_FREE = "free"
 TIER_PRO = "pro"
-TIER_ENTERPRISE = "enterprise"
+# Enterprise tier DEFERRED (Locked Decision #35, Open Decision #8, Architecture
+# §6); excised in the audit-and-alignment phase (Unit 1).
 
-ALLOWED_TIERS = (TIER_FREE, TIER_PRO, TIER_ENTERPRISE)
+ALLOWED_TIERS = (TIER_FREE, TIER_PRO)
 
 
 # ---------------------------------------------------------------------
@@ -111,10 +112,10 @@ ALLOWED_BILLING_CADENCES = (BILLING_CADENCE_MONTHLY, BILLING_CADENCE_ANNUAL)
 # for the single instance_count_cap axis; the full row is canonical.
 # ---------------------------------------------------------------------
 
+# One Luciel per account (Locked Decision #12): both tiers cap at 1 instance.
 TIER_INSTANCE_CAPS: dict[str, int | None] = {
-    TIER_FREE:       1,
-    TIER_PRO:        10,
-    TIER_ENTERPRISE: None,  # unlimited
+    TIER_FREE: 1,
+    TIER_PRO: 1,
 }
 
 

@@ -13,9 +13,7 @@ from app.api.v1 import billing  # Step 30a
 from app.api.v1 import auth  # Step 30a.3 -- password auth, mandatory at signup
 from app.api.v1 import ses_events  # Arc 8 WU-6 Phase C -- SES feedback / suppression sink
 from app.api.v1 import admin_knowledge  # Arc 11 Step 7
-from app.api.v1 import admin_sibling_grants  # Arc 12 WU4
 from app.api.v1 import admin_tools  # Arc 12 WU2b
-from app.api.v1 import admin_custom_roles  # Arc 12b
 from app.api.v1 import twilio_webhook  # Arc 13 D4 -- inbound SMS webhook
 from app.api.v1 import admin_channels  # Arc 13 D5 -- channel-config admin API
 from app.api.v1 import admin_personality  # Arc 15 WU3 -- personality config API
@@ -42,10 +40,7 @@ api_router.include_router(auth.router)  # Step 30a.3 -- password auth
 api_router.include_router(ses_events.router)  # Arc 8 WU-6 Phase C
 api_router.include_router(admin_knowledge.router)  # Arc 11 Step 7
 api_router.include_router(admin_knowledge.internal_router)  # Arc 11 Step 7
-api_router.include_router(admin_sibling_grants.router)  # Arc 12 WU4
 api_router.include_router(admin_tools.router)  # Arc 12 WU2b
-api_router.include_router(admin_custom_roles.roles_router)  # Arc 12b
-api_router.include_router(admin_custom_roles.assignments_router)  # Arc 12b
 api_router.include_router(twilio_webhook.router)  # Arc 13 D4 -- inbound SMS
 api_router.include_router(admin_channels.router)  # Arc 13 D5 -- channel config
 api_router.include_router(admin_personality.router)  # Arc 15 WU3 -- personality

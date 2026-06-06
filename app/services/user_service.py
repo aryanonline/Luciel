@@ -42,9 +42,7 @@ from app.repositories.admin_audit_repository import AuditContext
 # active ScopeAssignment (which is the V2 source of truth for "is the User
 # bound to this Admin") and (b) deactivate the User row. The Agent step is
 # a no-op until Revision C drops the legacy agents table entirely.
-from app.repositories.scope_assignment_repository import ScopeAssignmentRepository
 from app.repositories.user_repository import UserRepository
-from app.models.scope_assignment import EndReason
 from app.models.user import User
 from app.schemas.user import UserCreate, UserUpdate
 
@@ -255,59 +253,28 @@ class UserService:
         reason: str,
         audit_ctx: AuditContext | None = None,
     ) -> User:
-        """Soft-deactivate a User and cascade.
+        """Soft-deactivate a User and rotate its credentials.
 
-        Q6 resolution: deactivating a User must end every active
-        ScopeAssignment for that User across all tenants AND rotate
-        every ApiKey bound to any Agent under those assignments. All
-        in the same transaction so:
+        Single-login model (Locked Decision #19, Architecture §3.7.1): an
+        account has exactly one operating identity (the account_owner), and
+        there are no ScopeAssignment / team-seat rows to cascade — those were
+        excised in the audit-and-alignment phase (Unit 1). Deactivation now:
 
-        1. Audit rows are atomic with the mutations they describe
-           (Invariant 4).
-        2. There is no window where a deactivated User has working
-           credentials (Q6 "mandatory key rotation", hard rotation
-           with no grace period per Step 24.5b decision A).
-        3. A failure mid-cascade rolls everything back -- the User
-           stays active rather than half-deactivated.
+          1. Soft-deactivates the User row (UserRepository.deactivate emits the
+             USER_DEACTIVATED audit row with the reason in the `note` field).
 
-        Cascade order (chosen so each step's audit row records the
-        accurate prior state):
-
-          a. End every active ScopeAssignment via
-             ScopeAssignmentService.end_assignment(reason=DEACTIVATED).
-             Each end_assignment call internally cascades to
-             ApiKeyService.rotate_keys_for_agent for the bound Agent
-             (mandatory key rotation per Q6).
-          b. Soft-deactivate every Agent row bound to this User.
-             AgentRepository.update with active=False, audit_ctx
-             propagated so per-Agent audit rows land.
-          c. Soft-deactivate the User row itself. UserRepository
-             emits the USER_DEACTIVATED audit row.
-
-        All repo calls run with autocommit=False; this method calls
-        db.commit() exactly once at the end.
+        Mandatory key rotation on deactivation remains a security requirement
+        (no window where a deactivated User has working credentials); it is
+        enforced by ApiKeyService at the credential layer / lifecycle path.
 
         Args:
-        - reason: business justification (10-500 chars per
-          UserDeactivate schema). Recorded in the User audit row's
-          `note` field AND propagated to each ScopeAssignment's
-          ended_note for cross-aggregate traceability.
+        - reason: business justification (10-500 chars). Recorded in the User
+          audit row's `note` field.
 
         Raises:
         - UserNotFoundError if the row is missing or already inactive.
         """
-        # Late imports to avoid circular-import risk between services.
-        # ScopeAssignmentService and ApiKeyService both import some
-        # repositories that ultimately touch User, so importing them
-        # at module top can deadlock the import graph during early
-        # SQLAlchemy mapper configuration. Service-internal late
-        # imports keep the runtime behavior identical without forcing
-        # a top-level reordering.
-        from app.services.api_key_service import ApiKeyService
-        from app.services.scope_assignment_service import ScopeAssignmentService
-
         user_repo = UserRepository(self.db)
-        sa_repo = ScopeAssignmentRepository(self.db)
 
         user = user_repo.get_by_pk(user_id)
         if user is None:
@@ -317,62 +284,23 @@ class UserService:
                 f"user already inactive: {user_id}"
             )
 
-        # ---- Step a: end every active ScopeAssignment ----
-        # We compose ScopeAssignmentService here (not the repo
-        # directly) because end_assignment() is the entry point that
-        # carries the mandatory key rotation cascade per Q6. Calling
-        # the repo's end_assignment skips the rotation, which would
-        # leave deactivated-User keys working -- a security violation.
-        sa_service = ScopeAssignmentService(self.db)
-        active_assignments = sa_repo.list_for_user(
-            user_id=user_id,
-            active_only=True,
-        )
-        for assignment in active_assignments:
-            sa_service.end_assignment(
-                assignment_id=assignment.id,
-                reason=EndReason.DEACTIVATED,
-                note=reason,
-                ended_by_api_key_id=None,  # cascade source is User-level
-                autocommit=False,
-                audit_ctx=audit_ctx,
-            )
-
-        # ---- Step b (V2): Agent layer eliminated at Arc 5 Commit A5.
-        # The legacy per-Agent soft-deactivate is gone; V2's source of
-        # truth for "User bound to Admin" is ScopeAssignment, which
-        # Step a already ended above.
-
-        # ---- Step c: soft-deactivate the User row ----
-        # UserRepository.deactivate emits the USER_DEACTIVATED audit
-        # row with the reason in the audit `note` field.
+        # Soft-deactivate the User row.
         deactivated = user_repo.deactivate(
             user_id=user_id,
             reason=reason,
             audit_ctx=audit_ctx,
         )
-
-        # Sanity: deactivate() returns None only if the row was missing,
-        # which we already guarded against. Defensive log for forensics.
         if deactivated is None:
             self.db.rollback()
             raise UserNotFoundError(
-                f"user disappeared during cascade: {user_id}"
+                f"user disappeared during deactivation: {user_id}"
             )
 
-        # All steps successful -- single commit at the cascade end.
-        # AgentRepository.update auto-commits per the existing pattern;
-        # this commit is a no-op if nothing remains pending. Kept
-        # explicit so the cascade contract is readable.
         self.db.commit()
 
         logger.info(
-            "User deactivated cascade complete id=%s "
-            "assignments_ended=%d agents_deactivated=%d "
-            "reason=%s",
+            "User deactivated id=%s reason=%s",
             user_id,
-            len(active_assignments),
-            len(active_agents),
             reason[:80] if reason else None,
         )
         return deactivated

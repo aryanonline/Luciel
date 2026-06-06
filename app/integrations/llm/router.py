@@ -77,10 +77,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _TIER_FREE = "free"
 _TIER_PRO = "pro"
-_TIER_ENTERPRISE = "enterprise"
+# Enterprise tier DEFERRED (Locked Decision #35); excised in Unit 1.
 
 # Ordered so _resolve_model_pair can look up by index or key.
-_KNOWN_TIERS = (_TIER_FREE, _TIER_PRO, _TIER_ENTERPRISE)
+_KNOWN_TIERS = (_TIER_FREE, _TIER_PRO)
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +161,6 @@ def _resolve_tier_model_pair(tier: str) -> _TierModelPair:
         return _TierModelPair(
             primary_model=settings.anthropic_model_pro,
             fallback_model=settings.openai_model_pro,
-            fast_model_anthropic=settings.anthropic_model_fast,
-        )
-    if tier_lower == _TIER_ENTERPRISE:
-        return _TierModelPair(
-            primary_model=settings.anthropic_model_ent,
-            fallback_model=settings.openai_model_ent,
             fast_model_anthropic=settings.anthropic_model_fast,
         )
     # Free tier (and unknown/unrecognised tiers — fail-closed to cheapest)

@@ -53,12 +53,7 @@ from app.models.admin_audit_log import (
 )
 from app.models.session import SessionModel
 from app.policy.permissions import PERM_CONFIGURE_CHANNELS, PermissionResolver
-from app.policy.scope import (
-    ROLE_ADMIN_MANAGER,
-    ROLE_ADMIN_OWNER,
-    ROLE_INSTANCE_OPERATOR,
-    ScopePolicy,
-)
+from app.policy.scope import ScopePolicy
 from app.repositories.admin_audit_repository import (
     AdminAuditRepository,
     AuditContext,
@@ -72,12 +67,8 @@ router = APIRouter(
     tags=["admin-handoff"],
 )
 
-# Roles allowed to initiate/complete a session takeover.
-_TAKEOVER_ROLES = frozenset({
-    ROLE_ADMIN_OWNER,
-    ROLE_ADMIN_MANAGER,
-    ROLE_INSTANCE_OPERATOR,
-})
+# Session takeover is gated by PERM_CONFIGURE_CHANNELS via PermissionResolver
+# below. Under single-login (Locked Dec #19) the account owner holds it.
 
 
 # =====================================================================
@@ -184,16 +175,15 @@ def _require_takeover_permission(
     # Load the instance to check the role against.
     instance_id = getattr(session, "luciel_instance_id", None)
     if instance_id is None:
-        # No instance binding — allow admin_owner/manager only.
+        # No instance binding — allow the authenticated owner.
         return
     instance = instance_service.get_by_pk(instance_id)
     if instance is None:
         return  # instance gone — allow; let caller proceed
     # Enforce the role + permission gate.
     resolved = PermissionResolver.resolve(request, instance=instance)
-    # Accept if the caller holds PERM_CONFIGURE_CHANNELS (admin_owner,
-    # admin_manager, or an instance_operator scoped to this instance
-    # with that permission).
+    # Accept if the caller holds PERM_CONFIGURE_CHANNELS (the account
+    # owner of this instance's Admin, or platform_admin).
     if PERM_CONFIGURE_CHANNELS not in resolved:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

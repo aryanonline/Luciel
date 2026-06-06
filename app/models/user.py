@@ -163,12 +163,9 @@ class User(Base):
     # repository layer where it's needed. Avoid N+1 silently.
     # ``User.agents`` relationship removed at Arc 5 B1 — the Agent layer
     # was collapsed into ``Instance`` per the aggressive-cleanup amendment.
-    scope_assignments: Mapped[list["ScopeAssignment"]] = relationship(
-        "ScopeAssignment",
-        back_populates="user",
-        foreign_keys="ScopeAssignment.user_id",
-        lazy="select",
-    )
+    # ``User.scope_assignments`` removed in the audit-and-alignment phase
+    # (Unit 1): single-login (Locked Dec #19) has no team/seat/role bindings,
+    # so the ScopeAssignment model and this relationship no longer exist.
 
     # Step 24.5b File 2.8 -- restored from Commit 1 deferral.
     #

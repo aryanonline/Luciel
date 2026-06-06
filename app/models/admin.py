@@ -36,8 +36,11 @@ from app.models.base import Base
 
 TIER_FREE = "free"
 TIER_PRO = "pro"
-TIER_ENTERPRISE = "enterprise"
-ALLOWED_TIERS_V2 = (TIER_FREE, TIER_PRO, TIER_ENTERPRISE)
+# Enterprise tier DEFERRED (Vision Open Decision #8, Locked Decision #35,
+# Architecture §6). The platform ships Free/Pro only; the Enterprise SKU
+# returns only if inbound enterprise demand justifies it. Excised in the
+# audit-and-alignment phase (Unit 1).
+ALLOWED_TIERS_V2 = (TIER_FREE, TIER_PRO)
 
 TIER_SOURCE_STRIPE_WEBHOOK = "stripe_webhook"
 TIER_SOURCE_SALES_OPS = "sales_ops_provisioned"
@@ -149,7 +152,7 @@ class Admin(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "tier IN ('free', 'pro', 'enterprise', 'individual', 'solo', 'team', 'company')",
+            "tier IN ('free', 'pro')",
             name="ck_admins_tier_valid_during_migration",
         ),
         CheckConstraint(

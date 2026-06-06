@@ -9,11 +9,9 @@ from app.models.retention import RetentionPolicy, DeletionLog
 from app.models.user_consent import UserConsent
 from app.models.admin_audit_log import AdminAuditLog  # noqa: F401  (Step 24.5 — File 6.5a)
 from app.models.user import User  # noqa: F401  (Step 24.5b)
-from app.models.scope_assignment import ScopeAssignment, EndReason  # noqa: F401  (Step 24.5b)
 from app.models.conversation import Conversation  # noqa: F401  (Step 24.5c)
 from app.models.identity_claim import IdentityClaim, ClaimType  # noqa: F401  (Step 24.5c)
 from app.models.subscription import Subscription  # noqa: F401  (Step 30a)
-from app.models.user_invite import UserInvite, InviteStatus  # noqa: F401  (Step 30a.4)
 from app.models.email_send_event import (  # noqa: F401  (Arc 8 WU-6)
     EmailSendEvent,
     SES_EVENT_TYPES,
@@ -36,9 +34,8 @@ from app.models.admin import (  # noqa: F401
     ALLOWED_TIER_SOURCES,
     TIER_FREE,
     TIER_PRO,
-    TIER_ENTERPRISE,
 )
-# Arc 6 A — admin_widget_domains allowlist (Free/Pro/Enterprise widget domain control).
+# Arc 6 A — admin_widget_domains allowlist (Free/Pro widget domain control).
 from app.models.admin_widget_domain import AdminWidgetDomain  # noqa: F401
 from app.models.instance import Instance  # noqa: F401
 # Arc 13 — channel inbound-addressing → Instance routing map.
@@ -57,29 +54,6 @@ from app.models.instance_connection import (  # noqa: F401
 from app.models.secret_cleanup_outbox import (  # noqa: F401
     SecretCleanupOutbox,
     OUTBOX_STATUSES,
-)
-# Arc 12 WU4 — sibling-Luciel composition grants (§3.3.4).
-from app.models.sibling_call_grant import (  # noqa: F401
-    SiblingCallGrant,
-    APPROVAL_STATE_LIVE,
-    APPROVAL_STATE_PENDING,
-    APPROVAL_STATE_REVOKED,
-    ALLOWED_APPROVAL_STATES,
-)
-# Arc 12b — permission-based custom roles (Enterprise).
-from app.models.permission_model import (  # noqa: F401
-    Permission,
-    CustomRole,
-    RolePermission,
-    UserRoleAssignment,
-    LOCKED_ROLE_ADMIN_OWNER,
-    LOCKED_ROLE_ADMIN_MANAGER,
-    LOCKED_ROLE_INSTANCE_OPERATOR,
-    LOCKED_ROLE_READ_ONLY_VIEWER,
-    ALL_LOCKED_ROLES,
-    SCOPE_TYPE_ALL_INSTANCES,
-    SCOPE_TYPE_INSTANCE_SPECIFIC,
-    ALL_SCOPE_TYPES,
 )
 # Arc 14 U2 — §3.4.5 escalation judgment event store.
 from app.models.escalation_event import (  # noqa: F401
@@ -134,14 +108,10 @@ __all__ = [
     "KnowledgeSource",
     "AdminAuditLog",
     "User",
-    "ScopeAssignment",
-    "EndReason",
     "Conversation",
     "IdentityClaim",
     "ClaimType",
     "Subscription",
-    "UserInvite",
-    "InviteStatus",
     # Arc 8 WU-6 -- SES feedback / suppression cohort
     "EmailSendEvent",
     "SES_EVENT_TYPES",
@@ -161,7 +131,6 @@ __all__ = [
     "ALLOWED_TIER_SOURCES",
     "TIER_FREE",
     "TIER_PRO",
-    "TIER_ENTERPRISE",
     # Arc 6 A -- widget domain allowlist.
     "AdminWidgetDomain",
     # Arc 13 -- channel routing map.
@@ -175,12 +144,6 @@ __all__ = [
     # Arc 17 -- lifecycle secret-cleanup outbox.
     "SecretCleanupOutbox",
     "OUTBOX_STATUSES",
-    # Arc 12 WU4 -- sibling-Luciel composition grants.
-    "SiblingCallGrant",
-    "APPROVAL_STATE_LIVE",
-    "APPROVAL_STATE_PENDING",
-    "APPROVAL_STATE_REVOKED",
-    "ALLOWED_APPROVAL_STATES",
     # Arc 14 U2 -- escalation judgment event store.
     "EscalationEvent",
     "SIGNAL_EXPLICIT_HUMAN_REQUEST",
@@ -211,16 +174,4 @@ __all__ = [
     "CB_STATE_HALF_OPEN",
     "CB_STATE_OPEN",
     # Arc 12b -- permission-based custom roles.
-    "Permission",
-    "CustomRole",
-    "RolePermission",
-    "UserRoleAssignment",
-    "LOCKED_ROLE_ADMIN_OWNER",
-    "LOCKED_ROLE_ADMIN_MANAGER",
-    "LOCKED_ROLE_INSTANCE_OPERATOR",
-    "LOCKED_ROLE_READ_ONLY_VIEWER",
-    "ALL_LOCKED_ROLES",
-    "SCOPE_TYPE_ALL_INSTANCES",
-    "SCOPE_TYPE_INSTANCE_SPECIFIC",
-    "ALL_SCOPE_TYPES",
 ]
