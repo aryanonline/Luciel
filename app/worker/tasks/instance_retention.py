@@ -64,6 +64,7 @@ the two beat tasks do not contend for the worker's prefetch slot):
        leads                         WHERE luciel_instance_id = ?  (SET NULL; GDPR)
        escalation_events             WHERE luciel_instance_id = ?  (SET NULL; GDPR)
        sessions / messages           WHERE luciel_instance_id = ?
+       conversations                  WHERE admin_id = ?  (last instance only)
                                      (messages cascade via FK ON DELETE CASCADE)
        api_keys                      WHERE luciel_instance_id = ?  (embed keys)
        instance_connections          WHERE instance_id = ?         (RESTRICT)
@@ -439,6 +440,32 @@ def _hard_delete_instance_cascade(
         "DELETE FROM sessions WHERE luciel_instance_id = :iid",
         {"iid": instance_id},
     )
+
+    # ------------------------------------------------------------------
+    # Step 4b: conversations (tenant-level grouping, admin_id-scoped, no
+    # instance FK). In the single-Luciel model (Locked Decision #12) an
+    # account has exactly one instance, so hard-deleting that instance
+    # would otherwise orphan the admin's conversation rows. Purge them
+    # here per §3.6.5 ("full conversation" data), BUT only when this is
+    # the admin's LAST surviving instance — a defensive guard so that if
+    # the multi-instance model ever returns, one Luciel's hard-delete
+    # never destroys conversation data still owned by a sibling Luciel.
+    # ------------------------------------------------------------------
+    surviving = db.execute(
+        text(
+            "SELECT count(*) FROM instances "
+            "WHERE admin_id = :aid AND id <> :iid"
+        ),
+        {"aid": admin_id, "iid": instance_id},
+    ).scalar()
+    if not surviving:
+        counts["conversations"] = _delete_count(
+            db,
+            "DELETE FROM conversations WHERE admin_id = :aid",
+            {"aid": admin_id},
+        )
+    else:
+        counts["conversations"] = 0
 
     # ------------------------------------------------------------------
     # Step 5: embed keys — explicit step for audit visibility.

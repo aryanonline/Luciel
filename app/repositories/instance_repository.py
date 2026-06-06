@@ -510,6 +510,20 @@ class InstanceRepository:
                 audit_ctx=audit_ctx,
             )
 
+            # §3.6.3 step 3 — knowledge sources set to soft_deleted, in
+            # the SAME atomic transaction as the state flip. The retriever
+            # filters ``soft_deleted_at IS NULL`` so this makes the
+            # knowledge non-retrievable during the grace window; restore
+            # (§3.6.4) reverses exactly what this stamped.
+            from app.repositories.knowledge_repository import (
+                KnowledgeRepository,
+            )
+            KnowledgeRepository(self.db).soft_delete_for_instance(
+                instance_id=instance.id,
+                admin_id=instance.admin_id,
+                autocommit=False,
+            )
+
         self.db.commit()
         self.db.refresh(instance)
         logger.info(
@@ -686,6 +700,19 @@ class InstanceRepository:
         instance.instance_status = InstanceStatus.ACTIVE
         instance.active = True
         instance.soft_deleted_at = None
+
+        # §3.6.4 reactivation — mark knowledge sources active again.
+        # Scope the restore to rows the deactivation cascade itself
+        # soft-deleted (stamped at-or-after the grace clock), so a
+        # source the admin had independently deleted before deactivating
+        # stays deleted.
+        from app.repositories.knowledge_repository import KnowledgeRepository
+        KnowledgeRepository(self.db).restore_for_instance(
+            instance_id=instance.id,
+            admin_id=instance.admin_id,
+            deactivated_at=before_soft_deleted_at,
+            autocommit=False,
+        )
 
         if audit_ctx is not None:
             AdminAuditRepository(self.db).record(

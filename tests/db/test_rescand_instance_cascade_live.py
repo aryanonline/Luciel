@@ -105,6 +105,16 @@ def test_instance_cascade_purges_all_child_tables():
             """
         ), {"aid": admin_id, "iid": instance_id, "sid": uuid.uuid4().hex[:36]})
 
+        # --- conversations (tenant-level grouping, admin_id-scoped) ---
+        # Unit 4 (Gap B): the instance cascade purges conversations when
+        # this is the admin's last surviving instance (single-Luciel).
+        db.execute(text(
+            """
+            INSERT INTO conversations (id, admin_id, active, created_at)
+            VALUES (gen_random_uuid(), :aid, true, now())
+            """
+        ), {"aid": admin_id})
+
         # NOTE: the sibling_call_grants seed was removed in Unit 1 --
         # that table (multi-Luciel composition, Open Decision #7) was
         # dropped and the cascade no longer touches it.
@@ -155,9 +165,19 @@ def test_instance_cascade_purges_all_child_tables():
         )
         assert result.fetchone() is None, "Knowledge sources must be purged."
 
+        # conversations were purged (Gap B: last surviving instance).
+        result = db.execute(
+            text("SELECT id FROM conversations WHERE admin_id = :aid"),
+            {"aid": admin_id},
+        )
+        assert result.fetchone() is None, (
+            "Conversations must be purged on the admin's last-instance "
+            "hard-delete (Unit 4 Gap B)."
+        )
+
         # row_counts manifest includes expected keys.
         for key in ("leads", "instances", "api_keys",
-                    "knowledge_sources"):
+                    "knowledge_sources", "conversations"):
             assert key in row_counts, (
                 f"row_counts manifest must include '{key}'."
             )

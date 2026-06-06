@@ -38,6 +38,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.knowledge import KnowledgeChunk
+from app.models.knowledge_source import KnowledgeSource
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,95 @@ class KnowledgeRepository:
         else:
             self.db.flush()
         return len(rows)
+
+    def soft_delete_for_instance(
+        self,
+        *,
+        instance_id: int,
+        admin_id: str,
+        autocommit: bool = False,
+    ) -> dict[str, int]:
+        """Soft-delete ALL knowledge sources + chunks for one instance.
+
+        Architecture §3.6.3 step 3: on Luciel deactivation, knowledge
+        sources are set to ``soft_deleted``. Stamps ``soft_deleted_at =
+        now()`` on every currently-active source and chunk for the
+        instance, so the retriever (which filters ``soft_deleted_at IS
+        NULL``) stops returning them during the grace window. Reversible
+        via :meth:`restore_for_instance` (§3.6.4 reactivation).
+
+        Idempotent: rows already soft-deleted are not re-stamped (so the
+        original deletion timestamp is preserved). Returns per-table
+        newly-stamped counts.
+        """
+        now = datetime.now(tz=timezone.utc)
+        counts: dict[str, int] = {}
+        for model, key in (
+            (KnowledgeChunk, "knowledge_chunks"),
+            (KnowledgeSource, "knowledge_sources"),
+        ):
+            rows = list(self.db.execute(
+                select(model).where(
+                    model.luciel_instance_id == instance_id,
+                    model.admin_id == admin_id,
+                    model.soft_deleted_at.is_(None),
+                )
+            ).scalars().all())
+            for row in rows:
+                row.soft_deleted_at = now
+            counts[key] = len(rows)
+        if autocommit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return counts
+
+    def restore_for_instance(
+        self,
+        *,
+        instance_id: int,
+        admin_id: str,
+        deactivated_at: datetime | None = None,
+        autocommit: bool = False,
+    ) -> dict[str, int]:
+        """Restore (un-soft-delete) knowledge for one instance.
+
+        Architecture §3.6.4 reactivation: marking knowledge sources as
+        active again. Clears ``soft_deleted_at`` on the sources + chunks
+        that were soft-deleted by the deactivation cascade.
+
+        ``deactivated_at`` (the instance's ``soft_deleted_at`` clock):
+        when provided, only rows stamped at-or-after that moment are
+        restored, so a source the admin had *independently* soft-deleted
+        BEFORE deactivating the Luciel stays deleted (we only reverse
+        what the deactivation cascade itself stamped). When ``None``,
+        all soft-deleted rows for the instance are restored.
+
+        Returns per-table restored counts.
+        """
+        counts: dict[str, int] = {}
+        for model, key in (
+            (KnowledgeChunk, "knowledge_chunks"),
+            (KnowledgeSource, "knowledge_sources"),
+        ):
+            conds = [
+                model.luciel_instance_id == instance_id,
+                model.admin_id == admin_id,
+                model.soft_deleted_at.is_not(None),
+            ]
+            if deactivated_at is not None:
+                conds.append(model.soft_deleted_at >= deactivated_at)
+            rows = list(self.db.execute(
+                select(model).where(*conds)
+            ).scalars().all())
+            for row in rows:
+                row.soft_deleted_at = None
+            counts[key] = len(rows)
+        if autocommit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return counts
 
     # ==============================================================
     # READ — vector similarity (for retriever, chat path)
