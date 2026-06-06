@@ -83,6 +83,30 @@ def upgrade() -> None:
     insp = sa.inspect(conn)
     existing = set(insp.get_table_names())
 
+    # 0. Data migration: any existing Enterprise-tier rows are downgraded to
+    #    Pro before the CHECK is tightened. Enterprise was never GA (Open
+    #    Decision #8 defers it); deferring the tier means existing enterprise
+    #    rows collapse to the strongest shipped tier (Pro). This keeps the
+    #    tightened CHECK satisfiable and is the doctrine-consistent action.
+    op.execute("UPDATE admins SET tier='pro' WHERE tier='enterprise'")
+    if "subscriptions" in existing:
+        op.execute("UPDATE subscriptions SET tier='pro' WHERE tier='enterprise'")
+    if "data_export_jobs" in existing:
+        op.execute(
+            "UPDATE data_export_jobs SET tier_at_request='pro' "
+            "WHERE tier_at_request='enterprise'"
+        )
+    # History/snapshot tier columns (no CHECK, but normalise for consistency).
+    op.execute(
+        "UPDATE admin_audit_logs SET tier_at_write='pro' "
+        "WHERE tier_at_write='enterprise'"
+    )
+    if "conversation_overage_ledger" in existing:
+        op.execute(
+            "UPDATE conversation_overage_ledger SET tier_at_close='pro' "
+            "WHERE tier_at_close='enterprise'"
+        )
+
     # 1. Drop deferred-feature tables (FK-safe order). IF EXISTS via guard.
     for tbl in _DROP_ORDER:
         if tbl in existing:
@@ -95,7 +119,15 @@ def upgrade() -> None:
             "data_export_jobs", "tier_at_request", "ck_data_export_jobs_tier_valid"
         )
 
-    # 3. Drop the Enterprise personality-approval columns on instances.
+    # 3. Drop the Enterprise personality-approval columns on instances
+    #    (and the CHECK constraint that referenced approval_state).
+    instance_constraints = {
+        c["name"] for c in insp.get_check_constraints("instances")
+    }
+    if "ck_instances_personality_approval_state" in instance_constraints:
+        op.drop_constraint(
+            "ck_instances_personality_approval_state", "instances", type_="check"
+        )
     instance_cols = {c["name"] for c in insp.get_columns("instances")}
     with op.batch_alter_table("instances") as batch:
         for col in _PERSONALITY_APPROVAL_COLS:
@@ -154,6 +186,10 @@ def downgrade() -> None:
                     server_default="live",
                 )
             )
+            batch.create_check_constraint(
+                "ck_instances_personality_approval_state",
+                "personality_approval_state IN ('live', 'pending_approval')",
+            )
         if "personality_submitted_by_user_id" not in instance_cols:
             batch.add_column(sa.Column("personality_submitted_by_user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=True))
         if "personality_submitted_at" not in instance_cols:
@@ -205,7 +241,10 @@ def downgrade() -> None:
         sa.Column("id", UUID, primary_key=True),
         sa.Column("admin_id", sa.String(100), sa.ForeignKey("admins.id"), nullable=False),
         sa.Column("user_id", UUID, sa.ForeignKey("users.id"), nullable=False),
-        sa.Column("role", sa.Enum(name="scope_role", create_type=False), nullable=False),
+        # Structural-only downgrade: role stored as text (the scope_role enum
+        # is recreated above for type-existence parity, but we avoid binding it
+        # here so SQLAlchemy does not attempt to re-CREATE the type).
+        sa.Column("role", sa.String(32), nullable=False),
         sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
     )

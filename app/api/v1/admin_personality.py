@@ -41,7 +41,6 @@ from app.models.admin_audit_log import (
     RESOURCE_INSTANCE_PERSONALITY,
 )
 from app.models.instance import (
-    PERSONALITY_APPROVAL_STATE_LIVE,
     Instance,
 )
 from app.policy.entitlements import (
@@ -272,8 +271,8 @@ def put_personality_config(
     instance.personality_preset = body.personality_preset
     instance.personality_axes = proposed_axes
     instance.business_context = body.business_context
-    # Free/Pro never enter the approval workflow; keep state 'live'.
-    instance.personality_approval_state = PERSONALITY_APPROVAL_STATE_LIVE
+    # Single-login (Locked Dec #19): no approval workflow; changes apply
+    # immediately. The personality_approval_state column was dropped in Unit 1.
 
     audit_repo.record(
         ctx=audit_ctx,
