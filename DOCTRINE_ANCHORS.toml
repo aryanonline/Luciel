@@ -155,9 +155,9 @@ note = "Alembic is config-bound (alembic.ini: script_location = alembic). Renami
 [[anchor]]
 id = "analytics"
 doctrine = "§8 — app/analytics/ (§3.9, reads-only, no new write path)"
-status = "NO-MODULE-YET"
-paths = []
-note = "No analytics subsystem module exists today (only incidental references). The §3.9 subsystem is thin/unbuilt; nothing to relocate. No module fabricated."
+status = "MATCHES-DOC"
+paths = ["app/analytics/"]
+note = "Unit 13d built the §3.9 Analytics & Reporting subsystem at the §8 path. app/analytics/service.py::AnalyticsService computes read-only aggregate metrics (conversations, leads, escalations-by-signal, escalation→ack p50/p95, appointments booked, conversion rate, channel mix, budget utilization, top knowledge sources, busiest-times) entirely via SELECT aggregates scoped WHERE admin_id=:admin_id through the RLS-bound TenantScoped session. NO new tables, NO new write path, NO new PII. The lone write the unit adds is admin lead-outcome (app/api/v1/admin_leads.py → leads.outcome), which is lead BUSINESS data the admin owns, not analytics data. The HTTP surface is app/api/v1/analytics.py (tier-shaped GET + Pro CSV export); it EXTENDS app/api/v1/admin/usage.py (reuses the budget meter, does not duplicate it)."
 
 [[anchor]]
 id = "isolation_suite"

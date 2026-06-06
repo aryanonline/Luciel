@@ -159,8 +159,32 @@ def test_real_map_change_under_moved_path_is_caught():
     assert "auth_access" in res.matched_anchors
 
 
-def test_no_module_yet_anchor_has_no_paths_in_real_map():
+def test_no_module_yet_status_contributes_no_paths():
+    """A NO-MODULE-YET anchor names an unbuilt subsystem, so it governs no
+    live paths even if a stray ``paths`` glob is present — the gate keys
+    off status, not the presence of a paths key.
+
+    (Until Unit 13d the real map's ``analytics`` anchor was the live
+    example here; Unit 13d built §3.9 Analytics at app/analytics/ and
+    flipped it to MATCHES-DOC, so the invariant is now exercised against
+    a synthetic NO-MODULE-YET anchor rather than a real one.)
+    """
+    doc = {
+        "anchor": [
+            {
+                "id": "not_built_yet",
+                "status": "NO-MODULE-YET",
+                "paths": ["app/not_built_yet/"],
+            }
+        ]
+    }
+    assert gate.anchored_paths(doc) == {}
+
+
+def test_real_map_analytics_is_built_and_governed():
+    """Post-Unit-13d: analytics is MATCHES-DOC and governs app/analytics/."""
     with ANCHORS_PATH.open("rb") as fh:
         doc = tomllib.load(fh)
     id_to_paths = gate.anchored_paths(doc)
-    assert "analytics" not in id_to_paths
+    assert "analytics" in id_to_paths
+    assert any(p.startswith("app/analytics") for p in id_to_paths["analytics"])

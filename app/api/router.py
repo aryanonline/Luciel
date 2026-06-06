@@ -22,6 +22,8 @@ from app.api.v1 import admin_connections  # Arc 15 WU4 -- connection-config API
 from app.api.v1.admin import usage as admin_usage  # Arc 18 -- conversation-budget usage API
 from app.api.v1 import admin_handoff  # Rescan Tier-C -- human-controlled session handoff
 from app.api.v1 import admin_escalation_ack  # Unit 9 -- escalation ack endpoint
+from app.api.v1 import admin_leads  # Unit 13d -- lead-outcome endpoint (§3.9 prerequisite)
+from app.api.v1 import analytics  # Unit 13d -- §3.9 Analytics & Reporting API
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -50,3 +52,5 @@ api_router.include_router(admin_connections.router)  # Arc 15 WU4 -- connections
 api_router.include_router(admin_usage.router)  # Arc 18 -- budget usage API
 api_router.include_router(admin_handoff.router)  # Rescan Tier-C -- human handoff
 api_router.include_router(admin_escalation_ack.router)  # Unit 9 -- escalation ack
+api_router.include_router(admin_leads.router)  # Unit 13d -- lead-outcome endpoint
+api_router.include_router(analytics.router)  # Unit 13d -- §3.9 Analytics API

@@ -685,6 +685,20 @@ ACTION_ESCALATION_FIRED = "escalation_fired"
 #   a lead row carries customer contact/PII the operator can act on.
 ACTION_LEAD_CAPTURED = "lead_captured"
 
+# Unit 13d (§3.9) — admin records a lead's sales outcome.
+#
+# ACTION_LEAD_OUTCOME_SET -- emitted by PATCH /api/v1/admin/leads/{id}/
+#   outcome when the admin sets/changes a lead's ``outcome`` (converted /
+#   lost / in_progress). This is the ONLY write path the §3.9 Analytics
+#   unit adds, and it writes lead BUSINESS data the admin owns (not
+#   analytics data — analytics itself stays read-only). Distinct from
+#   ACTION_LEAD_CAPTURED (cognition writing the row) — this is the
+#   operator working the lead afterward. before_json carries
+#   {outcome: <old-or-null>}; after_json carries {outcome: <new>}.
+#   resource_type = RESOURCE_LEAD; resource_pk = leads.id;
+#   resource_natural_id = the session_id.
+ACTION_LEAD_OUTCOME_SET = "lead_outcome_set"
+
 # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
 #
 # ACTION_PERSONALITY_UPDATED -- a user changed an Instance's structured
@@ -955,6 +969,8 @@ ALLOWED_ACTIONS = (
     ACTION_ESCALATION_OWNER_FALLBACK,
     # Arc 14 U4 — §3.4.4 lead capture cognition.
     ACTION_LEAD_CAPTURED,
+    # Unit 13d — §3.9 admin lead-outcome recording.
+    ACTION_LEAD_OUTCOME_SET,
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
     ACTION_PERSONALITY_UPDATED,
     ACTION_ESCALATION_CONFIG_UPDATED,
