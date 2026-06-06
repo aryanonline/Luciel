@@ -71,6 +71,8 @@ from app.models.conversation_overage_ledger import (  # noqa: F401
 )
 # Arc 14 U4 — §3.4.4 lead capture + §3.4.7 summarization (cognition).
 from app.models.lead import Lead  # noqa: F401
+# Unit 13e — §3.4.10 persisted session-summary store (cross-session memory).
+from app.models.session_summary import SessionSummary  # noqa: F401
 # Arc 12 WU6 — BYO webhook config + general-purpose tool execution log.
 from app.models.byo_webhook_endpoint import ByoWebhookEndpoint  # noqa: F401
 from app.models.tool_execution_log import (  # noqa: F401
@@ -156,6 +158,8 @@ __all__ = [
     "ConversationOverageLedger",
     # Arc 14 U4 -- §3.4.4 lead capture + §3.4.7 summarization.
     "Lead",
+    # Unit 13e -- §3.4.10 persisted session-summary store.
+    "SessionSummary",
     # Arc 12 WU6 -- BYO webhook config + tool execution log.
     "ByoWebhookEndpoint",
     "ToolExecutionLog",

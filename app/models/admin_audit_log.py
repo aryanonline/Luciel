@@ -374,6 +374,20 @@ ACTION_OVERAGE_REPORTED = "overage_reported"
 ACTION_HUMAN_TAKEOVER_STARTED = "human_takeover_started"
 ACTION_HUMAN_TAKEOVER_ENDED = "human_takeover_ended"
 
+# Unit 13e §3.4.8 — a session was finalized (ended + summarized) because
+# its channel-class inactivity timeout elapsed. Emitted by the session
+# sweep (app.worker.tasks.session_sweep) for each session it finalizes.
+# resource_type = RESOURCE_SESSION; resource_natural_id = sessions.id.
+# after_json carries {session_id, channel, channel_class,
+# timeout_seconds, resolved_lead_id, idle_seconds}.
+ACTION_SESSION_FINALIZED_INACTIVITY = "session_finalized_inactivity"
+
+# Unit 13e §3.4.10 — the retention worker hard-deleted a data row (a
+# transcript/session, a summary, or a lead) because its tier-resolved
+# retention TTL elapsed. Emitted on EACH hard-delete. after_json carries
+# {data_class, resolved_lead_id, retention_policy_applied, deleted_at}.
+ACTION_DATA_RETENTION_HARD_DELETE = "data_retention_hard_delete"
+
 # Step 30a.2 -- retention worker hard-purge action. See ALLOWED_ACTIONS
 # entry for full rationale. Defined here (above ALLOWED_ACTIONS) so the
 # whitelist tuple can reference it.
@@ -994,6 +1008,9 @@ ALLOWED_ACTIONS = (
     # Rescan Tier-C §3.4.12 — human-controlled session handoff events.
     ACTION_HUMAN_TAKEOVER_STARTED,
     ACTION_HUMAN_TAKEOVER_ENDED,
+    # Unit 13e §3.4.8 / §3.4.10
+    ACTION_SESSION_FINALIZED_INACTIVITY,
+    ACTION_DATA_RETENTION_HARD_DELETE,
 )
 
 
@@ -1124,6 +1141,11 @@ RESOURCE_ESCALATION_EVENT = "escalation_event"
 # conversation" with a single filter.
 RESOURCE_LEAD = "lead"
 
+# Unit 13e — §3.4.10 persisted session-summary store. The auditable
+# resource for the retention worker's summary-TTL hard-delete.
+# resource_natural_id = session_summaries.session_id.
+RESOURCE_SESSION_SUMMARY = "session_summary"
+
 # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1). Both target
 # the instances row but carry distinct resource types so an auditor can
 # isolate persona-voice changes from escalation-contact changes at the
@@ -1189,6 +1211,8 @@ ALLOWED_RESOURCE_TYPES = (
     RESOURCE_ESCALATION_EVENT,
     # Arc 14 U4 — lead capture cognition.
     RESOURCE_LEAD,
+    # Unit 13e — §3.4.10 persisted session-summary store.
+    RESOURCE_SESSION_SUMMARY,
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
     RESOURCE_INSTANCE_PERSONALITY,
     RESOURCE_INSTANCE_ESCALATION,

@@ -43,6 +43,7 @@ class SessionRepository:
         status: str = "active",
         conversation_id: uuid.UUID | None = None,
         luciel_instance_id: int | None = None,
+        resolved_lead_id: str | None = None,
     ) -> SessionModel:
         # Step 24.5c sub-branch 4: conversation_id is the FK to
         # conversations.id that groups sibling sessions across
@@ -61,6 +62,10 @@ class SessionRepository:
         # Arc 12 EX3: agent_id / domain_id columns dropped from the
         # schema; the v2 row is (admin_id, luciel_instance_id,
         # session_id) per Walls 3/4.
+        # Unit 13e §3.4.8: resolved_lead_id is the session-key participant
+        # id. NULL is the anonymous-widget default (never matches another
+        # NULL as "same participant" per §3.4.9). The identity resolver
+        # supplies a non-NULL value via create_session_with_identity.
         session = SessionModel(
             id=session_id,
             admin_id=admin_id,
@@ -69,6 +74,7 @@ class SessionRepository:
             status=status,
             conversation_id=conversation_id,
             luciel_instance_id=luciel_instance_id,
+            resolved_lead_id=resolved_lead_id,
         )
         self.db.add(session)
         self.db.commit()
@@ -94,6 +100,55 @@ class SessionRepository:
         if admin_id and session.admin_id != admin_id:
             return None
         return session
+
+    def find_session_by_key(
+        self,
+        *,
+        luciel_instance_id: int,
+        resolved_lead_id: str | None,
+        channel: str,
+        admin_id: str | None = None,
+    ) -> SessionModel | None:
+        """§3.4.8 session-key lookup: (instance_id, participant_id, channel).
+
+        Returns the most-recent matching session for the session key, or
+        None. Backed by ix_sessions_key on
+        (luciel_instance_id, resolved_lead_id, channel).
+
+        §3.4.9 HARD RULE: a NULL ``resolved_lead_id`` (anonymous widget)
+        NEVER matches another session's NULL as "same participant". We
+        enforce this by refusing to look up on a NULL participant id at
+        all — an anonymous session has no shared key, so it always starts
+        fresh. (SQL ``= NULL`` would also be NULL/never-TRUE, but failing
+        loud here documents the rule and avoids a full-table scan.)
+
+        ``admin_id`` is an optional application-level tenant narrowing on
+        top of the (Wall-1) RLS already in force on the request's DB
+        session. The lookup is fenced by luciel_instance_id (Wall-3) so it
+        can never cross instances, and admin_id (Wall-1) so it can never
+        cross tenants.
+        """
+        if resolved_lead_id is None:
+            return None
+        # §3.4.9 reopened-thread rule: only an ACTIVE session matches the
+        # key. Once a session has ended (explicit end-signal or the
+        # §3.4.8 inactivity sweep set status='ended'), the key no longer
+        # resolves to it, so a new inbound starts a NEW session — a new
+        # budget unit — rather than reviving the closed one.
+        stmt = (
+            select(SessionModel)
+            .where(
+                SessionModel.luciel_instance_id == luciel_instance_id,
+                SessionModel.resolved_lead_id == resolved_lead_id,
+                SessionModel.channel == channel,
+                SessionModel.status == "active",
+            )
+            .order_by(SessionModel.created_at.desc())
+            .limit(1)
+        )
+        if admin_id:
+            stmt = stmt.where(SessionModel.admin_id == admin_id)
+        return self.db.scalars(stmt).first()
 
     def list_sessions(
         self,

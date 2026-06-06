@@ -187,6 +187,14 @@ celery_app = Celery(
     include=[
         "app.worker.tasks.memory_extraction",
         "app.worker.tasks.retention",
+        # Unit 13e §3.4.8 -- deterministic session inactivity sweep +
+        # finalization (the in-sandbox fallback for the Redis TTL-expiry
+        # → §3.4.7 finalization trigger; keyspace-notifications are the
+        # deploy-phase optimization).
+        "app.worker.tasks.session_sweep",
+        # Unit 13e §3.4.10 -- per-tier session-summary retention hard-delete
+        # (90d Free / 1y Pro). Emits ACTION_DATA_RETENTION_HARD_DELETE.
+        "app.worker.tasks.session_summary_retention",
         # Arc 11 Closeout PR-A -- per-instance hard-purge worker.
         "app.lifecycle.retention",
         # Arc 17 Task 5c -- connection token-refresh + secret-cleanup drain.
@@ -296,6 +304,28 @@ celery_app.conf.update(
         "instance-retention-purge-nightly": {
             "task": "app.lifecycle.retention.run_instance_retention_purge",
             "schedule": crontab(hour=8, minute=30),
+            "options": {"queue": "luciel-memory-tasks"},
+        },
+        # Unit 13e §3.4.8 -- session inactivity sweep. Runs every 5
+        # minutes so a 30-min synchronous_web session is finalized within
+        # one timeout window + one sweep tick of going idle. This is the
+        # deterministic fallback for the Redis TTL-expiry → §3.4.7
+        # finalization trigger; live keyspace-notifications (deploy-phase)
+        # would fire it sooner but the sweep guarantees it fires at all.
+        "session-inactivity-sweep": {
+            "task": "app.worker.tasks.session_sweep.run_session_inactivity_sweep",
+            "schedule": crontab(minute="*/5"),
+            "options": {"queue": "luciel-memory-tasks"},
+        },
+        # Unit 13e §3.4.10 -- session-summary retention hard-delete
+        # nightly (90d Free / 1y Pro). Runs alongside the other nightly
+        # retention sweeps; independent across rows so no contention.
+        "session-summary-retention-nightly": {
+            "task": (
+                "app.worker.tasks.session_summary_retention."
+                "run_session_summary_retention"
+            ),
+            "schedule": crontab(hour=8, minute=15),
             "options": {"queue": "luciel-memory-tasks"},
         },
         # Arc 10 -- audit-tier cold-archive nightly. Runs an hour

@@ -47,6 +47,35 @@ class SessionModel(Base, TimestampMixin):
     )
 
     user_id: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
+
+    # Unit 13e §3.4.8 — the session-key participant id. The §3.4.8 session
+    # key is (instance_id, participant_id, channel), where participant_id =
+    # the resolved lead identity for lead-facing channels (set when the
+    # identity resolver binds a session to a lead/User), or the internal
+    # Slack workspace user id for the internal channel (§3.4.9 exception).
+    #
+    # ADDITIVE: user_id is kept verbatim for back-compat and the anonymous
+    # widget path. A widget visitor is anonymous at v1 → resolved_lead_id
+    # stays NULL. The §3.4.9 HARD RULE: a NULL resolved_lead_id must NEVER
+    # match another session's NULL as "same participant" — anonymous tokens
+    # never inherit history. SQL equality already gives this for free
+    # (NULL = NULL is NULL, never TRUE), and the session-key lookup helper
+    # refuses to match on a NULL participant id.
+    #
+    # NOT used by the budget meter (which keys on session_id + (admin_id,
+    # instance_id, period_start), §3.4.1b) — adding this column does not
+    # touch budget counting.
+    resolved_lead_id: Mapped[str | None] = mapped_column(
+        String(100),
+        index=True,
+        nullable=True,
+        comment=(
+            "§3.4.8 session-key participant id: the resolved lead identity "
+            "(str of the resolved User.id) for lead-facing channels, or the "
+            "internal workspace user id (§3.4.9). NULL = anonymous (never "
+            "matches another NULL as same participant)."
+        ),
+    )
     channel: Mapped[str] = mapped_column(String(50), default="web", nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
 
