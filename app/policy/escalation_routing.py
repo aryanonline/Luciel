@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from app.policy.entitlements import TIER_ENTERPRISE, TIER_FREE, TIER_PRO
+from app.policy.entitlements import TIER_FREE, TIER_PRO
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +47,14 @@ logger = logging.getLogger(__name__)
 NOTIFY_EMAIL = "email"
 NOTIFY_SMS = "sms"
 NOTIFY_SLACK = "slack"
-NOTIFY_CUSTOM = "custom"
 
 
 # Tier → ordered admin-notification channel set. Fixed by tier, NOT
 # admin-configurable (the WHEN is doctrinal; the channel SHAPE is a tier
-# entitlement). Enterprise's "custom paths" is represented by NOTIFY_CUSTOM
-# — the concrete webhook/PagerDuty target is resolved from contact config.
+# entitlement). Per Vision §3.4: Free = email; Pro = email + SMS + Slack.
 _CHANNELS_BY_TIER: dict[str, tuple[str, ...]] = {
     TIER_FREE: (NOTIFY_EMAIL,),
-    TIER_PRO: (NOTIFY_EMAIL, NOTIFY_SMS),
-    TIER_ENTERPRISE: (NOTIFY_EMAIL, NOTIFY_SMS, NOTIFY_SLACK, NOTIFY_CUSTOM),
+    TIER_PRO: (NOTIFY_EMAIL, NOTIFY_SMS, NOTIFY_SLACK),
 }
 
 

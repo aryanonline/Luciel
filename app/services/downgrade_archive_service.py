@@ -61,9 +61,8 @@ from app.models.admin_widget_domain import AdminWidgetDomain
 from app.models.api_key import ApiKey
 from app.models.instance import Instance
 from app.models.knowledge import KnowledgeChunk  # Arc 10: AXIS_KNOWLEDGE
-from app.models.scope_assignment import EndReason, ScopeAssignment
+# Unit 1 excision: scope_assignment model deleted; AXIS_SEATS removed below.
 from app.policy.entitlements import (
-    TIER_ENTERPRISE,
     TIER_FREE,
     TIER_PRO,
     TIER_ENTITLEMENTS,
@@ -142,7 +141,7 @@ class OverflowSummary:
 AXIS_INSTANCES = "instances"
 AXIS_EMBED_KEYS = "embed_keys"
 AXIS_CNAMES = "cnames"
-AXIS_SEATS = "seats"
+# AXIS_SEATS removed (Unit 1 excision) — single-owner model has no multi-seat table.
 # Arc 10: knowledge axis. Unlike the count-of-rows axes above,
 # AXIS_KNOWLEDGE is a sum-of-bytes axis whose unit is the INTEGER
 # source_id FK (a group of chunks sharing the same source FK).
@@ -151,7 +150,7 @@ AXIS_SEATS = "seats"
 # All chunks sharing a source FK archive together.
 AXIS_KNOWLEDGE = "knowledge"
 ALL_AXES: tuple[str, ...] = (
-    AXIS_INSTANCES, AXIS_EMBED_KEYS, AXIS_CNAMES, AXIS_SEATS,
+    AXIS_INSTANCES, AXIS_EMBED_KEYS, AXIS_CNAMES,
     AXIS_KNOWLEDGE,
 )
 
@@ -324,28 +323,8 @@ class DowngradeArchiveService:
         if overflow == 0:
             return AxisOverflow(axis=axis, cap=cap, current=current, overflow=0)
 
-        # LRU loser selection. Owner seat is exempt: when axis='seats'
-        # we filter the candidate pool to non-owner rows first. If the
-        # remaining non-owner pool is smaller than the overflow count
-        # (i.e. the admin has fewer non-owner seats than the cap delta),
-        # we archive everything non-owner — the math caps at the pool
-        # size. This is the right invariant: "the owner is always
-        # entitled to their own Admin."
+        # LRU loser selection.
         candidates = active_rows
-        if axis == AXIS_SEATS:
-            candidates = [r for r in active_rows if not _is_owner_seat(r)]
-            # Recompute current/overflow against the non-owner pool so
-            # the reported numbers don't claim we'll archive the owner.
-            non_owner_current = len(candidates)
-            non_owner_overflow = min(overflow, non_owner_current)
-            ids = _lru_select(candidates, non_owner_overflow)
-            return AxisOverflow(
-                axis=axis, cap=cap,
-                current=current,            # original (includes owner)
-                overflow=non_owner_overflow,  # what we'll actually archive
-                archived_ids=ids,
-            )
-
         ids = _lru_select(candidates, overflow)
         return AxisOverflow(
             axis=axis, cap=cap, current=current,
@@ -486,20 +465,6 @@ class DowngradeArchiveService:
             )
             return list(self.db.scalars(stmt).all())
 
-        if axis == AXIS_SEATS:
-            # Active dashboard-seat assignments under this Admin.
-            # admin_id on scope_assignments is the admin binding
-            # (same physical-retention story as api_keys).
-            stmt = (
-                select(ScopeAssignment)
-                .where(
-                    ScopeAssignment.admin_id == admin_id,
-                    ScopeAssignment.active.is_(True),
-                    ScopeAssignment.ended_at.is_(None),
-                )
-            )
-            return list(self.db.scalars(stmt).all())
-
         raise ValueError(f"DowngradeArchiveService: unknown axis {axis!r}")
 
     # -----------------------------------------------------------------
@@ -596,28 +561,6 @@ class DowngradeArchiveService:
                 )
             return
 
-        if axis == AXIS_SEATS:
-            # Reuse Pattern E lifecycle columns. The repository's
-            # end_assignment is the right entry point because it
-            # handles the idempotency guard (already-ended rows are
-            # no-ops) and stamps ended_at + ended_reason + active=false
-            # in a single UPDATE.
-            from app.repositories.scope_assignment_repository import (
-                ScopeAssignmentRepository,
-            )
-            repo = ScopeAssignmentRepository(self.db)
-            for assignment_id in ids_list:
-                repo.end_assignment(
-                    assignment_id=assignment_id,
-                    reason=EndReason.DOWNGRADE_OVERFLOW_ARCHIVE,
-                    note=(
-                        "Soft-archived as overflow at downgrade boundary "
-                        f"on admin_id={admin_id}"
-                    ),
-                    autocommit=False,
-                )
-            return
-
         raise ValueError(f"DowngradeArchiveService: unknown axis {axis!r}")
 
 
@@ -631,7 +574,7 @@ _CAP_AXIS_TO_ATTR: dict[str, str] = {
     AXIS_INSTANCES:   "instance_count_cap",
     AXIS_EMBED_KEYS:  "embed_key_count_cap",
     AXIS_CNAMES:      "widget_custom_domain_cname_cap",
-    AXIS_SEATS:       "seat_cap",
+    # AXIS_SEATS removed (Unit 1 excision) — no seat_cap in entitlements.
     # Arc 10: knowledge cap is in BYTES, not in count-of-rows. The
     # _compute_axis path special-cases AXIS_KNOWLEDGE to compute
     # overflow as sum(bytes) - cap rather than count(rows) - cap.
@@ -661,25 +604,13 @@ def _cap_for_axis(target_tier: str, axis: str) -> int | None:
     Returns ``None`` for unlimited (Enterprise). The
     ``TIER_ENTITLEMENTS`` map is the canonical source.
     """
-    if target_tier == TIER_ENTERPRISE:
-        return None  # Defensive — preview/apply guard upstream.
     attr = _CAP_AXIS_TO_ATTR.get(axis)
     if attr is None:
         raise ValueError(f"_cap_for_axis: unknown axis {axis!r}")
     return getattr(TIER_ENTITLEMENTS[target_tier], attr)
 
 
-def _is_owner_seat(row: ScopeAssignment) -> bool:
-    """True iff this ScopeAssignment row is the owner seat.
-
-    Owner-seat protection: a downgrade can never archive the admin's
-    own owner row. Cleanup C promoted the role column to the
-    ``scope_role`` PG enum; the canonical owner value is
-    ``ScopeRole.ADMIN_OWNER``.
-    """
-    from app.models.scope_assignment import ScopeRole
-    role = getattr(row, "role", None)
-    return role == ScopeRole.ADMIN_OWNER or role == "admin_owner"
+# _is_owner_seat removed (Unit 1 excision) — AXIS_SEATS deleted.
 
 
 def _lru_select(rows: list, n: int) -> list:
@@ -688,10 +619,7 @@ def _lru_select(rows: list, n: int) -> list:
     LRU sort key (in priority order):
       1. ``updated_at`` ascending — oldest update wins (Instance,
          ApiKey, AdminWidgetDomain).
-      2. ``started_at`` ascending — only for ScopeAssignment, which
-         carries no ``updated_at`` on its lifecycle columns; its
-         creation time is its activity-recency proxy (seats don't
-         update in place — they're either active or ended).
+      2. ``started_at`` ascending — fallback for rows lacking updated_at.
       3. PK ascending — deterministic tiebreak so two rows updated in
          the same microsecond archive in a stable order. Important
          for test reproducibility and replay.

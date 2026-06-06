@@ -47,7 +47,6 @@ from fastapi.responses import JSONResponse
 from app.api.deps import DbSession
 from app.core.config import settings
 from app.integrations.stripe import StripeSignatureError, get_stripe_client
-from app.models.subscription import TIER_ENTERPRISE
 from app.models.user import User
 from app.schemas.billing import (
     CheckoutSessionRequest,
@@ -196,21 +195,6 @@ def create_checkout(
     Rate limiting happens at the edge (CloudFront / ALB); each call is a
     Stripe API call and Stripe imposes its own limits.
     """
-    # Enterprise can never be self-served. This is the primary/only
-    # response for a tier=enterprise checkout attempt.
-    if payload.tier == TIER_ENTERPRISE:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "reason": ENTERPRISE_CONTACT_SALES_REASON,
-                "message": (
-                    "Enterprise is provisioned through sales after an MSA "
-                    "and security review, not self-serve checkout. Please "
-                    "contact sales."
-                ),
-            },
-        )
-
     # Pro requires an authenticated Free admin (free-then-upgrade). An
     # anonymous caller has no Free account yet and must sign up first.
     cookie = request.cookies.get(settings.session_cookie_name)
@@ -657,46 +641,20 @@ def me(request: Request, db: DbSession) -> SubscriptionStatusResponse:
     cookie = request.cookies.get(settings.session_cookie_name)
     user = _resolve_cookied_user(db=db, session_cookie=cookie)
 
-    # Re-decode the JWT for admin_id only. The cookie has already
-    # been validated above by _resolve_cookied_user (which raises 401
-    # on failure), so this second decode is safe; we accept the small
-    # duplication rather than reshape the helper's return type and
-    # touch every caller. Mirrors the pattern in _resolve_invite_actor
-    # in admin.py.
-    session_tenant_id: str | None = None
+    # Single-owner model (Locked Dec #19): admin_id comes directly from
+    # the session JWT claim. No ScopeAssignment lookup needed.
+    session_admin_id: str | None = None
     try:
-        payload = validate_session_token(cookie or "")
-        session_tenant_id = payload.get("admin_id")
+        jwt_payload = validate_session_token(cookie or "")
+        session_admin_id = jwt_payload.get("admin_id")
     except MagicLinkError:
-        # Already validated upstream; if it somehow fails here we just
-        # leave session_tenant_id None and pick the first active scope.
-        session_tenant_id = None
+        session_admin_id = None
 
-    # Resolve the cookied user's active ScopeAssignment (preferring
-    # the assignment matching the session JWT's admin_id). This is
-    # also where we derive ``admin_id`` for the Admin-row lookup
-    # below: ScopeAssignment.admin_id physically retains the column
-    # name from Arc 5 Path A but semantically points at admins.id.
-    from app.repositories.scope_assignment_repository import (
-        ScopeAssignmentRepository,
-    )
-    sar = ScopeAssignmentRepository(db)
-    active_assignments = sar.list_for_user(user.id, active_only=True)
-    active_role: str | None = None
-    chosen_admin_id: str | None = None
-    if active_assignments:
-        chosen = next(
-            (a for a in active_assignments if a.admin_id == session_tenant_id),
-            active_assignments[0],
-        )
-        active_role = chosen.role
-        chosen_admin_id = chosen.admin_id
+    # The owner is the single role in this model.
+    active_role: str | None = "owner" if session_admin_id else None
+    chosen_admin_id: str | None = session_admin_id
 
     # Read the Admin row to source the tier (V2 source of truth).
-    # A cookied user with no active ScopeAssignment is a forensic
-    # edge case (deleted assignment, deactivated admin); answer 200
-    # with sentinel values rather than 401 so the dashboard can
-    # render a sensible "no plan yet" view.
     from app.models.admin import Admin as AdminModel
     admin = (
         db.get(AdminModel, chosen_admin_id) if chosen_admin_id else None
@@ -853,57 +811,18 @@ def upgrade_tier(
     payment (proration is handled by Stripe's standard immediate-
     proration semantics; we do not compute credits ourselves).
     """
-    # Funnel alignment (Arc 15): Enterprise is procurement-led and can
-    # never be self-served — not from anonymous /checkout, and not from
-    # an authenticated in-dashboard /upgrade either. A tier=enterprise
-    # upgrade attempt returns the same 422 contact_sales shape as
-    # /checkout, before any Stripe session is created. The Enterprise
-    # admin record is provisioned back-office after MSA/DPA + payment
-    # via the contract/webhook path (see create_checkout docstring).
-    if payload.target_tier == TIER_ENTERPRISE:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "reason": ENTERPRISE_CONTACT_SALES_REASON,
-                "message": (
-                    "Enterprise is provisioned through sales after an MSA "
-                    "and security review, not self-serve checkout. Please "
-                    "contact sales."
-                ),
-            },
-        )
-
     cookie = request.cookies.get(settings.session_cookie_name)
     user = _resolve_cookied_user(db=db, session_cookie=cookie)
 
-    # Resolve admin_id off the session's admin_id JWT claim, falling
-    # back to the cookied user's active ScopeAssignment (single-scope
-    # users). Mirrors the resolution order in /me above.
-    session_tenant_id: str | None = None
+    # Single-owner model (Locked Dec #19): admin_id from JWT claim.
     try:
         sess_payload = validate_session_token(cookie or "")
-        session_tenant_id = sess_payload.get("admin_id")
+        admin_id = sess_payload.get("admin_id")
     except MagicLinkError:
-        session_tenant_id = None
+        admin_id = None
 
-    from app.repositories.scope_assignment_repository import (
-        ScopeAssignmentRepository,
-    )
-    sar = ScopeAssignmentRepository(db)
-    active_assignments = sar.list_for_user(user.id, active_only=True)
-    if not active_assignments:
+    if not admin_id:
         raise HTTPException(status_code=400, detail="no_admin_for_user")
-    chosen = next(
-        (a for a in active_assignments if a.admin_id == session_tenant_id),
-        active_assignments[0],
-    )
-    # Only owners may initiate an upgrade. department_leads and
-    # teammates do not have billing authority on a Pro/Enterprise
-    # account. (For Free, the signup-free path mints owner-role on
-    # the first user, so every Free admin has exactly one owner.)
-    if chosen.role != "owner":
-        raise HTTPException(status_code=403, detail="upgrade_requires_owner")
-    admin_id = chosen.admin_id
 
     # Read current Admin.tier to enforce strict upgrade direction.
     from app.models.admin import Admin as AdminModel
@@ -911,19 +830,11 @@ def upgrade_tier(
     if admin is None or not admin.active:
         raise HTTPException(status_code=400, detail="admin_inactive")
 
-    _tier_order = {"free": 0, "pro": 1, "enterprise": 2}
+    _tier_order = {"free": 0, "pro": 1}
     current_rank = _tier_order.get(admin.tier, -1)
     target_rank = _tier_order.get(payload.target_tier, -1)
     if target_rank <= current_rank:
         raise HTTPException(status_code=400, detail="not_an_upgrade")
-
-    # Arc 7 Commit 1 (2026-05-24) RETIRED the (enterprise, monthly)
-    # 400 reject. Enterprise is now flat-recurring symmetric with Pro:
-    # both monthly + annual cadences are first-class Checkout paths.
-    # The hybrid/metered-overage shape that justified the annual-only
-    # restriction was retired by partner doctrine pivot — see
-    # CANONICAL §17 Arc 7 Commit 1 entry and the closure of
-    # D-enterprise-metering-not-implemented-2026-05-22.
 
     svc = _service(db)
     try:
@@ -947,14 +858,8 @@ def upgrade_tier(
 # POST /downgrade/preview
 # ---------------------------------------------------------------------
 
-# Tier ordinals used by both upgrade and downgrade routes. Pulled out of
-# the inner function so a single source-of-truth governs both direction
-# checks. NB: this dict intentionally mirrors the constant in
-# tier_provisioning_service so a misalignment between routes and service
-# would surface as a diff in two places. Keep them in sync; downgrade
-# direction is strictly LOWER (target_rank < current_rank), upgrade is
-# strictly HIGHER (target_rank > current_rank).
-_TIER_RANK = {"free": 0, "pro": 1, "enterprise": 2}
+# Tier ordinals used by both upgrade and downgrade routes (Free/Pro only).
+_TIER_RANK = {"free": 0, "pro": 1}
 
 
 def _resolve_owner_admin_id(
@@ -962,53 +867,25 @@ def _resolve_owner_admin_id(
 ) -> tuple[User, str]:
     """Resolve (user, admin_id) for cookied-owner routes.
 
-    Shared helper for the downgrade twin routes. Returns the validated
-    cookied User plus the admin (tenant) id derived from the session
-    JWT's admin_id claim (falling back to the user's first active
-    ScopeAssignment for single-scope users).
+    Single-owner model (Locked Dec #19): admin_id comes from the session
+    JWT claim. No ScopeAssignment lookup needed.
 
     Raises:
       HTTPException(401) -- invalid/missing session cookie
-      HTTPException(400, detail='no_admin_for_user') -- no active scope
-      HTTPException(403, detail='downgrade_requires_owner') -- non-owner
-        cookied user (department_lead / teammate). Downgrade is a
-        billing-authority action; only the owner role may initiate one.
-
-    Mirrors the resolution logic in ``upgrade_tier`` so the two routes
-    cannot drift on auth shape. Inline import of ScopeAssignmentRepository
-    matches the upgrade route's pattern -- it's a sibling helper, not a
-    long-lived module-level dep.
+      HTTPException(400, detail='no_admin_for_user') -- JWT has no admin_id
     """
     cookie = request.cookies.get(settings.session_cookie_name)
     user = _resolve_cookied_user(db=db, session_cookie=cookie)
 
-    session_tenant_id: str | None = None
     try:
         sess_payload = validate_session_token(cookie or "")
-        session_tenant_id = sess_payload.get("admin_id")
+        admin_id = sess_payload.get("admin_id")
     except MagicLinkError:
-        session_tenant_id = None
+        admin_id = None
 
-    from app.repositories.scope_assignment_repository import (
-        ScopeAssignmentRepository,
-    )
-    sar = ScopeAssignmentRepository(db)
-    active_assignments = sar.list_for_user(user.id, active_only=True)
-    if not active_assignments:
+    if not admin_id:
         raise HTTPException(status_code=400, detail="no_admin_for_user")
-    chosen = next(
-        (a for a in active_assignments if a.admin_id == session_tenant_id),
-        active_assignments[0],
-    )
-    # Only owners may initiate a downgrade. Same gate as upgrade: a
-    # department_lead's downgrade attempt would silently strip the
-    # owner's seats -- we 403 here so the owner gets a recoverable
-    # error in the UI instead.
-    if chosen.role != "owner":
-        raise HTTPException(
-            status_code=403, detail="downgrade_requires_owner",
-        )
-    return user, chosen.admin_id
+    return user, admin_id
 
 
 @router.post(

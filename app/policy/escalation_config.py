@@ -32,7 +32,6 @@ from __future__ import annotations
 from typing import Any
 
 from app.policy.entitlements import (
-    escalation_chains_enabled,
     escalation_notify_channels,
     escalation_secondary_contact_enabled,
 )
@@ -316,64 +315,24 @@ def validate_escalation_config_for_tier(
             )
         problems += check_routing_rules(routing_rules=routing_rules, tier=tier)
 
-    # Escalation chains are Enterprise only.
+    # Escalation chains were Enterprise-only and are deferred (Unit 1 excision).
+    # Any payload containing 'chains' is rejected as unavailable on Free/Pro.
     if chains is not None:
-        if not escalation_chains_enabled(tier):
-            problems.append(
-                {
-                    "field": "chains",
-                    "reason": "chains_not_available_on_tier",
-                    "message": (
-                        "Ordered escalation chains with SLA minutes are "
-                        "available on Enterprise only."
-                    ),
-                    "tier": tier,
-                    "upgrade_required": True,
-                }
-            )
-        else:
-            problems += _check_chains(chains=chains, tier=tier)
-
-    return problems
-
-
-def _check_chains(*, chains: Any, tier: str) -> list[dict[str, Any]]:
-    """Validate the Enterprise ordered-chain shape: a list of steps, each
-    an ordered contact + positive SLA minutes."""
-    problems: list[dict[str, Any]] = []
-    if not isinstance(chains, list):
-        return [
+        problems.append(
             {
                 "field": "chains",
-                "reason": "malformed",
-                "message": "chains must be an ordered list of escalation steps.",
+                "reason": "chains_not_available_on_tier",
+                "message": (
+                    "Ordered escalation chains with SLA minutes are not "
+                    "available on this tier."
+                ),
+                "tier": tier,
+                "upgrade_required": False,
             }
-        ]
-    for idx, step in enumerate(chains):
-        if not isinstance(step, dict):
-            problems.append(
-                {
-                    "field": f"chains[{idx}]",
-                    "reason": "malformed_chain_step",
-                    "message": f"chains[{idx}] must be an object.",
-                }
-            )
-            continue
-        problems += _contact_problems(
-            step.get("contact"), field=f"chains[{idx}].contact", tier=tier
         )
-        sla = step.get("sla_minutes")
-        if not isinstance(sla, int) or isinstance(sla, bool) or sla <= 0:
-            problems.append(
-                {
-                    "field": f"chains[{idx}].sla_minutes",
-                    "reason": "invalid_sla_minutes",
-                    "message": (
-                        f"chains[{idx}].sla_minutes must be a positive integer."
-                    ),
-                }
-            )
+
     return problems
+
 
 
 __all__ = [

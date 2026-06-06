@@ -865,14 +865,8 @@ ALLOWED_ACTIONS = (
     # + table manifest belongs in a structurally distinct action so
     # dashboards can tell them apart at-a-glance.
     ACTION_TENANT_HARD_PURGED,
-    # Step 30a.4 -- first-class invite lifecycle for Team and Company tiers.
-    ACTION_USER_INVITED,
-    ACTION_INVITE_REDEEMED,
-    ACTION_INVITE_RESENT,
-    ACTION_INVITE_REVOKED,
-    # Step 30a.5 -- Company-tier Domain self-serve verbs.
-    ACTION_DOMAIN_CREATED,
-    ACTION_DOMAIN_DEACTIVATED,
+    # Step 30a.4 invite lifecycle: DEFERRED (Unit 1 excision) — single-owner, no invites.
+    # Step 30a.5 domain lifecycle: DEFERRED (Unit 1 excision) — Company tier not launched.
     # Arc 8 WU-6 -- SES feedback / suppression cohort.
     ACTION_EMAIL_SUPPRESSION_RECORDED,
     ACTION_EMAIL_SUPPRESSION_CLEARED,
@@ -920,27 +914,14 @@ ALLOWED_ACTIONS = (
     ACTION_INSTANCE_DELETED,
     ACTION_INSTANCE_RESTORED,
     ACTION_INSTANCE_HARD_PURGED,
-    # Arc 12 WU4 -- sibling-Luciel composition grant lifecycle.
-    ACTION_SIBLING_GRANT_AUTHORED,
-    ACTION_SIBLING_GRANT_APPROVED,
-    ACTION_SIBLING_GRANT_REJECTED,
-    ACTION_SIBLING_GRANT_REVOKED,
+    # Arc 12 WU4 sibling grants: DEFERRED (Unit 1 excision) — sibling model deleted.
     # Arc 12 WU2b -- per-instance tool authorization admin API.
     ACTION_TOOL_AUTHORIZED,
     ACTION_TOOL_REVOKED,
-    # Arc 12 WU5 -- sibling-Luciel composition runtime dispatch.
-    ACTION_SIBLING_ACCESS,
+    # Arc 12 WU5 sibling dispatch: DEFERRED (Unit 1 excision) — sibling model deleted.
     # Arc 12 EX4 -- one-time audit-chain reseal.
     ACTION_AUDIT_CHAIN_RESEALED,
-    # Arc 12b -- Enterprise custom-role authoring lifecycle.
-    ACTION_CUSTOM_ROLE_AUTHORED,
-    ACTION_CUSTOM_ROLE_UPDATED,
-    ACTION_CUSTOM_ROLE_REVOKED,
-    ACTION_USER_ROLE_ASSIGNED,
-    ACTION_USER_ROLE_REVOKED,
-    # Rescan Tier-B -- custom-role second-admin approval workflow (§3.7.3).
-    ACTION_ROLE_APPROVAL_REQUIRED,
-    ACTION_ROLE_APPROVED,
+    # Arc 12b custom-role + role assignment: DEFERRED (Unit 1 excision) — single-owner model.
     # Arc 13 — channel adapters (email + SMS).
     ACTION_CHANNEL_ENABLED,
     ACTION_CHANNEL_DISABLED,
@@ -954,18 +935,13 @@ ALLOWED_ACTIONS = (
     # Rescan Tier-C — §3.5 escalation delivery layer.
     ACTION_ESCALATION_NOTIFICATION_SENT,
     ACTION_ESCALATION_DELIVERY_FAILED,
-    ACTION_ESCALATION_CHAIN_STEP,
-    ACTION_ESCALATION_ACKED,
-    ACTION_ESCALATION_CHAIN_END_FALLBACK,
+    # ACTION_ESCALATION_CHAIN_STEP/ACKED/CHAIN_END_FALLBACK: DEFERRED (Unit 1 excision) — Enterprise chains removed.
     # Arc 14 U4 — §3.4.4 lead capture cognition.
     ACTION_LEAD_CAPTURED,
     # Arc 15 WU3 — instance config-pillar admin APIs (§3.5.1).
     ACTION_PERSONALITY_UPDATED,
     ACTION_ESCALATION_CONFIG_UPDATED,
-    # Rescan ENT — Enterprise personality second-admin approval (Vision §7).
-    ACTION_PERSONALITY_SUBMITTED,
-    ACTION_PERSONALITY_APPROVED,
-    ACTION_PERSONALITY_REJECTED,
+    # Personality submit/approve/reject: DEFERRED (Unit 1 excision) — approval workflow removed.
     # Arc 15 WU4 — Arc 17 connection-contract slice (§3.8.2).
     ACTION_CONNECTION_CONFIGURED,
     ACTION_CONNECTION_DISCONNECTED,

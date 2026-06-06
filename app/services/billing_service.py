@@ -45,7 +45,6 @@ from app.models.subscription import (
     BILLING_CADENCE_MONTHLY,
     STATUS_CANCELED,
     Subscription,
-    TIER_ENTERPRISE,
     TIER_FREE,
     TIER_INSTANCE_CAPS,
     TIER_PRO,
@@ -165,8 +164,6 @@ PRICE_ID_KEY: dict[tuple[str, str], str] = {
     # ``resolve_price_id`` is required — it is data-driven.
     (TIER_PRO,        BILLING_CADENCE_MONTHLY): "stripe_price_pro_monthly",
     (TIER_PRO,        BILLING_CADENCE_ANNUAL):  "stripe_price_pro_annual",
-    (TIER_ENTERPRISE, BILLING_CADENCE_MONTHLY): "stripe_price_enterprise_monthly",
-    (TIER_ENTERPRISE, BILLING_CADENCE_ANNUAL):  "stripe_price_enterprise_annual",
 }
 
 

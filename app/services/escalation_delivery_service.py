@@ -14,19 +14,17 @@ Design decisions
   restart-safe exactly-once guarantee is maintained.
 
 * **Retry**: 3 attempts per channel (immediate / 30 s / 2 min). After 3
-  failures the Pro path falls back to admin_owner email + records a
-  delivery_failed audit row. Enterprise advances the chain (if the failed
-  step is not the last one) or executes the owner-email fallback.
+  failures the path falls back to admin_owner email + records a
+  delivery_failed audit row.
 
 * **Customer reply first**: This service is called AFTER the customer reply
   has been sent. Delivery must NEVER block or crash the turn — every public
   method is wrapped in try/except and degrades to a warning log on error.
 
-* **Tier dispatch**:
+* **Tier dispatch** (Unit 1: Free + Pro only):
   - Free  → single email, one contact, one attempt with retry.
   - Pro   → per-signal routing rules + fan-out (multiple contacts per
               signal). Each contact gets retry-with-fallback.
-  - Enterprise → chain walker (see EscalationChainWalker / Celery task).
 
 * **Dry-run**: when CHANNELS_LIVE_PROVISIONING_ENABLED is False, records the
   full routing+attempt decision and the escalation_notification_sent audit
@@ -57,8 +55,7 @@ logger = logging.getLogger(__name__)
 _RETRY_DELAYS = (0, 30, 120)
 _MAX_ATTEMPTS = 3
 
-# First-step SLA window for Enterprise chains (§9 item 11).
-ENTERPRISE_FIRST_STEP_SLA_SECONDS = 300  # 5 minutes
+# ENTERPRISE_FIRST_STEP_SLA_SECONDS removed (Unit 1 excision) — Enterprise chains deferred.
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +336,7 @@ class EscalationDeliveryService:
         gate: str,
         contact: EscalationContact,
     ) -> None:
-        from app.policy.entitlements import TIER_ENTERPRISE, TIER_FREE, TIER_PRO
+        from app.policy.entitlements import TIER_FREE, TIER_PRO
 
         db = None
         try:
@@ -412,22 +409,6 @@ class EscalationDeliveryService:
                     gate=gate,
                     email_to=email_to,
                     sms_to=sms_to,
-                    subject=subject,
-                    body=body,
-                    escalation_config=escalation_config,
-                )
-            elif tier == TIER_ENTERPRISE:
-                self._deliver_enterprise(
-                    db=db,
-                    event_id=event_id,
-                    admin_id=admin_id,
-                    luciel_instance_id=luciel_instance_id,
-                    session_id=session_id,
-                    signal=signal,
-                    gate=gate,
-                    email_to=email_to,
-                    sms_to=sms_to,
-                    slack_to=slack_to,
                     subject=subject,
                     body=body,
                     escalation_config=escalation_config,
@@ -754,185 +735,7 @@ class EscalationDeliveryService:
 
         return contacts
 
-    def _deliver_enterprise(
-        self,
-        *,
-        db,
-        event_id: int | None,
-        admin_id: str,
-        luciel_instance_id: int | None,
-        session_id: str,
-        signal: str,
-        gate: str,
-        email_to: str | None,
-        sms_to: str | None,
-        slack_to: str | None,
-        subject: str,
-        body: str,
-        escalation_config: dict | None,
-    ) -> None:
-        """Enterprise tier: chain walker with SLA timer via Celery.
-
-        Notifies the first step immediately, then enqueues a Celery task
-        to advance the chain on SLA timeout. Each transition is audited
-        with escalation_chain_step. If no chains are configured, degrades
-        to Pro fan-out.
-        """
-        from app.models.admin_audit_log import (
-            ACTION_ESCALATION_NOTIFICATION_SENT,
-            ACTION_ESCALATION_CHAIN_STEP,
-        )
-        from app.policy.entitlements import escalation_chains_enabled, TIER_ENTERPRISE
-
-        chains = (escalation_config or {}).get("chains")
-        if not chains or not isinstance(chains, list) or not escalation_chains_enabled(TIER_ENTERPRISE):
-            # No chains configured: degrade to Pro fan-out.
-            logger.info(
-                "escalation delivery (Enterprise): no chains configured "
-                "session=%s signal=%s — degrading to Pro fan-out",
-                session_id, signal,
-            )
-            self._deliver_pro(
-                db=db,
-                event_id=event_id,
-                admin_id=admin_id,
-                luciel_instance_id=luciel_instance_id,
-                session_id=session_id,
-                signal=signal,
-                gate=gate,
-                email_to=email_to,
-                sms_to=sms_to,
-                subject=subject,
-                body=body,
-                escalation_config=escalation_config,
-            )
-            return
-
-        # Notify step 1.
-        step_contact = chains[0] if chains else {}
-        step_channel = step_contact.get("channel", NOTIFY_EMAIL)
-        step_to = step_contact.get("value") or email_to
-        step_sla = step_contact.get("sla_minutes", 5) * 60  # convert to seconds
-
-        adapter = self._adapter_for_channel(step_channel)
-        result, attempts = _send_with_retry(
-            adapter,
-            to=step_to,
-            subject=subject,
-            body=body,
-            signal=signal,
-            session_id=session_id,
-        )
-
-        if db is not None:
-            _write_delivery_audit(
-                db,
-                admin_id=admin_id,
-                luciel_instance_id=luciel_instance_id,
-                event_id=event_id,
-                session_id=session_id,
-                signal=signal,
-                gate=gate,
-                action=ACTION_ESCALATION_NOTIFICATION_SENT,
-                after={
-                    "signal": signal,
-                    "gate": gate,
-                    "channel": step_channel,
-                    "to": step_to,
-                    "sent": result.sent,
-                    "dry_run": result.dry_run,
-                    "provider_id": result.provider_id,
-                    "attempts": attempts,
-                    "chain_step": 0,
-                    "event_id": event_id,
-                },
-                note=f"escalation:{signal} Enterprise chain step 0",
-            )
-            _write_delivery_audit(
-                db,
-                admin_id=admin_id,
-                luciel_instance_id=luciel_instance_id,
-                event_id=event_id,
-                session_id=session_id,
-                signal=signal,
-                gate=gate,
-                action=ACTION_ESCALATION_CHAIN_STEP,
-                after={
-                    "signal": signal,
-                    "session_id": session_id,
-                    "step": 0,
-                    "contact": step_to,
-                    "chain_action": "notified",
-                    "sla_seconds": step_sla,
-                },
-                note=f"escalation chain step 0 notified",
-            )
-            db.commit()
-
-        # Enqueue the SLA advance task.
-        if event_id is not None:
-            self._enqueue_chain_advance(
-                event_id=event_id,
-                admin_id=admin_id,
-                luciel_instance_id=luciel_instance_id,
-                session_id=session_id,
-                signal=signal,
-                gate=gate,
-                current_step=0,
-                chain=chains,
-                email_to=email_to,
-                subject=subject,
-                body=body,
-                sla_seconds=step_sla,
-            )
-
-    def _enqueue_chain_advance(
-        self,
-        *,
-        event_id: int,
-        admin_id: str,
-        luciel_instance_id: int | None,
-        session_id: str,
-        signal: str,
-        gate: str,
-        current_step: int,
-        chain: list,
-        email_to: str | None,
-        subject: str,
-        body: str,
-        sla_seconds: int,
-    ) -> None:
-        """Enqueue the Celery chain-walker SLA-advance task."""
-        try:
-            from app.worker.tasks.escalation_chain_walker import advance_escalation_chain
-            advance_escalation_chain.apply_async(
-                kwargs={
-                    "event_id": event_id,
-                    "admin_id": admin_id,
-                    "luciel_instance_id": luciel_instance_id,
-                    "session_id": session_id,
-                    "signal": signal,
-                    "gate": gate,
-                    "current_step": current_step,
-                    "chain": chain,
-                    "email_to": email_to,
-                    "subject": subject,
-                    "body": body,
-                },
-                countdown=sla_seconds,
-                queue="luciel-memory-tasks",
-            )
-            logger.info(
-                "escalation chain: SLA advance task enqueued event_id=%d "
-                "session=%s step=%d sla_seconds=%d",
-                event_id, session_id, current_step, sla_seconds,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "escalation chain: failed to enqueue advance task "
-                "event_id=%s session=%s exc=%s",
-                event_id, session_id, type(exc).__name__,
-            )
+    # _deliver_enterprise + _enqueue_chain_advance removed (Unit 1 excision) — Enterprise chains deferred.
 
     def _adapter_for_channel(self, channel: str):
         """Return the adapter for a given channel id."""
