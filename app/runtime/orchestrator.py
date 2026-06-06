@@ -945,6 +945,34 @@ class LucielOrchestrator:
             self._budget_meter = BudgetMeter()
         return self._budget_meter
 
+    def _instance_has_authorized_tools(self, req: RuntimeRequest, db) -> bool:
+        """Return True iff the instance has ≥1 authorized tool.
+
+        Reuses the caller's already-open ``db`` session (the budget gate's
+        billing-context session) — no new session, no per-iteration query.
+        Best-effort: any failure degrades to True (conservative — keeps fast
+        routing disabled rather than risk mis-routing a tool-needing turn).
+        """
+        if req.luciel_instance_id is None:
+            return True
+        try:
+            from app.repositories.instance_tool_authorization_repository import (
+                InstanceToolAuthorizationRepository,
+            )
+
+            tool_ids = InstanceToolAuthorizationRepository(db).list_authorized_tool_ids(
+                admin_id=req.admin_id,
+                instance_id=req.luciel_instance_id,
+            )
+            return len(tool_ids) > 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "authorized-tools lookup failed: exc_class=%s — has_tools=True "
+                "(conservative: fast routing stays disabled)",
+                type(exc).__name__,
+            )
+            return True
+
     def _budget_gate(self, req: RuntimeRequest, *, tier: str | None = None):
         """CONVERSATION BUDGET GATE — Arc 18 §3.4.1b. READ-ONLY peek.
 
@@ -984,6 +1012,13 @@ class LucielOrchestrator:
             db = SessionLocal()
             try:
                 ctx = resolve_billing_context(db, admin_id=req.admin_id)
+                # has_tools = "does this instance have ANY authorized tools?"
+                # Resolved ONCE here on the SAME session already open for the
+                # billing context (no second session, no per-PLAN-iteration
+                # query). An instance with zero authorized tools can never need
+                # a tool, so fast routing is provably safe for it; an instance
+                # with ≥1 tool stays conservative (has_tools=True).
+                has_tools = self._instance_has_authorized_tools(req, db)
             finally:
                 db.close()
 
@@ -1007,8 +1042,9 @@ class LucielOrchestrator:
                 )
 
             # Proceed. Hand the resolved billing context to the PLAN path so
-            # it increments once (idempotent) on the first model call.
-            return None, _BudgetPlanContext(ctx=ctx, cap=cap)
+            # it increments once (idempotent) on the first model call and so
+            # the tier-aware router gets the instance-level has_tools signal.
+            return None, _BudgetPlanContext(ctx=ctx, cap=cap, has_tools=has_tools)
         except Exception as exc:  # noqa: BLE001 — never block a turn on metering
             logger.warning(
                 "budget gate evaluation failed: exc_class=%s — proceeding to PLAN",
@@ -1348,12 +1384,23 @@ class LucielOrchestrator:
         # Best-effort: never crashes the turn.
         self._count_session_and_alert(req, budget_ctx)
 
+        # Instance-level has_tools resolved once by the budget gate (on its
+        # already-open session). When there's no budget context (no
+        # per-instance scope / legacy test contexts) default True — the
+        # conservative fallback that leaves fast routing disabled.
+        has_tools = budget_ctx.has_tools if budget_ctx is not None else True
+
         for iteration in range(1, MAX_LOOP_ITERATIONS + 1):
             result.iterations = iteration
 
             # PLAN
             plan = self._plan(
-                prompt, result, provider=req.provider, tier=tier, req=req
+                prompt,
+                result,
+                provider=req.provider,
+                tier=tier,
+                req=req,
+                has_tools=has_tools,
             )
 
             result.reply = plan.reply
@@ -1401,6 +1448,7 @@ class LucielOrchestrator:
         provider: str | None = None,
         tier: str | None = None,
         req: RuntimeRequest | None = None,
+        has_tools: bool = True,
     ) -> Plan:
         """PLAN step — one ModelRouter.generate call + tolerant parse.
 
@@ -1430,12 +1478,11 @@ class LucielOrchestrator:
         # Cheap deterministic prompt-size estimate for the fast-route 4K
         # context check (~4 chars/token); no tokenizer dependency.
         context_token_estimate = len(prompt) // 4
-        # has_tools: the loop discovers tool needs from PLAN output rather
-        # than a pre-resolved per-instance catalog, so we pass the
-        # conservative True — this DISABLES intra-tier fast routing, which
-        # never mis-routes a tool-needing turn to the fast model. TODO:
-        # thread the real per-instance tool-catalog non-emptiness once the
-        # broker exposes it cheaply.
+        # has_tools: whether the instance has ANY authorized tools. Resolved
+        # once by the budget gate (reusing its open db session) and threaded
+        # in via _BudgetPlanContext — an instance with no authorized tools can
+        # never need a tool this turn, so intra-tier fast routing is safe to
+        # engage; one with ≥1 keeps fast routing off (stays True).
         try:
             if tier is not None:
                 response = self._router().generate(
@@ -1443,7 +1490,7 @@ class LucielOrchestrator:
                     tier=tier,
                     user_message=(req.message if req is not None else ""),
                     context_token_estimate=context_token_estimate,
-                    has_tools=True,
+                    has_tools=has_tools,
                 )
             else:
                 response = self._router().generate(
@@ -1991,13 +2038,16 @@ class _BudgetPlanContext:
     """Resolved budget context the READ-ONLY budget gate hands to the
     PLAN path so the first-model-call increment uses the SAME key the
     gate peeked with (no second billing-context lookup). Carries the
-    ``BillingContext`` (tier + period_start) and the resolved cap."""
+    ``BillingContext`` (tier + period_start), the resolved cap, and the
+    instance-level ``has_tools`` signal (whether the instance has ANY
+    authorized tools) for the tier-aware router's fast-route decision."""
 
-    __slots__ = ("ctx", "cap")
+    __slots__ = ("ctx", "cap", "has_tools")
 
-    def __init__(self, *, ctx, cap: int) -> None:
+    def __init__(self, *, ctx, cap: int, has_tools: bool = True) -> None:
         self.ctx = ctx
         self.cap = cap
+        self.has_tools = has_tools
 
 
 # =====================================================================

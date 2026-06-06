@@ -376,5 +376,49 @@ class TestTierWiringReachesRouter(unittest.TestCase):
         self.assertEqual(router.call_kwargs[0].get("tier"), "pro")
 
 
+# =====================================================================
+# CHANGE 3 (follow-up) — instance-level has_tools reaches the router.
+#
+# has_tools means "does this instance have ANY authorized tools?",
+# resolved ONCE by the budget gate (on its already-open billing-context
+# session) and threaded to the router via _BudgetPlanContext. An instance
+# with zero authorized tools can never need a tool this turn, so fast
+# routing is provably safe → has_tools=False. One with ≥1 stays
+# conservative → has_tools=True. We patch the repo's
+# ``list_authorized_tool_ids`` so the real _instance_has_authorized_tools
+# path runs (instance-id resolution + len()>0) without a live DB row.
+# =====================================================================
+
+
+class TestHasToolsReachesRouter(unittest.TestCase):
+
+    _REPO = (
+        "app.repositories.instance_tool_authorization_repository"
+        ".InstanceToolAuthorizationRepository.list_authorized_tool_ids"
+    )
+
+    def test_zero_authorized_tools_passes_has_tools_false(self):
+        meter = BudgetMeter(backend=InMemoryBackend())
+        router = _RecordingRouter([_plan_json(reply="ok", confidence=0.95)])
+        orch = _orch(router=router, meter=meter)
+
+        with _Ctx(orch, TIER_PRO):
+            with patch(self._REPO, return_value=set()):
+                orch.run(_request(session_id="no-tools"))
+
+        self.assertEqual(router.call_kwargs[0].get("has_tools"), False)
+
+    def test_one_authorized_tool_passes_has_tools_true(self):
+        meter = BudgetMeter(backend=InMemoryBackend())
+        router = _RecordingRouter([_plan_json(reply="ok", confidence=0.95)])
+        orch = _orch(router=router, meter=meter)
+
+        with _Ctx(orch, TIER_PRO):
+            with patch(self._REPO, return_value={"push_to_crm"}):
+                orch.run(_request(session_id="has-tools"))
+
+        self.assertEqual(router.call_kwargs[0].get("has_tools"), True)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
