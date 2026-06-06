@@ -12,7 +12,7 @@ Input envelope (stdin, JSON one-shot)::
     {
       "endpoint_url": "https://...",
       "payload":       {...},
-      "request_timeout_seconds": 25,
+      "request_timeout_seconds": 8,
       "allowed_domains": ["api.example.com"]
     }
 
@@ -243,8 +243,12 @@ def main() -> int:
 
     endpoint_url = str(call.get("endpoint_url", ""))
     payload = call.get("payload", {}) or {}
+    # Fallback only; the parent always passes the child budget
+    # (``_CHILD_REQUEST_TIMEOUT_SECONDS`` = 8s, < the 10s hard
+    # timeout, §3.8.6). The default mirrors that ceiling so a missing
+    # field can never exceed the doctrine timeout.
     timeout_seconds = float(
-        call.get("request_timeout_seconds", 25.0)
+        call.get("request_timeout_seconds", 8.0)
     )
     allowed_domains = list(call.get("allowed_domains", []) or [])
 
