@@ -157,6 +157,18 @@ class Settings(BaseSettings):
     # empty-list KeywordModerationProvider in app/policy/moderation.py.
     enable_stub_llm_provider: bool = False
 
+    # --- Hermetic stub embedding provider (Unit 10) ---
+    # When True, app.knowledge.embedder.embed_texts returns
+    # deterministic stub vectors (seeded from sha256 of each text)
+    # instead of calling OpenAI. Mirrors enable_stub_llm_provider:
+    # it exists so the two carried arc11 internal-retrieve live tests
+    # can run hermetically with no network call. The embedder emits a
+    # WARNING the first time the stub path runs so a production deploy
+    # that flips this flag is observable in the log stream.
+    #
+    # MUST be False in production so real OpenAI embeddings are used.
+    enable_stub_embedding_provider: bool = False
+
     # --- Retention purge batching (Step 28 Phase 2 Commit 8) ---
     # Retention purges run as a sequence of bounded DELETE/UPDATE
     # statements rather than one unbounded statement. Without

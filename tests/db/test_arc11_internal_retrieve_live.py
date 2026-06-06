@@ -158,14 +158,6 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
         cls.conn.close()
 
     # ----- L1 -----
-    @unittest.skip(
-        "Unit 10 (knowledge subsystem): exercises the live retrieval path "
-        "which calls embed_single() -> OpenAI embeddings (no stub provider "
-        "wired yet). The tenant-scoping property this nominally checks is "
-        "already proven by test_arc11_knowledge_rls (RLS on knowledge_"
-        "sources/chunks) + test_c9_5_live_rls_integration. Re-enable with "
-        "an embedding stub in Unit 10."
-    )
     def test_l1_platform_admin_scoped_query_returns_only_target_tenant(self):
         """The handler binds ``payload.admin_id`` via bind_tenant_scope;
         even though the caller is platform_admin and the request has
@@ -220,11 +212,6 @@ class TestArc11InternalRetrieveLive(unittest.TestCase):
         )
 
     # ----- L2 -----
-    @unittest.skip(
-        "Unit 10 (knowledge subsystem): EXPLAIN-plan signature check over "
-        "the live retrieval path; needs the embedding provider stubbed. "
-        "Not a tenant-isolation assertion. Re-enable in Unit 10."
-    )
     def test_l2_explain_text_includes_recognizable_plan_signature(self):
         """The EXPLAIN ANALYZE output should mention either ``Index Scan``
         (sequential scan fallback when pgvector index is small) or

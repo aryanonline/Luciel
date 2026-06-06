@@ -8,6 +8,7 @@ export DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/lucie
 export REDIS_URL="redis://localhost:6379/0"
 export MODERATION_PROVIDER=null
 export ENABLE_STUB_LLM_PROVIDER=true
+export ENABLE_STUB_EMBEDDING_PROVIDER=true
 export CHANNELS_LIVE_PROVISIONING_ENABLED=false
 export MAIL_INBOUND_DOMAIN=luciel-mail.com
 # Enable the live-Postgres RLS integration test (tests/db/test_c9_5_live_
