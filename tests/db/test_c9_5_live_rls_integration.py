@@ -87,6 +87,18 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
                     pw=pgsql.Literal(cls.app_password),
                 )
             )
+            # PG15+ no longer grants USAGE on schema public to PUBLIC by
+            # default, so a fresh role cannot resolve unqualified table
+            # names until granted. Production's luciel_app role
+            # (migration arc9_c10_b_luciel_app_role) carries this grant
+            # for the same reason; mirror it here so the RLS evaluator
+            # -- not a schema-permission error -- is what this test
+            # actually exercises on PG17.
+            c.execute(
+                pgsql.SQL("GRANT USAGE ON SCHEMA public TO {role};").format(
+                    role=pgsql.Identifier(cls.app_role),
+                )
+            )
             # Tenant-scoped table owned by superuser. The app role does
             # NOT own it, so RLS applies to the app role's queries.
             c.execute(
@@ -135,8 +147,16 @@ class TestC95LiveRlsIntegration(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        from psycopg import sql as pgsql
         with cls.admin_conn.cursor() as c:
             c.execute(f"DROP TABLE IF EXISTS {cls.table};")
+            # Revoke the schema grant before DROP ROLE -- Postgres
+            # refuses to drop a role that still owns dependent privileges.
+            c.execute(
+                pgsql.SQL(
+                    "REVOKE USAGE ON SCHEMA public FROM {role};"
+                ).format(role=pgsql.Identifier(cls.app_role))
+            )
             c.execute(f"DROP ROLE IF EXISTS {cls.app_role};")
         cls.admin_conn.close()
 

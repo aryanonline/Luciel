@@ -1,12 +1,15 @@
 """RESCAN TIER-DE — live regression: instance hard-delete cascade completeness.
 
-Seeds an instance that owns every child table introduced by the TIER-DE
-spec (leads, escalation_events, sibling_call_grants, instance_composition_
-grants, knowledge_share_grants, instance_tool_authorizations,
+Seeds an instance that owns child tables from the TIER-DE spec
+(leads, escalation_events, instance_tool_authorizations,
 byo_webhook_endpoints, channel_routes, tool_execution_log,
-user_role_assignments, knowledge_graph_nodes/edges) and asserts the
-purge completes + per-step audit manifest rows are present + tombstones
-are NOT deleted.
+knowledge_graph_nodes/edges) and asserts the purge completes + per-step
+audit manifest rows are present + tombstones are NOT deleted.
+
+Note: sibling_call_grants / instance_composition_grants /
+knowledge_share_grants / user_role_assignments were dropped in Unit 1
+(deferred multi-Luciel / custom-role surfaces) and are no longer part
+of the cascade.
 
 Opt-in convention: set LUCIEL_LIVE_POSTGRES_URL to run, otherwise skipped.
 
@@ -102,53 +105,9 @@ def test_instance_cascade_purges_all_child_tables():
             """
         ), {"aid": admin_id, "iid": instance_id, "sid": uuid.uuid4().hex[:36]})
 
-        # --- sibling_call_grants (as caller) ---
-        # Create a second instance as callee.
-        callee_id = instance_id + 1
-        db.execute(text(
-            """
-            INSERT INTO instances (
-                id, admin_id, instance_slug, display_name,
-                active, instance_status, created_at, updated_at
-            ) VALUES (
-                :iid, :aid, :slug, 'Callee Instance',
-                true, 'active'::instance_status, now(), now()
-            ) ON CONFLICT (id) DO NOTHING
-            """
-        ), {
-            "iid": callee_id,
-            "aid": admin_id,
-            "slug": f"tierde-callee-{uuid.uuid4().hex[:6]}",
-        })
-
-        # Create a dummy user for granted_by_user_id.
-        user_id = uuid.uuid4()
-        db.execute(text(
-            """
-            INSERT INTO users (id, email, display_name, created_at, updated_at)
-            VALUES (:uid, :email, 'TIERDE Test User', now(), now())
-            ON CONFLICT (id) DO NOTHING
-            """
-        ), {
-            "uid": user_id,
-            "email": f"tierde-test-{uuid.uuid4().hex[:8]}@test.invalid",
-        })
-
-        db.execute(text(
-            """
-            INSERT INTO sibling_call_grants (
-                admin_id, caller_instance_id, callee_instance_id,
-                granted_by_user_id, approval_state, granted_at
-            ) VALUES (
-                :aid, :caller, :callee, :uid, 'live', now()
-            )
-            """
-        ), {
-            "aid": admin_id,
-            "caller": instance_id,
-            "callee": callee_id,
-            "uid": user_id,
-        })
+        # NOTE: the sibling_call_grants seed was removed in Unit 1 --
+        # that table (multi-Luciel composition, Open Decision #7) was
+        # dropped and the cascade no longer touches it.
 
         db.commit()
 
@@ -189,16 +148,6 @@ def test_instance_cascade_purges_all_child_tables():
         )
         assert result.fetchone() is None, "Leads must be purged."
 
-        # sibling_call_grants (caller side) were purged.
-        result = db.execute(
-            text(
-                "SELECT id FROM sibling_call_grants "
-                "WHERE caller_instance_id = :iid"
-            ),
-            {"iid": instance_id},
-        )
-        assert result.fetchone() is None, "Sibling call grants must be purged."
-
         # knowledge_sources were purged.
         result = db.execute(
             text("SELECT id FROM knowledge_sources WHERE luciel_instance_id = :iid"),
@@ -207,7 +156,7 @@ def test_instance_cascade_purges_all_child_tables():
         assert result.fetchone() is None, "Knowledge sources must be purged."
 
         # row_counts manifest includes expected keys.
-        for key in ("leads", "sibling_call_grants", "instances", "api_keys",
+        for key in ("leads", "instances", "api_keys",
                     "knowledge_sources"):
             assert key in row_counts, (
                 f"row_counts manifest must include '{key}'."

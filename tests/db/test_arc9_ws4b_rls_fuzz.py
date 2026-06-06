@@ -53,30 +53,37 @@ import uuid
 _PG_URL = os.environ.get("LUCIEL_LIVE_POSTGRES_URL")
 
 
-# Canonical list of 17 FORCE-RLS tenant-scoped tables. MUST stay in
-# sync with FORCE_TABLES in alembic/versions/arc9_c10_a_force_rls.py.
-# Any new tenant-scoped table added to that migration MUST be added
-# here too. This duplication is intentional -- the test is the
-# external contract; the migration is the implementation.
-_FORCE_RLS_TABLES = (
-    "admin_audit_logs",
-    "traces",
-    "memory_items",
-    "conversations",
-    "sessions",
-    "subscriptions",
-    "scope_assignments",
-    "knowledge_embeddings",
-    "api_keys",
-    "user_invites",
-    "user_consents",
-    "identity_claims",
-    "instances",
-    "admin_widget_domains",
-    "retention_policies",
-    "deletion_logs",
-    "messages",
-)
+# The set of tenant-scoped RLS tables is DERIVED FROM THE LIVE SCHEMA at
+# setUpClass time (every public table with rowsecurity enabled) rather
+# than a hand-maintained snapshot.
+#
+# Rationale (Unit 3 tenant-isolation re-verify): the prior frozen
+# "17 tables" list silently rotted -- it still named scope_assignments /
+# user_invites (dropped in Unit 1) and, more dangerously, MISSED every
+# tenant table added after Arc 9 (data_export_jobs, leads,
+# escalation_events, channel_routes, instance_connections, the
+# knowledge-graph tables, ...). That stale list is exactly why a table
+# created ENABLE-but-not-FORCE (data_export_jobs) went undetected.
+# Deriving the set from pg_class makes this an invariant guard that
+# auto-covers every current and future tenant table.
+_FORCE_RLS_TABLES: tuple[str, ...] = ()  # populated in setUpClass
+
+
+def _discover_rls_tables(conn) -> tuple[str, ...]:
+    """Return every public table with ROW LEVEL SECURITY enabled."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.relname
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = 'public'
+               AND c.relkind = 'r'
+               AND c.relrowsecurity = true
+             ORDER BY c.relname
+            """
+        )
+        return tuple(r[0] for r in cur.fetchall())
 
 
 @unittest.skipUnless(
@@ -93,13 +100,25 @@ class TestArc9WS4bRlsFuzz(unittest.TestCase):
         cls.psycopg = psycopg
         cls.admin_conn = psycopg.connect(_PG_URL, autocommit=True)
 
+        # Derive the tenant-table set from the live schema (see module
+        # docstring above _FORCE_RLS_TABLES). Publish it onto the class
+        # and the module global so the existing tests read the live set.
+        global _FORCE_RLS_TABLES
+        cls.rls_tables = _discover_rls_tables(cls.admin_conn)
+        _FORCE_RLS_TABLES = cls.rls_tables
+        assert cls.rls_tables, (
+            "No RLS-enabled tables discovered -- the local stack is not "
+            "migrated to head, or RLS was never enabled."
+        )
+
         cls.app_role = f"luciel_app_ws4b_{uuid.uuid4().hex[:8]}"
         cls.app_password = uuid.uuid4().hex
 
         # Build a non-superuser, non-BYPASSRLS app role -- the same
-        # posture as production's luciel_app. We grant it SELECT on
-        # all 17 tables so its 0-row results are "RLS denied", not
-        # "permission denied".
+        # posture as production's luciel_app. We grant it USAGE on the
+        # schema (PG15+ no longer grants this to PUBLIC) and SELECT on
+        # every discovered RLS table so its 0-row results are "RLS
+        # denied", not "permission denied".
         from psycopg import sql as pgsql
 
         with cls.admin_conn.cursor() as cur:
@@ -109,7 +128,12 @@ class TestArc9WS4bRlsFuzz(unittest.TestCase):
                     pw=pgsql.Literal(cls.app_password),
                 )
             )
-            for table in _FORCE_RLS_TABLES:
+            cur.execute(
+                pgsql.SQL("GRANT USAGE ON SCHEMA public TO {role}").format(
+                    role=pgsql.Identifier(cls.app_role),
+                )
+            )
+            for table in cls.rls_tables:
                 cur.execute(
                     pgsql.SQL(
                         "GRANT SELECT ON TABLE {tbl} TO {role}"

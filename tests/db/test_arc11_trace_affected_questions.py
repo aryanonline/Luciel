@@ -61,11 +61,11 @@ class TestArc11AffectedQuestionsLive(unittest.TestCase):
             for aid in (cls.admin_a, cls.admin_b):
                 cur.execute(
                     """
-                    INSERT INTO admins (id, email, tier, active)
-                    VALUES (%s, %s, 'free', true)
+                    INSERT INTO admins (id, name, tier, tier_source, active)
+                    VALUES (%s, %s, 'free', 'free_signup', true)
                     ON CONFLICT (id) DO NOTHING
                     """,
-                    (aid, f"{aid}@example.test"),
+                    (aid, f"luciel-{aid}"),
                 )
             for attr, aid in (
                 ("instance_a", cls.admin_a),
@@ -105,7 +105,7 @@ class TestArc11AffectedQuestionsLive(unittest.TestCase):
                 ([],            "row-6"),
                 ([42],          "row-7"),
             ]
-            cur.execute("SET LOCAL app.admin_id = %s", (cls.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, true)", (cls.admin_a,))
             cls.expected_count_for_42 = 0
             for ids, label in seed_a:
                 cur.execute(
@@ -113,8 +113,11 @@ class TestArc11AffectedQuestionsLive(unittest.TestCase):
                     INSERT INTO traces
                         (trace_id, session_id, admin_id,
                          luciel_instance_id, user_message,
-                         assistant_reply, source_ids_used)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s::bigint[])
+                         assistant_reply, source_ids_used,
+                         memories_retrieved, memories_extracted,
+                         tool_called, escalated)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::bigint[],
+                            0, 0, false, false)
                     """,
                     (
                         f"{cls.admin_a}-{label}-{uuid.uuid4().hex[:6]}",
@@ -129,14 +132,17 @@ class TestArc11AffectedQuestionsLive(unittest.TestCase):
                 if 42 in ids:
                     cls.expected_count_for_42 += 1
 
-            cur.execute("SET LOCAL app.admin_id = %s", (cls.admin_b,))
+            cur.execute("SELECT set_config('app.admin_id', %s, true)", (cls.admin_b,))
             cur.execute(
                 """
                 INSERT INTO traces
                     (trace_id, session_id, admin_id,
                      luciel_instance_id, user_message,
-                     assistant_reply, source_ids_used)
-                VALUES (%s, %s, %s, %s, %s, %s, %s::bigint[])
+                     assistant_reply, source_ids_used,
+                     memories_retrieved, memories_extracted,
+                     tool_called, escalated)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::bigint[],
+                        0, 0, false, false)
                 """,
                 (
                     f"{cls.admin_b}-leak-{uuid.uuid4().hex[:6]}",
@@ -156,7 +162,7 @@ class TestArc11AffectedQuestionsLive(unittest.TestCase):
         with cls.conn.cursor() as cur:
             for aid in (cls.admin_a, cls.admin_b):
                 cur.execute(
-                    "SET LOCAL app.admin_id = %s", (aid,)
+                    "SELECT set_config('app.admin_id', %s, true)", (aid,)
                 )
                 cur.execute(
                     "DELETE FROM traces WHERE admin_id = %s", (aid,),
@@ -200,7 +206,7 @@ class TestArc11AffectedQuestionsLive(unittest.TestCase):
         @event.listens_for(engine, "begin")
         def _begin_bind(conn):  # noqa: ANN001
             conn.execute(
-                sa_text("SET LOCAL app.admin_id = :aid").bindparams(
+                sa_text("SELECT set_config('app.admin_id', :aid, true)").bindparams(
                     aid=admin_id
                 )
             )

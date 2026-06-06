@@ -112,11 +112,11 @@ class TestArc11KnowledgeRls(unittest.TestCase):
             for aid in (cls.admin_a, cls.admin_b):
                 cur.execute(
                     """
-                    INSERT INTO admins (id, email, tier, active)
-                    VALUES (%s, %s, 'free', true)
+                    INSERT INTO admins (id, name, tier, tier_source, active)
+                    VALUES (%s, %s, 'free', 'free_signup', true)
                     ON CONFLICT (id) DO NOTHING
                     """,
-                    (aid, f"{aid}@example.test"),
+                    (aid, f"luciel-{aid}"),
                 )
 
             # Create one instance per admin.
@@ -184,7 +184,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         cls.chunk_a_ids: list[int] = []
 
         with cls.admin_conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (cls.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, false)", (cls.admin_a,))
             cur.execute(
                 """
                 INSERT INTO knowledge_sources
@@ -233,7 +233,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         with cls.admin_conn.cursor() as cur:
             # Drop our chunks + source. Admin GUC so RLS lets us
             # touch our own rows.
-            cur.execute("SET LOCAL app.admin_id = %s", (cls.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, false)", (cls.admin_a,))
             cur.execute(
                 "DELETE FROM knowledge_chunks WHERE admin_id = %s",
                 (cls.admin_a,),
@@ -308,7 +308,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         with self.admin_conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT polname, tablename
+                SELECT policyname, tablename
                   FROM pg_policies
                  WHERE schemaname = 'public'
                    AND tablename IN ('knowledge_sources', 'knowledge_chunks')
@@ -347,7 +347,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
     def test_admin_b_sees_no_knowledge_sources(self):
         """Direct SELECT under Admin B's GUC returns no Admin-A rows."""
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_b,))
+            cur.execute("SELECT set_config('app.admin_id', %s, false)", (self.admin_b,))
             cur.execute(
                 "SELECT id FROM knowledge_sources WHERE admin_id = %s",
                 (self.admin_a,),
@@ -361,7 +361,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
     def test_admin_b_sees_no_knowledge_chunks(self):
         """Direct SELECT under Admin B's GUC returns no Admin-A chunks."""
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_b,))
+            cur.execute("SELECT set_config('app.admin_id', %s, false)", (self.admin_b,))
             cur.execute(
                 "SELECT id FROM knowledge_chunks WHERE admin_id = %s",
                 (self.admin_a,),
@@ -377,7 +377,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         their own rows. Otherwise the "0 rows for B" result would
         be ambiguous between "RLS denied" and "table empty"."""
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, false)", (self.admin_a,))
             cur.execute("SELECT id FROM knowledge_sources")
             sources = cur.fetchall()
             cur.execute("SELECT id FROM knowledge_chunks")
@@ -400,7 +400,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
     def test_reset_guc_returns_zero_rows_knowledge_sources(self):
         """RESET clears the GUC; reads must still fail-closed."""
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, false)", (self.admin_a,))
             cur.execute("RESET app.admin_id")
             cur.execute("SELECT id FROM knowledge_sources")
             rows = cur.fetchall()
@@ -415,7 +415,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         with Admin B's admin_id. The RESTRICTIVE WITH CHECK fence
         denies the write; PG raises ``insufficient_privilege``."""
         with self._app_conn() as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.admin_id = %s", (self.admin_a,))
+            cur.execute("SELECT set_config('app.admin_id', %s, false)", (self.admin_a,))
             with self.assertRaises(self.psycopg.errors.InsufficientPrivilege):
                 cur.execute(
                     """
@@ -460,7 +460,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         @event.listens_for(engine, "begin")
         def _begin_bind_admin(conn):  # noqa: ANN001 — SA event sig
             conn.execute(
-                sa_text("SET LOCAL app.admin_id = :aid").bindparams(
+                sa_text("SELECT set_config('app.admin_id', :aid, false)").bindparams(
                     aid=self.admin_b
                 )
             )
@@ -523,7 +523,7 @@ class TestArc11KnowledgeRls(unittest.TestCase):
         @event.listens_for(engine, "begin")
         def _begin_bind_admin(conn):  # noqa: ANN001
             conn.execute(
-                sa_text("SET LOCAL app.admin_id = :aid").bindparams(
+                sa_text("SELECT set_config('app.admin_id', :aid, false)").bindparams(
                     aid=self.admin_a
                 )
             )

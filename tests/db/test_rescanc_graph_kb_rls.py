@@ -41,6 +41,12 @@ class TestGraphKBRLS(unittest.TestCase):
                 f"CREATE ROLE {cls.app_role} NOINHERIT LOGIN NOBYPASSRLS"
                 " NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD 'testpwd';"
             )
+            # PG15+ no longer grants USAGE on schema public to PUBLIC by
+            # default; a fresh non-superuser role cannot resolve table
+            # names without it (prod's luciel_app carries this grant).
+            cur.execute(
+                f"GRANT USAGE ON SCHEMA public TO {cls.app_role};"
+            )
             # Grant table access so setup works.
             cur.execute(
                 f"GRANT SELECT, INSERT, DELETE ON knowledge_graph_nodes, "
@@ -69,15 +75,17 @@ class TestGraphKBRLS(unittest.TestCase):
         with cls.admin_conn.cursor() as cur:
             # Admin row (minimal)
             cur.execute(
-                "INSERT INTO admins (id, tier, created_at) "
-                "VALUES (%s, 'free', now()) ON CONFLICT DO NOTHING;",
-                (admin_id,),
+                "INSERT INTO admins (id, name, tier, tier_source, created_at) "
+                "VALUES (%s, %s, 'free', 'free_signup', now()) "
+                "ON CONFLICT DO NOTHING;",
+                (admin_id, f"luciel-{admin_id}"),
             )
             # Instance row
             cur.execute(
-                "INSERT INTO instances (admin_id, name, created_at) "
-                "VALUES (%s, 'test', now()) RETURNING id;",
-                (admin_id,),
+                "INSERT INTO instances "
+                "(admin_id, instance_slug, display_name, created_at) "
+                "VALUES (%s, %s, 'Test Luciel', now()) RETURNING id;",
+                (admin_id, f"slug-{admin_id[:8]}"),
             )
             instance_id = cur.fetchone()[0]
             # Knowledge source row
@@ -89,18 +97,20 @@ class TestGraphKBRLS(unittest.TestCase):
                 "RETURNING id;",
                 (admin_id, instance_id),
             )
-            cls.__dict__.setdefault("_source_ids", {})[admin_id] = cur.fetchone()[0]
+            if not hasattr(cls, "_source_ids"):
+                cls._source_ids = {}
+            cls._source_ids[admin_id] = cur.fetchone()[0]
             return instance_id
 
     @classmethod
     def _source_id(cls, admin_id: str) -> int:
-        return cls.__dict__["_source_ids"][admin_id]
+        return cls._source_ids[admin_id]
 
     @classmethod
     def _insert_node(cls, admin_id: str, instance_id: int) -> int:
         with cls.admin_conn.cursor() as cur:
             cur.execute(
-                "SET app.admin_id = %s;", (admin_id,)
+                "SELECT set_config('app.admin_id', %s, false);", (admin_id,)
             )
             cur.execute(
                 "INSERT INTO knowledge_graph_nodes "
@@ -113,7 +123,7 @@ class TestGraphKBRLS(unittest.TestCase):
     @classmethod
     def _insert_edge(cls, admin_id: str, instance_id: int, node_id: int) -> int:
         with cls.admin_conn.cursor() as cur:
-            cur.execute("SET app.admin_id = %s;", (admin_id,))
+            cur.execute("SELECT set_config('app.admin_id', %s, false);", (admin_id,))
             cur.execute(
                 "INSERT INTO knowledge_graph_edges "
                 "(admin_id, instance_id, source_id, src_node_id, dst_node_id, "
@@ -143,6 +153,9 @@ class TestGraphKBRLS(unittest.TestCase):
                 cur.execute(
                     "DELETE FROM admins WHERE id = %s;", (aid,)
                 )
+            # DROP OWNED clears every grant (schema USAGE, table + sequence
+            # privileges) so DROP ROLE does not fail on dependent objects.
+            cur.execute(f"DROP OWNED BY {cls.app_role};")
             cur.execute(f"DROP ROLE IF EXISTS {cls.app_role};")
         cls.admin_conn.close()
 
@@ -154,7 +167,7 @@ class TestGraphKBRLS(unittest.TestCase):
         conn = psycopg.connect(base_url, autocommit=True)
         with conn.cursor() as cur:
             if admin_id is not None:
-                cur.execute("SET app.admin_id = %s;", (admin_id,))
+                cur.execute("SELECT set_config('app.admin_id', %s, false);", (admin_id,))
             # else: leave unset (fail-closed test)
         return conn
 
