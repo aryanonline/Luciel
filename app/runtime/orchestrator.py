@@ -979,11 +979,20 @@ class LucielOrchestrator:
 
     def _budget_meter_inst(self):
         """Lazy BudgetMeter accessor. Built from settings.redis_url on
-        first use; injectable for tests."""
-        if self._budget_meter is None:
-            from app.billing.metering import BudgetMeter
+        first use; injectable for tests.
 
-            self._budget_meter = BudgetMeter()
+        Unit 13g (§4.5): in production the meter is WRITE-THROUGH — Redis is
+        the hot cache and a ``PostgresCounterStore`` (bound to the app
+        ``SessionLocal``) is the authoritative source of truth. The store
+        sets the ``app.admin_id`` RLS GUC itself per operation, so it works
+        whether or not the caller is inside a tenant-scoped request context.
+        """
+        if self._budget_meter is None:
+            from app.billing.metering import BudgetMeter, PostgresCounterStore
+
+            self._budget_meter = BudgetMeter(
+                counter_store=PostgresCounterStore.from_session_factory()
+            )
         return self._budget_meter
 
     def _instance_has_authorized_tools(self, req: RuntimeRequest, db) -> bool:

@@ -839,11 +839,13 @@ class Settings(BaseSettings):
     # native HubSpot + Salesforce CRM OAuth).
     # -----------------------------------------------------------------
     #
-    # MASTER LIVE-SWITCH for the deferred connectors. Mirrors
-    # channels_live_provisioning_enabled exactly: when False (the
-    # boot-safe default) NO real provider call is ever made — the
-    # email_sender / sms_sender send tools return an HONEST no-op receipt
-    # and the CRM push tool round-trips deferred, so dev / CI / tests can
+    # MASTER LIVE-SWITCH for the deploy-gated connectors (the send/push
+    # code paths are BUILT; this switch gates whether they reach a live
+    # provider). Mirrors channels_live_provisioning_enabled exactly: when
+    # False (the boot-safe default) NO real provider call is ever made —
+    # the email_sender / sms_sender send tools return an HONEST no-op
+    # receipt and the CRM push tool round-trips an honest unconfigured, so
+    # dev / CI / tests can
     # exercise the full code path without billing or hitting any provider.
     # Production flips this True IN LOCKSTEP with the per-connector
     # credentials below landing in SSM. The OAuth client-creds gate

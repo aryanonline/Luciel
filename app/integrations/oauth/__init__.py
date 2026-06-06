@@ -1,16 +1,18 @@
-"""OAuth integration package — Arc 17 Connections layer.
+"""OAuth integration package — Connections layer.
 
-The deferred connectors (calendar / crm / email_sender / sms_sender)
-authenticate via OAuth. Google Calendar is the reference provider per
-the Arc 17 brief.
+The OAuth-backed connectors (calendar / crm) authenticate via OAuth.
+Google Calendar is the reference provider.
 
 Honesty posture (architecture §3.8.2): the FULL real OAuth code path
-(auth-URL builder, code→token exchange, silent refresh) is built here,
-but it only completes when client credentials are present. When they
-are absent — this session, by design, since no Google client creds are
-available — the provider reports ``is_configured() is False`` and every
-caller round-trips an honest ``unconfigured`` + ``arc17_pending``
-marker. The provider NEVER fabricates a ``connected`` result.
+(auth-URL builder, code→token exchange, silent refresh) is BUILT here.
+It completes whenever the OAuth client credentials are present. When they
+are absent in a given environment — DEPLOY-GATED, not unbuilt — the
+provider reports ``is_configured() is False`` and every caller
+round-trips an honest ``unconfigured`` + ``arc17_pending`` marker. The
+``arc17_pending`` field name is retained for API stability and means
+"deploy-gated pending" (the connect path exists; it needs live client
+credentials), NOT "feature not built". The provider NEVER fabricates a
+``connected`` result.
 
 Three pieces:
   * ``OAuthProvider``    — the ABC (is_configured / authorization_url /

@@ -69,6 +69,11 @@ from app.models.escalation_event import (  # noqa: F401
 from app.models.conversation_overage_ledger import (  # noqa: F401
     ConversationOverageLedger,
 )
+# Unit 13g — §3.4.1b+§4.5 budget counter write-through (Postgres authoritative).
+from app.models.conversation_budget_counter import (  # noqa: F401
+    ConversationBudgetCounter,
+    ConversationCountedSession,
+)
 # Arc 14 U4 — §3.4.4 lead capture + §3.4.7 summarization (cognition).
 from app.models.lead import Lead  # noqa: F401
 # Unit 13e — §3.4.10 persisted session-summary store (cross-session memory).
@@ -156,6 +161,9 @@ __all__ = [
     "SIGNAL_BUDGET_EXHAUSTED",
     # Arc 18 -- §3.4.1b conversation-overage durable billing ledger.
     "ConversationOverageLedger",
+    # Unit 13g -- §3.4.1b+§4.5 budget counter write-through.
+    "ConversationBudgetCounter",
+    "ConversationCountedSession",
     # Arc 14 U4 -- §3.4.4 lead capture + §3.4.7 summarization.
     "Lead",
     # Unit 13e -- §3.4.10 persisted session-summary store.

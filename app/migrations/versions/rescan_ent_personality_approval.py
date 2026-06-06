@@ -149,18 +149,25 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # The two personality-approval FK constraints are dropped with
+    # DROP CONSTRAINT IF EXISTS. A later migration
+    # (unit1_excise_deferred_features) drops these columns in its upgrade;
+    # Postgres implicitly drops the dependent FK constraints with the
+    # columns. That migration's downgrade re-adds the columns (and the CHECK
+    # constraint) but NOT the FK constraints, so in a full `downgrade base`
+    # round-trip the FKs are already absent when this downgrade runs. IF
+    # EXISTS makes the drop correct in both orderings; the upgrade is
+    # unchanged.
     op.drop_column("instances", "personality_approved_at")
-    op.drop_constraint(
-        "fk_instances_personality_approved_by_user_id",
-        "instances",
-        type_="foreignkey",
+    op.execute(
+        "ALTER TABLE instances DROP CONSTRAINT IF EXISTS "
+        "fk_instances_personality_approved_by_user_id"
     )
     op.drop_column("instances", "personality_approved_by_user_id")
     op.drop_column("instances", "personality_submitted_at")
-    op.drop_constraint(
-        "fk_instances_personality_submitted_by_user_id",
-        "instances",
-        type_="foreignkey",
+    op.execute(
+        "ALTER TABLE instances DROP CONSTRAINT IF EXISTS "
+        "fk_instances_personality_submitted_by_user_id"
     )
     op.drop_column("instances", "personality_submitted_by_user_id")
     op.drop_column("instances", "pending_business_context")

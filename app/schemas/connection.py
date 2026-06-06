@@ -9,9 +9,10 @@ Honesty invariants enforced here + at the route:
   URL, sender address, allowlisted domain). Secrets NEVER land in a
   request body field that writes ``non_secret_config``.
 * A row is only ever serialized with ``status == 'connected'`` when it
-  has a real backing (CSV / webhook in this slice). Deferred connectors
-  (calendar / crm) round-trip as ``unconfigured`` with an
-  ``arc17_pending`` marker on the create response.
+  has a real backing. When the live provider credential / OAuth consent
+  is absent the row round-trips as ``unconfigured`` with an
+  ``arc17_pending`` (deploy-gated-pending) marker on the create response —
+  never a fake ``connected``.
 """
 from __future__ import annotations
 
@@ -43,10 +44,13 @@ ConnectionStatus = Literal[
     "expired",
 ]
 
-# Connectors that connect LIVE in this slice (real backing exists) vs
-# connectors that are DEFERRED to full Arc 17 (land unconfigured). The
-# route consults these sets; they are the single source of truth for the
-# "no fake connected" honesty invariant.
+# Connectors whose connect path completes from a config-presence check
+# alone (real backing already present: CSV store ref / webhook URL) vs
+# connectors whose live connect is DEPLOY-GATED on a provider credential /
+# OAuth consent and so land ``unconfigured`` until that lands. The two
+# sets partition the vocabulary and back the "no fake connected" honesty
+# invariant. (Names retained for API/test stability; "DEFERRED" here means
+# deploy-gated, not unbuilt.)
 LIVE_CONNECTION_TYPES: frozenset[str] = frozenset(
     {"record_source", "outbound_webhook"}
 )
@@ -172,6 +176,34 @@ class OAuthInitiateResponse(BaseModel):
     status: ConnectionStatus = "unconfigured"
 
 
+class ConnectorCatalogEntry(BaseModel):
+    """One supported connection_type's readiness in the deploy environment.
+
+    ``is_ready`` reports whether this connector CAN connect live in the
+    current environment, by auth_class:
+      * ``api_key`` — always ready (the backing is per-tenant config the
+        tenant supplies at configure time; nothing is deploy-gated).
+      * ``provisioned_resource`` — ready iff the platform sender identity
+        is present in settings (same check the configure path + send tools
+        use).
+      * ``oauth_token`` — ready iff the OAuth client credentials are
+        configured (same ``provider.is_configured()`` gate the connect
+        path uses).
+    Carries NO secrets and no per-tenant data — it is a static, read-only
+    description of the deploy's connector capability.
+    """
+
+    connection_type: ConnectionType
+    auth_class: str
+    is_ready: bool
+
+
+class ConnectorCatalogResponse(BaseModel):
+    """GET .../connections/catalog response — the readiness catalog."""
+
+    connectors: list[ConnectorCatalogEntry]
+
+
 __all__ = [
     "ConnectionType",
     "ConnectionStatus",
@@ -185,6 +217,8 @@ __all__ = [
     "ConnectionRefreshResponse",
     "ConnectionDeleteResponse",
     "OAuthInitiateResponse",
+    "ConnectorCatalogEntry",
+    "ConnectorCatalogResponse",
     "CONNECTION_TYPES",
     "CONNECTION_STATUSES",
 ]

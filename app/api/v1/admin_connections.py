@@ -7,18 +7,27 @@ back the connection-settings panel:
   * POST   "/instances/{instance_id}/connections"  -- configure a row.
   * DELETE "/connections/{connection_id}"           -- soft-delete a row.
 
-This is the REAL Arc 17 ``instance_connections`` contract narrowed in
-surface — not a throwaway stub. Full OAuth / secrets-manager / health-
-worker flows stay deferred to full Arc 17.
+This is the REAL ``instance_connections`` contract. The OAuth
+initiate/callback connect paths, the secrets-store integration, the
+§3.8.5 auth_class fork, and the §3.8.5 health/refresh worker are BUILT
+(Unit 13c); what remains environment-dependent is the live provider
+credential / consent, which is deploy-gated, NOT unbuilt.
 
 Honesty invariant (non-negotiable, spec §115)
 ----------------------------------------------
 No endpoint returns ``connected`` for a connection with no real backing.
-Only CSV (``record_source``) and ``outbound_webhook`` connect LIVE in
-this slice → a real ``connected`` row. calendar / crm / email_sender /
-sms_sender are DEFERRED → an honest ``unconfigured`` row plus a
-structured ``arc17_pending`` payload. ``non_secret_config`` carries NON-SECRET
-config ONLY; ``secret_ref`` stays NULL in this slice.
+A connection is ``connected`` when its credential SHAPE is present —
+``api_key`` config present (record_source / outbound_webhook),
+``provisioned_resource`` platform sender identity present (email_sender /
+sms_sender), ``oauth_token`` consent completed (calendar / crm). When the
+live credential/consent is absent it is an honest ``unconfigured`` row
+plus a structured ``arc17_pending`` payload that marks the connection as
+DEPLOY-GATED pending (the connect path is built; it needs live provider
+credentials to succeed in this environment). The ``arc17_pending`` field
+NAME is retained for API stability (renaming is a frontend-visible
+contract change, out of scope); it means "deploy-gated pending", not
+"feature not built". ``non_secret_config`` carries NON-SECRET config
+ONLY; ``secret_ref`` is NULL for shapes that have no per-tenant secret.
 
 Layered defences (mirrors admin_channels.py / admin_personality.py)
 -------------------------------------------------------------------
@@ -63,6 +72,7 @@ from app.models.admin_audit_log import (
 )
 from app.models.instance import Instance
 from app.connections.instance_connection import (
+    CONNECTION_TYPES,
     InstanceConnection,
     auth_class_for,
 )
@@ -89,6 +99,8 @@ from app.schemas.connection import (
     ConnectionListResponse,
     ConnectionRefreshResponse,
     ConnectionView,
+    ConnectorCatalogEntry,
+    ConnectorCatalogResponse,
     OAuthInitiateResponse,
 )
 from app.services.connection_health_service import ConnectionHealthService
@@ -245,6 +257,31 @@ def _provisioned_resource_identity(
     return None
 
 
+def _connector_is_ready(settings, connection_type: str) -> bool:
+    """Whether ``connection_type`` CAN connect live in this environment.
+
+    Read-only, no per-tenant data, no secrets, no network — purely a
+    config-presence check keyed on the §3.8.5 auth_class:
+      * ``api_key``              → always ready (per-tenant config supplies
+                                    the backing at configure time).
+      * ``provisioned_resource`` → platform sender identity present (same
+                                    gate as the configure path /
+                                    ``_provisioned_resource_identity``).
+      * ``oauth_token``          → OAuth client creds configured (same
+                                    ``provider.is_configured()`` gate the
+                                    connect path uses).
+    """
+    klass = auth_class_for(connection_type)
+    if klass == "api_key":
+        return True
+    if klass == "provisioned_resource":
+        return _provisioned_resource_identity(settings, connection_type) is not None
+    if klass == "oauth_token":
+        provider = get_oauth_provider(connection_type, settings)
+        return provider is not None and provider.is_configured()
+    return False
+
+
 def _view(row: InstanceConnection) -> ConnectionView:
     return ConnectionView(
         id=row.id,
@@ -339,6 +376,33 @@ def list_connections(
     )
 
 
+@router.get(
+    "/connections/catalog",
+    response_model=ConnectorCatalogResponse,
+)
+def connector_catalog(request: Request) -> ConnectorCatalogResponse:
+    """Read-only connector-readiness catalog for the deploy environment.
+
+    Returns one entry per supported ``connection_type`` with its §3.8.5
+    ``auth_class`` and whether the connector CAN connect live here
+    (``is_ready``). Static + tenant-agnostic: no per-tenant data, no
+    secrets, no network — just a config-presence check (see
+    ``_connector_is_ready``). Requires an authenticated admin context like
+    the other connections routes. The UI uses it to render which
+    connectors are available to configure in this environment.
+    """
+    _require_admin_id(request)
+    entries = [
+        ConnectorCatalogEntry(
+            connection_type=ct,
+            auth_class=auth_class_for(ct),
+            is_ready=_connector_is_ready(app_settings, ct),
+        )
+        for ct in CONNECTION_TYPES
+    ]
+    return ConnectorCatalogResponse(connectors=entries)
+
+
 @router.post(
     "/instances/{instance_id}/connections",
     response_model=ConnectionCreateResponse,
@@ -356,11 +420,22 @@ def configure_connection(
 ) -> ConnectionCreateResponse:
     """Configure a connection for an instance.
 
-    CSV (``record_source``) and ``outbound_webhook`` connect LIVE → a
-    real ``connected`` row. calendar / crm / email_sender / sms_sender
-    are DEFERRED → an honest ``unconfigured`` row plus an
-    ``arc17_pending`` marker. The status is decided HERE (the policy
-    boundary); the repository never fabricates a status.
+    The status is decided HERE (the policy boundary, driven by the §3.8.5
+    auth_class) — the repository never fabricates a status:
+
+      * ``api_key`` (record_source / outbound_webhook): config present →
+        ``connected``.
+      * ``provisioned_resource`` (email_sender / sms_sender): platform
+        sender identity present in settings → ``connected``; absent →
+        honest ``unconfigured`` + a deploy-gated ``arc17_pending`` marker.
+      * ``oauth_token`` (calendar / crm): POST configure is NOT the connect
+        path — OAuth connects via the initiate/callback consent flow, so
+        this records an honest ``unconfigured`` row pointing the caller at
+        the initiate endpoint (live consent is deploy-gated on the OAuth
+        client credentials).
+
+    ``arc17_pending`` means "deploy-gated pending" (the connect path is
+    built; it needs the live credential/consent), NOT "feature not built".
     """
     admin_id = _require_admin_id(request)
     instance = _load_active_instance(
@@ -491,9 +566,10 @@ def refresh_connection(
     re-enforces PERM_CONFIGURE_CONNECTIONS on the owning instance, then
     runs the shared health-check / token-refresh path:
 
-      * LIVE connector (record_source / outbound_webhook) → reachability
-        probe → ``connected`` / ``error`` + a fresh ``last_health_check_at``.
-      * DEFERRED OAuth connector → silent token refresh. The live flow is
+      * api_key connector (record_source / outbound_webhook) →
+        reachability probe → ``connected`` / ``error`` + a fresh
+        ``last_health_check_at``.
+      * OAuth connector → silent token refresh. The live flow is
         DEPLOY-GATED on OAuth client creds; absent them the row stays an
         HONEST ``unconfigured`` + ``arc17_pending`` — NEVER a fake
         ``connected``.
@@ -541,7 +617,7 @@ def refresh_connection(
             message=result.detail
             or (
                 f"{row.connection_type} stays unconfigured "
-                "(live credential flow deferred to Arc 17 deploy)."
+                "(live credential flow deploy-gated on provider creds)."
             ),
         )
 
