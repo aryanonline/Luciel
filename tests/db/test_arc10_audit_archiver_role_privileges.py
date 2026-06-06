@@ -60,10 +60,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "arc10_lifecycle_subsystem.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "arc10_lifecycle_subsystem.py"
 )
 C61_MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "arc9_c6_1_luciel_ops_role.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "arc9_c6_1_luciel_ops_role.py"
 )
 
 

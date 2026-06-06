@@ -26,7 +26,7 @@ import unittest
 import uuid
 from pathlib import Path
 
-VERSIONS_DIR = Path(__file__).parent.parent.parent / "alembic" / "versions"
+VERSIONS_DIR = Path(__file__).parent.parent.parent / "app" / "migrations" / "versions"
 REV_ID = "unit13c_connection_auth_class"
 DOWN_REV = "unit9_escalation_signal_llm_unavailable"
 

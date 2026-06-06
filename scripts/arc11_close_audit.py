@@ -945,7 +945,15 @@ def section_8_no_internal_arc_strings() -> list[CheckResult]:
     # historical substring (the contract test asserts on its
     # absence), and the migration's backfill clause is the one
     # grandfathered place the substring is permitted.
+    #
+    # Unit 13f relocated the Alembic tree from ``alembic/`` to
+    # ``app/migrations/`` (config-coupled move, zero behavior change).
+    # The migration backfill clause therefore now lives *under* app/,
+    # so the AST scan below explicitly prunes ``app/migrations/`` to
+    # preserve the original "migrations are excluded" invariant. Before
+    # the move this exclusion was implicit (the tree lived outside app/).
     app_root = REPO_ROOT / "app"
+    migrations_root = app_root / "migrations"
     if not app_root.is_dir():
         return [
             _fail(
@@ -966,8 +974,8 @@ def section_8_no_internal_arc_strings() -> list[CheckResult]:
     # one that leaked into the cross-repo data contract via the
     # crawl-stub. After PR-B, the only remaining occurrence permitted
     # in the repo is the migration's grandfathered legacy-data
-    # backfill clause (and that file lives outside app/, so this scan
-    # never sees it). The broader "any Arc-NN literal" sweep is
+    # backfill clause (which the loop below skips via migrations_root,
+    # so this scan never sees it). The broader "any Arc-NN literal" sweep is
     # premature — many of those are doctrine-anchor strings in audit
     # notes that legitimately reference the arc the row was written
     # in. Tightening to the documented leak prevents false positives.
@@ -975,6 +983,10 @@ def section_8_no_internal_arc_strings() -> list[CheckResult]:
 
     offenders: list[str] = []
     for path in sorted(app_root.rglob("*.py")):
+        # Prune the relocated Alembic tree (Unit 13f) so the migration
+        # backfill clause stays excluded, exactly as before the move.
+        if migrations_root in path.parents:
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:

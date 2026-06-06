@@ -65,7 +65,7 @@ from pathlib import Path
 
 MIGRATION_PATH = (
     Path(__file__).parent.parent.parent
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "arc9_c6_2_admin_audit_immutability.py"
 )

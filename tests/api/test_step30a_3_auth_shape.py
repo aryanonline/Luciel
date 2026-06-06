@@ -84,7 +84,7 @@ class TestUserPasswordHashColumn:
 
 class TestStep30a3Migration:
     MIGRATION_PATH = (
-        REPO_ROOT / "alembic" / "versions"
+        REPO_ROOT / "app" / "migrations" / "versions"
         / "a3c1f08b9d42_step30a_3_users_password_hash.py"
     )
 

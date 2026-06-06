@@ -75,7 +75,7 @@ class TestMigrationAnchor:
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[2]
-        path = root / "alembic" / "versions" / "arc7_b_admins_last_signup_ip.py"
+        path = root / "app" / "migrations" / "versions" / "arc7_b_admins_last_signup_ip.py"
         spec = importlib.util.spec_from_file_location(
             "arc7_b_admins_last_signup_ip", path
         )
@@ -100,7 +100,7 @@ class TestMigrationAnchor:
 
         root = Path(__file__).resolve().parents[2]
         src = (
-            root / "alembic" / "versions" / "arc7_b_admins_last_signup_ip.py"
+            root / "app" / "migrations" / "versions" / "arc7_b_admins_last_signup_ip.py"
         ).read_text()
         assert "ix_admins_last_signup_ip" in src
         assert "postgresql_where" in src

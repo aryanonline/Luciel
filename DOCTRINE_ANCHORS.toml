@@ -148,9 +148,9 @@ note = "Already at the §8 path. No move (grounding was extracted out of it — 
 [[anchor]]
 id = "migrations"
 doctrine = "§8 — app/migrations/"
-status = "CONFIG-BOUND-EXCEPTION"
-paths = ["alembic/"]
-note = "Alembic is config-bound (alembic.ini: script_location = alembic). Renaming would desync env.py, the revision chain, and CI. Doctrine path app/migrations/ maps to alembic/ by Alembic convention. FLAGGED FOR FOUNDER RULING whether to rename (would require alembic.ini + env.py + CI updates). Not moved in this unit."
+status = "MATCHES-DOC"
+paths = ["app/migrations/"]
+note = "Unit 13f moved the Alembic tree from alembic/ to the §8 path app/migrations/ as a pure config-coupled relocation (git mv of env.py, script.py.mako, and all versions/*.py — 100%-similarity renames, zero migration-SQL change). alembic.ini script_location was repointed alembic -> app/migrations; env.py is location-agnostic (imports app.core.config.settings, no __file__ path math). All path references updated: run_tests.sh (no alembic path ref), Dockerfile (dropped redundant COPY alembic/), .github/workflows/widget-e2e.yml + ci.yml path filters, widget/README.md, scripts/deploy_30a*.{ps1,sh}, scripts/mint_*.py, scripts/arc11_close_audit.py (now prunes app/migrations/ from its Arc-14 AST scan to preserve the prior 'migrations excluded' invariant), and ~44 test/script files constructing the versions path. Revision chain intact, single head = unit13e_session_summaries; upgrade head + single-step round-trip verified from the new location."
 
 [[anchor]]
 id = "analytics"

@@ -31,7 +31,7 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "dummy")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "rescand_connections_schema.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "rescand_connections_schema.py"
 )
 MODEL_PATH = REPO_ROOT / "app" / "connections" / "instance_connection.py"
 REPO_PATH = REPO_ROOT / "app" / "connections" / "repository.py"

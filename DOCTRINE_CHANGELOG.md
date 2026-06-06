@@ -12,6 +12,54 @@ anchored-path change is accompanied by a change to this file.
 
 Newest entries first.
 
+## Unit 13f — §8 path cleanup: move Alembic tree to `app/migrations/` (2026-06-06)
+
+Relocated the Alembic migration tree from `alembic/` to its §8 doctrine
+path `app/migrations/` as a **pure config-coupled relocation — zero
+behavior change**. Flips the `migrations` anchor in
+`DOCTRINE_ANCHORS.toml` from **CONFIG-BOUND-EXCEPTION** (`paths =
+["alembic/"]`, "FLAGGED FOR FOUNDER RULING") to **MATCHES-DOC** (`paths =
+["app/migrations/"]`).
+
+- `git mv` of `alembic/env.py`, `alembic/script.py.mako`, and every
+  `alembic/versions/*.py` into `app/migrations/` — all are 100%-similarity
+  renames; no migration SQL was touched. The revision chain is intact,
+  single head = `unit13e_session_summaries`; `alembic upgrade head` and a
+  single-step downgrade/re-upgrade round-trip both verified from the new
+  location. (A pre-existing `downgrade base` FK-ordering bug in the
+  historical chain is unrelated to this move and out of scope under the
+  zero-behavior-change mandate.)
+- `alembic.ini`: `script_location` repointed `alembic` → `app/migrations`.
+  `env.py` is location-agnostic (imports `app.core.config.settings`, no
+  `__file__` path math), so it needed no edit.
+- Functional path references updated: `Dockerfile` (dropped the now
+  redundant `COPY alembic/ alembic/`; `COPY app/ app/` carries the tree),
+  `.github/workflows/widget-e2e.yml` (`alembic/versions/**` →
+  `app/migrations/versions/**` in the PR path filter),
+  `widget/README.md`, the `scripts/deploy_30a*.{ps1,sh}` and
+  `scripts/mint_*.py` helpers, and ~44 test/script files that construct
+  the `versions/` path. `scripts/arc11_close_audit.py` now prunes
+  `app/migrations/` from its `Arc-14` AST scan, preserving the prior
+  "migrations live outside `app/` so the scan never sees them" invariant.
+- Historical prose mentions of `alembic/versions/...` in model docstrings
+  and frozen audit reports were intentionally left as-is: they document
+  where each table was *born* and are not functional path resolutions.
+
+The companion MOVE 2 (consolidating the tenant-isolation suite under
+`tests/isolation/`) was **deferred under the spec's STOP-AND-REPORT
+clause**: the `tests/security/` + `tests/db/` files cannot be cleanly
+bisected into "genuine tenant-isolation" vs "general-db" without risking
+the non-negotiable isolation gate. File names actively mislead (the
+`test_rls_c3_*` / `test_rls_c4_3*` / `test_rls_c5_*` families are
+migration-*shape* tests that regex the migration source and explicitly
+defer live enforcement to the C7/C9.5 suites, despite carrying
+`*_instance_isolation` policy names), and the 46-test
+`test_c5_4_tenant_leak_regression.py` sits exactly on the
+isolation-purpose / shape-mechanism boundary the spec cannot
+disambiguate. The `isolation_suite` anchor therefore remains
+**ISOLATION-SUITE** at `tests/security/` + `tests/db/` pending a founder
+ruling. No isolation test was moved, weakened, or dropped.
+
 ## Unit 13d — build the §3.9 Analytics & Reporting subsystem (2026-06-06)
 
 Built the §3.9 Analytics & Reporting subsystem at the §8 doctrine path

@@ -211,14 +211,14 @@ def test_cluster3_migration_file_present_and_wired() -> None:
     project_root = here.parents[2]
     mig = (
         project_root
-        / "alembic"
+        / "app" / "migrations"
         / "versions"
         / "c5d8a1e7b3f9_step29y_cluster3_audit_row_hash_not_null.py"
     )
     assert mig.exists(), (
         "D-8: Cluster 3 migration file is missing. Expected "
         f"at {mig}. The migration must be present in the "
-        "alembic/versions directory and named "
+        "app/migrations/versions directory and named "
         "c5d8a1e7b3f9_step29y_cluster3_audit_row_hash_not_null.py."
     )
 

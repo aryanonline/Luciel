@@ -77,7 +77,7 @@ def _find_function(tree: ast.Module, name: str) -> ast.FunctionDef:
 def test_e2_rejection_idempotency_migration_present_and_wired() -> None:
     mig = (
         _PROJECT_ROOT
-        / "alembic"
+        / "app" / "migrations"
         / "versions"
         / "d8e2c4b1a0f3_step29y_cluster4_worker_rejection_idempotency.py"
     )

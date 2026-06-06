@@ -27,7 +27,7 @@ from pathlib import Path
 # Repo-relative path to the migration under test.
 MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "arc9_c3_4_rls_api_keys.py"
 )

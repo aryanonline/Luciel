@@ -60,7 +60,7 @@ if ($dirty) {
 
 # ----- Preflight 0b: migration file present + chain correct -----
 $RepoRoot = (git rev-parse --show-toplevel).Trim()
-$MigrationFile = Join-Path $RepoRoot "alembic/versions/e7b2c9d4a18f_step30a_4_user_invites_table.py"
+$MigrationFile = Join-Path $RepoRoot "app/migrations/versions/e7b2c9d4a18f_step30a_4_user_invites_table.py"
 if (-not (Test-Path $MigrationFile)) {
     Write-Host "ERROR: expected migration file not found:" -ForegroundColor Red
     Write-Host "       $MigrationFile" -ForegroundColor Red
@@ -72,7 +72,7 @@ if ($migContent -notmatch 'revision\s*=\s*"e7b2c9d4a18f"' -or
     Write-Host "ERROR: migration chain mismatch -- expected e7b2c9d4a18f down_revision a3c1f08b9d42" -ForegroundColor Red
     exit 1
 }
-Write-Host "    migration: alembic/versions/e7b2c9d4a18f_step30a_4_user_invites_table.py" -ForegroundColor Gray
+Write-Host "    migration: app/migrations/versions/e7b2c9d4a18f_step30a_4_user_invites_table.py" -ForegroundColor Gray
 Write-Host "    chain:     e7b2c9d4a18f -> a3c1f08b9d42 (verified)" -ForegroundColor Gray
 
 # ----- Resolve image tag -----
@@ -184,7 +184,7 @@ Write-Host "    registered: $BackendNewArn" -ForegroundColor Gray
 # Migration order note: we deploy the new image FIRST, then run alembic
 # from the new task. The original sequence (migrate before service swap)
 # does not work because alembic reads migration files from the container
-# filesystem -- the old image does not contain alembic/versions/e7b2c9d4a18f_*.
+# filesystem -- the old image does not contain app/migrations/versions/e7b2c9d4a18f_*.
 # Running 'alembic upgrade head' against the old container is a silent
 # no-op (head still resolves to a3c1f08b9d42). The new code is forward-safe
 # against the old schema during the 2-4 minute rolling deploy: the four new
@@ -228,7 +228,7 @@ if ([string]::IsNullOrWhiteSpace($RunningTaskArn) -or $RunningTaskArn -eq "None"
 
 Write-Host ""
 Write-Host "    PAUSE: run the migration NOW on the new task ($RunningTaskArn)." -ForegroundColor Yellow
-Write-Host "    The new image ships alembic/versions/e7b2c9d4a18f_*.py, so" -ForegroundColor Yellow
+Write-Host "    The new image ships app/migrations/versions/e7b2c9d4a18f_*.py, so" -ForegroundColor Yellow
 Write-Host "    'alembic upgrade head' will apply the new revision and" -ForegroundColor Yellow
 Write-Host "    'alembic current' will report e7b2c9d4a18f (head)." -ForegroundColor Yellow
 Write-Host ""

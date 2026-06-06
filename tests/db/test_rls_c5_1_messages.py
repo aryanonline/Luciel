@@ -30,7 +30,7 @@ REV_ID = "arc9_c5_1_rls_messages"
 EXPECTED_DOWN = "arc9_c5_0b_messages_instance_id"
 
 VERSIONS_DIR = (
-    Path(__file__).parent.parent.parent / "alembic" / "versions"
+    Path(__file__).parent.parent.parent / "app" / "migrations" / "versions"
 )
 MIGRATION_PATH = VERSIONS_DIR / f"{REV_ID}.py"
 

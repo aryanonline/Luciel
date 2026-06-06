@@ -16,7 +16,7 @@ import unittest
 
 MIGRATION_PATH = (
     pathlib.Path(__file__).parent.parent.parent
-    / "alembic" / "versions" / "rescanc_escalation_delivery.py"
+    / "app" / "migrations" / "versions" / "rescanc_escalation_delivery.py"
 )
 
 

@@ -70,7 +70,7 @@ fi
 
 echo "==> [0/6] Preflight: confirm alembic head is dfea1a04e037 in tree"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-MIGRATION_FILE="${REPO_ROOT}/alembic/versions/dfea1a04e037_step30a_2_deactivated_at_and_retention.py"
+MIGRATION_FILE="${REPO_ROOT}/app/migrations/versions/dfea1a04e037_step30a_2_deactivated_at_and_retention.py"
 if [[ ! -f "${MIGRATION_FILE}" ]]; then
   echo "ERROR: expected migration file not found:"
   echo "       ${MIGRATION_FILE}"

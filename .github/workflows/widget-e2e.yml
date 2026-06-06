@@ -117,7 +117,7 @@ on:
       - app/models/admin.py
       - app/models/instance.py
       - app/models/api_key.py
-      - alembic/versions/**
+      - app/migrations/versions/**
       - scripts/bootstrap_platform_admin_ci.py
       - ci/e2e/**
       - .github/workflows/widget-e2e.yml

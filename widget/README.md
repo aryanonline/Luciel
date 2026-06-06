@@ -71,5 +71,5 @@ first SSE frame:
 
 - Backend endpoint: `app/api/v1/chat_widget.py`
 - Embed-key gate: `app/api/widget_deps.py`
-- Schema migration: `alembic/versions/a7c1f4e92b85_step30b_api_keys_widget_columns.py`
+- Schema migration: `app/migrations/versions/a7c1f4e92b85_step30b_api_keys_widget_columns.py`
 - Demo sandbox: `widget/demo.html` (commit (e))

@@ -45,7 +45,7 @@ from pathlib import Path
 
 
 VERSIONS_DIR = (
-    Path(__file__).parent.parent.parent / "alembic" / "versions"
+    Path(__file__).parent.parent.parent / "app" / "migrations" / "versions"
 )
 
 

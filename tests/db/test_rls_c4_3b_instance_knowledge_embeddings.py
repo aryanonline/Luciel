@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MIGRATION_PATH = REPO_ROOT / "alembic/versions/arc9_c4_3b_rls_instance_knowledge_embeddings.py"
+MIGRATION_PATH = REPO_ROOT / "app/migrations/versions/arc9_c4_3b_rls_instance_knowledge_embeddings.py"
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
 

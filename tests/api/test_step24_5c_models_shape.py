@@ -90,7 +90,7 @@ def _import_models() -> dict[str, Any]:
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
     REPO_ROOT
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "3dbbc70d0105_step24_5c_conversations_and_identity_claims.py"
 )
@@ -507,7 +507,7 @@ class TestModelsInitRegistration:
 
 
 class TestMigrationShape:
-    """alembic/versions/3dbbc70d0105_*.py commits the design-locked shape."""
+    """app/migrations/versions/3dbbc70d0105_*.py commits the design-locked shape."""
 
     @pytest.fixture(scope="class")
     def migration_text(self) -> str:

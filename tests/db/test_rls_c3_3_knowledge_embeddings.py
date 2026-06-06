@@ -44,7 +44,7 @@ from pathlib import Path
 
 MIGRATION_PATH = (
     Path(__file__).parent.parent.parent
-    / "alembic" / "versions"
+    / "app" / "migrations" / "versions"
     / "arc9_c3_3_rls_knowledge_embeddings.py"
 )
 

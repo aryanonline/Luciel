@@ -47,7 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SERVICE_PATH = REPO_ROOT / "app" / "services" / "downgrade_grace_service.py"
 ARCHIVE_PATH = REPO_ROOT / "app" / "services" / "downgrade_archive_service.py"
 MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "arc10_lifecycle_subsystem.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "arc10_lifecycle_subsystem.py"
 )
 
 

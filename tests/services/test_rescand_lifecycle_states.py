@@ -44,7 +44,7 @@ WORKER_PATH = REPO_ROOT / "app" / "lifecycle" / "retention.py"
 MODEL_PATH = REPO_ROOT / "app" / "lifecycle" / "state.py"
 SERVICE_PATH = REPO_ROOT / "app" / "services" / "instance_service.py"
 MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "rescand_lifecycle_states.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "rescand_lifecycle_states.py"
 )
 
 
@@ -422,7 +422,7 @@ def test_scan_predicate_ordered_by_oldest_first():
 
 def test_migration_file_exists():
     assert MIGRATION_PATH.exists(), (
-        "alembic/versions/rescand_lifecycle_states.py must exist."
+        "app/migrations/versions/rescand_lifecycle_states.py must exist."
     )
 
 

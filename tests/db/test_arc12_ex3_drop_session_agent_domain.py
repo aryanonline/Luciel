@@ -48,7 +48,7 @@ from app.models.session import SessionModel
 
 
 VERSIONS_DIR = (
-    Path(__file__).parent.parent.parent / "alembic" / "versions"
+    Path(__file__).parent.parent.parent / "app" / "migrations" / "versions"
 )
 MIGRATION_PATH = (
     VERSIONS_DIR / "arc12_ex3_drop_session_agent_domain.py"

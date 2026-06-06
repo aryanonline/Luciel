@@ -584,7 +584,7 @@ def test_authorize_is_idempotent() -> None:
 
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "arc12_wu2_instance_tool_authorizations.py"
 )

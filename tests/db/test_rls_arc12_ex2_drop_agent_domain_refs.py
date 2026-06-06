@@ -50,7 +50,7 @@ from pathlib import Path
 
 
 VERSIONS_DIR = (
-    Path(__file__).parent.parent.parent / "alembic" / "versions"
+    Path(__file__).parent.parent.parent / "app" / "migrations" / "versions"
 )
 MIGRATION_PATH = VERSIONS_DIR / "arc12_ex2_rls_drop_agent_domain_refs.py"
 

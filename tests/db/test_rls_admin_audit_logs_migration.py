@@ -45,7 +45,7 @@ from pathlib import Path
 
 MIGRATION_PATH = (
     Path(__file__).parent.parent.parent
-    / "alembic"
+    / "app" / "migrations"
     / "versions"
     / "arc9_c3_1_rls_admin_audit_logs.py"
 )

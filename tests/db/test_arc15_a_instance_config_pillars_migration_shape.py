@@ -18,7 +18,7 @@ import importlib.util
 import re
 from pathlib import Path
 
-VERSIONS_DIR = Path(__file__).parent.parent.parent / "alembic" / "versions"
+VERSIONS_DIR = Path(__file__).parent.parent.parent / "app" / "migrations" / "versions"
 REV_ID = "arc15_a_instance_config_pillars"
 DOWN_REV = "arc14_u4_leads"
 PRESET_VALUES = (

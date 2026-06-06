@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RETENTION_PATH = REPO_ROOT / "app" / "worker" / "tasks" / "retention.py"
 ADMIN_SERVICE_PATH = REPO_ROOT / "app" / "services" / "admin_service.py"
 MIGRATION_PATH = (
-    REPO_ROOT / "alembic" / "versions" / "arc10_lifecycle_subsystem.py"
+    REPO_ROOT / "app" / "migrations" / "versions" / "arc10_lifecycle_subsystem.py"
 )
 
 

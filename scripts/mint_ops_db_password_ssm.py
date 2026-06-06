@@ -90,7 +90,7 @@ scripts are part of platform operational tooling once they target a
 stable, repeatedly-used SSM path).
 
 Cross-references:
-  - Migration that creates the role: alembic/versions/
+  - Migration that creates the role: app/migrations/versions/
     arc9_c6_1_luciel_ops_role.py (Arc 9 C6.1)
   - Operator anchor for prod execution: Architecture v1 §6
     step-28-commit-8-luciel-worker-sg.md
