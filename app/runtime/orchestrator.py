@@ -173,7 +173,47 @@ class LucielOrchestrator:
         if self._is_session_human_controlled(req.session_id):
             return self._finalize_human_controlled_turn(req)
 
-        # 2. CONTEXT ASSEMBLY — flag-gated Retrieve + prompt composition.
+        # Resolve the Admin's tier ONCE per turn and thread it into the
+        # gates + PLAN. The budget gate keys its cap on it, the OUTCOME
+        # gate reads it for the grounding floor, and PLAN passes it to the
+        # tier-aware router (per-tier model class + intra-tier fast route).
+        tier = self._resolve_tier(req)
+
+        # §3.4.1 diagram order (Unit 7 alignment): BUDGET GATE → ESCALATION
+        # GATE 1 (intake) → RETRIEVE (context assembly) → PLAN. The budget
+        # gate runs FIRST so a Free-at-cap session short-circuits with ZERO
+        # retrieval cost and ZERO LLM cost; the intake gate runs next so an
+        # intake-escalated session also skips retrieval/PLAN. Retrieval has
+        # NOT run when either gate fires, so both finalizers cite source_ids=[].
+
+        # BUDGET GATE — Arc 18 (§3.4.1b). READ-ONLY peek: it never
+        # increments here (the increment fires on the FIRST model call in
+        # the PLAN path, §3.4.1b line 454). For Free at cap it returns a
+        # budget_exhausted EscalationDecision → short-circuit with NO LLM
+        # call and NO increment. Otherwise it returns (None, budget_ctx):
+        # budget_ctx carries the resolved (tier, cap, period_start) so the
+        # PLAN path can increment with the SAME key the gate peeked.
+        budget_decision, budget_ctx = self._budget_gate(req, tier=tier)
+        if budget_decision is not None:
+            return self._finalize_budget_escalation(
+                req=req, decision=budget_decision, source_ids=[]
+            )
+
+        # ESCALATION GATE 1 — INTAKE (pre-PLAN). §3.4.5 signals (a)+(b).
+        #    If it fires we SKIP plan/act/reflect and emit a templated
+        #    handoff acknowledgement instead of an LLM-generated reply
+        #    (the LLM may be exactly what's failing the customer). An
+        #    intake-escalated turn never reaches PLAN, so it never
+        #    increments the budget counter (§3.4.1b line 454).
+        intake_decision = self._intake_gate(req)
+        if intake_decision is not None:
+            return self._finalize_intake_escalation(
+                req=req, decision=intake_decision, source_ids=[]
+            )
+
+        # RETRIEVE / CONTEXT ASSEMBLY — flag-gated Retrieve + prompt
+        # composition. Runs AFTER the gates so a short-circuited turn pays
+        # zero retrieval cost.
         chunks: list = []
         source_ids: list[int] = []
         retrieval_attempted = False
@@ -187,33 +227,12 @@ class LucielOrchestrator:
 
         base_prompt = self.context.build_prompt(req, retrieved_chunks=chunks)
 
-        # 3. ESCALATION GATE 1 — INTAKE (pre-PLAN). §3.4.5 signals (a)+(b).
-        #    If it fires we SKIP plan/act/reflect and emit a templated
-        #    handoff acknowledgement instead of an LLM-generated reply
-        #    (the LLM may be exactly what's failing the customer).
-        intake_decision = self._intake_gate(req)
-        if intake_decision is not None:
-            return self._finalize_intake_escalation(
-                req=req, decision=intake_decision, source_ids=source_ids
-            )
-
-        # 3b. CONVERSATION BUDGET GATE — Arc 18 (§3.4.1b). Position is
-        #     LOAD-BEARING: AFTER intake Gate 1 (an intake-escalated
-        #     session returned above and NEVER reaches here, so it never
-        #     consumes budget) and BEFORE PLAN (the first LLM call). The
-        #     gate counts this conversation ONCE (idempotent across the
-        #     REFLECT loop). For Free at cap it returns a budget_exhausted
-        #     EscalationDecision → short-circuit with NO LLM call. For
-        #     Pro/Enterprise it never blocks (returns None) — it only
-        #     increments the counter and fires 80%/100% alerts.
-        budget_decision = self._budget_gate(req)
-        if budget_decision is not None:
-            return self._finalize_budget_escalation(
-                req=req, decision=budget_decision, source_ids=source_ids
-            )
-
-        # 4. PLAN → ACT → REFLECT — bounded at MAX_LOOP_ITERATIONS.
-        loop = self._run_plan_act_reflect(req, base_prompt)
+        # 4. PLAN → ACT → REFLECT — bounded at MAX_LOOP_ITERATIONS. The
+        #    budget counter increments on the FIRST model call inside the
+        #    loop (idempotent across iterations) using budget_ctx.
+        loop = self._run_plan_act_reflect(
+            req, base_prompt, tier=tier, budget_ctx=budget_ctx
+        )
 
         # Thread the CONTEXT-step retrieval outcome onto the loop result
         # so the OUTCOME gate can read grounding + retrieval-failure
@@ -926,29 +945,35 @@ class LucielOrchestrator:
             self._budget_meter = BudgetMeter()
         return self._budget_meter
 
-    def _budget_gate(self, req: RuntimeRequest):
-        """CONVERSATION BUDGET GATE — Arc 18 §3.4.1b.
+    def _budget_gate(self, req: RuntimeRequest, *, tier: str | None = None):
+        """CONVERSATION BUDGET GATE — Arc 18 §3.4.1b. READ-ONLY peek.
 
-        Counts this conversation ONCE per session (idempotent across the
-        REFLECT loop). Returns a ``budget_exhausted`` EscalationDecision
-        (Free at/over cap → short-circuit, no LLM call) or ``None``
-        (proceed to PLAN).
+        Returns a ``(decision, budget_ctx)`` tuple:
+          * ``(EscalationDecision, None)`` — Free at cap → short-circuit
+            with NO LLM call and NO increment.
+          * ``(None, _BudgetPlanContext)`` — proceed to PLAN; the carrier
+            holds the resolved (tier, cap, period_start) so the PLAN path
+            can increment the counter with the SAME key this gate peeked.
+          * ``(None, None)`` — no per-instance scope or a metering hiccup;
+            proceed with no budget accounting.
 
-        Pro/Enterprise NEVER block: capacity is never cut off
-        mid-conversation (Vision §2). When a paying instance is over cap
-        the counter still increments (overage) and the 80%/100% alerts
-        fire — but the turn proceeds to PLAN. Never raises: any failure
-        degrades to None (proceed) so a metering hiccup never blocks a
-        legitimate turn.
+        §3.4.1b line 454: the counter increments exactly once per session,
+        on the FIRST model call — NOT here. So this gate only PEEKS
+        (``current_count``) and never increments. Free is denied when the
+        peeked count is already AT/over cap (``current_count >= cap``):
+        peeking pre-increment, the conversation that would push usage to
+        cap+1 is the one denied, and it consumes no unit. Pro never blocks;
+        its overage alerts fire AFTER the increment in the PLAN path.
+
+        Never raises: any failure degrades to ``(None, None)`` (proceed) so
+        a metering hiccup never blocks a legitimate turn.
         """
         # No per-instance scope → no per-instance budget to meter. Proceed.
         if req.luciel_instance_id is None:
-            return None
+            return None, None
 
         try:
             from app.policy.entitlements import (
-                ALERT_THRESHOLD_80,
-                ALERT_THRESHOLD_100,
                 TIER_FREE,
                 conversation_budget,
             )
@@ -964,32 +989,71 @@ class LucielOrchestrator:
 
             cap = conversation_budget(ctx.tier, ctx.cadence)
             meter = self._budget_meter_inst()
+            # READ-ONLY peek — no increment here (§3.4.1b line 454).
+            count = meter.current_count(
+                admin_id=req.admin_id,
+                instance_id=req.luciel_instance_id,
+                period_start=ctx.period_start,
+            )
+
+            # Free at/over cap → graceful single-turn handoff, no LLM call,
+            # no increment. Peeking pre-increment means we compare >= cap.
+            if ctx.tier == TIER_FREE and count >= cap:
+                return (
+                    self._build_budget_decision(
+                        req=req, ctx=ctx, count=count, cap=cap
+                    ),
+                    None,
+                )
+
+            # Proceed. Hand the resolved billing context to the PLAN path so
+            # it increments once (idempotent) on the first model call.
+            return None, _BudgetPlanContext(ctx=ctx, cap=cap)
+        except Exception as exc:  # noqa: BLE001 — never block a turn on metering
+            logger.warning(
+                "budget gate evaluation failed: exc_class=%s — proceeding to PLAN",
+                type(exc).__name__,
+            )
+            return None, None
+
+    def _count_session_and_alert(
+        self, req: RuntimeRequest, budget_ctx
+    ) -> None:
+        """First-model-call budget increment (§3.4.1b line 454).
+
+        Called from the PLAN path BEFORE the first ``generate`` call. The
+        meter's ``count_session_once`` is idempotent per session (SETNX
+        marker), so calling it on loop entry counts the conversation
+        exactly ONCE regardless of how many PLAN iterations run. For paying
+        tiers the post-increment count drives the 80%/100% overage alerts.
+
+        Best-effort: a metering failure NEVER crashes the turn. Skips
+        cleanly when there is no per-instance scope or no resolved context.
+        """
+        if budget_ctx is None or req.luciel_instance_id is None:
+            return
+        try:
+            from app.policy.entitlements import TIER_FREE
+
+            ctx = budget_ctx.ctx
+            meter = self._budget_meter_inst()
             count = meter.count_session_once(
                 admin_id=req.admin_id,
                 instance_id=req.luciel_instance_id,
                 period_start=ctx.period_start,
                 session_id=req.session_id,
             )
-
-            # Free at/over cap → graceful single-turn handoff, no LLM call.
-            if ctx.tier == TIER_FREE and count > cap:
-                return self._build_budget_decision(
-                    req=req, ctx=ctx, count=count, cap=cap
-                )
-
-            # Pro/Enterprise: never block. Fire threshold alerts (idempotent)
-            # then proceed. Alerts are best-effort side effects.
+            # Pro/Enterprise overage alerts fire on the post-increment count.
             if ctx.tier != TIER_FREE:
                 self._maybe_fire_budget_alerts(
-                    req=req, ctx=ctx, count=count, cap=cap
+                    req=req, ctx=ctx, count=count, cap=budget_ctx.cap
                 )
-            return None
-        except Exception as exc:  # noqa: BLE001 — never block a turn on metering
+        except Exception as exc:  # noqa: BLE001 — metering never crashes a turn
             logger.warning(
-                "budget gate evaluation failed: exc_class=%s — proceeding to PLAN",
+                "budget increment on first model call failed: exc_class=%s — "
+                "turn proceeds (conversation may be undercounted)",
                 type(exc).__name__,
             )
-            return None
 
     def _build_budget_decision(self, *, req: RuntimeRequest, ctx, count: int, cap: int):
         """Construct the budget_exhausted EscalationDecision (GATE_INTAKE,
@@ -1255,6 +1319,9 @@ class LucielOrchestrator:
         self,
         req: RuntimeRequest,
         base_prompt: str,
+        *,
+        tier: str | None = None,
+        budget_ctx=None,
     ) -> "_LoopResult":
         """Drive the bounded plan→act→reflect loop.
 
@@ -1275,11 +1342,19 @@ class LucielOrchestrator:
         result = _LoopResult(reply="")
         prompt = base_prompt
 
+        # FIRST MODEL CALL — increment the conversation budget counter once
+        # (§3.4.1b line 454). Idempotent per session, so doing it at loop
+        # entry counts the conversation exactly once across all iterations.
+        # Best-effort: never crashes the turn.
+        self._count_session_and_alert(req, budget_ctx)
+
         for iteration in range(1, MAX_LOOP_ITERATIONS + 1):
             result.iterations = iteration
 
             # PLAN
-            plan = self._plan(prompt, result, provider=req.provider)
+            plan = self._plan(
+                prompt, result, provider=req.provider, tier=tier, req=req
+            )
 
             result.reply = plan.reply
             result.confidence = plan.confidence
@@ -1319,7 +1394,13 @@ class LucielOrchestrator:
         return result
 
     def _plan(
-        self, prompt: str, result: "_LoopResult", *, provider: str | None = None
+        self,
+        prompt: str,
+        result: "_LoopResult",
+        *,
+        provider: str | None = None,
+        tier: str | None = None,
+        req: RuntimeRequest | None = None,
     ) -> Plan:
         """PLAN step — one ModelRouter.generate call + tolerant parse.
 
@@ -1330,11 +1411,12 @@ class LucielOrchestrator:
         providers down) PLAN degrades to a low-confidence no-tool reply
         rather than crashing the turn (§3.4.1).
 
-        ``provider`` (RESCAN CORE serving-path) is the preferred-provider
-        hint resolved by the ChatService adapter (instance.preferred_
-        provider or a caller override). Defaults None ⇒ the ModelRouter
-        picks its own default, the pre-rewiring behaviour every existing
-        test relies on.
+        ``tier`` (Unit 7 alignment) is the resolved Admin tier, threaded
+        from ``run()``. Passing it engages the router's tier-aware path
+        (per-tier model class + intra-tier fast routing); without it the
+        router takes the legacy global-default path. When a tier is passed
+        the router ignores ``preferred_provider`` (tier wins), so a tier
+        is always preferred over the legacy hint.
         """
         llm_request = LLMRequest(
             messages=[
@@ -1345,10 +1427,28 @@ class LucielOrchestrator:
                 ),
             ]
         )
+        # Cheap deterministic prompt-size estimate for the fast-route 4K
+        # context check (~4 chars/token); no tokenizer dependency.
+        context_token_estimate = len(prompt) // 4
+        # has_tools: the loop discovers tool needs from PLAN output rather
+        # than a pre-resolved per-instance catalog, so we pass the
+        # conservative True — this DISABLES intra-tier fast routing, which
+        # never mis-routes a tool-needing turn to the fast model. TODO:
+        # thread the real per-instance tool-catalog non-emptiness once the
+        # broker exposes it cheaply.
         try:
-            response = self._router().generate(
-                llm_request, preferred_provider=provider
-            )
+            if tier is not None:
+                response = self._router().generate(
+                    llm_request,
+                    tier=tier,
+                    user_message=(req.message if req is not None else ""),
+                    context_token_estimate=context_token_estimate,
+                    has_tools=True,
+                )
+            else:
+                response = self._router().generate(
+                    llm_request, preferred_provider=provider
+                )
         except Exception as exc:  # noqa: BLE001
             # Provider-agnostic firewall: a PLAN call must never crash
             # the turn. Degrade to a graceful low-confidence reply.
@@ -1880,6 +1980,24 @@ class LucielOrchestrator:
         db = SessionLocal()
         repo = TraceRepository(db)
         return TraceService(repo)
+
+
+# =====================================================================
+# Internal budget-context carrier (gate → PLAN-path increment)
+# =====================================================================
+
+
+class _BudgetPlanContext:
+    """Resolved budget context the READ-ONLY budget gate hands to the
+    PLAN path so the first-model-call increment uses the SAME key the
+    gate peeked with (no second billing-context lookup). Carries the
+    ``BillingContext`` (tier + period_start) and the resolved cap."""
+
+    __slots__ = ("ctx", "cap")
+
+    def __init__(self, *, ctx, cap: int) -> None:
+        self.ctx = ctx
+        self.cap = cap
 
 
 # =====================================================================

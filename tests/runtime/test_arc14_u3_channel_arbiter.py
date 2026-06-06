@@ -265,7 +265,7 @@ class _ScriptedRouter:
         self._provider = provider
         self._model = model
 
-    def generate(self, request, *, preferred_provider=None):
+    def generate(self, request, *, preferred_provider=None, **kwargs):
         return LLMResponse(
             content=self._content, model=self._model, provider=self._provider
         )

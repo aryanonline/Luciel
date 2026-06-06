@@ -10,7 +10,6 @@ config-driven so ops can retune without a code change.
 
   Free       -> Anthropic small/fast (Haiku-class)    ; OpenAI small fallback
   Pro        -> Anthropic mid (Sonnet-class)           ; OpenAI mid fallback
-  Enterprise -> Anthropic top (Sonnet/Opus per contract); OpenAI top fallback
 
 Anthropic is ALWAYS the primary regardless of provider registration order
 (Decision #8). OpenAI is the fallback, used only on primary non-200/timeout
@@ -493,7 +492,7 @@ class ModelRouter:
                                  tier routing takes precedence. When supplied
                                  without a tier (legacy callers), falls back to
                                  the legacy _build_fallback_order path.
-            tier: The admin's subscription tier ('free', 'pro', 'enterprise').
+            tier: The admin's subscription tier ('free', 'pro').
                   When None and no preferred_provider, uses _TIER_FREE (Haiku).
             user_message: The current user turn text, used for complexity
                           scoring. When None, complexity check is skipped

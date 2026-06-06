@@ -149,7 +149,7 @@ class _ScriptedRouter:
         self._model = model
         self.calls = []
 
-    def generate(self, request, *, preferred_provider=None):
+    def generate(self, request, *, preferred_provider=None, **kwargs):
         idx = min(len(self.calls), len(self._contents) - 1)
         self.calls.append(request)
         return LLMResponse(

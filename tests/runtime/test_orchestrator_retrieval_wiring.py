@@ -51,7 +51,7 @@ class _FakeRouter:
     def __init__(self) -> None:
         self.calls: list = []
 
-    def generate(self, request, *, preferred_provider=None) -> LLMResponse:
+    def generate(self, request, *, preferred_provider=None, **kwargs) -> LLMResponse:
         self.calls.append(request)
         return LLMResponse(
             content='{"reply": "ok", "tool_calls": [], "confidence": 0.8}',

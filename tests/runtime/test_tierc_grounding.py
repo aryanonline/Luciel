@@ -283,7 +283,7 @@ class TestOrchestratorCannotAnswerReply(unittest.TestCase):
         from app.runtime.contracts import RuntimeRequest
 
         class _LowConfidenceRouter:
-            def generate(self, request, *, preferred_provider=None) -> LLMResponse:
+            def generate(self, request, *, preferred_provider=None, **kwargs) -> LLMResponse:
                 # Confidence 0.3 < LOW_CONFIDENCE_THRESHOLD (0.6)
                 return LLMResponse(
                     content='{"reply": "I think maybe...", "tool_calls": [], "confidence": 0.3}',
